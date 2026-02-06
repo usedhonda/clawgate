@@ -46,6 +46,8 @@ final class LINEInboundWatcher {
             .filter { $0.role == "AXStaticText" }
             .compactMap { $0.title ?? $0.description }
 
+        let windowTitle = AXQuery.copyStringAttribute(window, attribute: kAXTitleAttribute as String)
+
         guard let lastText = textNodes.last else { return }
 
         if lastText != lastSnapshot {
@@ -60,7 +62,7 @@ final class LINEInboundWatcher {
                 _ = eventBus.append(
                     type: "inbound_message",
                     adapter: "line",
-                    payload: ["text": lastText]
+                    payload: ["text": lastText, "conversation": windowTitle ?? ""]
                 )
                 logger.log(.debug, "LINEInboundWatcher: new message detected")
             }

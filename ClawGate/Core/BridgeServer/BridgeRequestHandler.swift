@@ -67,6 +67,28 @@ final class BridgeRequestHandler: ChannelInboundHandler {
             return
         }
 
+        if head.method == .GET && path == "/v1/context" {
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            writeResponse(context: context, result: core.context(adapter: adapter))
+            return
+        }
+
+        if head.method == .GET && path == "/v1/messages" {
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
+            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+            writeResponse(context: context, result: core.messages(adapter: adapter, limit: limit))
+            return
+        }
+
+        if head.method == .GET && path == "/v1/conversations" {
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
+            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+            writeResponse(context: context, result: core.conversations(adapter: adapter, limit: limit))
+            return
+        }
+
         if head.method == .GET && path == "/v1/poll" {
             let since = components?.queryItems?.first(where: { $0.name == "since" })?.value.flatMap(Int64.init)
             writeResponse(context: context, result: core.poll(since: since))
@@ -74,7 +96,8 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         }
 
         if head.method == .GET && path == "/v1/axdump" {
-            writeResponse(context: context, result: core.axdump())
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            writeResponse(context: context, result: core.axdump(adapter: adapter))
             return
         }
 

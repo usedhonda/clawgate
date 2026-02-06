@@ -52,6 +52,26 @@ enum LineSelectors {
         requiredActions: ["AXPress"]
     )
 
+    // Message area AXStaticText (right pane, below title bar and above input)
+    static let messageTextU = UniversalSelector(
+        role: "AXStaticText",
+        geometryHint: GeometryHint(
+            regionX: 0.2...1.0,
+            regionY: 0.08...0.75,
+            minWidth: nil
+        )
+    )
+
+    // Sidebar conversation names (left pane)
+    static let conversationNameU = UniversalSelector(
+        role: "AXStaticText",
+        geometryHint: GeometryHint(
+            regionX: 0.0...0.35,
+            regionY: 0.08...1.0,
+            minWidth: nil
+        )
+    )
+
     // --- Legacy selectors (kept for backward compatibility) ---
 
     static let searchField = LineSelector(

@@ -3,6 +3,7 @@ import Foundation
 
 final class LINEAdapter: AdapterProtocol {
     let name = "line"
+    let bundleIdentifier = "jp.naver.line.mac"
 
     private let logger: AppLogger
     private let retry = RetryPolicy(maxAttempts: 2, initialDelayMs: 120)
@@ -201,6 +202,210 @@ final class LINEAdapter: AdapterProtocol {
         )
 
         return (result, stepLogger.all())
+    }
+
+    // MARK: - Read API
+
+    func getContext() throws -> ConversationContext {
+        try withLINEWindow { rootWindow, windowFrame, nodes in
+            let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+            let hasInput = SelectorResolver.resolve(
+                selector: LineSelectors.messageInputU, in: nodes, windowFrame: windowFrame
+            ) != nil
+            return ConversationContext(
+                adapter: name,
+                conversationName: windowTitle,
+                hasInputField: hasInput,
+                windowTitle: windowTitle,
+                timestamp: ISO8601DateFormatter().string(from: Date())
+            )
+        }
+    }
+
+    func getMessages(limit: Int) throws -> MessageList {
+        try withLINEWindow { rootWindow, windowFrame, nodes in
+            let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+
+            let messageAreaLeft = windowFrame.origin.x + windowFrame.width * 0.2
+            let messageAreaWidth = windowFrame.width * 0.8
+
+            let textNodes = nodes.filter { node in
+                guard node.role == "AXStaticText", let frame = node.frame else { return false }
+                let relX = Double(frame.midX - windowFrame.origin.x) / Double(windowFrame.width)
+                let relY = Double(frame.midY - windowFrame.origin.y) / Double(windowFrame.height)
+                let geo = LineSelectors.messageTextU.geometryHint!
+                return geo.regionX.contains(relX) && geo.regionY.contains(relY)
+            }
+
+            let visibleTexts: [(text: String, frame: CGRect)] = textNodes.compactMap { node in
+                let text = node.value ?? node.title ?? node.description
+                guard let t = text, !t.isEmpty, let frame = node.frame else { return nil }
+                guard !LINEAdapter.isUIChrome(t, windowTitle: windowTitle) else { return nil }
+                return (text: t, frame: frame)
+            }
+
+            let sorted = visibleTexts.sorted { $0.frame.origin.y < $1.frame.origin.y }
+            let limited = Array(sorted.suffix(limit))
+
+            let messages = limited.enumerated().map { (index, item) -> VisibleMessage in
+                let relativeX = messageAreaWidth > 0
+                    ? Double(item.frame.midX - messageAreaLeft) / Double(messageAreaWidth)
+                    : 0.5
+                let sender: String
+                if relativeX < 0.45 {
+                    sender = "other"
+                } else if relativeX > 0.55 {
+                    sender = "self"
+                } else {
+                    sender = "unknown"
+                }
+                return VisibleMessage(text: item.text, sender: sender, yOrder: index)
+            }
+
+            return MessageList(
+                adapter: name,
+                conversationName: windowTitle,
+                messages: messages,
+                messageCount: messages.count,
+                timestamp: ISO8601DateFormatter().string(from: Date())
+            )
+        }
+    }
+
+    func getConversations(limit: Int) throws -> ConversationList {
+        try withLINEWindow { rootWindow, windowFrame, nodes in
+            let sidebarNodes = nodes.filter { node in
+                guard node.role == "AXStaticText", let frame = node.frame else { return false }
+                let relX = Double(frame.midX - windowFrame.origin.x) / Double(windowFrame.width)
+                let relY = Double(frame.midY - windowFrame.origin.y) / Double(windowFrame.height)
+                let geo = LineSelectors.conversationNameU.geometryHint!
+                return geo.regionX.contains(relX) && geo.regionY.contains(relY)
+            }
+
+            guard !sidebarNodes.isEmpty else {
+                throw BridgeRuntimeError(
+                    code: "sidebar_not_visible",
+                    message: "サイドバーが表示されていません",
+                    retriable: true,
+                    failedStep: "get_conversations",
+                    details: nil
+                )
+            }
+
+            let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+
+            struct SidebarItem {
+                let text: String
+                let frame: CGRect
+            }
+
+            let items: [SidebarItem] = sidebarNodes.compactMap { node in
+                let text = node.value ?? node.title ?? node.description
+                guard let t = text, !t.isEmpty, let frame = node.frame else { return nil }
+                guard !LINEAdapter.isUIChrome(t, windowTitle: windowTitle) else { return nil }
+                return SidebarItem(text: t, frame: frame)
+            }.sorted { $0.frame.origin.y < $1.frame.origin.y }
+
+            // Group by Y proximity (< 10px = same conversation)
+            var groups: [[SidebarItem]] = []
+            for item in items {
+                if let lastGroup = groups.last, let lastItem = lastGroup.last,
+                   abs(item.frame.origin.y - lastItem.frame.origin.y) < 10 {
+                    groups[groups.count - 1].append(item)
+                } else {
+                    groups.append([item])
+                }
+            }
+
+            // Detect unread: a digit-only text node to the right of the conversation name
+            let digitNodes = sidebarNodes.filter { node in
+                let text = node.value ?? node.title ?? node.description
+                guard let t = text, !t.isEmpty else { return false }
+                return t.trimmingCharacters(in: .whitespacesAndNewlines).allSatisfy(\.isNumber)
+            }
+
+            let conversations: [ConversationEntry] = groups.prefix(limit).enumerated().map { index, group in
+                let convName = group.max(by: { $0.text.count < $1.text.count })?.text ?? ""
+                let mainFrame = group.first?.frame
+                let hasUnread = mainFrame.map { mf in
+                    digitNodes.contains { digit in
+                        guard let df = digit.frame else { return false }
+                        return df.origin.x > mf.origin.x && abs(df.midY - mf.midY) < 15
+                    }
+                } ?? false
+                return ConversationEntry(name: convName, yOrder: index, hasUnread: hasUnread)
+            }
+
+            return ConversationList(
+                adapter: name,
+                conversations: conversations,
+                count: conversations.count,
+                timestamp: ISO8601DateFormatter().string(from: Date())
+            )
+        }
+    }
+
+    // MARK: - UI Chrome Filter
+
+    private static let timestampPattern: NSRegularExpression = {
+        // Matches patterns like "12:34", "2026/2/6", weekday names, "AM/PM" etc.
+        try! NSRegularExpression(
+            pattern: #"^(\d{1,2}:\d{2}(:\d{2})?|(\d{2,4}[/\-]\d{1,2}[/\-]\d{1,2})|(月|火|水|木|金|土|日)曜日?|[AP]M|yesterday|今日|昨日)$"#,
+            options: [.caseInsensitive]
+        )
+    }()
+
+    static func isUIChrome(_ text: String, windowTitle: String?) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.count <= 1 { return true }
+        if t == windowTitle { return true }
+        if t.allSatisfy(\.isNumber) { return true }
+        let range = NSRange(t.startIndex..., in: t)
+        return timestampPattern.firstMatch(in: t, range: range) != nil
+    }
+
+    // MARK: - Common helper for read-only operations
+
+    private func withLINEWindow<T>(
+        body: (_ rootWindow: AXUIElement, _ windowFrame: CGRect, _ nodes: [AXNode]) throws -> T
+    ) throws -> T {
+        do {
+            return try AXAppWindow.withWindow(bundleIdentifier: bundleIdentifier) { ctx in
+                try body(ctx.window, ctx.frame, ctx.nodes)
+            }
+        } catch AXAppWindow.WindowError.axPermissionMissing {
+            throw BridgeRuntimeError(
+                code: "ax_permission_missing",
+                message: "アクセシビリティ権限が未付与です",
+                retriable: false,
+                failedStep: "ensure_accessibility",
+                details: "System Settings > Privacy & Security > Accessibility"
+            )
+        } catch AXAppWindow.WindowError.appNotRunning {
+            throw BridgeRuntimeError(
+                code: "line_not_running",
+                message: "LINEが起動していません",
+                retriable: true,
+                failedStep: "ensure_line_running",
+                details: "bundleIdentifier=\(bundleIdentifier)"
+            )
+        } catch AXAppWindow.WindowError.windowNotFound {
+            throw BridgeRuntimeError(
+                code: "line_window_missing",
+                message: "LINEのフォーカスウィンドウが見つかりません",
+                retriable: true,
+                failedStep: "find_main_window",
+                details: nil
+            )
+        } catch AXAppWindow.WindowError.frameNotFound {
+            throw BridgeRuntimeError(
+                code: "window_frame_missing",
+                message: "ウィンドウのフレーム情報が取得できません",
+                retriable: true,
+                failedStep: "get_window_frame",
+                details: nil
+            )
+        }
     }
 
     private func legacyResolve(_ selector: LineSelector, in nodes: [AXNode]) -> SelectorCandidate? {

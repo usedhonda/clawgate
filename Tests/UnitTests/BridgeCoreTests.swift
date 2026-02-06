@@ -5,15 +5,52 @@ import XCTest
 
 private final class FakeAdapter: AdapterProtocol {
     let name = "line"
+    let bundleIdentifier = "jp.naver.line.mac"
 
     func sendMessage(payload: SendPayload) throws -> (SendResult, [StepLog]) {
         let result = SendResult(adapter: "line", action: "send_message", messageID: "local-test", timestamp: "2026-02-05T00:00:00Z")
         return (result, [])
     }
+
+    func getContext() throws -> ConversationContext {
+        ConversationContext(
+            adapter: "line",
+            conversationName: "TestUser",
+            hasInputField: true,
+            windowTitle: "TestUser",
+            timestamp: "2026-02-06T00:00:00Z"
+        )
+    }
+
+    func getMessages(limit: Int) throws -> MessageList {
+        MessageList(
+            adapter: "line",
+            conversationName: "TestUser",
+            messages: [
+                VisibleMessage(text: "Hello", sender: "other", yOrder: 0),
+                VisibleMessage(text: "Hi there", sender: "self", yOrder: 1),
+            ],
+            messageCount: 2,
+            timestamp: "2026-02-06T00:00:00Z"
+        )
+    }
+
+    func getConversations(limit: Int) throws -> ConversationList {
+        ConversationList(
+            adapter: "line",
+            conversations: [
+                ConversationEntry(name: "TestUser", yOrder: 0, hasUnread: false),
+                ConversationEntry(name: "WorkGroup", yOrder: 1, hasUnread: true),
+            ],
+            count: 2,
+            timestamp: "2026-02-06T00:00:00Z"
+        )
+    }
 }
 
 private final class FailingAdapter: AdapterProtocol {
     let name = "failing"
+    let bundleIdentifier = "com.example.failing"
 
     func sendMessage(payload: SendPayload) throws -> (SendResult, [StepLog]) {
         throw BridgeRuntimeError(
@@ -112,6 +149,47 @@ final class BridgeCoreTests: XCTestCase {
         """
         let response = core.send(body: Data(json.utf8))
         XCTAssertEqual(response.status, .serviceUnavailable)
+    }
+
+    // MARK: - Read API tests
+
+    func testContextReturnsOk() {
+        let core = makeCore()
+        let response = core.context(adapter: "line")
+        XCTAssertEqual(response.status, .ok)
+        let parsed = try! JSONDecoder().decode(APIResponse<ConversationContext>.self, from: response.body)
+        XCTAssertTrue(parsed.ok)
+        XCTAssertEqual(parsed.result?.conversationName, "TestUser")
+        XCTAssertEqual(parsed.result?.hasInputField, true)
+    }
+
+    func testMessagesReturnsOk() {
+        let core = makeCore()
+        let response = core.messages(adapter: "line", limit: 50)
+        XCTAssertEqual(response.status, .ok)
+        let parsed = try! JSONDecoder().decode(APIResponse<MessageList>.self, from: response.body)
+        XCTAssertTrue(parsed.ok)
+        XCTAssertEqual(parsed.result?.messageCount, 2)
+        XCTAssertEqual(parsed.result?.messages.first?.sender, "other")
+    }
+
+    func testConversationsReturnsOk() {
+        let core = makeCore()
+        let response = core.conversations(adapter: "line", limit: 50)
+        XCTAssertEqual(response.status, .ok)
+        let parsed = try! JSONDecoder().decode(APIResponse<ConversationList>.self, from: response.body)
+        XCTAssertTrue(parsed.ok)
+        XCTAssertEqual(parsed.result?.count, 2)
+        XCTAssertEqual(parsed.result?.conversations.last?.hasUnread, true)
+    }
+
+    func testContextUnsupportedAdapterReturnsError() {
+        let core = makeCore()
+        let response = core.context(adapter: "slack")
+        XCTAssertEqual(response.status, .badRequest)
+        let parsed = try! JSONDecoder().decode(APIResponse<ConversationContext>.self, from: response.body)
+        XCTAssertFalse(parsed.ok)
+        XCTAssertEqual(parsed.error?.code, "adapter_not_found")
     }
 
     // MARK: - Token tests

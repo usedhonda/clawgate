@@ -72,6 +72,64 @@ struct PollResponse: Codable {
     }
 }
 
+struct ConversationContext: Codable {
+    let adapter: String
+    let conversationName: String?
+    let hasInputField: Bool
+    let windowTitle: String?
+    let timestamp: String
+    enum CodingKeys: String, CodingKey {
+        case adapter
+        case conversationName = "conversation_name"
+        case hasInputField = "has_input_field"
+        case windowTitle = "window_title"
+        case timestamp
+    }
+}
+
+struct VisibleMessage: Codable {
+    let text: String
+    let sender: String      // "self" | "other" | "unknown"
+    let yOrder: Int
+    enum CodingKeys: String, CodingKey {
+        case text, sender
+        case yOrder = "y_order"
+    }
+}
+
+struct MessageList: Codable {
+    let adapter: String
+    let conversationName: String?
+    let messages: [VisibleMessage]
+    let messageCount: Int
+    let timestamp: String
+    enum CodingKeys: String, CodingKey {
+        case adapter
+        case conversationName = "conversation_name"
+        case messages
+        case messageCount = "message_count"
+        case timestamp
+    }
+}
+
+struct ConversationEntry: Codable {
+    let name: String
+    let yOrder: Int
+    let hasUnread: Bool
+    enum CodingKeys: String, CodingKey {
+        case name
+        case yOrder = "y_order"
+        case hasUnread = "has_unread"
+    }
+}
+
+struct ConversationList: Codable {
+    let adapter: String
+    let conversations: [ConversationEntry]
+    let count: Int
+    let timestamp: String
+}
+
 struct HTTPResult {
     let status: HTTPResponseStatus
     let headers: HTTPHeaders
