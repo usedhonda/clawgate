@@ -32,6 +32,12 @@ final class LINEInboundWatcher {
     }
 
     private func poll() {
+        BlockingWork.queue.async { [weak self] in
+            self?.doPoll()
+        }
+    }
+
+    private func doPoll() {
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else {
             return
         }

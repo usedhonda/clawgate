@@ -22,7 +22,6 @@ final class EventBus {
 
     func append(type: String, adapter: String, payload: [String: String]) -> BridgeEvent {
         lock.lock()
-        defer { lock.unlock() }
 
         let event = BridgeEvent(
             id: nextID,
@@ -39,6 +38,8 @@ final class EventBus {
         }
 
         let callbacks = subscribers.values.map(\.callback)
+        lock.unlock()
+
         for callback in callbacks {
             callback(event)
         }
