@@ -86,6 +86,7 @@ final class BridgeCoreTests: XCTestCase {
         let core = BridgeCore(
             eventBus: EventBus(),
             tokenManager: tokenManager,
+            pairingManager: PairingCodeManager(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: ConfigStore(defaults: UserDefaults(suiteName: "clawgate.tests")!))
         )
@@ -233,6 +234,7 @@ final class BridgeCoreTests: XCTestCase {
         return BridgeCore(
             eventBus: EventBus(),
             tokenManager: tokenManager,
+            pairingManager: PairingCodeManager(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg)
         )
@@ -247,6 +249,7 @@ final class BridgeCoreTests: XCTestCase {
         return BridgeCore(
             eventBus: EventBus(),
             tokenManager: tokenManager,
+            pairingManager: PairingCodeManager(),
             registry: AdapterRegistry(adapters: [FakeAdapter(), FailingAdapter()]),
             logger: AppLogger(configStore: cfg)
         )

@@ -28,4 +28,8 @@ final class BridgeTokenManager {
         guard let token else { return false }
         return token == currentToken()
     }
+
+    func hasValidToken() -> Bool {
+        (try? keychain.load(account: account)) != nil
+    }
 }

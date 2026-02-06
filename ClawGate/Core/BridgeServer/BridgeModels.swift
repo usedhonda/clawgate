@@ -135,3 +135,49 @@ struct HTTPResult {
     let headers: HTTPHeaders
     let body: Data
 }
+
+// MARK: - Doctor Report
+
+struct DoctorCheck: Codable {
+    let name: String
+    let status: String          // "ok", "warning", "error"
+    let message: String
+    let details: String?
+}
+
+struct DoctorReport: Codable {
+    let ok: Bool
+    let version: String
+    let checks: [DoctorCheck]
+    let summary: DoctorSummary
+    let timestamp: String
+}
+
+struct DoctorSummary: Codable {
+    let total: Int
+    let passed: Int
+    let warnings: Int
+    let errors: Int
+}
+
+// MARK: - Pairing
+
+struct PairRequest: Codable {
+    let code: String
+    let clientName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case clientName = "client_name"
+    }
+}
+
+struct PairResult: Codable {
+    let token: String
+    let expiresAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case token
+        case expiresAt = "expires_at"
+    }
+}

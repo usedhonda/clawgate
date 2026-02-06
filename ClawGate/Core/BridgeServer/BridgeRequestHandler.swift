@@ -48,6 +48,12 @@ final class BridgeRequestHandler: ChannelInboundHandler {
             return
         }
 
+        // Pairing endpoint - no auth required (uses one-time code instead)
+        if head.method == .POST && path == "/v1/pair/request" {
+            writeResponse(context: context, result: core.pair(body: body.data, headers: head.headers))
+            return
+        }
+
         guard core.isAuthorized(headers: head.headers) else {
             let payload = APIResponse<String>(
                 ok: false,
@@ -98,6 +104,11 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         if head.method == .GET && path == "/v1/axdump" {
             let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
             writeResponse(context: context, result: core.axdump(adapter: adapter))
+            return
+        }
+
+        if head.method == .GET && path == "/v1/doctor" {
+            writeResponse(context: context, result: core.doctor())
             return
         }
 
