@@ -1,10 +1,33 @@
+import Dispatch
 import Foundation
 import NIOCore
 import NIOHTTP1
 
+/// Shared serial queue for all blocking work (AX queries, Keychain access, etc.)
+/// Serializes AX access between HTTP handlers and LINEInboundWatcher.
+enum BlockingWork {
+    static let queue = DispatchQueue(
+        label: "com.clawgate.blocking",
+        qos: .userInitiated
+    )
+}
+
 final class BridgeRequestHandler: ChannelInboundHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
+
+    private static let routes: [(HTTPMethod, String)] = [
+        (.GET, "/v1/health"),
+        (.GET, "/v1/poll"),
+        (.POST, "/v1/pair/request"),
+        (.POST, "/v1/send"),
+        (.GET, "/v1/context"),
+        (.GET, "/v1/messages"),
+        (.GET, "/v1/conversations"),
+        (.GET, "/v1/axdump"),
+        (.GET, "/v1/doctor"),
+        (.GET, "/v1/events"),
+    ]
 
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer = ByteBuffer()
@@ -43,87 +66,158 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         let components = URLComponents(string: "http://localhost\(head.uri)")
         let path = components?.path ?? head.uri
 
+        // Method mismatch check: known path but wrong method -> 405
+        let knownPaths = Self.routes.map(\.1)
+        if knownPaths.contains(path) && !Self.routes.contains(where: { $0.0 == head.method && $0.1 == path }) {
+            writeMethodNotAllowed(context: context)
+            return
+        }
+
+        // Non-blocking: health check responds immediately on event loop
         if head.method == .GET && path == "/v1/health" {
             writeResponse(context: context, result: core.health())
             return
         }
 
-        // Pairing endpoint - no auth required (uses one-time code instead)
-        if head.method == .POST && path == "/v1/pair/request" {
-            writeResponse(context: context, result: core.pair(body: body.data, headers: head.headers))
-            return
-        }
-
-        guard core.isAuthorized(headers: head.headers) else {
-            let payload = APIResponse<String>(
-                ok: false,
-                result: nil,
-                error: ErrorPayload(code: "unauthorized", message: "X-Bridge-Tokenが不正です", retriable: false, failedStep: "auth", details: nil)
-            )
-            let data = try! JSONEncoder().encode(payload)
-            var headers = HTTPHeaders()
-            headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
-            headers.add(name: "Content-Length", value: "\(data.count)")
-            writeResponse(context: context, result: HTTPResult(status: .unauthorized, headers: headers, body: data))
-            return
-        }
-
-        if head.method == .POST && path == "/v1/send" {
-            writeResponse(context: context, result: core.send(body: body.data))
-            return
-        }
-
-        if head.method == .GET && path == "/v1/context" {
-            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-            writeResponse(context: context, result: core.context(adapter: adapter))
-            return
-        }
-
-        if head.method == .GET && path == "/v1/messages" {
-            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-            let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
-            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
-            writeResponse(context: context, result: core.messages(adapter: adapter, limit: limit))
-            return
-        }
-
-        if head.method == .GET && path == "/v1/conversations" {
-            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-            let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
-            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
-            writeResponse(context: context, result: core.conversations(adapter: adapter, limit: limit))
-            return
-        }
-
+        // Poll: EventBus.poll() is lightweight (NSLock only), but auth check
+        // hits Keychain so we offload the whole thing to avoid blocking on
+        // SecItemCopyMatching if a Keychain UI dialog appears.
         if head.method == .GET && path == "/v1/poll" {
+            let requestHeaders = head.headers
             let since = components?.queryItems?.first(where: { $0.name == "since" })?.value.flatMap(Int64.init)
-            writeResponse(context: context, result: core.poll(since: since))
+            BlockingWork.queue.async { [self, core] in
+                guard core.isAuthorized(headers: requestHeaders) else {
+                    context.eventLoop.execute {
+                        self.writeUnauthorized(context: context)
+                    }
+                    return
+                }
+                let result = core.poll(since: since)
+                context.eventLoop.execute {
+                    self.writeResponse(context: context, result: result)
+                }
+            }
             return
         }
 
-        if head.method == .GET && path == "/v1/axdump" {
-            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-            writeResponse(context: context, result: core.axdump(adapter: adapter))
+        // Pairing endpoint - no auth required, but Keychain access -> offload
+        if head.method == .POST && path == "/v1/pair/request" {
+            let bodyData = body.data
+            let headers = head.headers
+            offloadToBlockingQueue(context: context) { [core] in
+                core.pair(body: bodyData, headers: headers)
+            }
             return
         }
 
-        if head.method == .GET && path == "/v1/doctor" {
-            writeResponse(context: context, result: core.doctor())
-            return
-        }
-
+        // SSE: auth check offloaded, then SSE starts on event loop
         if head.method == .GET && path == "/v1/events" {
             let lastEventID = head.headers.first(name: "Last-Event-ID").flatMap(Int64.init)
-            startSSE(context: context, lastEventID: lastEventID)
+            let requestHeaders = head.headers
+            BlockingWork.queue.async { [self, core] in
+                guard core.isAuthorized(headers: requestHeaders) else {
+                    context.eventLoop.execute {
+                        self.writeUnauthorized(context: context)
+                    }
+                    return
+                }
+                context.eventLoop.execute {
+                    self.startSSE(context: context, lastEventID: lastEventID)
+                }
+            }
             return
         }
 
-        let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
+        // All other endpoints: auth + business logic offloaded to blocking queue
+        let bodyData = body.data
+        let requestHeaders = head.headers
+        let method = head.method
+
+        BlockingWork.queue.async { [self, core] in
+            guard core.isAuthorized(headers: requestHeaders) else {
+                context.eventLoop.execute {
+                    self.writeUnauthorized(context: context)
+                }
+                return
+            }
+
+            let result: HTTPResult
+
+            if method == .POST && path == "/v1/send" {
+                result = core.send(body: bodyData)
+            } else if method == .GET && path == "/v1/context" {
+                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+                result = core.context(adapter: adapter)
+            } else if method == .GET && path == "/v1/messages" {
+                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+                let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
+                let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+                result = core.messages(adapter: adapter, limit: limit)
+            } else if method == .GET && path == "/v1/conversations" {
+                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+                let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
+                let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+                result = core.conversations(adapter: adapter, limit: limit)
+            } else if method == .GET && path == "/v1/axdump" {
+                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+                result = core.axdump(adapter: adapter)
+            } else if method == .GET && path == "/v1/doctor" {
+                result = core.doctor()
+            } else {
+                let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
+                var headers = HTTPHeaders()
+                headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
+                headers.add(name: "Content-Length", value: "\(notFound.count)")
+                result = HTTPResult(status: .notFound, headers: headers, body: notFound)
+            }
+
+            context.eventLoop.execute {
+                self.writeResponse(context: context, result: result)
+            }
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func offloadToBlockingQueue(
+        context: ChannelHandlerContext,
+        work: @escaping () -> HTTPResult
+    ) {
+        BlockingWork.queue.async {
+            let result = work()
+            context.eventLoop.execute {
+                self.writeResponse(context: context, result: result)
+            }
+        }
+    }
+
+    private func writeMethodNotAllowed(context: ChannelHandlerContext) {
+        let payload = APIResponse<String>(
+            ok: false,
+            result: nil,
+            error: ErrorPayload(code: "method_not_allowed", message: "Method not allowed", retriable: false, failedStep: "routing", details: nil)
+        )
+        let data = try! JSONEncoder().encode(payload)
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
-        headers.add(name: "Content-Length", value: "\(notFound.count)")
-        writeResponse(context: context, result: HTTPResult(status: .notFound, headers: headers, body: notFound))
+        headers.add(name: "Content-Length", value: "\(data.count)")
+        writeResponse(context: context, result: HTTPResult(status: .methodNotAllowed, headers: headers, body: data))
     }
+
+    private func writeUnauthorized(context: ChannelHandlerContext) {
+        let payload = APIResponse<String>(
+            ok: false,
+            result: nil,
+            error: ErrorPayload(code: "unauthorized", message: "X-Bridge-Tokenが不正です", retriable: false, failedStep: "auth", details: nil)
+        )
+        let data = try! JSONEncoder().encode(payload)
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
+        headers.add(name: "Content-Length", value: "\(data.count)")
+        writeResponse(context: context, result: HTTPResult(status: .unauthorized, headers: headers, body: data))
+    }
+
+    // MARK: - SSE
 
     private func startSSE(context: ChannelHandlerContext, lastEventID: Int64?) {
         var headers = HTTPHeaders()
@@ -163,6 +257,8 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         buffer.writeString("\n\n")
         context.writeAndFlush(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
     }
+
+    // MARK: - Response writing
 
     private func writeResponse(context: ChannelHandlerContext, result: HTTPResult) {
         let responseHead = HTTPResponseHead(version: .http1_1, status: result.status, headers: result.headers)
