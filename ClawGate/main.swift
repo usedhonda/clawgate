@@ -4,12 +4,19 @@ import Foundation
 final class AppRuntime {
     let configStore = ConfigStore()
     let tokenManager = BridgeTokenManager(keychain: KeychainStore())
+    let pairingManager = PairingCodeManager()
 
     private lazy var logger = AppLogger(configStore: configStore)
     private lazy var lineAdapter = LINEAdapter(logger: logger)
     private lazy var registry = AdapterRegistry(adapters: [lineAdapter])
     private lazy var eventBus = EventBus()
-    private lazy var core = BridgeCore(eventBus: eventBus, tokenManager: tokenManager, registry: registry, logger: logger)
+    private lazy var core = BridgeCore(
+        eventBus: eventBus,
+        tokenManager: tokenManager,
+        pairingManager: pairingManager,
+        registry: registry,
+        logger: logger
+    )
     private lazy var server = BridgeServer(core: core)
     private lazy var inboundWatcher = LINEInboundWatcher(
         eventBus: eventBus,

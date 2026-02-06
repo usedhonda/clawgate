@@ -1,0 +1,62 @@
+{
+  "name": "ClawGate",
+  "version": "0.1.0",
+  "description": "macOS menubar app for LINE automation via Accessibility API",
+  "local_only": true,
+  "network": {
+    "listen": ["127.0.0.1:8765"],
+    "outbound": "disabled",
+    "explanation": "All communication is local-only. No data is sent to external servers."
+  },
+  "permissions": {
+    "required": ["Accessibility"],
+    "optional": [],
+    "explanation": "Accessibility permission is required to interact with LINE via AX API."
+  },
+  "data": {
+    "logs": {
+      "location": "local_only",
+      "retention": "session_only",
+      "pii_recorded": false
+    },
+    "token_storage": {
+      "method": "macOS Keychain",
+      "service": "com.clawgate.local",
+      "account": "bridge.token"
+    },
+    "message_content": {
+      "recorded": false,
+      "explanation": "Message content is not logged by default for privacy."
+    }
+  },
+  "verification": {
+    "codesign": {
+      "identity": "Developer ID Application",
+      "status": "pending"
+    },
+    "notarization": {
+      "enabled": false,
+      "status": "pending"
+    },
+    "entitlements": [
+      "com.apple.security.network.server"
+    ]
+  },
+  "security": {
+    "csrf_protection": {
+      "method": "token-based",
+      "header": "X-Bridge-Token"
+    },
+    "origin_validation": {
+      "status": "planned",
+      "description": "Browser-origin requests will be rejected in future versions"
+    }
+  },
+  "distribution": {
+    "homebrew_tap": "usedhonda/clawgate",
+    "dmg": {
+      "notarized": false,
+      "status": "planned"
+    }
+  }
+}
