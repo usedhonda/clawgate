@@ -273,6 +273,15 @@ final class BridgeCore {
             details: "127.0.0.1:8765"
         ))
 
+        // Check 6: Screen Recording permission (for Vision OCR)
+        let screenOk = CGPreflightScreenCaptureAccess()
+        checks.append(DoctorCheck(
+            name: "screen_recording_permission",
+            status: screenOk ? "ok" : "warning",
+            message: screenOk ? "Screen recording permission granted" : "Screen recording not granted (OCR disabled)",
+            details: screenOk ? nil : "System Settings > Privacy > Screen Recording"
+        ))
+
         // Calculate summary
         let passed = checks.filter { $0.status == "ok" }.count
         let warnings = checks.filter { $0.status == "warning" }.count

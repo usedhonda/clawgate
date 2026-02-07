@@ -6,7 +6,7 @@ struct AppConfig: Codable {
     var includeMessageBodyInLogs: Bool
 
     static let `default` = AppConfig(
-        pollIntervalSeconds: 3,
+        pollIntervalSeconds: 2,
         debugLogging: false,
         includeMessageBodyInLogs: false
     )
