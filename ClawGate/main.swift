@@ -7,7 +7,8 @@ final class AppRuntime {
     let pairingManager = PairingCodeManager()
 
     private lazy var logger = AppLogger(configStore: configStore)
-    private lazy var lineAdapter = LINEAdapter(logger: logger)
+    private lazy var recentSendTracker = RecentSendTracker()
+    private lazy var lineAdapter = LINEAdapter(logger: logger, recentSendTracker: recentSendTracker)
     private lazy var registry = AdapterRegistry(adapters: [lineAdapter])
     private lazy var eventBus = EventBus()
     private lazy var core = BridgeCore(
@@ -21,7 +22,13 @@ final class AppRuntime {
     private lazy var inboundWatcher = LINEInboundWatcher(
         eventBus: eventBus,
         logger: logger,
-        pollIntervalSeconds: configStore.load().pollIntervalSeconds
+        pollIntervalSeconds: configStore.load().pollIntervalSeconds,
+        recentSendTracker: recentSendTracker
+    )
+    private lazy var notificationBannerWatcher = NotificationBannerWatcher(
+        eventBus: eventBus,
+        logger: logger,
+        recentSendTracker: recentSendTracker
     )
 
     func startServer() {
@@ -33,9 +40,11 @@ final class AppRuntime {
         }
 
         inboundWatcher.start()
+        notificationBannerWatcher.start()
     }
 
     func stopServer() {
+        notificationBannerWatcher.stop()
         inboundWatcher.stop()
         server.stop()
         logger.log(.info, "ClawGate stopped")

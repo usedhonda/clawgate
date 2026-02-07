@@ -7,9 +7,11 @@ final class LINEAdapter: AdapterProtocol {
 
     private let logger: AppLogger
     private let retry = RetryPolicy(maxAttempts: 2, initialDelayMs: 120)
+    private let recentSendTracker: RecentSendTracker
 
-    init(logger: AppLogger) {
+    init(logger: AppLogger, recentSendTracker: RecentSendTracker) {
         self.logger = logger
+        self.recentSendTracker = recentSendTracker
     }
 
     func sendMessage(payload: SendPayload) throws -> (SendResult, [StepLog]) {
@@ -252,6 +254,7 @@ final class LINEAdapter: AdapterProtocol {
         }
 
         logger.log(.info, "LINE send flow finished for \(payload.conversationHint)")
+        recentSendTracker.recordSend(conversation: payload.conversationHint, text: payload.text)
 
         let result = SendResult(
             adapter: name,
