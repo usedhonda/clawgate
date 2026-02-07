@@ -37,7 +37,7 @@ enum LineSelectors {
 
     static let searchFieldU = UniversalSelector(
         role: "AXTextField",
-        textHints: ["search", "検索"],
+        textHints: ["search"],
         mustBeSettable: ["AXValue"],
         geometryHint: GeometryHint(
             regionX: 0.0...0.4,
@@ -48,7 +48,7 @@ enum LineSelectors {
 
     static let sendButtonU = UniversalSelector(
         role: "AXButton",
-        textHints: ["send", "送信"],
+        textHints: ["send"],
         requiredActions: ["AXPress"]
     )
 
@@ -76,8 +76,8 @@ enum LineSelectors {
 
     static let searchField = LineSelector(
         role: "AXTextField",
-        titleContains: ["search", "検索"],
-        descriptionContains: ["search", "検索"]
+        titleContains: ["search"],
+        descriptionContains: ["search"]
     )
 
     static let messageInput = LineSelector(
@@ -86,7 +86,7 @@ enum LineSelectors {
 
     static let sendButton = LineSelector(
         role: "AXButton",
-        titleContains: ["send", "送信"],
-        descriptionContains: ["send", "送信"]
+        titleContains: ["send"],
+        descriptionContains: ["send"]
     )
 }

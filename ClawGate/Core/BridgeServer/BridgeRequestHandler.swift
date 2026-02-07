@@ -19,6 +19,7 @@ final class BridgeRequestHandler: ChannelInboundHandler {
     private static let routes: [(HTTPMethod, String)] = [
         (.GET, "/v1/health"),
         (.GET, "/v1/poll"),
+        (.POST, "/v1/pair/generate"),
         (.POST, "/v1/pair/request"),
         (.POST, "/v1/send"),
         (.GET, "/v1/context"),
@@ -97,6 +98,12 @@ final class BridgeRequestHandler: ChannelInboundHandler {
                     self.writeResponse(context: context, result: result)
                 }
             }
+            return
+        }
+
+        // Generate pairing code - no auth, no Keychain, safe on event loop
+        if head.method == .POST && path == "/v1/pair/generate" {
+            writeResponse(context: context, result: core.generatePairCode())
             return
         }
 
@@ -208,7 +215,7 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         let payload = APIResponse<String>(
             ok: false,
             result: nil,
-            error: ErrorPayload(code: "unauthorized", message: "X-Bridge-Tokenが不正です", retriable: false, failedStep: "auth", details: nil)
+            error: ErrorPayload(code: "unauthorized", message: "Invalid X-Bridge-Token", retriable: false, failedStep: "auth", details: nil)
         )
         let data = try! JSONEncoder().encode(payload)
         var headers = HTTPHeaders()

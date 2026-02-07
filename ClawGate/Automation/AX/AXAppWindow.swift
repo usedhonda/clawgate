@@ -45,11 +45,15 @@ enum AXAppWindow {
             throw WindowError.appNotRunning(bundleIdentifier: bundleIdentifier)
         }
 
-        if activate {
-            app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-        }
-
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+
+        if activate {
+            guard AXActions.ensureWindow(
+                app: app, appElement: appElement, bundleID: bundleIdentifier
+            ) != nil else {
+                throw WindowError.windowNotFound(bundleIdentifier: bundleIdentifier)
+            }
+        }
 
         guard let window = AXQuery.focusedWindow(appElement: appElement) else {
             throw WindowError.windowNotFound(bundleIdentifier: bundleIdentifier)

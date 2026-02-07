@@ -36,7 +36,7 @@ final class BridgeCore {
             guard request.action == "send_message" else {
                 throw BridgeRuntimeError(
                     code: "unsupported_action",
-                    message: "actionはsend_messageのみ対応です",
+                    message: "Only send_message action is supported",
                     retriable: false,
                     failedStep: "validate_request",
                     details: request.action
@@ -45,7 +45,7 @@ final class BridgeCore {
             guard !request.payload.conversationHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw BridgeRuntimeError(
                     code: "invalid_conversation_hint",
-                    message: "conversation_hintは必須です",
+                    message: "conversation_hint is required",
                     retriable: false,
                     failedStep: "validate_request",
                     details: nil
@@ -54,7 +54,7 @@ final class BridgeCore {
             guard !request.payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw BridgeRuntimeError(
                     code: "invalid_text",
-                    message: "textは必須です",
+                    message: "text is required",
                     retriable: false,
                     failedStep: "validate_request",
                     details: nil
@@ -64,7 +64,7 @@ final class BridgeCore {
             guard let adapter = registry.adapter(for: request.adapter) else {
                 throw BridgeRuntimeError(
                     code: "adapter_not_found",
-                    message: "指定adapterは未登録です",
+                    message: "Specified adapter is not registered",
                     retriable: false,
                     failedStep: "resolve_adapter",
                     details: request.adapter
@@ -84,7 +84,7 @@ final class BridgeCore {
         } catch {
             let payload = ErrorPayload(
                 code: "invalid_json",
-                message: "リクエストJSONを解釈できません",
+                message: "Could not parse request JSON",
                 retriable: false,
                 failedStep: "decode_request",
                 details: String(describing: error)
@@ -98,7 +98,7 @@ final class BridgeCore {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
                     code: "adapter_not_found",
-                    message: "指定adapterは未登録です",
+                    message: "Specified adapter is not registered",
                     retriable: false,
                     failedStep: "resolve_adapter",
                     details: adapterName
@@ -115,7 +115,7 @@ final class BridgeCore {
         } catch {
             let payload = ErrorPayload(
                 code: "internal_error",
-                message: "コンテキスト取得中にエラーが発生しました",
+                message: "Error while retrieving context",
                 retriable: false,
                 failedStep: "get_context",
                 details: String(describing: error)
@@ -129,7 +129,7 @@ final class BridgeCore {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
                     code: "adapter_not_found",
-                    message: "指定adapterは未登録です",
+                    message: "Specified adapter is not registered",
                     retriable: false,
                     failedStep: "resolve_adapter",
                     details: adapterName
@@ -146,7 +146,7 @@ final class BridgeCore {
         } catch {
             let payload = ErrorPayload(
                 code: "internal_error",
-                message: "メッセージ取得中にエラーが発生しました",
+                message: "Error while retrieving messages",
                 retriable: false,
                 failedStep: "get_messages",
                 details: String(describing: error)
@@ -160,7 +160,7 @@ final class BridgeCore {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
                     code: "adapter_not_found",
-                    message: "指定adapterは未登録です",
+                    message: "Specified adapter is not registered",
                     retriable: false,
                     failedStep: "resolve_adapter",
                     details: adapterName
@@ -177,7 +177,7 @@ final class BridgeCore {
         } catch {
             let payload = ErrorPayload(
                 code: "internal_error",
-                message: "会話リスト取得中にエラーが発生しました",
+                message: "Error while retrieving conversations",
                 retriable: false,
                 failedStep: "get_conversations",
                 details: String(describing: error)
@@ -197,7 +197,7 @@ final class BridgeCore {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
                     code: "adapter_not_found",
-                    message: "指定adapterは未登録です",
+                    message: "Specified adapter is not registered",
                     retriable: false,
                     failedStep: "resolve_adapter",
                     details: adapterName
@@ -213,7 +213,7 @@ final class BridgeCore {
         } catch {
             let payload = ErrorPayload(
                 code: "axdump_failed",
-                message: "AXDumpの取得に失敗しました",
+                message: "Failed to retrieve AX dump",
                 retriable: true,
                 failedStep: "axdump",
                 details: String(describing: error)
@@ -230,7 +230,7 @@ final class BridgeCore {
         checks.append(DoctorCheck(
             name: "accessibility_permission",
             status: axTrusted ? "ok" : "error",
-            message: axTrusted ? "Accessibility権限が許可されています" : "Accessibility権限が未付与です",
+            message: axTrusted ? "Accessibility permission is granted" : "Accessibility permission is not granted",
             details: axTrusted ? nil : "System Settings > Privacy & Security > Accessibility"
         ))
 
@@ -239,8 +239,8 @@ final class BridgeCore {
         checks.append(DoctorCheck(
             name: "token_configured",
             status: hasToken ? "ok" : "warning",
-            message: hasToken ? "認証トークンが設定されています" : "認証トークンが未設定です",
-            details: hasToken ? nil : "初回起動時に自動生成されます"
+            message: hasToken ? "Auth token is configured" : "Auth token is not configured",
+            details: hasToken ? nil : "Auto-generated on first access"
         ))
 
         // Check 3: LINE running
@@ -248,8 +248,8 @@ final class BridgeCore {
         checks.append(DoctorCheck(
             name: "line_running",
             status: lineRunning ? "ok" : "warning",
-            message: lineRunning ? "LINEが起動しています" : "LINEが起動していません",
-            details: lineRunning ? nil : "LINEを起動してください"
+            message: lineRunning ? "LINE is running" : "LINE is not running",
+            details: lineRunning ? nil : "Please launch LINE"
         ))
 
         // Check 4: LINE window accessible (only if LINE is running and AX is trusted)
@@ -260,8 +260,8 @@ final class BridgeCore {
             checks.append(DoctorCheck(
                 name: "line_window_accessible",
                 status: "warning",
-                message: "LINEウィンドウのチェックをスキップしました",
-                details: !axTrusted ? "Accessibility権限が必要です" : "LINEが起動していません"
+                message: "LINE window check skipped",
+                details: !axTrusted ? "Accessibility permission required" : "LINE is not running"
             ))
         }
 
@@ -269,7 +269,7 @@ final class BridgeCore {
         checks.append(DoctorCheck(
             name: "server_port",
             status: "ok",
-            message: "サーバーがポート8765でリッスン中です",
+            message: "Server is listening on port 8765",
             details: "127.0.0.1:8765"
         ))
 
@@ -300,7 +300,7 @@ final class BridgeCore {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "warning",
-                message: "LINEが起動していません",
+                message: "LINE is not running",
                 details: nil
             )
         }
@@ -310,8 +310,8 @@ final class BridgeCore {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "warning",
-                message: "LINEウィンドウが取得できません（前面に表示してください）",
-                details: "Qt制約: バックグラウンドではAXツリーが取得できません"
+                message: "LINE window not accessible (bring it to foreground)",
+                details: "Qt limitation: AX tree unavailable in background"
             )
         }
 
@@ -319,7 +319,7 @@ final class BridgeCore {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "warning",
-                message: "ウィンドウフレーム情報が取得できません",
+                message: "Could not retrieve window frame",
                 details: nil
             )
         }
@@ -331,27 +331,33 @@ final class BridgeCore {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "ok",
-                message: "LINEウィンドウにアクセス可能です（入力欄あり）",
-                details: "ノード数: \(nodes.count)"
+                message: "LINE window is accessible (input field present)",
+                details: "Node count: \(nodes.count)"
             )
         } else {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "ok",
-                message: "LINEウィンドウにアクセス可能です（サイドバー表示中）",
-                details: "ノード数: \(nodes.count)、チャット画面を開くと入力欄が表示されます"
+                message: "LINE window is accessible (sidebar view)",
+                details: "Node count: \(nodes.count), open a chat to see the input field"
             )
         }
     }
 
     // MARK: - Pairing
 
+    func generatePairCode() -> HTTPResult {
+        let code = pairingManager.generateCode()
+        let result = GenerateCodeResult(code: code, expiresIn: 120)
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+    }
+
     func pair(body: Data, headers: HTTPHeaders) -> HTTPResult {
         // Reject browser-origin requests (CSRF protection)
         if let origin = headers.first(name: "Origin"), !origin.isEmpty {
             let payload = ErrorPayload(
                 code: "browser_origin_rejected",
-                message: "ブラウザからのリクエストは拒否されます",
+                message: "Requests from browsers are rejected",
                 retriable: false,
                 failedStep: "origin_check",
                 details: "Origin header detected: \(origin)"
@@ -368,7 +374,7 @@ final class BridgeCore {
             guard pairingManager.validateAndConsume(request.code) else {
                 let payload = ErrorPayload(
                     code: "invalid_pairing_code",
-                    message: "ペアリングコードが無効または期限切れです",
+                    message: "Pairing code is invalid or expired",
                     retriable: true,
                     failedStep: "validate_code",
                     details: nil
@@ -389,7 +395,7 @@ final class BridgeCore {
         } catch {
             let payload = ErrorPayload(
                 code: "invalid_json",
-                message: "リクエストJSONを解釈できません",
+                message: "Could not parse request JSON",
                 retriable: false,
                 failedStep: "decode_request",
                 details: String(describing: error)
