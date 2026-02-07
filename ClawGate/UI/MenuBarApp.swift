@@ -22,12 +22,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         menu.delegate = self
 
         // Pairing code item
-        pairingMenuItem = NSMenuItem(title: "ペアリングコードを生成", action: #selector(generatePairingCode), keyEquivalent: "p")
+        pairingMenuItem = NSMenuItem(title: "Generate Pairing Code", action: #selector(generatePairingCode), keyEquivalent: "p")
         pairingMenuItem?.target = self
         menu.addItem(pairingMenuItem!)
 
         // Copy token item
-        let copyTokenItem = NSMenuItem(title: "トークンをコピー", action: #selector(copyToken), keyEquivalent: "t")
+        let copyTokenItem = NSMenuItem(title: "Copy Token", action: #selector(copyToken), keyEquivalent: "t")
         copyTokenItem.target = self
         menu.addItem(copyTokenItem)
 
@@ -69,9 +69,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         let remaining = runtime.pairingManager.remainingSeconds()
 
         if remaining > 0, let code = runtime.pairingManager.currentValidCode() {
-            pairingMenuItem?.title = "📋 \(code) (\(remaining)秒)"
+            pairingMenuItem?.title = "📋 \(code) (\(remaining)s)"
         } else {
-            pairingMenuItem?.title = "ペアリングコードを生成"
+            pairingMenuItem?.title = "Generate Pairing Code"
             pairingTimer?.invalidate()
             pairingTimer = nil
         }

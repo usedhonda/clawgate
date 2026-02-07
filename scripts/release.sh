@@ -26,10 +26,10 @@ DMG_PATH="/tmp/${APP_NAME}.dmg"
 DMG_STAGING="/tmp/dmg-contents"
 
 # Apple credentials (from .local/release.md or environment)
-APPLE_ID="${APPLE_ID:-honda@ofinventi.one}"
-TEAM_ID="${TEAM_ID:-F588423ZWS}"
+APPLE_ID="${APPLE_ID:?Set APPLE_ID environment variable}"
+TEAM_ID="${TEAM_ID:?Set TEAM_ID environment variable}"
 APP_PASSWORD="${APP_PASSWORD:-}"
-SIGNING_ID="Developer ID Application: Yuzuru Honda (${TEAM_ID})"
+SIGNING_ID="Developer ID Application: ${SIGNING_NAME:?Set SIGNING_NAME environment variable} (${TEAM_ID})"
 
 cd "$PROJECT_DIR"
 

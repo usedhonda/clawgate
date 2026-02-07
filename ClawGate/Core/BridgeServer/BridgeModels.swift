@@ -181,3 +181,13 @@ struct PairResult: Codable {
         case expiresAt = "expires_at"
     }
 }
+
+struct GenerateCodeResult: Codable {
+    let code: String
+    let expiresIn: Int
+
+    enum CodingKeys: String, CodingKey {
+        case code
+        case expiresIn = "expires_in"
+    }
+}

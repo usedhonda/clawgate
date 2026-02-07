@@ -1,0 +1,150 @@
+#!/bin/bash
+# ClawGate CLI — lightweight wrapper for the ClawGate HTTP API.
+# Usage:
+#   clawgate send   --to "Name" --text "Hello"
+#   clawgate chats  [--limit 10]
+#   clawgate messages [--limit 20]
+#   clawgate context
+#   clawgate doctor
+#   clawgate pair
+#
+# Token is cached in ~/.clawgate/token after first pairing.
+
+set -euo pipefail
+
+BASE_URL="${CLAWGATE_URL:-http://127.0.0.1:8765}"
+TOKEN_FILE="$HOME/.clawgate/token"
+
+# --- helpers ---
+
+die() { echo "error: $1" >&2; exit 1; }
+
+ensure_token() {
+    if [ -f "$TOKEN_FILE" ]; then
+        TOKEN=$(cat "$TOKEN_FILE")
+        # Verify token is still valid
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 \
+            -H "X-Bridge-Token: $TOKEN" "$BASE_URL/v1/poll" 2>/dev/null || echo "000")
+        if [ "$STATUS" = "200" ]; then
+            return 0
+        fi
+    fi
+    # Token missing or invalid — auto-pair
+    do_pair
+}
+
+do_pair() {
+    CODE=$(curl -s -m 5 -X POST "$BASE_URL/v1/pair/generate" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['code'])" 2>/dev/null) \
+        || die "Failed to generate pairing code. Is ClawGate running?"
+
+    TOKEN=$(curl -s -m 5 -X POST -H "Content-Type: application/json" \
+        -d "{\"code\":\"$CODE\",\"client_name\":\"openclaw\"}" \
+        "$BASE_URL/v1/pair/request" 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['result']['token'])" 2>/dev/null) \
+        || die "Pairing failed"
+
+    mkdir -p "$(dirname "$TOKEN_FILE")"
+    echo -n "$TOKEN" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+}
+
+api_get() {
+    ensure_token
+    curl -s -m 15 -H "X-Bridge-Token: $TOKEN" "$BASE_URL$1" 2>/dev/null
+}
+
+api_post() {
+    ensure_token
+    curl -s -m 15 -X POST -H "X-Bridge-Token: $TOKEN" \
+        -H "Content-Type: application/json" -d "$2" "$BASE_URL$1" 2>/dev/null
+}
+
+# --- commands ---
+
+cmd_pair() {
+    do_pair
+    echo "Paired successfully. Token cached at $TOKEN_FILE"
+}
+
+cmd_doctor() {
+    api_get "/v1/doctor" | python3 -m json.tool
+}
+
+cmd_context() {
+    api_get "/v1/context?adapter=line" | python3 -m json.tool
+}
+
+cmd_chats() {
+    local limit="${1:-10}"
+    api_get "/v1/conversations?adapter=line&limit=$limit" | python3 -m json.tool
+}
+
+cmd_messages() {
+    local limit="${1:-20}"
+    api_get "/v1/messages?adapter=line&limit=$limit" | python3 -m json.tool
+}
+
+cmd_send() {
+    local to="" text="" enter_to_send="true"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to)   to="$2"; shift 2 ;;
+            --text) text="$2"; shift 2 ;;
+            --no-enter) enter_to_send="false"; shift ;;
+            *) die "Unknown flag: $1" ;;
+        esac
+    done
+    [ -z "$to" ] && die "--to is required"
+    [ -z "$text" ] && die "--text is required"
+
+    # Escape JSON strings
+    to_json=$(python3 -c "import json; print(json.dumps($( python3 -c "import json; print(json.dumps('$to'))" )))" 2>/dev/null)
+    text_json=$(python3 -c "import json; print(json.dumps($( python3 -c "import json; print(json.dumps('$text'))" )))" 2>/dev/null)
+
+    BODY="{\"adapter\":\"line\",\"action\":\"send_message\",\"payload\":{\"conversation_hint\":$to_json,\"text\":$text_json,\"enter_to_send\":$enter_to_send}}"
+
+    RESP=$(api_post "/v1/send" "$BODY")
+    OK=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok', False))" 2>/dev/null || echo "False")
+    if [ "$OK" = "True" ]; then
+        echo "Message sent to $to"
+    else
+        echo "$RESP" | python3 -m json.tool 2>/dev/null || echo "$RESP"
+        exit 1
+    fi
+}
+
+cmd_help() {
+    cat <<'USAGE'
+ClawGate CLI — LINE automation via ClawGate bridge
+
+Commands:
+  send     --to "Name" --text "Hello"   Send a LINE message
+  chats    [--limit N]                  List conversations
+  messages [--limit N]                  Get messages in current chat
+  context                               Get current conversation context
+  doctor                                Run diagnostics
+  pair                                  Force re-pair with ClawGate
+
+Environment:
+  CLAWGATE_URL   Override base URL (default: http://127.0.0.1:8765)
+
+Token is auto-managed and cached at ~/.clawgate/token
+USAGE
+}
+
+# --- main ---
+
+COMMAND="${1:-help}"
+shift || true
+
+case "$COMMAND" in
+    send)     cmd_send "$@" ;;
+    chats)    cmd_chats "${1:-10}" ;;
+    messages) cmd_messages "${1:-20}" ;;
+    context)  cmd_context ;;
+    doctor)   cmd_doctor ;;
+    pair)     cmd_pair ;;
+    help|--help|-h) cmd_help ;;
+    *) die "Unknown command: $COMMAND. Run 'clawgate help' for usage." ;;
+esac

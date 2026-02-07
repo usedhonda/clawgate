@@ -29,6 +29,14 @@ enum AXQuery {
         return (element as! AXUIElement)
     }
 
+    /// Get all windows of an application (including minimized ones).
+    static func windows(appElement: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value)
+        guard status == .success, let windows = value as? [AXUIElement] else { return [] }
+        return windows
+    }
+
     static func descendants(of root: AXUIElement, maxDepth: Int = 5, maxNodes: Int = 300) -> [AXNode] {
         var results: [AXNode] = []
         traverse(element: root, depth: 0, maxDepth: maxDepth, maxNodes: maxNodes, results: &results)
@@ -38,8 +46,9 @@ enum AXQuery {
     static func bestMatch(selector: LineSelector, in nodes: [AXNode]) -> AXNode? {
         let normalizedTitle = selector.titleContains.map { $0.lowercased() }
         let normalizedDescription = selector.descriptionContains.map { $0.lowercased() }
+        let hasTextHints = !normalizedTitle.isEmpty || !normalizedDescription.isEmpty
 
-        return nodes
+        let candidates = nodes
             .filter {
                 if let role = selector.role, $0.role != role {
                     return false
@@ -49,11 +58,16 @@ enum AXQuery {
                 }
                 return true
             }
-            .sorted { lhs, rhs in
-                score(node: lhs, titleTokens: normalizedTitle, descTokens: normalizedDescription) >
-                    score(node: rhs, titleTokens: normalizedTitle, descTokens: normalizedDescription)
+            .map { node in
+                (node: node, score: score(node: node, titleTokens: normalizedTitle, descTokens: normalizedDescription))
             }
-            .first
+            .sorted { $0.score > $1.score }
+
+        // When text hints are specified, require at least one match (score > 0)
+        // to avoid returning unrelated elements (e.g. close button for send button).
+        guard let best = candidates.first else { return nil }
+        if hasTextHints && best.score == 0 { return nil }
+        return best.node
     }
 
     private static func score(node: AXNode, titleTokens: [String], descTokens: [String]) -> Int {
@@ -172,5 +186,44 @@ enum AXQuery {
         let status = AXUIElementCopyElementAtPosition(systemWide, Float(x), Float(y), &element)
         guard status == .success else { return nil }
         return element
+    }
+
+    /// Get the system-wide focused element.
+    static func systemFocusedElement() -> AXUIElement? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &value)
+        guard status == .success, let element = value else { return nil }
+        return (element as! AXUIElement)
+    }
+
+    /// Get the PID of an AXUIElement.
+    static func pid(of element: AXUIElement) -> pid_t? {
+        var pid: pid_t = 0
+        let status = AXUIElementGetPid(element, &pid)
+        guard status == .success else { return nil }
+        return pid
+    }
+
+    /// Get direct children of an AXUIElement.
+    static func children(of element: AXUIElement) -> [AXUIElement] {
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
+        guard status == .success, let children = value as? [AXUIElement] else { return [] }
+        return children
+    }
+
+    /// Get a boolean attribute value (e.g. kAXFrontmostAttribute, kAXMinimizedAttribute).
+    static func copyBoolAttribute(_ element: AXUIElement, attribute: String) -> Bool? {
+        var value: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
+        guard status == .success else { return nil }
+        if let boolVal = value as? Bool {
+            return boolVal
+        }
+        if let numVal = value as? NSNumber {
+            return numVal.boolValue
+        }
+        return nil
     }
 }

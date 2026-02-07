@@ -19,7 +19,7 @@ final class LINEAdapter: AdapterProtocol {
             guard AXIsProcessTrusted() else {
                 throw BridgeRuntimeError(
                     code: "ax_permission_missing",
-                    message: "アクセシビリティ権限が未付与です",
+                    message: "Accessibility permission is not granted",
                     retriable: false,
                     failedStep: "ensure_accessibility",
                     details: "System Settings > Privacy & Security > Accessibility"
@@ -40,7 +40,7 @@ final class LINEAdapter: AdapterProtocol {
             guard launched else {
                 throw BridgeRuntimeError(
                     code: "line_not_running",
-                    message: "LINEを起動できません",
+                    message: "Failed to launch LINE",
                     retriable: true,
                     failedStep: "ensure_line_running",
                     details: "bundleIdentifier=jp.naver.line.mac"
@@ -50,7 +50,7 @@ final class LINEAdapter: AdapterProtocol {
             guard let runningApp = NSRunningApplication.runningApplications(withBundleIdentifier: "jp.naver.line.mac").first else {
                 throw BridgeRuntimeError(
                     code: "line_not_running",
-                    message: "LINEの起動を確認できません",
+                    message: "Could not confirm LINE is running",
                     retriable: true,
                     failedStep: "ensure_line_running",
                     details: "bundleIdentifier=jp.naver.line.mac"
@@ -59,20 +59,20 @@ final class LINEAdapter: AdapterProtocol {
             return runningApp
         }
 
-        _ = try step("activate_line", logger: stepLogger) {
-            app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            return true
-        }
+        let pid = app.processIdentifier
+        let appElement = AXQuery.applicationElement(pid: pid)
 
-        let rootWindow = try step("find_main_window", logger: stepLogger) {
-            let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
-            guard let window = AXQuery.focusedWindow(appElement: appElement) else {
+        // Stage 1: Surface — bring LINE window to front
+        let rootWindow: AXUIElement = try step("surface_line", logger: stepLogger) {
+            guard let window = AXActions.ensureWindow(
+                app: app, appElement: appElement, bundleID: bundleIdentifier
+            ) else {
                 throw BridgeRuntimeError(
                     code: "line_window_missing",
-                    message: "LINEのフォーカスウィンドウが見つかりません",
+                    message: "LINE focused window not found",
                     retriable: true,
-                    failedStep: "find_main_window",
-                    details: nil
+                    failedStep: "surface_line",
+                    details: "hasWSWindows=\(AXActions.hasWindowServerWindows(pid: pid))"
                 )
             }
             return window
@@ -82,7 +82,7 @@ final class LINEAdapter: AdapterProtocol {
             guard let frame = AXQuery.copyFrameAttribute(rootWindow) else {
                 throw BridgeRuntimeError(
                     code: "window_frame_missing",
-                    message: "ウィンドウのフレーム情報が取得できません",
+                    message: "Could not retrieve window frame",
                     retriable: true,
                     failedStep: "get_window_frame",
                     details: nil
@@ -95,6 +95,7 @@ final class LINEAdapter: AdapterProtocol {
             AXQuery.descendants(of: rootWindow)
         }
 
+        // Stage 2: Search -> click result row to navigate to matching conversation
         _ = try step("open_conversation", logger: stepLogger) {
             let candidate = SelectorResolver.resolve(
                 selector: LineSelectors.searchFieldU, in: nodes, windowFrame: windowFrame
@@ -103,93 +104,151 @@ final class LINEAdapter: AdapterProtocol {
             guard let searchField = candidate else {
                 throw BridgeRuntimeError(
                     code: "search_field_not_found",
-                    message: "検索欄が見つかりません",
+                    message: "Search field not found",
                     retriable: true,
                     failedStep: "open_conversation",
                     details: "selectors=LineSelectors.searchFieldU"
                 )
             }
+
+            // 1. Activate LINE
+            let activateDone = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async {
+                app.activate(options: [.activateIgnoringOtherApps])
+                activateDone.signal()
+            }
+            activateDone.wait()
+            usleep(150_000)
+
+            // 2. Focus search field
+            AXActions.setFocused(searchField.node.element)
+            usleep(100_000)
+
+            // 3. Set search text via AX API (not pasteText)
             guard AXActions.setValue(payload.conversationHint, on: searchField.node.element) else {
                 throw BridgeRuntimeError(
-                    code: "search_input_failed",
-                    message: "宛先検索キーワードを入力できません",
+                    code: "search_set_failed",
+                    message: "Failed to set search field value",
                     retriable: true,
                     failedStep: "open_conversation",
-                    details: payload.conversationHint
+                    details: nil
                 )
             }
-            AXActions.confirmEnterFallback()
+
+            // 4. Verify value was set
+            let verified = AXActions.poll(intervalMs: 30, timeoutMs: 500) {
+                let val = AXQuery.copyStringAttribute(
+                    searchField.node.element, attribute: kAXValueAttribute as String
+                ) ?? ""
+                return !val.isEmpty
+            }
+            guard verified else {
+                throw BridgeRuntimeError(
+                    code: "search_value_empty",
+                    message: "Search field value empty after setValue",
+                    retriable: true,
+                    failedStep: "open_conversation",
+                    details: nil
+                )
+            }
+
+            // 5. HID Enter to confirm search (triggers Qt search execution)
+            // setValue alone doesn't fire Qt's textEdited signal, so search doesn't run.
+            // HID Enter confirms the search query and populates result rows.
+            AXActions.sendSearchEnter()
+            usleep(800_000) // 800ms for search results to populate after Enter
+
+            // 6. Click first conversation result row (height > 40, skip header rows ~34px)
+            let freshNodes = AXQuery.descendants(of: rootWindow)
+            let resultRow = freshNodes.first { node in
+                node.role == "AXRow"
+                    && (node.frame?.height ?? 0) > 40
+                    && (node.frame?.width ?? 0) > 0
+            }
+            if let row = resultRow {
+                AXActions.clickAtCenter(row.element)
+            }
+            // If no row found, Enter may have already navigated (v4 behavior)
             return true
         }
 
+        // Wait for navigation: poll for messageInput to appear
         nodes = try step("rescan_after_navigation", logger: stepLogger) {
-            let maxAttempts = 4
-            for attempt in 1...maxAttempts {
-                let fresh = AXQuery.descendants(of: rootWindow)
-                let found = SelectorResolver.resolve(
-                    selector: LineSelectors.messageInputU, in: fresh, windowFrame: windowFrame
-                ) ?? legacyResolve(LineSelectors.messageInput, in: fresh)
-                if found != nil {
-                    return fresh
-                }
-                if attempt < maxAttempts {
-                    Thread.sleep(forTimeInterval: 0.5)
-                }
+            var freshNodes: [AXNode] = []
+            let found = AXActions.poll(intervalMs: 100, timeoutMs: 3000) {
+                freshNodes = AXQuery.descendants(of: rootWindow)
+                let windowFrameNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+                let match = SelectorResolver.resolve(
+                    selector: LineSelectors.messageInputU, in: freshNodes, windowFrame: windowFrameNow
+                ) ?? self.legacyResolve(LineSelectors.messageInput, in: freshNodes)
+                return match != nil
+            }
+            if found {
+                return freshNodes
             }
             throw BridgeRuntimeError(
                 code: "rescan_timeout",
-                message: "会話画面への遷移を検出できません",
+                message: "Could not detect navigation to conversation",
                 retriable: true,
                 failedStep: "rescan_after_navigation",
-                details: "messageInput not found after 2s polling"
+                details: "messageInput not found after 3s polling"
             )
         }
 
+        // Stage 2+3: Focus input -> setValue -> verify
         _ = try step("input_message", logger: stepLogger) {
+            let windowFrameNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
             let candidate = SelectorResolver.resolve(
-                selector: LineSelectors.messageInputU, in: nodes, windowFrame: windowFrame
+                selector: LineSelectors.messageInputU, in: nodes, windowFrame: windowFrameNow
             ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)
 
             guard let input = candidate else {
                 throw BridgeRuntimeError(
                     code: "message_input_not_found",
-                    message: "メッセージ入力欄が見つかりません",
+                    message: "Message input field not found",
                     retriable: true,
                     failedStep: "input_message",
                     details: "selectors=LineSelectors.messageInputU"
                 )
             }
+
+            // Focus via setFocused (no AXPress — it has side effects on Qt)
+            AXActions.setFocused(input.node.element)
+
             guard AXActions.setValue(payload.text, on: input.node.element) else {
                 throw BridgeRuntimeError(
                     code: "message_set_failed",
-                    message: "メッセージ本文を入力できません",
+                    message: "Failed to set message text",
                     retriable: true,
                     failedStep: "input_message",
                     details: nil
                 )
             }
+
+            // Poll to verify value was set
+            _ = AXActions.poll(intervalMs: 20, timeoutMs: 200) {
+                let currentValue = AXQuery.copyStringAttribute(input.node.element, attribute: kAXValueAttribute as String)
+                return currentValue == payload.text
+            }
             return true
         }
 
+        // Stage 4: Send via AXPostKeyboardEvent Enter (LINE has no send button)
+        // NOTE: Do NOT try sendButtonU here — LINE has no send button in AX tree,
+        // and the selector matches close/minimize buttons (AXButton + AXPress),
+        // which closes the window.
         _ = try step("send_message", logger: stepLogger) {
-            let candidate = SelectorResolver.resolve(
-                selector: LineSelectors.sendButtonU, in: nodes, windowFrame: windowFrame
-            ) ?? legacyResolve(LineSelectors.sendButton, in: nodes)
+            let windowFrameNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
 
-            if let button = candidate, AXActions.press(button.node.element) {
-                return true
+            let inputCandidate = SelectorResolver.resolve(
+                selector: LineSelectors.messageInputU, in: nodes, windowFrame: windowFrameNow
+            ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)
+            if let input = inputCandidate {
+                AXActions.setFocused(input.node.element)
+                usleep(50_000)
             }
-            if payload.enterToSend {
-                AXActions.confirmEnterFallback()
-                return true
-            }
-            throw BridgeRuntimeError(
-                code: "send_action_failed",
-                message: "送信アクションを実行できません",
-                retriable: true,
-                failedStep: "send_message",
-                details: nil
-            )
+            AXActions.sendEnter(pid: pid)
+            return true
         }
 
         logger.log(.info, "LINE send flow finished for \(payload.conversationHint)")
@@ -285,7 +344,7 @@ final class LINEAdapter: AdapterProtocol {
             guard !sidebarNodes.isEmpty else {
                 throw BridgeRuntimeError(
                     code: "sidebar_not_visible",
-                    message: "サイドバーが表示されていません",
+                    message: "Sidebar is not visible",
                     retriable: true,
                     failedStep: "get_conversations",
                     details: nil
@@ -350,7 +409,7 @@ final class LINEAdapter: AdapterProtocol {
     private static let timestampPattern: NSRegularExpression = {
         // Matches patterns like "12:34", "2026/2/6", weekday names, "AM/PM" etc.
         try! NSRegularExpression(
-            pattern: #"^(\d{1,2}:\d{2}(:\d{2})?|(\d{2,4}[/\-]\d{1,2}[/\-]\d{1,2})|(月|火|水|木|金|土|日)曜日?|[AP]M|yesterday|今日|昨日)$"#,
+            pattern: #"^(\d{1,2}:\d{2}(:\d{2})?|(\d{2,4}[/\-]\d{1,2}[/\-]\d{1,2})|(月|火|水|木|金|土|日)曜日?|[AP]M|yesterday|today|今日|昨日)$"#,
             options: [.caseInsensitive]
         )
     }()
@@ -376,7 +435,7 @@ final class LINEAdapter: AdapterProtocol {
         } catch AXAppWindow.WindowError.axPermissionMissing {
             throw BridgeRuntimeError(
                 code: "ax_permission_missing",
-                message: "アクセシビリティ権限が未付与です",
+                message: "Accessibility permission is not granted",
                 retriable: false,
                 failedStep: "ensure_accessibility",
                 details: "System Settings > Privacy & Security > Accessibility"
@@ -384,7 +443,7 @@ final class LINEAdapter: AdapterProtocol {
         } catch AXAppWindow.WindowError.appNotRunning {
             throw BridgeRuntimeError(
                 code: "line_not_running",
-                message: "LINEが起動していません",
+                message: "LINE is not running",
                 retriable: true,
                 failedStep: "ensure_line_running",
                 details: "bundleIdentifier=\(bundleIdentifier)"
@@ -392,7 +451,7 @@ final class LINEAdapter: AdapterProtocol {
         } catch AXAppWindow.WindowError.windowNotFound {
             throw BridgeRuntimeError(
                 code: "line_window_missing",
-                message: "LINEのフォーカスウィンドウが見つかりません",
+                message: "LINE focused window not found",
                 retriable: true,
                 failedStep: "find_main_window",
                 details: nil
@@ -400,7 +459,7 @@ final class LINEAdapter: AdapterProtocol {
         } catch AXAppWindow.WindowError.frameNotFound {
             throw BridgeRuntimeError(
                 code: "window_frame_missing",
-                message: "ウィンドウのフレーム情報が取得できません",
+                message: "Could not retrieve window frame",
                 retriable: true,
                 failedStep: "get_window_frame",
                 details: nil

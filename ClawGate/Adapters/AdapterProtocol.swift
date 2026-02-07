@@ -11,15 +11,15 @@ protocol AdapterProtocol {
 
 extension AdapterProtocol {
     func getContext() throws -> ConversationContext {
-        throw BridgeRuntimeError(code: "not_supported", message: "このadapterはgetContextに未対応です",
+        throw BridgeRuntimeError(code: "not_supported", message: "This adapter does not support getContext",
                                  retriable: false, failedStep: nil, details: name)
     }
     func getMessages(limit: Int) throws -> MessageList {
-        throw BridgeRuntimeError(code: "not_supported", message: "このadapterはgetMessagesに未対応です",
+        throw BridgeRuntimeError(code: "not_supported", message: "This adapter does not support getMessages",
                                  retriable: false, failedStep: nil, details: name)
     }
     func getConversations(limit: Int) throws -> ConversationList {
-        throw BridgeRuntimeError(code: "not_supported", message: "このadapterはgetConversationsに未対応です",
+        throw BridgeRuntimeError(code: "not_supported", message: "This adapter does not support getConversations",
                                  retriable: false, failedStep: nil, details: name)
     }
 }
