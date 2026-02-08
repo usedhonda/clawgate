@@ -8,12 +8,16 @@ enum VisionOCR {
 
     /// Extract text from a screen rectangle (in global CG coordinates).
     /// Returns nil if Screen Recording permission is missing or OCR fails.
-    /// NOTE: Uses optionOnScreenOnly — LINE window must be visible (not occluded).
-    static func extractText(from screenRect: CGRect) -> String? {
+    /// When windowID is provided, captures only that window (immune to occlusion).
+    /// When windowID is kCGNullWindowID (default), captures on-screen composite.
+    static func extractText(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> String? {
+        let options: CGWindowListOption = windowID != kCGNullWindowID
+            ? .optionIncludingWindow
+            : .optionOnScreenOnly
         guard let image = CGWindowListCreateImage(
             screenRect,
-            .optionOnScreenOnly,
-            kCGNullWindowID,
+            options,
+            windowID,
             [.bestResolution]
         ) else {
             return nil
@@ -29,11 +33,11 @@ enum VisionOCR {
 
     /// Extract text from multiple screen rectangles merged into one capture (with padding).
     /// More efficient than calling extractText(from:) per-rect: N rects × 300ms → 1 capture × 300ms.
-    static func extractText(from rects: [CGRect], padding: CGFloat = 4) -> String? {
+    static func extractText(from rects: [CGRect], padding: CGFloat = 4, windowID: CGWindowID = kCGNullWindowID) -> String? {
         guard !rects.isEmpty else { return nil }
         let merged = rects.reduce(rects[0]) { $0.union($1) }
         let padded = merged.insetBy(dx: -padding, dy: -padding)
-        return extractText(from: padded)
+        return extractText(from: padded, windowID: windowID)
     }
 
     // MARK: - Private

@@ -51,6 +51,7 @@ final class LINEInboundWatcher {
         }
 
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        let lineWindowID = AXActions.findWindowID(pid: app.processIdentifier) ?? kCGNullWindowID
 
         // Try focused window first, fall back to first window (works when LINE is background)
         guard let window = AXQuery.focusedWindow(appElement: appElement)
@@ -118,7 +119,7 @@ final class LINEInboundWatcher {
             }
 
             // Vision OCR: extract text from new rows (batch — single capture)
-            let ocrText = VisionOCR.extractText(from: newRowFrames, padding: 4) ?? ""
+            let ocrText = VisionOCR.extractText(from: newRowFrames, padding: 4, windowID: lineWindowID) ?? ""
 
             // Echo suppression: temporal window is the sole signal for now.
             // OCR text matching is not reliable enough because the watcher may read
@@ -151,15 +152,17 @@ final class LINEInboundWatcher {
             width: chatListFrame.width,
             height: chatListFrame.height / 2
         )
+        let captureOptions: CGWindowListOption = lineWindowID != kCGNullWindowID
+            ? .optionIncludingWindow : .optionOnScreenOnly
         guard let image = CGWindowListCreateImage(
-            bottomHalf, .optionOnScreenOnly, kCGNullWindowID, [.bestResolution]
+            bottomHalf, captureOptions, lineWindowID, [.bestResolution]
         ) else { return }
 
         let hash = computeImageHash(image)
 
         if !baselineCaptured {
             lastImageHash = hash
-            lastOCRText = VisionOCR.extractText(from: chatListFrame) ?? ""
+            lastOCRText = VisionOCR.extractText(from: chatListFrame, windowID: lineWindowID) ?? ""
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
             return
@@ -172,7 +175,7 @@ final class LINEInboundWatcher {
         // Pixels changed -> run OCR on chat list area (screen coordinates)
         // NOTE: AXRow frames are virtual scroll coordinates (y=-17000 etc),
         // NOT screen coordinates. Only chatListFrame has real screen position.
-        let pixelOCRText = VisionOCR.extractText(from: chatListFrame) ?? ""
+        let pixelOCRText = VisionOCR.extractText(from: chatListFrame, windowID: lineWindowID) ?? ""
         guard pixelOCRText != lastOCRText else {
             logger.log(.debug, "LINEInboundWatcher: pixel hash changed (\(previousHash)->\(hash)) but OCR text unchanged")
             return
