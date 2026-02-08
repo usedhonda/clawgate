@@ -2,38 +2,38 @@ import SwiftUI
 
 struct SettingsView: View {
     @State private var config: AppConfig
-    @State private var token: String
 
     private let configStore: ConfigStore
-    private let tokenManager: BridgeTokenManager
 
-    init(configStore: ConfigStore, tokenManager: BridgeTokenManager) {
+    init(configStore: ConfigStore) {
         self.configStore = configStore
-        self.tokenManager = tokenManager
         self._config = State(initialValue: configStore.load())
-        self._token = State(initialValue: tokenManager.currentToken())
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
             Text("ClawGate Settings")
                 .font(.headline)
 
-            HStack {
-                Text("Bridge Token")
-                Text(token)
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(1)
-                Spacer()
-                Button("Regenerate") {
-                    token = tokenManager.regenerateToken()
+            GroupBox(label: Text("General")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Debug Logging", isOn: $config.debugLogging)
+                    Toggle("Include Message Body in Logs", isOn: $config.includeMessageBodyInLogs)
                 }
+                .padding(.vertical, 4)
             }
 
-            Toggle("Debug Logging", isOn: $config.debugLogging)
-            Toggle("Include Message Body in Logs", isOn: $config.includeMessageBodyInLogs)
-
-            Stepper("Poll Interval: \(config.pollIntervalSeconds)s", value: $config.pollIntervalSeconds, in: 1...30)
+            GroupBox(label: Text("LINE")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Default Conversation:")
+                        TextField("e.g. John Doe", text: $config.lineDefaultConversation)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Stepper("Poll Interval: \(config.linePollIntervalSeconds)s", value: $config.linePollIntervalSeconds, in: 1...30)
+                }
+                .padding(.vertical, 4)
+            }
 
             HStack {
                 Spacer()

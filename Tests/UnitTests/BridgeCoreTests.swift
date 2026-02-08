@@ -76,24 +76,6 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(response.status, .badRequest)
     }
 
-    func testAuthValidationWorks() {
-        let tokenManager = BridgeTokenManager(keychain: KeychainStore(service: "com.clawgate.test.auth"))
-        let token = tokenManager.regenerateToken()
-
-        var headers = HTTPHeaders()
-        headers.add(name: "X-Bridge-Token", value: token)
-
-        let core = BridgeCore(
-            eventBus: EventBus(),
-            tokenManager: tokenManager,
-            pairingManager: PairingCodeManager(),
-            registry: AdapterRegistry(adapters: [FakeAdapter()]),
-            logger: AppLogger(configStore: ConfigStore(defaults: UserDefaults(suiteName: "clawgate.tests")!))
-        )
-
-        XCTAssertTrue(core.isAuthorized(headers: headers))
-    }
-
     // MARK: - Error code tests
 
     func testSendReturnsAdapterNotFound() {
@@ -193,34 +175,33 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(parsed.error?.code, "adapter_not_found")
     }
 
-    // MARK: - Token tests
+    // MARK: - Origin check tests
 
-    func testTokenRegenerationInvalidatesOldToken() {
-        let tokenManager = BridgeTokenManager(keychain: KeychainStore(service: "com.clawgate.test.regen"))
-        let oldToken = tokenManager.currentToken()
-        let newToken = tokenManager.regenerateToken()
-
-        XCTAssertNotEqual(oldToken, newToken)
-        XCTAssertFalse(tokenManager.validate(oldToken))
-        XCTAssertTrue(tokenManager.validate(newToken))
-    }
-
-    func testTokenValidateRejectsNil() {
-        let tokenManager = BridgeTokenManager(keychain: KeychainStore(service: "com.clawgate.test.nil"))
-        XCTAssertFalse(tokenManager.validate(nil))
-    }
-
-    func testUnauthorizedRequestIsRejected() {
+    func testOriginCheckRejectsPostWithOrigin() {
         let core = makeCore()
         var headers = HTTPHeaders()
-        headers.add(name: "X-Bridge-Token", value: "invalid-token-value")
-        XCTAssertFalse(core.isAuthorized(headers: headers))
+        headers.add(name: "Origin", value: "http://evil.com")
+        let result = core.checkOrigin(method: .POST, headers: headers)
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.status, .forbidden)
+
+        let parsed = try! JSONDecoder().decode(APIResponse<String>.self, from: result!.body)
+        XCTAssertEqual(parsed.error?.code, "browser_origin_rejected")
     }
 
-    func testMissingTokenIsRejected() {
+    func testOriginCheckAllowsPostWithoutOrigin() {
         let core = makeCore()
         let headers = HTTPHeaders()
-        XCTAssertFalse(core.isAuthorized(headers: headers))
+        let result = core.checkOrigin(method: .POST, headers: headers)
+        XCTAssertNil(result)
+    }
+
+    func testOriginCheckAllowsGetWithOrigin() {
+        let core = makeCore()
+        var headers = HTTPHeaders()
+        headers.add(name: "Origin", value: "http://evil.com")
+        let result = core.checkOrigin(method: .GET, headers: headers)
+        XCTAssertNil(result)
     }
 
     // MARK: - Helpers
@@ -229,12 +210,9 @@ final class BridgeCoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "clawgate.tests.core")!
         defaults.removePersistentDomain(forName: "clawgate.tests.core")
         let cfg = ConfigStore(defaults: defaults)
-        let tokenManager = BridgeTokenManager(keychain: KeychainStore(service: "com.clawgate.test.core"))
 
         return BridgeCore(
             eventBus: EventBus(),
-            tokenManager: tokenManager,
-            pairingManager: PairingCodeManager(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg)
         )
@@ -244,12 +222,9 @@ final class BridgeCoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "clawgate.tests.failing")!
         defaults.removePersistentDomain(forName: "clawgate.tests.failing")
         let cfg = ConfigStore(defaults: defaults)
-        let tokenManager = BridgeTokenManager(keychain: KeychainStore(service: "com.clawgate.test.failing"))
 
         return BridgeCore(
             eventBus: EventBus(),
-            tokenManager: tokenManager,
-            pairingManager: PairingCodeManager(),
             registry: AdapterRegistry(adapters: [FakeAdapter(), FailingAdapter()]),
             logger: AppLogger(configStore: cfg)
         )

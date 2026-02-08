@@ -3,8 +3,6 @@ import Foundation
 
 final class AppRuntime {
     let configStore = ConfigStore()
-    let tokenManager = BridgeTokenManager(keychain: KeychainStore())
-    let pairingManager = PairingCodeManager()
 
     private lazy var logger = AppLogger(configStore: configStore)
     private lazy var recentSendTracker = RecentSendTracker()
@@ -13,16 +11,15 @@ final class AppRuntime {
     private lazy var eventBus = EventBus()
     private lazy var core = BridgeCore(
         eventBus: eventBus,
-        tokenManager: tokenManager,
-        pairingManager: pairingManager,
         registry: registry,
-        logger: logger
+        logger: logger,
+        configStore: configStore
     )
     private lazy var server = BridgeServer(core: core)
     private lazy var inboundWatcher = LINEInboundWatcher(
         eventBus: eventBus,
         logger: logger,
-        pollIntervalSeconds: configStore.load().pollIntervalSeconds,
+        pollIntervalSeconds: configStore.load().linePollIntervalSeconds,
         recentSendTracker: recentSendTracker
     )
     private lazy var notificationBannerWatcher = NotificationBannerWatcher(

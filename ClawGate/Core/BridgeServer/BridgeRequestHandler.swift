@@ -3,7 +3,7 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 
-/// Shared serial queue for all blocking work (AX queries, Keychain access, etc.)
+/// Shared serial queue for all blocking work (AX queries, etc.)
 /// Serializes AX access between HTTP handlers and LINEInboundWatcher.
 enum BlockingWork {
     static let queue = DispatchQueue(
@@ -18,9 +18,8 @@ final class BridgeRequestHandler: ChannelInboundHandler {
 
     private static let routes: [(HTTPMethod, String)] = [
         (.GET, "/v1/health"),
+        (.GET, "/v1/config"),
         (.GET, "/v1/poll"),
-        (.POST, "/v1/pair/generate"),
-        (.POST, "/v1/pair/request"),
         (.POST, "/v1/send"),
         (.GET, "/v1/context"),
         (.GET, "/v1/messages"),
@@ -74,80 +73,44 @@ final class BridgeRequestHandler: ChannelInboundHandler {
             return
         }
 
+        // CSRF protection: reject POST requests with Origin header
+        if let csrfResult = core.checkOrigin(method: head.method, headers: head.headers) {
+            writeResponse(context: context, result: csrfResult)
+            return
+        }
+
         // Non-blocking: health check responds immediately on event loop
         if head.method == .GET && path == "/v1/health" {
             writeResponse(context: context, result: core.health())
             return
         }
 
-        // Poll: EventBus.poll() is lightweight (NSLock only), but auth check
-        // hits Keychain so we offload the whole thing to avoid blocking on
-        // SecItemCopyMatching if a Keychain UI dialog appears.
+        // Non-blocking: config responds immediately on event loop (UserDefaults read only)
+        if head.method == .GET && path == "/v1/config" {
+            writeResponse(context: context, result: core.config())
+            return
+        }
+
+        // Poll: EventBus.poll() is lightweight (NSLock only), respond on event loop
         if head.method == .GET && path == "/v1/poll" {
-            let requestHeaders = head.headers
             let since = components?.queryItems?.first(where: { $0.name == "since" })?.value.flatMap(Int64.init)
-            BlockingWork.queue.async { [self, core] in
-                guard core.isAuthorized(headers: requestHeaders) else {
-                    context.eventLoop.execute {
-                        self.writeUnauthorized(context: context)
-                    }
-                    return
-                }
-                let result = core.poll(since: since)
-                context.eventLoop.execute {
-                    self.writeResponse(context: context, result: result)
-                }
-            }
+            let result = core.poll(since: since)
+            writeResponse(context: context, result: result)
             return
         }
 
-        // Generate pairing code - no auth, no Keychain, safe on event loop
-        if head.method == .POST && path == "/v1/pair/generate" {
-            writeResponse(context: context, result: core.generatePairCode())
-            return
-        }
-
-        // Pairing endpoint - no auth required, but Keychain access -> offload
-        if head.method == .POST && path == "/v1/pair/request" {
-            let bodyData = body.data
-            let headers = head.headers
-            offloadToBlockingQueue(context: context) { [core] in
-                core.pair(body: bodyData, headers: headers)
-            }
-            return
-        }
-
-        // SSE: auth check offloaded, then SSE starts on event loop
+        // SSE: start on event loop
         if head.method == .GET && path == "/v1/events" {
             let lastEventID = head.headers.first(name: "Last-Event-ID").flatMap(Int64.init)
-            let requestHeaders = head.headers
-            BlockingWork.queue.async { [self, core] in
-                guard core.isAuthorized(headers: requestHeaders) else {
-                    context.eventLoop.execute {
-                        self.writeUnauthorized(context: context)
-                    }
-                    return
-                }
-                context.eventLoop.execute {
-                    self.startSSE(context: context, lastEventID: lastEventID)
-                }
-            }
+            startSSE(context: context, lastEventID: lastEventID)
             return
         }
 
-        // All other endpoints: auth + business logic offloaded to blocking queue
+        // All other endpoints: offload to blocking queue (AX queries, etc.)
         let bodyData = body.data
-        let requestHeaders = head.headers
         let method = head.method
 
         BlockingWork.queue.async { [self, core] in
-            guard core.isAuthorized(headers: requestHeaders) else {
-                context.eventLoop.execute {
-                    self.writeUnauthorized(context: context)
-                }
-                return
-            }
-
             let result: HTTPResult
 
             if method == .POST && path == "/v1/send" {
@@ -186,18 +149,6 @@ final class BridgeRequestHandler: ChannelInboundHandler {
 
     // MARK: - Helpers
 
-    private func offloadToBlockingQueue(
-        context: ChannelHandlerContext,
-        work: @escaping () -> HTTPResult
-    ) {
-        BlockingWork.queue.async {
-            let result = work()
-            context.eventLoop.execute {
-                self.writeResponse(context: context, result: result)
-            }
-        }
-    }
-
     private func writeMethodNotAllowed(context: ChannelHandlerContext) {
         let payload = APIResponse<String>(
             ok: false,
@@ -209,19 +160,6 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
         headers.add(name: "Content-Length", value: "\(data.count)")
         writeResponse(context: context, result: HTTPResult(status: .methodNotAllowed, headers: headers, body: data))
-    }
-
-    private func writeUnauthorized(context: ChannelHandlerContext) {
-        let payload = APIResponse<String>(
-            ok: false,
-            result: nil,
-            error: ErrorPayload(code: "unauthorized", message: "Invalid X-Bridge-Token", retriable: false, failedStep: "auth", details: nil)
-        )
-        let data = try! JSONEncoder().encode(payload)
-        var headers = HTTPHeaders()
-        headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
-        headers.add(name: "Content-Length", value: "\(data.count)")
-        writeResponse(context: context, result: HTTPResult(status: .unauthorized, headers: headers, body: data))
     }
 
     // MARK: - SSE

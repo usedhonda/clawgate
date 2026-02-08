@@ -1,0 +1,10 @@
+{
+  "id": "vibeterm-telemetry",
+  "name": "Vibeterm Telemetry",
+  "description": "REST endpoint for Vibeterm iOS location telemetry",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

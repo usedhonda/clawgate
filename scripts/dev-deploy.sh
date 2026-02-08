@@ -99,44 +99,56 @@ if [ $ELAPSED -ge $MAX_WAIT ]; then
 fi
 
 ###############################################################################
-# Step 4: Sync OpenClaw plugin
+# Step 4: Sync OpenClaw plugins
 ###############################################################################
 if [ "$SKIP_PLUGIN" = "false" ]; then
-    step "Syncing OpenClaw plugin..."
+    step "Syncing OpenClaw plugins..."
 
-    PLUGIN_SRC="$PROJECT_DIR/extensions/openclaw-plugin"
-    PLUGIN_DST="$HOME/.openclaw/extensions/clawgate"
+    ANY_PLUGIN_SYNCED=false
 
-    if [ ! -d "$PLUGIN_SRC" ]; then
-        warn "Plugin source not found at $PLUGIN_SRC — skipping"
-    else
-        # Check if plugin files changed
-        NEEDS_SYNC=false
-        if [ ! -d "$PLUGIN_DST" ]; then
-            NEEDS_SYNC=true
-        elif ! diff -rq "$PLUGIN_SRC" "$PLUGIN_DST" >/dev/null 2>&1; then
-            NEEDS_SYNC=true
+    # Sync each plugin: source_dir -> dest_dir
+    sync_plugin() {
+        local src="$1"
+        local dst="$2"
+        local name="$3"
+
+        if [ ! -d "$src" ]; then
+            warn "$name source not found at $src — skipping"
+            return
         fi
 
-        if [ "$NEEDS_SYNC" = "true" ]; then
-            mkdir -p "$PLUGIN_DST"
-            cp -R "$PLUGIN_SRC/" "$PLUGIN_DST/"
-            ok "Plugin synced to $PLUGIN_DST"
+        local needs_sync=false
+        if [ ! -d "$dst" ]; then
+            needs_sync=true
+        elif ! diff -rq "$src" "$dst" >/dev/null 2>&1; then
+            needs_sync=true
+        fi
 
-            # Restart gateway (KeepAlive will auto-restart it)
-            if pgrep -f "openclaw.*gateway" >/dev/null 2>&1; then
-                pkill -f "openclaw.*gateway" 2>/dev/null || true
-                ok "Gateway killed (KeepAlive will restart)"
-                sleep 5
-            else
-                warn "Gateway not running — skipping restart"
-            fi
+        if [ "$needs_sync" = "true" ]; then
+            mkdir -p "$dst"
+            cp -R "$src/" "$dst/"
+            ok "$name synced to $dst"
+            ANY_PLUGIN_SYNCED=true
         else
-            ok "Plugin unchanged — no sync needed"
+            ok "$name unchanged — no sync needed"
         fi
+    }
 
-        SMOKE_ARGS="--with-openclaw"
+    sync_plugin "$PROJECT_DIR/extensions/openclaw-plugin" "$HOME/.openclaw/extensions/clawgate" "clawgate"
+    sync_plugin "$PROJECT_DIR/extensions/vibeterm-telemetry" "$HOME/.openclaw/extensions/vibeterm-telemetry" "vibeterm-telemetry"
+
+    # Restart gateway once if any plugin changed
+    if [ "$ANY_PLUGIN_SYNCED" = "true" ]; then
+        if pgrep -f "openclaw.*gateway" >/dev/null 2>&1; then
+            pkill -f "openclaw.*gateway" 2>/dev/null || true
+            ok "Gateway killed (KeepAlive will restart)"
+            sleep 5
+        else
+            warn "Gateway not running — skipping restart"
+        fi
     fi
+
+    SMOKE_ARGS="--with-openclaw"
 else
     step "Skipping OpenClaw plugin sync (--skip-plugin)"
 fi

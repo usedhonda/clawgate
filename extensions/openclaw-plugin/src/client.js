@@ -1,6 +1,9 @@
 /**
  * ClawGate HTTP client — thin wrapper around the localhost API.
  * Uses Node.js 22+ built-in fetch (no dependencies).
+ *
+ * No authentication required — ClawGate binds to 127.0.0.1 only.
+ * CSRF protection via Origin header check (server-side).
  */
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -10,16 +13,14 @@ const DEFAULT_TIMEOUT_MS = 10_000;
  * @param {string} path
  * @param {object} [opts]
  * @param {string} [opts.method]
- * @param {string} [opts.token]
  * @param {object} [opts.body]
  * @param {number} [opts.timeoutMs]
  * @returns {Promise<object>}
  */
 async function request(apiUrl, path, opts = {}) {
-  const { method = "GET", token, body, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const { method = "GET", body, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
   const url = `${apiUrl}${path}`;
   const headers = { "Content-Type": "application/json" };
-  if (token) headers["X-Bridge-Token"] = token;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -39,7 +40,7 @@ async function request(apiUrl, path, opts = {}) {
 }
 
 /**
- * GET /v1/health — no auth required.
+ * GET /v1/health
  * @param {string} apiUrl
  * @returns {Promise<{ok: boolean, version?: string}>}
  */
@@ -48,46 +49,24 @@ export async function clawgateHealth(apiUrl) {
 }
 
 /**
- * Auto-pair: generate code then immediately request token.
- * @param {string} apiUrl
- * @returns {Promise<{token: string}>}
- */
-export async function clawgatePair(apiUrl) {
-  const gen = await request(apiUrl, "/v1/pair/generate", { method: "POST" });
-  if (!gen.ok) throw new Error(`pair/generate failed: ${gen.error?.message ?? JSON.stringify(gen)}`);
-
-  const code = gen.result.code;
-  const req = await request(apiUrl, "/v1/pair/request", {
-    method: "POST",
-    body: { code, client_name: "openclaw-clawgate-plugin" },
-  });
-  if (!req.ok) throw new Error(`pair/request failed: ${req.error?.message ?? JSON.stringify(req)}`);
-
-  return { token: req.result.token };
-}
-
-/**
  * GET /v1/doctor — check ClawGate system status.
  * @param {string} apiUrl
- * @param {string} token
  * @returns {Promise<object>}
  */
-export async function clawgateDoctor(apiUrl, token) {
-  return request(apiUrl, "/v1/doctor", { token });
+export async function clawgateDoctor(apiUrl) {
+  return request(apiUrl, "/v1/doctor");
 }
 
 /**
  * POST /v1/send — send a message via LINE.
  * @param {string} apiUrl
- * @param {string} token
  * @param {string} conversationHint
  * @param {string} text
  * @returns {Promise<object>}
  */
-export async function clawgateSend(apiUrl, token, conversationHint, text) {
+export async function clawgateSend(apiUrl, conversationHint, text) {
   return request(apiUrl, "/v1/send", {
     method: "POST",
-    token,
     body: {
       adapter: "line",
       action: "send_message",
@@ -101,13 +80,36 @@ export async function clawgateSend(apiUrl, token, conversationHint, text) {
 }
 
 /**
+ * GET /v1/conversations — list LINE conversations visible in AX tree.
+ * @param {string} apiUrl
+ * @param {number} [limit=50]
+ * @returns {Promise<{ok: boolean, result?: {conversations: Array}}>}
+ */
+export async function clawgateConversations(apiUrl, limit = 50) {
+  return request(apiUrl, `/v1/conversations?adapter=line&limit=${limit}`);
+}
+
+/**
+ * GET /v1/config — get ClawGate configuration.
+ * @param {string} apiUrl
+ * @returns {Promise<object|null>} config result or null on failure
+ */
+export async function clawgateConfig(apiUrl) {
+  try {
+    const res = await request(apiUrl, "/v1/config");
+    return res.ok ? res.result : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * GET /v1/poll?since=N — poll for inbound events.
  * @param {string} apiUrl
- * @param {string} token
  * @param {number} [since=0]
  * @returns {Promise<{ok: boolean, events: Array, next_cursor: number}>}
  */
-export async function clawgatePoll(apiUrl, token, since = 0) {
+export async function clawgatePoll(apiUrl, since = 0) {
   const path = since > 0 ? `/v1/poll?since=${since}` : "/v1/poll";
-  return request(apiUrl, path, { token });
+  return request(apiUrl, path);
 }

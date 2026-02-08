@@ -1,0 +1,16 @@
+{
+  "name": "@openclaw/vibeterm-telemetry",
+  "version": "2026.2.8",
+  "description": "Vibeterm telemetry REST endpoint — receives location data from iOS Background URLSession",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "install": {
+      "localPath": "extensions/vibeterm-telemetry",
+      "defaultChoice": "local"
+    }
+  }
+}
