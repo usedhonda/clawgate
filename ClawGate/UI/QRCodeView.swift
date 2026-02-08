@@ -1,0 +1,224 @@
+import SwiftUI
+import CoreImage.CIFilterBuiltins
+
+/// SwiftUI view for displaying OpenClaw connection QR code
+struct QRCodeView: View {
+    @State private var tailscaleHostname: String?
+    @State private var openClawToken: String?
+    @State private var openClawPort: Int = 18789
+    @State private var connectionURL: String?
+    @State private var errorMessage: String?
+    @State private var copied = false
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("OpenClaw Connection")
+                .font(.headline)
+
+            // QR Code
+            if let url = connectionURL, let qrImage = generateQRCode(from: url) {
+                Image(nsImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 200, height: 200)
+                    .padding()
+                    .background(Color.white)
+                    .cornerRadius(8)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "qrcode")
+                        .font(.system(size: 80))
+                        .foregroundColor(.secondary)
+                    if let error = errorMessage {
+                        Text(error)
+                            .foregroundColor(.orange)
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                    } else {
+                        Text("Loading...")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
+                    }
+                }
+                .frame(width: 200, height: 200)
+                .padding()
+            }
+
+            // Connection info
+            VStack(alignment: .leading, spacing: 6) {
+                ConnectionInfoRow(label: "Host", value: tailscaleHostname ?? "Not available")
+                ConnectionInfoRow(label: "Port", value: String(openClawPort))
+            }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(8)
+
+            // Copy URL button
+            Button(action: copyURL) {
+                HStack {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    Text(copied ? "Copied!" : "Copy URL")
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(connectionURL == nil)
+
+            Text("Scan with OpenClaw app")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            Spacer()
+        }
+        .padding()
+        .frame(width: 360, height: 420)
+        .onAppear {
+            loadConnectionInfo()
+        }
+    }
+
+    // MARK: - Private Methods
+
+    private func loadConnectionInfo() {
+        // Load Tailscale hostname
+        tailscaleHostname = getTailscaleHostname()
+
+        // Load OpenClaw config
+        if let config = getOpenClawConfig() {
+            openClawToken = config.token
+            openClawPort = config.port
+        }
+
+        // Build URL or set error
+        if let host = tailscaleHostname, let token = openClawToken {
+            var components = URLComponents()
+            components.scheme = "openclaw"
+            components.host = "connect"
+            components.queryItems = [
+                URLQueryItem(name: "host", value: host),
+                URLQueryItem(name: "token", value: token),
+                URLQueryItem(name: "port", value: String(openClawPort)),
+            ]
+            connectionURL = components.string
+        } else {
+            var errors: [String] = []
+            if tailscaleHostname == nil {
+                errors.append("Tailscale not available")
+            }
+            if openClawToken == nil {
+                errors.append("OpenClaw config not found")
+            }
+            errorMessage = errors.joined(separator: "\n")
+        }
+    }
+
+    private func copyURL() {
+        guard let url = connectionURL else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url, forType: .string)
+
+        copied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            copied = false
+        }
+    }
+
+    private func generateQRCode(from string: String) -> NSImage? {
+        let context = CIContext()
+        let filter = CIFilter.qrCodeGenerator()
+
+        filter.message = Data(string.utf8)
+        filter.correctionLevel = "M"
+
+        guard let outputImage = filter.outputImage else {
+            return nil
+        }
+
+        let scale: CGFloat = 10
+        let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+
+        guard let cgImage = context.createCGImage(scaledImage, from: scaledImage.extent) else {
+            return nil
+        }
+
+        return NSImage(cgImage: cgImage, size: NSSize(width: 200, height: 200))
+    }
+}
+
+// MARK: - Data Fetching
+
+private func getTailscaleHostname() -> String? {
+    let paths = [
+        "/usr/local/bin/tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    ]
+    guard let cli = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+        return nil
+    }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: cli)
+    process.arguments = ["status", "--json"]
+
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+
+    do {
+        try process.run()
+    } catch {
+        return nil
+    }
+
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+
+    guard process.terminationStatus == 0,
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let backendState = json["BackendState"] as? String,
+          backendState == "Running",
+          let selfInfo = json["Self"] as? [String: Any],
+          let dnsName = selfInfo["DNSName"] as? String else {
+        return nil
+    }
+
+    return dnsName.hasSuffix(".") ? String(dnsName.dropLast()) : dnsName
+}
+
+private func getOpenClawConfig() -> (token: String, port: Int)? {
+    let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
+    guard let data = FileManager.default.contents(atPath: configPath),
+          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let gateway = json["gateway"] as? [String: Any],
+          let auth = gateway["auth"] as? [String: Any],
+          let token = auth["token"] as? String,
+          !token.isEmpty else {
+        return nil
+    }
+
+    let port = gateway["port"] as? Int ?? 18789
+    return (token: token, port: port)
+}
+
+/// Row component for connection info display
+private struct ConnectionInfoRow: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(label + ":")
+                .foregroundColor(.secondary)
+                .frame(width: 50, alignment: .trailing)
+            Text(value)
+                .fontWeight(.medium)
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+        }
+        .font(.system(.body, design: .monospaced))
+    }
+}

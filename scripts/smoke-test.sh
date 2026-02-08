@@ -76,13 +76,13 @@ else
     exit 1
 fi
 
-AUTH="-H X-Bridge-Token:$TOKEN"
+AUTH_HEADER="X-Bridge-Token: $TOKEN"
 
 ###############################################################################
 # S3: Doctor
 ###############################################################################
 log "S3: Doctor"
-DOCTOR=$(api $AUTH "$BASE_URL/v1/doctor")
+DOCTOR=$(api -H "$AUTH_HEADER" "$BASE_URL/v1/doctor")
 DOC_OK=$(echo "$DOCTOR" | json_field "d.get('ok', False)" 2>/dev/null || echo "False")
 if [ "$DOC_OK" = "True" ]; then
     pass "S3 Doctor (ok=true)"
@@ -94,7 +94,7 @@ fi
 # S4: Poll
 ###############################################################################
 log "S4: Poll"
-POLL=$(api $AUTH "$BASE_URL/v1/poll")
+POLL=$(api -H "$AUTH_HEADER" "$BASE_URL/v1/poll")
 POLL_OK=$(echo "$POLL" | json_field "d['ok']" 2>/dev/null || echo "")
 if [ "$POLL_OK" = "True" ]; then
     CURSOR=$(echo "$POLL" | json_field "d['next_cursor']" 2>/dev/null || echo "?")
@@ -107,7 +107,7 @@ fi
 # S5: Send dry-run (invalid adapter -> 400)
 ###############################################################################
 log "S5: Send dry-run"
-SEND_BAD=$(api -X POST $AUTH -H "Content-Type: application/json" \
+SEND_BAD=$(api -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
     -d '{"adapter":"nonexistent","action":"send_message","payload":{"conversation_hint":"test","text":"test","enter_to_send":true}}' \
     "$BASE_URL/v1/send")
 ERR_CODE=$(echo "$SEND_BAD" | json_field "d['error']['code']" 2>/dev/null || echo "")
