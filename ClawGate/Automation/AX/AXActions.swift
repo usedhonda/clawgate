@@ -110,6 +110,24 @@ enum AXActions {
 
     // MARK: - Window discovery
 
+    /// Find the CGWindowID for a PID's main window (layer 0, on-screen).
+    /// Used for single-window capture (CGWindowListCreateImage with .optionIncludingWindow).
+    static func findWindowID(pid: pid_t) -> CGWindowID? {
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+
+        for info in list {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == pid,
+                  let number = info[kCGWindowNumber as String] as? CGWindowID,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == 0 else { continue }
+            return number
+        }
+        return nil
+    }
+
     /// Check if a PID has any windows at the WindowServer level (including off-screen).
     static func hasWindowServerWindows(pid: pid_t) -> Bool {
         guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
