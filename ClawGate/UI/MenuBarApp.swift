@@ -4,6 +4,7 @@ import SwiftUI
 final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
+    private var qrCodeWindow: NSWindow?
     private var pairingMenuItem: NSMenuItem?
     private var pairingTimer: Timer?
 
@@ -30,6 +31,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         let copyTokenItem = NSMenuItem(title: "Copy Token", action: #selector(copyToken), keyEquivalent: "t")
         copyTokenItem.target = self
         menu.addItem(copyTokenItem)
+
+        // Show QR Code item
+        let qrCodeItem = NSMenuItem(title: "Show QR Code...", action: #selector(openQRCodeWindow), keyEquivalent: "r")
+        qrCodeItem.target = self
+        menu.addItem(qrCodeItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -81,6 +87,24 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         let token = runtime.tokenManager.currentToken()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(token, forType: .string)
+    }
+
+    @objc private func openQRCodeWindow() {
+        let view = QRCodeView()
+        let content = NSHostingView(rootView: view)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "OpenClaw Connection"
+        window.center()
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        qrCodeWindow = window
     }
 
     @objc private func openSettings() {
