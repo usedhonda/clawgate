@@ -5,28 +5,56 @@ import NIOHTTP1
 final class BridgeCore {
     let eventBus: EventBus
 
-    private let tokenManager: BridgeTokenManager
-    private let pairingManager: PairingCodeManager
     private let registry: AdapterRegistry
     private let logger: AppLogger
+    private let configStore: ConfigStore
     private let jsonDecoder = JSONDecoder()
     private let jsonEncoder = JSONEncoder()
 
-    init(eventBus: EventBus, tokenManager: BridgeTokenManager, pairingManager: PairingCodeManager, registry: AdapterRegistry, logger: AppLogger) {
+    init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, configStore: ConfigStore) {
         self.eventBus = eventBus
-        self.tokenManager = tokenManager
-        self.pairingManager = pairingManager
         self.registry = registry
         self.logger = logger
+        self.configStore = configStore
         self.jsonEncoder.outputFormatting = [.withoutEscapingSlashes]
     }
 
-    func isAuthorized(headers: HTTPHeaders) -> Bool {
-        tokenManager.validate(headers.first(name: "X-Bridge-Token"))
+    /// CSRF protection: reject POST requests that carry an Origin header (browser-initiated).
+    func checkOrigin(method: HTTPMethod, headers: HTTPHeaders) -> HTTPResult? {
+        guard method == .POST else { return nil }
+        guard let origin = headers.first(name: "Origin"), !origin.isEmpty else { return nil }
+        let payload = ErrorPayload(
+            code: "browser_origin_rejected",
+            message: "Requests from browsers are rejected",
+            retriable: false,
+            failedStep: "origin_check",
+            details: "Origin header detected: \(origin)"
+        )
+        return jsonResponse(
+            status: .forbidden,
+            body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
+        )
     }
 
     func health() -> HTTPResult {
         let body = encode(HealthResponse(ok: true, version: "0.1.0"))
+        return jsonResponse(status: .ok, body: body)
+    }
+
+    func config() -> HTTPResult {
+        let cfg = configStore.load()
+        let result = ConfigResult(
+            version: "0.1.0",
+            general: ConfigGeneralSection(
+                debugLogging: cfg.debugLogging,
+                includeMessageBodyInLogs: cfg.includeMessageBodyInLogs
+            ),
+            line: ConfigLineSection(
+                defaultConversation: cfg.lineDefaultConversation,
+                pollIntervalSeconds: cfg.linePollIntervalSeconds
+            )
+        )
+        let body = encode(APIResponse(ok: true, result: result, error: nil))
         return jsonResponse(status: .ok, body: body)
     }
 
@@ -234,16 +262,7 @@ final class BridgeCore {
             details: axTrusted ? nil : "System Settings > Privacy & Security > Accessibility"
         ))
 
-        // Check 2: Token configured
-        let hasToken = tokenManager.hasValidToken()
-        checks.append(DoctorCheck(
-            name: "token_configured",
-            status: hasToken ? "ok" : "warning",
-            message: hasToken ? "Auth token is configured" : "Auth token is not configured",
-            details: hasToken ? nil : "Auto-generated on first access"
-        ))
-
-        // Check 3: LINE running
+        // Check 2: LINE running
         let lineRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "jp.naver.line.mac").first != nil
         checks.append(DoctorCheck(
             name: "line_running",
@@ -252,7 +271,7 @@ final class BridgeCore {
             details: lineRunning ? nil : "Please launch LINE"
         ))
 
-        // Check 4: LINE window accessible (only if LINE is running and AX is trusted)
+        // Check 3: LINE window accessible (only if LINE is running and AX is trusted)
         if axTrusted && lineRunning {
             let windowCheck = checkLINEWindowAccessible()
             checks.append(windowCheck)
@@ -265,7 +284,7 @@ final class BridgeCore {
             ))
         }
 
-        // Check 5: Port 8765 (we're already listening, so this is informational)
+        // Check 4: Port 8765 (we're already listening, so this is informational)
         checks.append(DoctorCheck(
             name: "server_port",
             status: "ok",
@@ -273,7 +292,7 @@ final class BridgeCore {
             details: "127.0.0.1:8765"
         ))
 
-        // Check 6: Screen Recording permission (for Vision OCR)
+        // Check 5: Screen Recording permission (for Vision OCR)
         let screenOk = CGPreflightScreenCaptureAccess()
         checks.append(DoctorCheck(
             name: "screen_recording_permission",
@@ -349,69 +368,6 @@ final class BridgeCore {
                 status: "ok",
                 message: "LINE window is accessible (sidebar view)",
                 details: "Node count: \(nodes.count), open a chat to see the input field"
-            )
-        }
-    }
-
-    // MARK: - Pairing
-
-    func generatePairCode() -> HTTPResult {
-        let code = pairingManager.generateCode()
-        let result = GenerateCodeResult(code: code, expiresIn: 120)
-        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
-    }
-
-    func pair(body: Data, headers: HTTPHeaders) -> HTTPResult {
-        // Reject browser-origin requests (CSRF protection)
-        if let origin = headers.first(name: "Origin"), !origin.isEmpty {
-            let payload = ErrorPayload(
-                code: "browser_origin_rejected",
-                message: "Requests from browsers are rejected",
-                retriable: false,
-                failedStep: "origin_check",
-                details: "Origin header detected: \(origin)"
-            )
-            return jsonResponse(
-                status: .forbidden,
-                body: encode(APIResponse<PairResult>(ok: false, result: nil, error: payload))
-            )
-        }
-
-        do {
-            let request = try jsonDecoder.decode(PairRequest.self, from: body)
-
-            guard pairingManager.validateAndConsume(request.code) else {
-                let payload = ErrorPayload(
-                    code: "invalid_pairing_code",
-                    message: "Pairing code is invalid or expired",
-                    retriable: true,
-                    failedStep: "validate_code",
-                    details: nil
-                )
-                return jsonResponse(
-                    status: .unauthorized,
-                    body: encode(APIResponse<PairResult>(ok: false, result: nil, error: payload))
-                )
-            }
-
-            // Generate new token for this pairing
-            let token = tokenManager.regenerateToken()
-            logger.log(.info, "Pairing successful for client: \(request.clientName ?? "unknown")")
-
-            let result = PairResult(token: token, expiresAt: nil)
-            return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
-
-        } catch {
-            let payload = ErrorPayload(
-                code: "invalid_json",
-                message: "Could not parse request JSON",
-                retriable: false,
-                failedStep: "decode_request",
-                details: String(describing: error)
-            )
-            return jsonResponse(
-                status: .badRequest,
-                body: encode(APIResponse<PairResult>(ok: false, result: nil, error: payload))
             )
         }
     }

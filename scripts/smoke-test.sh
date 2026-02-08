@@ -2,13 +2,14 @@
 # ClawGate Smoke Test — lightweight E2E check (~5 seconds)
 # Usage: ./scripts/smoke-test.sh [--with-openclaw]
 #
-# Runs 5 core API tests (+ 1 optional OpenClaw check).
+# Runs 4 core API tests (+ 1 optional OpenClaw check).
 # For full test suite, use ./scripts/integration-test.sh
+#
+# No authentication required — ClawGate binds to 127.0.0.1 only.
 
 set -euo pipefail
 
 BASE_URL="http://127.0.0.1:8765"
-TOKEN=""
 PASS=0
 FAIL=0
 TOTAL=0
@@ -55,73 +56,49 @@ else
 fi
 
 ###############################################################################
-# S2: Auto-pair
+# S2: Doctor
 ###############################################################################
-log "S2: Auto-pair"
-CODE_RESP=$(api -X POST "$BASE_URL/v1/pair/generate")
-CODE=$(echo "$CODE_RESP" | json_field "d['result']['code']")
-if [ -z "$CODE" ] || [ "$CODE" = "None" ]; then
-    fail "S2 Pair/generate" "No code returned"
-    exit 1
-fi
-
-PAIR_RESP=$(api -X POST -H "Content-Type: application/json" \
-    -d "{\"code\":\"$CODE\",\"client_name\":\"smoke-test\"}" \
-    "$BASE_URL/v1/pair/request")
-TOKEN=$(echo "$PAIR_RESP" | json_field "d['result']['token']")
-if [ -n "$TOKEN" ] && [ "$TOKEN" != "None" ]; then
-    pass "S2 Auto-pair (token=${TOKEN:0:8}...)"
-else
-    fail "S2 Auto-pair" "No token returned"
-    exit 1
-fi
-
-AUTH_HEADER="X-Bridge-Token: $TOKEN"
-
-###############################################################################
-# S3: Doctor
-###############################################################################
-log "S3: Doctor"
-DOCTOR=$(api -H "$AUTH_HEADER" "$BASE_URL/v1/doctor")
+log "S2: Doctor"
+DOCTOR=$(api "$BASE_URL/v1/doctor")
 DOC_OK=$(echo "$DOCTOR" | json_field "d.get('ok', False)" 2>/dev/null || echo "False")
 if [ "$DOC_OK" = "True" ]; then
-    pass "S3 Doctor (ok=true)"
+    pass "S2 Doctor (ok=true)"
 else
-    fail "S3 Doctor" "ok=$DOC_OK"
+    fail "S2 Doctor" "ok=$DOC_OK"
 fi
 
 ###############################################################################
-# S4: Poll
+# S3: Poll
 ###############################################################################
-log "S4: Poll"
-POLL=$(api -H "$AUTH_HEADER" "$BASE_URL/v1/poll")
+log "S3: Poll"
+POLL=$(api "$BASE_URL/v1/poll")
 POLL_OK=$(echo "$POLL" | json_field "d['ok']" 2>/dev/null || echo "")
 if [ "$POLL_OK" = "True" ]; then
     CURSOR=$(echo "$POLL" | json_field "d['next_cursor']" 2>/dev/null || echo "?")
-    pass "S4 Poll (cursor=$CURSOR)"
+    pass "S3 Poll (cursor=$CURSOR)"
 else
-    fail "S4 Poll" "ok=$POLL_OK"
+    fail "S3 Poll" "ok=$POLL_OK"
 fi
 
 ###############################################################################
-# S5: Send dry-run (invalid adapter -> 400)
+# S4: Send dry-run (invalid adapter -> 400)
 ###############################################################################
-log "S5: Send dry-run"
-SEND_BAD=$(api -X POST -H "$AUTH_HEADER" -H "Content-Type: application/json" \
+log "S4: Send dry-run"
+SEND_BAD=$(api -X POST -H "Content-Type: application/json" \
     -d '{"adapter":"nonexistent","action":"send_message","payload":{"conversation_hint":"test","text":"test","enter_to_send":true}}' \
     "$BASE_URL/v1/send")
 ERR_CODE=$(echo "$SEND_BAD" | json_field "d['error']['code']" 2>/dev/null || echo "")
 if [ "$ERR_CODE" = "adapter_not_found" ]; then
-    pass "S5 Send dry-run (adapter_not_found)"
+    pass "S4 Send dry-run (adapter_not_found)"
 else
-    fail "S5 Send dry-run" "Expected adapter_not_found, got: $ERR_CODE"
+    fail "S4 Send dry-run" "Expected adapter_not_found, got: $ERR_CODE"
 fi
 
 ###############################################################################
-# S6: OpenClaw plugin (optional)
+# S5: OpenClaw plugin (optional)
 ###############################################################################
 if [ "$WITH_OPENCLAW" = "true" ]; then
-    log "S6: OpenClaw plugin"
+    log "S5: OpenClaw plugin"
 
     # Find gateway log
     OC_LOG="$HOME/.openclaw/logs/gateway.log"
@@ -131,22 +108,19 @@ if [ "$WITH_OPENCLAW" = "true" ]; then
     fi
 
     if [ -f "$OC_LOG" ]; then
-        NOW=$(date +%s)
-        THRESHOLD=$((NOW - 120))
-
-        # Check for recent successful pair
-        PAIRED=$(tail -100 "$OC_LOG" | grep -c "paired successfully" 2>/dev/null || echo "0")
+        # Check for recent successful doctor + cursor
+        DOCTOR_OK=$(tail -100 "$OC_LOG" | grep -c "doctor OK" 2>/dev/null || echo "0")
         CURSOR=$(tail -100 "$OC_LOG" | grep -c "initial cursor" 2>/dev/null || echo "0")
 
-        if [ "$PAIRED" -gt 0 ] && [ "$CURSOR" -gt 0 ]; then
-            pass "S6 OpenClaw plugin (paired + polling)"
-        elif [ "$PAIRED" -gt 0 ]; then
-            pass "S6 OpenClaw plugin (paired, cursor check inconclusive)"
+        if [ "$DOCTOR_OK" -gt 0 ] && [ "$CURSOR" -gt 0 ]; then
+            pass "S5 OpenClaw plugin (doctor OK + polling)"
+        elif [ "$DOCTOR_OK" -gt 0 ]; then
+            pass "S5 OpenClaw plugin (doctor OK, cursor check inconclusive)"
         else
-            fail "S6 OpenClaw plugin" "No recent 'paired successfully' in log"
+            fail "S5 OpenClaw plugin" "No recent 'doctor OK' in log"
         fi
     else
-        fail "S6 OpenClaw plugin" "Gateway log not found at $OC_LOG"
+        fail "S5 OpenClaw plugin" "Gateway log not found at $OC_LOG"
     fi
 fi
 

@@ -2,22 +2,22 @@
  * Gateway adapter — polls ClawGate for inbound LINE messages and dispatches to OpenClaw AI.
  *
  * Flow:
- *   1. Obtain token (from config or auto-pair)
- *   2. Verify ClawGate health via /v1/doctor
+ *   1. Wait for ClawGate health
+ *   2. Verify system status via /v1/doctor
  *   3. Poll /v1/poll?since=cursor in a loop
  *   4. For each inbound_message event:
  *      - Build MsgContext
  *      - recordInboundSession()
- *      - createReplyDispatcherWithTyping() → deliver callback sends via ClawGate
- *      - dispatchInboundMessage() → triggers AI reply
+ *      - createReplyDispatcherWithTyping() -> deliver callback sends via ClawGate
+ *      - dispatchInboundMessage() -> triggers AI reply
  *   5. Repeat until abortSignal fires
  */
 
 import { resolveAccount } from "./config.js";
 import {
   clawgateHealth,
-  clawgatePair,
   clawgateDoctor,
+  clawgateConfig,
   clawgateSend,
   clawgatePoll,
 } from "./client.js";
@@ -123,48 +123,6 @@ function sleep(ms, signal) {
   });
 }
 
-// ── Re-pair backoff & circuit breaker ────────────────────────
-const REPARE_BACKOFF_INITIAL_MS = 3_000;
-const REPARE_BACKOFF_MAX_MS = 60_000;
-const REPARE_CIRCUIT_WINDOW_MS = 5 * 60_000; // 5 minutes
-const REPARE_CIRCUIT_THRESHOLD = 5;           // max re-pairs in window
-const REPARE_CIRCUIT_COOLDOWN_MS = 60_000;    // pause when tripped
-
-/** @type {{ time: number }[]} */
-const repairHistory = [];
-let repairBackoffMs = REPARE_BACKOFF_INITIAL_MS;
-let repairConsecutiveFailures = 0;
-
-/**
- * Check if re-pair circuit breaker is tripped.
- * Returns cooldown ms to wait, or 0 if OK to proceed.
- */
-function repairCircuitCheck() {
-  const now = Date.now();
-  // Prune old entries outside the window
-  while (repairHistory.length > 0 && repairHistory[0].time < now - REPARE_CIRCUIT_WINDOW_MS) {
-    repairHistory.shift();
-  }
-  if (repairHistory.length >= REPARE_CIRCUIT_THRESHOLD) {
-    return REPARE_CIRCUIT_COOLDOWN_MS;
-  }
-  return 0;
-}
-
-function repairRecordAttempt() {
-  repairHistory.push({ time: Date.now() });
-}
-
-function repairResetBackoff() {
-  repairBackoffMs = REPARE_BACKOFF_INITIAL_MS;
-  repairConsecutiveFailures = 0;
-}
-
-function repairBumpBackoff() {
-  repairConsecutiveFailures++;
-  repairBackoffMs = Math.min(repairBackoffMs * 2, REPARE_BACKOFF_MAX_MS);
-}
-
 /**
  * Wait for ClawGate API to become reachable.
  * @param {string} apiUrl
@@ -192,23 +150,24 @@ async function waitForReady(apiUrl, signal, log) {
 }
 
 /**
- * Obtain a valid token — use config value or auto-pair.
- * @param {object} account
- * @param {object} [log]
- * @returns {Promise<string>}
+ * Build a location prefix string from vibeterm telemetry data.
+ * Returns empty string if no recent location is available.
  */
-async function ensureToken(account, log) {
-  if (account.token) return account.token;
+function buildLocationPrefix() {
+  const loc = globalThis.__vibetermLatestLocation;
+  if (!loc || typeof loc.lat !== "number" || typeof loc.lon !== "number") return "";
 
-  log?.info?.(`clawgate: [${account.accountId}] no token configured, auto-pairing...`);
-  const { token } = await clawgatePair(account.apiUrl);
-  log?.info?.(`clawgate: [${account.accountId}] paired successfully`);
+  const ageMs = Date.now() - (loc.receivedAt ? Date.parse(loc.receivedAt) : Date.now());
+  const ageMins = Math.round(ageMs / 60_000);
+  if (ageMins > 1440) return ""; // Discard data older than 24 hours
 
-  // Note: token is NOT saved to config file to avoid overwriting other config sections.
-  // The token lives only in memory for this gateway session.
-  // On ClawGate restart, the token will be re-paired automatically.
+  const parts = [`${loc.lat.toFixed(4)}, ${loc.lon.toFixed(4)}`];
+  if (typeof loc.accuracy === "number") parts.push(`accuracy ${Math.round(loc.accuracy)}m`);
+  if (ageMins <= 1) parts.push("just now");
+  else if (ageMins < 60) parts.push(`${ageMins} min ago`);
+  else parts.push(`${Math.round(ageMins / 60)}h ago`);
 
-  return token;
+  return `[User location: ${parts.join(", ")}]`;
 }
 
 /**
@@ -228,7 +187,7 @@ function buildMsgContext(event, accountId, defaultConversation) {
   const source = payload.source || "poll";
   const timestamp = event.observed_at ? Date.parse(event.observed_at) : Date.now();
 
-  return {
+  const ctx = {
     Body: text,
     RawBody: text,
     CommandBody: text,
@@ -249,6 +208,13 @@ function buildMsgContext(event, accountId, defaultConversation) {
     OriginatingTo: conversation,
     _clawgateSource: source,
   };
+
+  const locationPrefix = buildLocationPrefix();
+  if (locationPrefix) {
+    ctx.BodyForAgent = `${locationPrefix}\n\n${text}`;
+  }
+
+  return ctx;
 }
 
 /**
@@ -257,12 +223,11 @@ function buildMsgContext(event, accountId, defaultConversation) {
  * @param {object} params.event
  * @param {string} params.accountId
  * @param {string} params.apiUrl
- * @param {string} params.token
  * @param {object} params.cfg
  * @param {string} [params.defaultConversation]
  * @param {object} [params.log]
  */
-async function handleInboundMessage({ event, accountId, apiUrl, token, cfg, defaultConversation, log }) {
+async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
   const runtime = getRuntime();
   const ctx = buildMsgContext(event, accountId, defaultConversation);
   const conversation = ctx.ConversationLabel;
@@ -291,13 +256,12 @@ async function handleInboundMessage({ event, accountId, apiUrl, token, cfg, defa
   }
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
-  // This creates a dispatcher internally and handles the full dispatch flow.
   const deliver = async (payload) => {
     const text = payload.text || payload.body || "";
     if (!text.trim()) return;
     log?.info?.(`clawgate: [${accountId}] sending reply to "${conversation}": "${text.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, token, conversation, text);
+      await clawgateSend(apiUrl, conversation, text);
       recordPluginSend(text); // Track for echo suppression
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send reply failed: ${err}`);
@@ -335,8 +299,8 @@ export async function startAccount(ctx) {
   const { cfg, account, abortSignal, log } = ctx;
   const accountId = account.accountId;
   const apiUrl = account.apiUrl;
-  const pollIntervalMs = account.pollIntervalMs || 3000;
-  const defaultConversation = account.defaultConversation || "";
+  let pollIntervalMs = account.pollIntervalMs || 3000;
+  let defaultConversation = account.defaultConversation || "";
 
   log?.info?.(`clawgate: [${accountId}] starting gateway (apiUrl=${apiUrl}, poll=${pollIntervalMs}ms, defaultConv="${defaultConversation}")`);
 
@@ -344,18 +308,9 @@ export async function startAccount(ctx) {
   await waitForReady(apiUrl, abortSignal, log);
   if (abortSignal?.aborted) return;
 
-  // Ensure we have a token
-  let token;
-  try {
-    token = await ensureToken(account, log);
-  } catch (err) {
-    log?.error?.(`clawgate: [${accountId}] failed to obtain token: ${err}`);
-    throw err;
-  }
-
   // Verify system health
   try {
-    const doctor = await clawgateDoctor(apiUrl, token);
+    const doctor = await clawgateDoctor(apiUrl);
     if (doctor.ok) {
       log?.info?.(`clawgate: [${accountId}] doctor OK (${doctor.summary?.passed}/${doctor.summary?.total} checks passed)`);
     } else {
@@ -365,10 +320,27 @@ export async function startAccount(ctx) {
     log?.warn?.(`clawgate: [${accountId}] doctor check failed: ${err}`);
   }
 
+  // Fetch ClawGate config — fill in any values not set in openclaw.json
+  try {
+    const remoteConfig = await clawgateConfig(apiUrl);
+    if (remoteConfig?.line) {
+      if (!defaultConversation && remoteConfig.line.defaultConversation) {
+        defaultConversation = remoteConfig.line.defaultConversation;
+        log?.info?.(`clawgate: [${accountId}] defaultConversation from ClawGate config: "${defaultConversation}"`);
+      }
+      if (!account.pollIntervalMs && remoteConfig.line.pollIntervalSeconds) {
+        pollIntervalMs = remoteConfig.line.pollIntervalSeconds * 1000;
+        log?.info?.(`clawgate: [${accountId}] pollIntervalMs from ClawGate config: ${pollIntervalMs}`);
+      }
+    }
+  } catch (err) {
+    log?.debug?.(`clawgate: [${accountId}] config fetch failed (using defaults): ${err}`);
+  }
+
   // Get initial cursor
   let cursor = 0;
   try {
-    const initial = await clawgatePoll(apiUrl, token, 0);
+    const initial = await clawgatePoll(apiUrl, 0);
     if (initial.ok) {
       cursor = initial.next_cursor ?? 0;
       log?.info?.(`clawgate: [${accountId}] initial cursor=${cursor}, skipping ${initial.events?.length ?? 0} existing events`);
@@ -380,7 +352,7 @@ export async function startAccount(ctx) {
   // Polling loop
   while (!abortSignal?.aborted) {
     try {
-      const poll = await clawgatePoll(apiUrl, token, cursor);
+      const poll = await clawgatePoll(apiUrl, cursor);
 
       if (poll.ok && poll.events?.length > 0) {
         for (const event of poll.events) {
@@ -391,25 +363,25 @@ export async function startAccount(ctx) {
 
           const eventText = event.payload?.text || "";
 
-          // ② Skip empty/short texts (OCR noise, read-receipts, scroll artifacts)
+          // Skip empty/short texts (OCR noise, read-receipts, scroll artifacts)
           if (eventText.trim().length < MIN_TEXT_LENGTH) {
             log?.debug?.(`clawgate: [${accountId}] skipped short text (${eventText.length} chars)`);
             continue;
           }
 
-          // ③ Plugin-level echo suppression (ClawGate's 8s window is too short for AI replies)
+          // Plugin-level echo suppression (ClawGate's 8s window is too short for AI replies)
           if (isPluginEcho(eventText)) {
             log?.debug?.(`clawgate: [${accountId}] suppressed echo: "${eventText.slice(0, 60)}"`);
             continue;
           }
 
-          // ④ Cross-source deduplication (AXRow / PixelDiff / NotificationBanner)
+          // Cross-source deduplication (AXRow / PixelDiff / NotificationBanner)
           if (isDuplicateInbound(eventText)) {
             log?.debug?.(`clawgate: [${accountId}] suppressed duplicate: "${eventText.slice(0, 60)}"`);
             continue;
           }
 
-          // ⑤ Record before dispatch so subsequent duplicates are caught
+          // Record before dispatch so subsequent duplicates are caught
           recordInbound(eventText);
 
           try {
@@ -417,7 +389,6 @@ export async function startAccount(ctx) {
               event,
               accountId,
               apiUrl,
-              token,
               cfg,
               defaultConversation,
               log,
@@ -427,31 +398,6 @@ export async function startAccount(ctx) {
           }
         }
         cursor = poll.next_cursor ?? cursor;
-      } else if (!poll.ok && poll.error?.code === "unauthorized") {
-        // Token expired — re-pair with backoff & circuit breaker
-        const cooldown = repairCircuitCheck();
-        if (cooldown > 0) {
-          log?.warn?.(`clawgate: [${accountId}] re-pair circuit breaker tripped (${repairHistory.length} attempts in 5min), cooling down ${cooldown / 1000}s`);
-          await sleep(cooldown, abortSignal);
-          if (abortSignal?.aborted) break;
-          continue;
-        }
-
-        log?.warn?.(`clawgate: [${accountId}] token expired, re-pairing (backoff=${repairBackoffMs}ms, attempt=${repairConsecutiveFailures + 1})...`);
-        repairRecordAttempt();
-
-        try {
-          const { token: newToken } = await clawgatePair(apiUrl);
-          token = newToken;
-          account.token = newToken;
-          repairResetBackoff();
-          log?.info?.(`clawgate: [${accountId}] re-paired successfully`);
-        } catch (pairErr) {
-          repairBumpBackoff();
-          log?.error?.(`clawgate: [${accountId}] re-pair failed (next backoff=${repairBackoffMs}ms): ${pairErr}`);
-          await sleep(repairBackoffMs, abortSignal);
-          if (abortSignal?.aborted) break;
-        }
       }
     } catch (err) {
       if (abortSignal?.aborted) break;

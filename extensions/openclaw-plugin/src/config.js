@@ -3,12 +3,14 @@
  *
  * Expected config shape in ~/.openclaw/openclaw.json:
  *   channels.clawgate.<accountId> = {
- *     enabled: true,
- *     apiUrl: "http://127.0.0.1:8765",
- *     token: "",
- *     pollIntervalMs: 3000,
- *     defaultConversation: "Yuzuru Honda"
+ *     apiUrl: "http://127.0.0.1:8765"      // required
+ *     // All below are optional — ClawGate Settings UI manages these via GET /v1/config
+ *     // enabled: true,
+ *     // pollIntervalMs: 3000,
+ *     // defaultConversation: "..."
  *   }
+ *
+ * No token needed — ClawGate binds to 127.0.0.1 only (no auth required).
  */
 
 const DEFAULTS = {
@@ -38,7 +40,6 @@ export function resolveAccount(cfg, accountId) {
     accountId,
     enabled: section.enabled !== false,
     apiUrl: section.apiUrl || DEFAULTS.apiUrl,
-    token: section.token || "",
     pollIntervalMs: section.pollIntervalMs || DEFAULTS.pollIntervalMs,
     defaultConversation: section.defaultConversation || DEFAULTS.defaultConversation,
     config: section,

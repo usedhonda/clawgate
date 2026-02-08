@@ -160,34 +160,21 @@ struct DoctorSummary: Codable {
     let errors: Int
 }
 
-// MARK: - Pairing
+// MARK: - Config Response
 
-struct PairRequest: Codable {
-    let code: String
-    let clientName: String?
-
-    enum CodingKeys: String, CodingKey {
-        case code
-        case clientName = "client_name"
-    }
+struct ConfigGeneralSection: Codable {
+    let debugLogging: Bool
+    let includeMessageBodyInLogs: Bool
 }
 
-struct PairResult: Codable {
-    let token: String
-    let expiresAt: String?
-
-    enum CodingKeys: String, CodingKey {
-        case token
-        case expiresAt = "expires_at"
-    }
+struct ConfigLineSection: Codable {
+    let defaultConversation: String
+    let pollIntervalSeconds: Int
 }
 
-struct GenerateCodeResult: Codable {
-    let code: String
-    let expiresIn: Int
-
-    enum CodingKeys: String, CodingKey {
-        case code
-        case expiresIn = "expires_in"
-    }
+struct ConfigResult: Codable {
+    let version: String
+    let general: ConfigGeneralSection
+    let line: ConfigLineSection
 }
+

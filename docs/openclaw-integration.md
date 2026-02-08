@@ -152,6 +152,18 @@ ClawGateのDoctor機能を実行して、問題を診断して
 
 ---
 
+## 位置情報テレメトリー
+
+Vibeterm (iOS) がバックグラウンドで位置情報を送信し、日記ファイルに記録します。
+
+- **エンドポイント**: `POST /api/telemetry`（OpenClaw gateway経由）
+- **日記ファイル**: `~/.openclaw/workspace/memory/YYYY-MM-DD.md`
+- **エントリ形式**: `📍 HH:MM - lat, lon (accuracy Xm)`
+
+AIはセッション開始時にこのファイルを読み、ユーザーの現在地を把握します。
+
+---
+
 ## 関連ドキュメント
 
 - [アーキテクチャ](./architecture.md)

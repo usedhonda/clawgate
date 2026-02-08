@@ -18,9 +18,14 @@ export const outbound = {
    * @param {object} params.cfg
    * @returns {Promise<{channel: string, messageId: string, chatId: string, timestamp: number}>}
    */
-  sendText: async ({ to, text, accountId, cfg }) => {
+  sendMedia: async ({ to, text, mediaUrl, accountId, cfg }) => {
+    // LINE via ClawGate does not support media — send text fallback
     const account = resolveAccount(cfg, accountId);
-    const result = await clawgateSend(account.apiUrl, account.token, to, text);
+    const conversationHint = (to === "default" || to.includes(":"))
+      ? (account.defaultConversation || to)
+      : to;
+    const caption = text || (mediaUrl ? `[media: ${mediaUrl}]` : "[media]");
+    const result = await clawgateSend(account.apiUrl, conversationHint, caption);
 
     if (!result.ok) {
       throw new Error(`clawgate send failed: ${result.error?.message ?? JSON.stringify(result)}`);
@@ -29,7 +34,27 @@ export const outbound = {
     return {
       channel: "clawgate",
       messageId: result.result?.message_id ?? `cg-${Date.now()}`,
-      chatId: to,
+      chatId: conversationHint,
+      timestamp: result.result?.timestamp ? Date.parse(result.result.timestamp) : Date.now(),
+    };
+  },
+
+  sendText: async ({ to, text, accountId, cfg }) => {
+    const account = resolveAccount(cfg, accountId);
+    // Account-format targets (e.g. "default", "clawgate:default") -> use defaultConversation
+    const conversationHint = (to === "default" || to.includes(":"))
+      ? (account.defaultConversation || to)
+      : to;
+    const result = await clawgateSend(account.apiUrl, conversationHint, text);
+
+    if (!result.ok) {
+      throw new Error(`clawgate send failed: ${result.error?.message ?? JSON.stringify(result)}`);
+    }
+
+    return {
+      channel: "clawgate",
+      messageId: result.result?.message_id ?? `cg-${Date.now()}`,
+      chatId: conversationHint,
       timestamp: result.result?.timestamp ? Date.parse(result.result.timestamp) : Date.now(),
     };
   },

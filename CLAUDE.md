@@ -25,15 +25,14 @@ After context refresh, read `docs/testing.md` to restore parameters. Do NOT ask 
 
 | Operation | AI Command | NEVER say this |
 |-----------|-----------|----------------|
-| See screen state | `screencapture -x -D1 /tmp/clawgate-screen.png` → Read the image | "Can you check the screen?" |
-| Inspect AX tree | `curl -s -H "X-Bridge-Token: $TOKEN" localhost:8765/v1/axdump \| jq .` | "Can you look at the AX tree?" |
-| Check AX permission | `curl -s -H "X-Bridge-Token: $TOKEN" localhost:8765/v1/doctor` — poll until ok | "Do you have AX permission?" |
+| See screen state | `screencapture -x -D1 /tmp/clawgate-screen.png` -> Read the image | "Can you check the screen?" |
+| Inspect AX tree | `curl -s localhost:8765/v1/axdump \| jq .` | "Can you look at the AX tree?" |
+| Check AX permission | `curl -s localhost:8765/v1/doctor` -- poll until ok | "Do you have AX permission?" |
 | Restart app | `pkill -f ClawGate.app; sleep 1; open ClawGate.app` | "Please restart the app" |
 | Build + deploy | `./scripts/dev-deploy.sh` (or `--skip-plugin` / `--skip-test`) | Stopping after build to ask user |
-| Test via API | `curl -s -X POST -H "X-Bridge-Token: $TOKEN" -d '...' localhost:8765/v1/send` | "Can you test this?" |
-| Verify result | Screenshot + axdump + messages API — AI reads all and judges | "Did it work?" |
+| Test via API | `curl -s -X POST -H 'Content-Type: application/json' -d '...' localhost:8765/v1/send` | "Can you test this?" |
+| Verify result | Screenshot + axdump + messages API -- AI reads all and judges | "Did it work?" |
 | Run integration tests | `./scripts/integration-test.sh` | "Please run the tests" |
-| Get pairing token | `curl -s -X POST localhost:8765/v1/pair/generate` then `curl -s -X POST -d '{"code":"..."}' localhost:8765/v1/pair/request` | "Please pair the client" |
 
 ### Build-Deploy Pipeline (mandatory after code changes)
 

@@ -5,6 +5,7 @@
 import { listAccountIds, resolveAccount, defaultAccountId } from "./config.js";
 import { outbound } from "./outbound.js";
 import { startAccount } from "./gateway.js";
+import { directory } from "./directory.js";
 
 export const clawgatePlugin = {
   id: "clawgate",
@@ -63,7 +64,15 @@ export const clawgatePlugin = {
     }),
   },
 
+  messaging: {
+    targetResolver: {
+      looksLikeId: (raw) => raw === "default" || raw.startsWith("clawgate:"),
+    },
+  },
+
   outbound,
+
+  directory,
 
   gateway: {
     startAccount: async (ctx) => {

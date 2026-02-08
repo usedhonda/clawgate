@@ -50,21 +50,17 @@ ClawGate/
     Logging/
       AppLogger.swift                 # Leveled logger (debug/info/warning/error)
       StepLog.swift                   # Per-step operation log for send flows
-    Security/
-      BridgeTokenManager.swift        # In-memory token cache (Keychain for persistence only)
-      KeychainStore.swift             # SecItemAdd/Update/CopyMatching wrapper
-      PairingCodeManager.swift        # One-time 6-digit code with 120s TTL
   UI/
-    MenuBarApp.swift                  # NSMenu, pairing code display, status
+    MenuBarApp.swift                  # NSMenu, QR code, status
     SettingsView.swift                # SwiftUI settings panel
 Tests/
   UnitTests/
-    BridgeCoreTests.swift             # 25 tests: routing, auth, error codes, mock adapters
+    BridgeCoreTests.swift             # Unit tests: routing, error codes, Origin check, mock adapters
     SelectorResolverTests.swift       # 13 tests: multi-layer selector scoring
     ChromeFilterTests.swift           # 9 tests: timestamp/date chrome exclusion
     EventBusTests.swift               # 4 tests: poll, overflow, subscribe/unsubscribe
 scripts/
-  integration-test.sh                # 24 automated API tests with auto-pairing
+  integration-test.sh                # Automated API tests (no auth required)
   release.sh                          # Universal binary build, sign, DMG, notarize
 ```
 
@@ -74,14 +70,14 @@ scripts/
 
 ```
 ┌─────────────────────────────┐
-│  NIO EventLoop (1 thread)   │  handles: health, pair/generate, SSE write, response write
+│  NIO EventLoop (1 thread)   │  handles: health, poll, SSE write, response write
 │  - NEVER do blocking work   │
 └──────────┬──────────────────┘
            │ offload via BlockingWork.queue.async { }
            ▼
 ┌─────────────────────────────┐
 │  BlockingWork.queue          │  serial DispatchQueue (.userInitiated)
-│  (com.clawgate.blocking)    │  handles: auth check, AX queries, Keychain write, send
+│  (com.clawgate.blocking)    │  handles: AX queries, send, doctor
 └─────────────────────────────┘
            │ context.eventLoop.execute { writeResponse }
            ▼
@@ -89,11 +85,9 @@ scripts/
 ```
 
 ### Rules
-- **health** and **pair/generate**: handled directly on event loop (no blocking calls)
-- **All auth-protected endpoints**: offloaded to `BlockingWork.queue`
-- **SSE**: auth check on BlockingWork, then SSE streaming on event loop
+- **health**, **poll**, **SSE**: handled directly on event loop (no blocking calls)
+- **AX-dependent endpoints** (send, context, messages, conversations, axdump, doctor): offloaded to `BlockingWork.queue`
 - **LINEInboundWatcher**: runs its own timer on BlockingWork.queue (serialized with HTTP handlers)
-- **Token validation**: uses in-memory cache only (never calls Keychain)
 
 ### Why serial queue?
 AX queries on LINE (Qt app) are not thread-safe. `BlockingWork.queue` serializes all
@@ -102,38 +96,15 @@ AXUIElement calls.
 
 ---
 
-## 4. Authentication
+## 4. Security
 
-### Token Lifecycle
-
-```
-App start
-  └─ cachedToken = nil (no Keychain read at init)
-
-POST /v1/pair/generate
-  └─ PairingCodeManager.generateCode() -> 6-digit code (120s TTL, one-time use)
-
-POST /v1/pair/request { code, client_name }
-  └─ validate code -> BridgeTokenManager.regenerateToken()
-     └─ generates UUID (hex, 32 chars), stores in cachedToken + Keychain
-     └─ returns token to client
-
-Subsequent requests: X-Bridge-Token header
-  └─ BridgeTokenManager.validate() -> compares against cachedToken (no Keychain read)
-
-App restart
-  └─ cachedToken = nil -> client must re-pair via pair/generate + pair/request
-```
+ClawGate binds exclusively to `127.0.0.1:8765` — no external access is possible.
+No token authentication is required. All endpoints are open to localhost callers.
 
 ### CSRF Protection
-- `POST /v1/pair/request` rejects requests with non-empty `Origin` header
-  (error code: `browser_origin_rejected`, HTTP 403)
-
-### Keychain Details
-- Service: `com.clawgate.local`
-- Account: `bridge.token`
-- Keychain is write-only at runtime (never read after init)
-- Ad-hoc signing causes `SecItemCopyMatching` to trigger a blocking macOS dialog
+All `POST` requests are checked for an `Origin` header. If present and non-empty,
+the request is rejected with HTTP 403 and error code `browser_origin_rejected`.
+This prevents browser-initiated cross-origin requests from reaching the API.
 
 ---
 
@@ -168,7 +139,6 @@ Error:
 
 | Code | HTTP | Retriable | Trigger |
 |------|------|-----------|---------|
-| `unauthorized` | 401 | false | Missing or invalid X-Bridge-Token |
 | `method_not_allowed` | 405 | false | Wrong HTTP method for known path |
 | `not_found` | 404 | false | Unknown path |
 | `invalid_json` | 400 | false | Request body not valid JSON |
@@ -180,8 +150,7 @@ Error:
 | `line_not_running` | 503 | true | LINE app not running |
 | `line_window_not_found` | 503 | true | LINE window not accessible |
 | `message_input_not_found` | 503 | true | Chat input field not found |
-| `invalid_pairing_code` | 401 | true | Wrong/expired/used pairing code |
-| `browser_origin_rejected` | 403 | false | Origin header present on pair/request |
+| `browser_origin_rejected` | 403 | false | Origin header present on POST request |
 | `axdump_failed` | 503 | true | AX tree dump failed |
 | `not_supported` | 400 | false | Adapter doesn't implement method |
 
@@ -199,56 +168,8 @@ Response:
 
 ---
 
-#### `POST /v1/pair/generate`
-No auth. Returns immediately on event loop.
-
-Request body: none (or empty)
-
-Response:
-```json
-{
-  "ok": true,
-  "result": {
-    "code": "531540",
-    "expires_in": 120
-  }
-}
-```
-
-Generates a 6-digit one-time code valid for 120 seconds.
-Invalidates any previously generated code.
-
----
-
-#### `POST /v1/pair/request`
-No auth. Offloaded to BlockingWork.queue (Keychain write).
-
-Request:
-```json
-{
-  "code": "531540",
-  "client_name": "my-tool"
-}
-```
-
-Response:
-```json
-{
-  "ok": true,
-  "result": {
-    "token": "03C99294A82A47D2887FC12A6347960D",
-    "expires_at": null
-  }
-}
-```
-
-`client_name` is optional (logged only). Token does not expire (valid until next pairing
-or app restart).
-
----
-
 #### `GET /v1/doctor`
-Auth required. Offloaded to BlockingWork.queue.
+No auth. Offloaded to BlockingWork.queue.
 
 Response:
 ```json
@@ -257,10 +178,10 @@ Response:
   "version": "0.1.0",
   "checks": [
     { "name": "accessibility_permission", "status": "ok", "message": "...", "details": null },
-    { "name": "token_configured",        "status": "ok", "message": "...", "details": null },
     { "name": "line_running",            "status": "ok", "message": "...", "details": null },
     { "name": "line_window_accessible",  "status": "ok", "message": "...", "details": "..." },
-    { "name": "server_port",             "status": "ok", "message": "...", "details": "127.0.0.1:8765" }
+    { "name": "server_port",             "status": "ok", "message": "...", "details": "127.0.0.1:8765" },
+    { "name": "screen_recording_permission", "status": "ok", "message": "...", "details": null }
   ],
   "summary": { "total": 5, "passed": 5, "warnings": 0, "errors": 0 },
   "timestamp": "2026-02-06T08:39:28Z"
@@ -273,7 +194,7 @@ HTTP status: 200 if no errors, 503 if any error.
 ---
 
 #### `GET /v1/poll[?since=N]`
-Auth required. Offloaded to BlockingWork.queue.
+No auth. Offloaded to BlockingWork.queue.
 
 Response:
 ```json
@@ -298,7 +219,7 @@ With `since=N`: returns events with `id > N`.
 ---
 
 #### `GET /v1/events`
-Auth required. SSE (Server-Sent Events) stream.
+No auth. SSE (Server-Sent Events) stream.
 
 Headers: `Last-Event-ID` (optional, for replay).
 
@@ -318,7 +239,7 @@ Then streams new events in real-time.
 ---
 
 #### `GET /v1/context[?adapter=line]`
-Auth required. Offloaded to BlockingWork.queue. Requires AX permission.
+No auth. Offloaded to BlockingWork.queue. Requires AX permission.
 
 Response:
 ```json
@@ -337,7 +258,7 @@ Response:
 ---
 
 #### `GET /v1/messages[?adapter=line&limit=50]`
-Auth required. Offloaded to BlockingWork.queue. Requires AX permission.
+No auth. Offloaded to BlockingWork.queue. Requires AX permission.
 
 Query params: `adapter` (default: "line"), `limit` (default: 50, max: 200).
 
@@ -364,7 +285,7 @@ Response:
 ---
 
 #### `GET /v1/conversations[?adapter=line&limit=50]`
-Auth required. Offloaded to BlockingWork.queue. Requires AX permission.
+No auth. Offloaded to BlockingWork.queue. Requires AX permission.
 
 Response:
 ```json
@@ -385,7 +306,7 @@ Response:
 ---
 
 #### `GET /v1/axdump[?adapter=line]`
-Auth required. Offloaded to BlockingWork.queue. Requires AX permission.
+No auth. Offloaded to BlockingWork.queue. Requires AX permission.
 
 Returns the raw AX tree of the target app as nested JSON. Used for debugging
 selector issues. Response structure: recursive `AXDumpNode` objects.
@@ -393,7 +314,7 @@ selector issues. Response structure: recursive `AXDumpNode` objects.
 ---
 
 #### `POST /v1/send`
-Auth required. Offloaded to BlockingWork.queue. Requires AX permission.
+No auth. Offloaded to BlockingWork.queue. Requires AX permission.
 
 Request:
 ```json
@@ -479,17 +400,7 @@ Current adapters: `line` (LINEAdapter).
 
 ---
 
-## 8. Pairing Code System
-
-- 6-digit numeric code (`000000`-`999999`)
-- TTL: 120 seconds from generation
-- One-time use: consumed on successful `pair/request`
-- Only one active code at a time (generating a new code invalidates the previous)
-- Thread-safe via `NSLock`
-
----
-
-## 9. Selector System
+## 8. Selector System
 
 UI elements are located using a multi-layer scoring system:
 
@@ -504,7 +415,7 @@ UI elements are located using a multi-layer scoring system:
 
 ---
 
-## 10. Build & Deploy
+## 9. Build & Deploy
 
 ### Debug build
 ```bash
@@ -530,8 +441,7 @@ swift test
 
 ### Integration tests
 ```bash
-./scripts/integration-test.sh            # auto-pairs, 24 tests
-./scripts/integration-test.sh --skip-setup  # uses TOKEN env var
+./scripts/integration-test.sh            # no auth required
 ```
 
 ### Release pipeline (`scripts/release.sh`)
@@ -546,37 +456,58 @@ swift test
 
 ---
 
-## 11. macOS Permissions & Constraints
+## 10. macOS Permissions & Constraints
 
 | Permission | Required For | How to Grant |
 |-----------|-------------|--------------|
 | Accessibility | All AX endpoints (context, messages, conversations, send, axdump, doctor window check) | System Settings > Privacy & Security > Accessibility > ClawGate ON |
-| Keychain | Token persistence (write-only, non-blocking) | Automatic on ad-hoc sign (may prompt once) |
+| Screen Recording | Vision OCR for inbound message text extraction | System Settings > Privacy > Screen Recording > ClawGate ON |
 
 ### Constraints
 - **Accessibility**: Cannot be granted programmatically (macOS security policy)
-- **Ad-hoc signing**: `SecItemCopyMatching` triggers a blocking Keychain dialog.
-  Mitigated by in-memory token cache (no Keychain reads at runtime).
 - **LINE (Qt)**: AX tree is only available when LINE window is in foreground.
   Background windows return empty/partial trees.
 - **Screen lock**: AX automation requires an active user session with display awake.
-- **Token non-persistence**: Token is lost on app restart. Re-pairing is trivial via
-  `pair/generate` + `pair/request` (no GUI needed).
 
 ---
 
-## 12. Integration Test Coverage
-
-24 tests across 6 phases:
+## 11. Integration Test Coverage
 
 | Phase | Tests | What |
 |-------|-------|------|
-| Phase 0: Health & Pairing | 3 | health, pair/generate, pair/request |
-| Phase 1: Auth & Errors | 5 | invalid token, no token, wrong method, not found, bad pairing code |
-| Phase 2: Doctor | 4 | doctor response, token check, LINE check, AX check |
+| Phase 0: Health | 1 | health check |
+| Phase 1: Error Handling | 2 | wrong method, not found |
+| Phase 2: Doctor | 3 | doctor response, LINE check, AX check |
 | Phase 3: Poll & Events | 3 | poll, poll with since, SSE connection |
 | Phase 4: AX endpoints | 4 | context, messages, conversations, axdump (skip if no AX) |
 | Phase 5: Send API | 4 | send (skip if no AX), invalid adapter, invalid JSON, unsupported action |
-| Phase 6: Security | 1 | CSRF Origin rejection |
+| Phase 6: Security | 1 | CSRF Origin rejection on /v1/send |
 
 Tests auto-skip AX-dependent cases when Accessibility permission is not granted.
+
+## 12. Vibeterm Telemetry Plugin
+
+OpenClaw plugin (`extensions/vibeterm-telemetry/`) that receives iOS background location
+updates and writes them to daily diary files.
+
+### Endpoint
+
+`POST /api/telemetry` (via OpenClaw gateway :18789)
+
+- Auth: `Authorization: Bearer {gateway-token}`
+- Body: `{ "samples": [{ "id", "lat", "lon", "accuracy", "timestamp" }] }`
+- Response: `{ "received": N, "nextMinIntervalSec": 60 }`
+
+### Storage
+
+1. **In-memory**: UUID-based dedup store (`store.js`)
+2. **Diary**: `~/.openclaw/workspace/memory/YYYY-MM-DD.md`
+   - Format: `📍 HH:MM - lat, lon (accuracy Xm)`
+   - Throttle: 200m movement or 30min elapsed
+
+### Relation to BodyForAgent
+
+| Layer | Scope | When |
+|-------|-------|------|
+| BodyForAgent | Real-time coordinate injection per message | Message arrives while moving |
+| Diary | Persistent location history | Session start, movement tracking |
