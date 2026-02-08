@@ -117,13 +117,8 @@ final class LINEInboundWatcher {
                 newRowFrames = [lastFrame]
             }
 
-            // Vision OCR: extract text from new rows
-            var ocrText = ""
-            for frame in newRowFrames {
-                if let text = VisionOCR.extractText(from: frame) {
-                    ocrText += (ocrText.isEmpty ? "" : "\n") + text
-                }
-            }
+            // Vision OCR: extract text from new rows (batch — single capture)
+            let ocrText = VisionOCR.extractText(from: newRowFrames, padding: 4) ?? ""
 
             // Echo suppression: temporal window is the sole signal for now.
             // OCR text matching is not reliable enough because the watcher may read
@@ -174,7 +169,9 @@ final class LINEInboundWatcher {
         let previousHash = lastImageHash
         lastImageHash = hash
 
-        // Pixels changed -> run OCR on full chat area to check for content change
+        // Pixels changed -> run OCR on chat list area (screen coordinates)
+        // NOTE: AXRow frames are virtual scroll coordinates (y=-17000 etc),
+        // NOT screen coordinates. Only chatListFrame has real screen position.
         let pixelOCRText = VisionOCR.extractText(from: chatListFrame) ?? ""
         guard pixelOCRText != lastOCRText else {
             logger.log(.debug, "LINEInboundWatcher: pixel hash changed (\(previousHash)->\(hash)) but OCR text unchanged")

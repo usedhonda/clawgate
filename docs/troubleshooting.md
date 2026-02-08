@@ -177,6 +177,75 @@ curl -X POST http://127.0.0.1:8765/v1/pair/request \
 
 ---
 
+## OpenClaw Gateway 運用
+
+### 起動・停止
+
+Gateway は LaunchAgent (KeepAlive=true) で管理されている。手動操作:
+
+```bash
+# 状態確認
+ps aux | grep "openclaw.*gateway" | grep -v grep
+lsof -i :18789   # ポートリッスン確認
+
+# 再起動（KeepAlive で自動復帰する）
+pkill -f "openclaw-gateway"
+sleep 5
+# 自動的に再起動される
+
+# 手動起動（LaunchAgent が動かない場合）
+nohup /usr/local/bin/node /Users/usedhonda/projects/temp/openclaw/dist/index.js gateway --port 18789 > /dev/null 2>&1 &
+```
+
+### ClawGate プラグイン確認
+
+```bash
+# プラグインログ確認
+grep "clawgate" ~/.openclaw/logs/gateway.log | tail -10
+
+# 正常起動時のログパターン:
+# [clawgate] [default] starting gateway (apiUrl=http://127.0.0.1:8765, poll=3000ms)
+# [clawgate] [default] no token configured, auto-pairing...
+# [clawgate] [default] paired successfully
+# [clawgate] [default] doctor OK (6/6 checks passed)
+# [clawgate] [default] initial cursor=N, skipping N existing events
+```
+
+### よくある問題
+
+#### Gateway が応答しない
+1. `lsof -i :18789` でポート確認
+2. プロセスはあるがポートなし → 起動失敗。ログ確認
+3. `pkill -9 -f "openclaw"` で全プロセス kill → KeepAlive 待ち
+
+#### "Config invalid" エラー
+- `~/.openclaw/openclaw.json` に不正なキーがある
+- ログに `Unknown config keys` が表示される
+- 該当キーを削除して Gateway 再起動
+
+#### ちー（AI）が返事しない
+1. Gateway 動作確認: `curl -s localhost:18789/ | head -1`
+2. ClawGate 動作確認: `curl -s localhost:8765/v1/health`
+3. プラグインログ確認: `grep "clawgate" ~/.openclaw/logs/gateway.log | tail -10`
+4. auto-pair 失敗 → ClawGate を再起動してから Gateway 再起動
+
+#### 二重起動の回避
+- `pkill` + `nohup` で手動起動すると KeepAlive と競合して2プロセスになる
+- 対処: `pkill -9 -f "openclaw"` → KeepAlive に任せる（手動 nohup しない）
+
+### プラグイン更新
+
+```bash
+# ソースからプラグインディレクトリにコピー（symlink は非対応）
+cp -R extensions/openclaw-plugin/* ~/.openclaw/extensions/clawgate/
+
+# Gateway 再起動
+pkill -f "openclaw-gateway"
+# KeepAlive で自動復帰
+```
+
+---
+
 ## 関連ドキュメント
 
 - [OpenClaw統合ガイド](./openclaw-integration.md) - プロンプト例・クイックスタート

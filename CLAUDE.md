@@ -29,7 +29,7 @@ After context refresh, read `docs/testing.md` to restore parameters. Do NOT ask 
 | Inspect AX tree | `curl -s -H "X-Bridge-Token: $TOKEN" localhost:8765/v1/axdump \| jq .` | "Can you look at the AX tree?" |
 | Check AX permission | `curl -s -H "X-Bridge-Token: $TOKEN" localhost:8765/v1/doctor` — poll until ok | "Do you have AX permission?" |
 | Restart app | `pkill -f ClawGate.app; sleep 1; open ClawGate.app` | "Please restart the app" |
-| Build + deploy | `swift build && pkill -f ClawGate.app; sleep 1 && cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate && codesign --force --deep --options runtime --entitlements ClawGate.entitlements --sign "ClawGate Dev" ClawGate.app && open ClawGate.app` | Stopping after build to ask user |
+| Build + deploy | `./scripts/dev-deploy.sh` (or `--skip-plugin` / `--skip-test`) | Stopping after build to ask user |
 | Test via API | `curl -s -X POST -H "X-Bridge-Token: $TOKEN" -d '...' localhost:8765/v1/send` | "Can you test this?" |
 | Verify result | Screenshot + axdump + messages API — AI reads all and judges | "Did it work?" |
 | Run integration tests | `./scripts/integration-test.sh` | "Please run the tests" |
@@ -37,8 +37,15 @@ After context refresh, read `docs/testing.md` to restore parameters. Do NOT ask 
 
 ### Build-Deploy Pipeline (mandatory after code changes)
 
-Always run the full pipeline in one shot — never stop partway:
+Use the one-shot deploy script — it builds, deploys, syncs OpenClaw plugin, and runs smoke tests:
 
+```bash
+./scripts/dev-deploy.sh              # Full pipeline: build + deploy + plugin sync + smoke test
+./scripts/dev-deploy.sh --skip-plugin  # ClawGate only (no OpenClaw)
+./scripts/dev-deploy.sh --skip-test    # Deploy without smoke test
+```
+
+For manual steps (rarely needed):
 ```bash
 swift build \
   && pkill -f ClawGate.app; sleep 1 \
@@ -102,8 +109,12 @@ Every step uses AI tools — no human involvement:
 ## Quick Reference
 
 ```
-swift build                              # Debug build
-./scripts/integration-test.sh            # Run 24 integration tests (auto-pairs)
+./scripts/dev-deploy.sh                  # Build + deploy + plugin sync + smoke test (preferred)
+./scripts/dev-deploy.sh --skip-plugin    # ClawGate only (no OpenClaw)
+./scripts/smoke-test.sh                  # Lightweight smoke test (5 tests, ~5s)
+./scripts/smoke-test.sh --with-openclaw  # Smoke test + OpenClaw check
+./scripts/integration-test.sh            # Full 24-test suite (auto-pairs)
+swift build                              # Debug build only
 ./scripts/release.sh                     # Build + sign + DMG + notarize
 ```
 

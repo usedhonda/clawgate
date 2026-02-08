@@ -1,0 +1,9 @@
+{
+  "id": "clawgate",
+  "channels": ["clawgate"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

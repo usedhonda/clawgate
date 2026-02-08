@@ -8,8 +8,8 @@ enum VisionOCR {
 
     /// Extract text from a screen rectangle (in global CG coordinates).
     /// Returns nil if Screen Recording permission is missing or OCR fails.
+    /// NOTE: Uses optionOnScreenOnly — LINE window must be visible (not occluded).
     static func extractText(from screenRect: CGRect) -> String? {
-        // CGWindowListCreateImage uses CG coordinates (top-left origin, same as AX frames)
         guard let image = CGWindowListCreateImage(
             screenRect,
             .optionOnScreenOnly,
@@ -24,6 +24,21 @@ enum VisionOCR {
             return nil
         }
 
+        return performOCR(on: image)
+    }
+
+    /// Extract text from multiple screen rectangles merged into one capture (with padding).
+    /// More efficient than calling extractText(from:) per-rect: N rects × 300ms → 1 capture × 300ms.
+    static func extractText(from rects: [CGRect], padding: CGFloat = 4) -> String? {
+        guard !rects.isEmpty else { return nil }
+        let merged = rects.reduce(rects[0]) { $0.union($1) }
+        let padded = merged.insetBy(dx: -padding, dy: -padding)
+        return extractText(from: padded)
+    }
+
+    // MARK: - Private
+
+    private static func performOCR(on image: CGImage) -> String? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["ja-JP", "en-US"]

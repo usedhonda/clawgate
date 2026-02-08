@@ -248,6 +248,54 @@ enum AXActions {
         return nil
     }
 
+    // MARK: - Window geometry
+
+    /// Set the position of a window (kAXPositionAttribute).
+    @discardableResult
+    static func setWindowPosition(_ window: AXUIElement, to point: CGPoint) -> Bool {
+        var p = point
+        guard let value = AXValueCreate(.cgPoint, &p) else { return false }
+        return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value) == .success
+    }
+
+    /// Set the size of a window (kAXSizeAttribute).
+    @discardableResult
+    static func setWindowSize(_ window: AXUIElement, to size: CGSize) -> Bool {
+        var s = size
+        guard let value = AXValueCreate(.cgSize, &s) else { return false }
+        return AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value) == .success
+    }
+
+    /// Set window to the given frame and verify. Returns the actual frame after setting.
+    @discardableResult
+    static func setWindowFrame(_ window: AXUIElement, to frame: CGRect) -> CGRect? {
+        setWindowPosition(window, to: frame.origin)
+        usleep(50_000)
+        setWindowSize(window, to: frame.size)
+        usleep(100_000)
+
+        // Verify
+        guard let actual = AXQuery.copyFrameAttribute(window) else { return nil }
+        NSLog("[AXActions] setWindowFrame: requested=(%.0f,%.0f %.0fx%.0f) actual=(%.0f,%.0f %.0fx%.0f)",
+              frame.origin.x, frame.origin.y, frame.width, frame.height,
+              actual.origin.x, actual.origin.y, actual.width, actual.height)
+        return actual
+    }
+
+    /// Calculate an optimal window frame for OCR visibility.
+    /// Uses ~65% of screen width and ~85% of screen height, positioned at left edge.
+    static func optimalWindowFrame() -> CGRect {
+        let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1920, height: 1055)
+        // visibleFrame excludes menu bar and Dock, but uses bottom-left origin.
+        // AX uses top-left origin. Convert.
+        let screenTop = (NSScreen.main?.frame.height ?? 1080) - screen.maxY  // menu bar height
+        let width = min(1200, screen.width * 0.65)
+        let height = min(900, screen.height * 0.85)
+        let x = screen.origin.x + 60  // slight offset from left edge
+        let y = screenTop + 20        // below menu bar
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
     // MARK: - 4-Stage Pipeline helpers
 
     /// Generic polling: checks condition every intervalMs until it returns true or timeoutMs elapses.
