@@ -1,0 +1,23 @@
+{
+  "name": "@openclaw/clawgate",
+  "version": "2026.2.8",
+  "description": "OpenClaw ClawGate channel plugin — LINE messaging via AX bridge",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "channel": {
+      "id": "clawgate",
+      "label": "ClawGate",
+      "selectionLabel": "ClawGate (LINE)",
+      "blurb": "LINE messaging via ClawGate AX bridge.",
+      "order": 90
+    },
+    "install": {
+      "localPath": "extensions/openclaw-plugin",
+      "defaultChoice": "local"
+    }
+  }
+}

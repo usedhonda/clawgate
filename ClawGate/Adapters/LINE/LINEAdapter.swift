@@ -80,6 +80,27 @@ final class LINEAdapter: AdapterProtocol {
             return window
         }
 
+        // Resize window to optimal dimensions for OCR visibility
+        _ = try step("optimize_window", logger: stepLogger) {
+            let optimal = AXActions.optimalWindowFrame()
+            guard let actual = AXActions.setWindowFrame(rootWindow, to: optimal) else {
+                throw BridgeRuntimeError(
+                    code: "window_resize_failed",
+                    message: "Could not resize LINE window",
+                    retriable: true,
+                    failedStep: "optimize_window",
+                    details: "target=\(Int(optimal.width))x\(Int(optimal.height))"
+                )
+            }
+            // Verify dimensions are close enough (window managers may constrain)
+            let widthOK = actual.width >= optimal.width * 0.8
+            let heightOK = actual.height >= optimal.height * 0.8
+            if !widthOK || !heightOK {
+                logger.log(.warning, "Window resize constrained: requested \(Int(optimal.width))x\(Int(optimal.height)), got \(Int(actual.width))x\(Int(actual.height))")
+            }
+            return actual
+        }
+
         let windowFrame: CGRect = try step("get_window_frame", logger: stepLogger) {
             guard let frame = AXQuery.copyFrameAttribute(rootWindow) else {
                 throw BridgeRuntimeError(
