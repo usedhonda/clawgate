@@ -30,6 +30,9 @@ const pathCache = new Map();
 /** @type {Map<string, string>} project -> last sent hash */
 const sentHash = new Map();
 
+/** @type {Map<string, { text: string, timestamp: number }>} */
+const progressSnapshots = new Map();
+
 /**
  * Resolve and cache the working directory for a project via tmux.
  * @param {string} project — project name
@@ -137,11 +140,30 @@ export function getProjectRoster(sessionModes, sessionStatuses, pendingQuestions
     const status = sessionStatuses?.get(name) || "unknown";
     const pending = pendingQuestions?.get(name);
     const pendingQuestion = pending ? pending.questionText : undefined;
-    projects.push({ name, path, mode, status, pendingQuestion });
+    const progress = progressSnapshots.get(name);
+    const progressText = status === "running" && progress ? progress.text : undefined;
+    projects.push({ name, path, mode, status, pendingQuestion, progressText });
   }
 
   if (!projects.length) return "";
   return buildProjectRoster(projects);
+}
+
+/**
+ * Store a progress snapshot for a running project.
+ * @param {string} project
+ * @param {string} text
+ */
+export function setProgressSnapshot(project, text) {
+  progressSnapshots.set(project, { text, timestamp: Date.now() });
+}
+
+/**
+ * Clear a progress snapshot (e.g. on task completion).
+ * @param {string} project
+ */
+export function clearProgressSnapshot(project) {
+  progressSnapshots.delete(project);
 }
 
 /**
