@@ -101,6 +101,8 @@ fi
 ###############################################################################
 # Step 4: Sync OpenClaw plugins
 ###############################################################################
+GATEWAY_RESTARTED=false
+
 if [ "$SKIP_PLUGIN" = "false" ]; then
     step "Syncing OpenClaw plugins..."
 
@@ -139,18 +141,33 @@ if [ "$SKIP_PLUGIN" = "false" ]; then
 
     # Restart gateway once if any plugin changed
     if [ "$ANY_PLUGIN_SYNCED" = "true" ]; then
-        if pgrep -f "openclaw.*gateway" >/dev/null 2>&1; then
-            pkill -f "openclaw.*gateway" 2>/dev/null || true
-            ok "Gateway killed (KeepAlive will restart)"
+        if launchctl list 2>/dev/null | grep -q 'openclaw\.gateway'; then
+            launchctl stop ai.openclaw.gateway && sleep 2 && launchctl start ai.openclaw.gateway
+            ok "Gateway restarted via launchctl"
+            GATEWAY_RESTARTED=true
             sleep 5
         else
-            warn "Gateway not running — skipping restart"
+            warn "Gateway not registered in launchd — skipping restart"
         fi
     fi
 
     SMOKE_ARGS="--with-openclaw"
 else
     step "Skipping OpenClaw plugin sync (--skip-plugin)"
+fi
+
+###############################################################################
+# Step 4.5: Restart Gateway (if not already restarted by plugin sync)
+###############################################################################
+if [ "$GATEWAY_RESTARTED" = "false" ]; then
+    step "Restarting OpenClaw Gateway (ClawGate connection reset)..."
+    if launchctl list 2>/dev/null | grep -q 'openclaw\.gateway'; then
+        launchctl stop ai.openclaw.gateway && sleep 2 && launchctl start ai.openclaw.gateway
+        ok "Gateway restarted via launchctl"
+        sleep 5
+    else
+        warn "Gateway not registered in launchd — skipping restart"
+    fi
 fi
 
 ###############################################################################

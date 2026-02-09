@@ -52,6 +52,11 @@ final class BridgeCore {
             line: ConfigLineSection(
                 defaultConversation: cfg.lineDefaultConversation,
                 pollIntervalSeconds: cfg.linePollIntervalSeconds
+            ),
+            tmux: ConfigTmuxSection(
+                enabled: cfg.tmuxEnabled,
+                statusBarUrl: cfg.tmuxStatusBarUrl,
+                sessionModes: cfg.tmuxSessionModes
             )
         )
         let body = encode(APIResponse(ok: true, result: result, error: nil))

@@ -172,9 +172,16 @@ struct ConfigLineSection: Codable {
     let pollIntervalSeconds: Int
 }
 
+struct ConfigTmuxSection: Codable {
+    let enabled: Bool
+    let statusBarUrl: String
+    let sessionModes: [String: String]  // project -> "observe" | "autonomous"
+}
+
 struct ConfigResult: Codable {
     let version: String
     let general: ConfigGeneralSection
     let line: ConfigLineSection
+    let tmux: ConfigTmuxSection
 }
 

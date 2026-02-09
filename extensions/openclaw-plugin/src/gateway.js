@@ -13,6 +13,9 @@
  *   5. Repeat until abortSignal fires
  */
 
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveAccount } from "./config.js";
 import {
   clawgateHealth,
@@ -20,7 +23,18 @@ import {
   clawgateConfig,
   clawgateSend,
   clawgatePoll,
+  clawgateTmuxSend,
 } from "./client.js";
+import {
+  getProjectContext,
+  getProjectRoster,
+  getStableContext,
+  getDynamicEnvelope,
+  markContextSent,
+  invalidateProject,
+  registerProjectPath,
+  resolveProjectPath,
+} from "./context-cache.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
 let _runtime = null;
@@ -33,6 +47,21 @@ function getRuntime() {
   if (!_runtime) throw new Error("clawgate: gateway runtime not initialized");
   return _runtime;
 }
+
+// ── Claude Code knowledge (static, loaded once) ─────────────────
+let _ccKnowledge = "";
+try {
+  const __dirname = dirname(fileURLToPath(import.meta.url));
+  _ccKnowledge = readFileSync(join(__dirname, "..", "claude-code-knowledge.md"), "utf-8");
+} catch {
+  // Not critical — knowledge file missing just means less context
+}
+
+// ── Session state tracking (for roster) ──────────────────────────
+/** @type {Map<string, string>} project -> mode */
+const sessionModes = new Map();
+/** @type {Map<string, string>} project -> status */
+const sessionStatuses = new Map();
 
 // ── Plugin-level echo suppression ──────────────────────────────
 // ClawGate's RecentSendTracker uses an 8-second window which is too short
@@ -110,6 +139,63 @@ function recordInbound(eventText) {
   recentInbounds.push({ fingerprint: eventFingerprint(eventText), time: Date.now() });
 }
 
+// ── Autonomous task chaining ──────────────────────────────────
+const MAX_CONSECUTIVE_TASKS = 5;
+/** @type {Map<string, number>} project -> consecutive task count */
+const consecutiveTaskCount = new Map();
+
+/**
+ * Extract <cc_task> from AI reply and send to Claude Code via tmux.
+ * Returns null if no task tag found.
+ * @param {object} params
+ * @param {string} params.replyText — full AI reply text
+ * @param {string} params.project — target tmux project
+ * @param {string} params.apiUrl
+ * @param {object} [params.log]
+ * @returns {Promise<{lineText: string, taskText: string} | {error: Error, lineText: string} | null>}
+ */
+async function tryExtractAndSendTask({ replyText, project, apiUrl, log }) {
+  const taskMatch = replyText.match(/<cc_task>([\s\S]*?)<\/cc_task>/);
+  if (!taskMatch) return null;
+
+  const taskText = taskMatch[1].trim();
+  if (!taskText) return null;
+
+  const lineText = replyText.replace(/<cc_task>[\s\S]*?<\/cc_task>/, "").trim();
+
+  // Check consecutive task limit
+  const count = (consecutiveTaskCount.get(project) || 0) + 1;
+  if (count > MAX_CONSECUTIVE_TASKS) {
+    log?.warn?.(`clawgate: consecutive task limit reached (${MAX_CONSECUTIVE_TASKS}) for ${project}, skipping task`);
+    const limitMsg = `[Task chain limit reached (${MAX_CONSECUTIVE_TASKS}). Sending full reply to LINE instead.]\n\n${replyText}`;
+    consecutiveTaskCount.set(project, 0);
+    return { error: new Error("consecutive task limit reached"), lineText: limitMsg };
+  }
+
+  try {
+    const result = await clawgateTmuxSend(apiUrl, project, taskText);
+    if (result?.ok) {
+      consecutiveTaskCount.set(project, count);
+      log?.info?.(`clawgate: task ${count}/${MAX_CONSECUTIVE_TASKS} sent to CC (${project}): "${taskText.slice(0, 80)}"`);
+      return { lineText, taskText };
+    } else {
+      const errMsg = result?.error || "unknown error";
+      log?.error?.(`clawgate: failed to send task to CC (${project}): ${errMsg}`);
+      return { error: new Error(errMsg), lineText: replyText };
+    }
+  } catch (err) {
+    log?.error?.(`clawgate: failed to send task to CC (${project}): ${err}`);
+    return { error: err, lineText: replyText };
+  }
+}
+
+/**
+ * Reset consecutive task counter for a project (called on human input or completion without task).
+ */
+function resetTaskChain(project) {
+  consecutiveTaskCount.set(project, 0);
+}
+
 /**
  * Sleep that respects abort signal.
  * @param {number} ms
@@ -171,6 +257,23 @@ function buildLocationPrefix() {
 }
 
 /**
+ * Build a compact roster of active Claude Code projects for LINE messages.
+ * @returns {string}
+ */
+function buildRosterPrefix() {
+  const roster = getProjectRoster(sessionModes, sessionStatuses);
+  if (!roster) return "";
+
+  // Check if any project is in autonomous mode
+  const hasAutonomous = [...sessionModes.values()].some((m) => m === "autonomous");
+  const taskHint = hasAutonomous
+    ? `\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to LINE.`
+    : "";
+
+  return `[Active Claude Code Projects]\n${roster}${taskHint}`;
+}
+
+/**
  * Build MsgContext from a ClawGate poll event.
  * @param {object} event — from /v1/poll
  * @param {string} accountId
@@ -209,9 +312,12 @@ function buildMsgContext(event, accountId, defaultConversation) {
     _clawgateSource: source,
   };
 
+  // Build BodyForAgent with location + project roster prefixes
   const locationPrefix = buildLocationPrefix();
-  if (locationPrefix) {
-    ctx.BodyForAgent = `${locationPrefix}\n\n${text}`;
+  const rosterPrefix = buildRosterPrefix();
+  const prefixes = [locationPrefix, rosterPrefix].filter(Boolean);
+  if (prefixes.length > 0) {
+    ctx.BodyForAgent = `${prefixes.join("\n\n")}\n\n${text}`;
   }
 
   return ctx;
@@ -231,6 +337,11 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   const runtime = getRuntime();
   const ctx = buildMsgContext(event, accountId, defaultConversation);
   const conversation = ctx.ConversationLabel;
+
+  // Human input resets all task chain counters (user is back in the loop)
+  for (const project of consecutiveTaskCount.keys()) {
+    resetTaskChain(project);
+  }
 
   log?.info?.(`clawgate: [${accountId}] inbound from "${ctx.SenderName}" in "${conversation}": "${ctx.Body?.slice(0, 80)}"`);
 
@@ -255,10 +366,42 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     log?.warn?.(`clawgate: recordInboundSession failed: ${err}`);
   }
 
+  // Find autonomous projects for potential task routing from LINE replies
+  const autonomousProjects = [...sessionModes.entries()]
+    .filter(([, m]) => m === "autonomous")
+    .map(([p]) => p);
+
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
   const deliver = async (payload) => {
     const text = payload.text || payload.body || "";
     if (!text.trim()) return;
+
+    // If there are autonomous projects, try to extract <cc_task> from AI reply
+    if (autonomousProjects.length > 0) {
+      const result = await tryExtractAndSendTask({
+        replyText: text, project: autonomousProjects[0], apiUrl, log,
+      });
+      if (result) {
+        if (result.error) {
+          const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+          try {
+            await clawgateSend(apiUrl, conversation, msg);
+            recordPluginSend(msg);
+          } catch (err) {
+            log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+          }
+        } else if (result.lineText) {
+          try {
+            await clawgateSend(apiUrl, conversation, result.lineText);
+            recordPluginSend(result.lineText);
+          } catch (err) {
+            log?.error?.(`clawgate: [${accountId}] send line reply failed: ${err}`);
+          }
+        }
+        return;
+      }
+    }
+
     log?.info?.(`clawgate: [${accountId}] sending reply to "${conversation}": "${text.slice(0, 80)}"`);
     try {
       await clawgateSend(apiUrl, conversation, text);
@@ -285,6 +428,163 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     }
   } catch (err) {
     log?.error?.(`clawgate: [${accountId}] dispatch failed: ${err}`);
+  }
+}
+
+/**
+ * Handle a tmux completion event: Claude Code finished a task.
+ * Dispatches the completion summary to AI, which then reports to LINE.
+ * @param {object} params
+ */
+async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
+  const runtime = getRuntime();
+  const payload = event.payload ?? {};
+  const project = payload.project || payload.conversation || "unknown";
+  const text = payload.text || "(no output captured)";
+  const mode = payload.mode || "autonomous"; // "observe" or "autonomous"
+  const tmuxTarget = payload.tmux_target || "";
+
+  // Track session state for roster
+  sessionModes.set(project, mode);
+  sessionStatuses.set(project, "waiting_input");
+
+  // Resolve project path and register for roster
+  if (tmuxTarget) {
+    resolveProjectPath(project, tmuxTarget);
+  }
+
+  // Invalidate context cache (files may have changed during the task)
+  invalidateProject(project);
+
+  // Build two-layer context (stable + dynamic)
+  const stable = getStableContext(project, tmuxTarget);
+  const dynamic = getDynamicEnvelope(project, tmuxTarget);
+
+  const contextParts = [];
+
+  if (stable && stable.isNew && stable.context) {
+    contextParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
+    if (_ccKnowledge) {
+      contextParts.push(_ccKnowledge);
+    }
+  } else if (stable && stable.hash) {
+    contextParts.push(
+      `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
+    );
+  }
+
+  if (dynamic && dynamic.envelope) {
+    contextParts.push(`[Current State]\n${dynamic.envelope}`);
+  }
+
+  let taskSummary;
+  if (mode === "observe") {
+    taskSummary = `[OBSERVE MODE - You can comment, suggest, and give opinions, but do NOT send tasks to Claude Code]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+  } else if (mode === "autonomous") {
+    const chainCount = consecutiveTaskCount.get(project) || 0;
+    const remaining = MAX_CONSECUTIVE_TASKS - chainCount;
+    taskSummary = `[AUTONOMOUS MODE - You may send a follow-up task to Claude Code by wrapping it in <cc_task>your task here</cc_task> tags. Only send a task when you have a clear, actionable follow-up. Do not send tasks just because you can. Your message outside the tags goes to the user on LINE. Chain: ${chainCount}/${MAX_CONSECUTIVE_TASKS} (${remaining} remaining)]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+  } else {
+    taskSummary = `Claude Code (${project}) completed a task:\n\n${text}`;
+  }
+
+  contextParts.push(taskSummary);
+  const body = contextParts.join("\n\n---\n\n");
+
+  const ctx = {
+    Body: body,
+    RawBody: body,
+    CommandBody: body,
+    From: `tmux:${project}`,
+    To: `clawgate:${accountId}`,
+    SessionKey: `clawgate:${accountId}:tmux:${project}`,
+    AccountId: accountId,
+    ChatType: "direct",
+    Provider: "clawgate",
+    Surface: "clawgate",
+    ConversationLabel: defaultConversation || project,
+    SenderName: `Claude Code (${project})`,
+    SenderId: `tmux:${project}`,
+    MessageSid: String(event.id ?? Date.now()),
+    Timestamp: event.observed_at ? Date.parse(event.observed_at) : Date.now(),
+    CommandAuthorized: true,
+    OriginatingChannel: "clawgate",
+    OriginatingTo: defaultConversation || project,
+    _clawgateSource: "tmux_completion",
+    _tmuxMode: mode,
+  };
+
+  log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}): "${text.slice(0, 80)}"`);
+
+  // Dispatch to AI — the AI will summarize and reply via LINE
+  // In autonomous mode, parse <cc_task> tags and route tasks to Claude Code
+  const deliver = async (replyPayload) => {
+    const replyText = replyPayload.text || replyPayload.body || "";
+    if (!replyText.trim()) return;
+
+    // Autonomous mode: try to extract and send <cc_task>
+    if (mode === "autonomous") {
+      const result = await tryExtractAndSendTask({
+        replyText, project, apiUrl, log,
+      });
+      if (result) {
+        if (result.error) {
+          // Task send failed — forward everything to LINE with error notice
+          const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+          try {
+            await clawgateSend(apiUrl, defaultConversation || project, msg);
+            recordPluginSend(msg);
+          } catch (err) {
+            log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+          }
+        } else {
+          // Task sent successfully — send remaining text to LINE (if any)
+          if (result.lineText) {
+            try {
+              await clawgateSend(apiUrl, defaultConversation || project, result.lineText);
+              recordPluginSend(result.lineText);
+            } catch (err) {
+              log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
+            }
+          }
+        }
+        return;
+      }
+      // No <cc_task> found — reset chain counter and fall through to normal delivery
+      resetTaskChain(project);
+    }
+
+    // Default: forward all to LINE
+    log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${replyText.slice(0, 80)}"`);
+    try {
+      await clawgateSend(apiUrl, defaultConversation || project, replyText);
+      recordPluginSend(replyText);
+    } catch (err) {
+      log?.error?.(`clawgate: [${accountId}] send tmux result to LINE failed: ${err}`);
+    }
+  };
+
+  try {
+    const dispatch = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
+    if (dispatch) {
+      await dispatch({
+        ctx,
+        cfg,
+        dispatcherOptions: {
+          deliver,
+          humanDelay: { mode: "off" },
+          onError: (err) => log?.error?.(`clawgate: tmux dispatch error: ${err}`),
+        },
+      });
+      // Mark stable context as sent after successful dispatch
+      if (stable && stable.isNew && stable.hash) {
+        markContextSent(project, stable.hash);
+      }
+    } else {
+      log?.error?.("clawgate: dispatchReplyWithBufferedBlockDispatcher not found on runtime");
+    }
+  } catch (err) {
+    log?.error?.(`clawgate: [${accountId}] tmux dispatch failed: ${err}`);
   }
 }
 
@@ -360,6 +660,25 @@ export async function startAccount(ctx) {
 
           // Only process inbound_message events (skip echo_message, heartbeat, etc.)
           if (event.type !== "inbound_message") continue;
+
+          // Track tmux session state for roster
+          if (event.adapter === "tmux" && event.payload?.project) {
+            const proj = event.payload.project;
+            const tmuxTgt = event.payload.tmux_target || "";
+            if (event.payload.mode) sessionModes.set(proj, event.payload.mode);
+            if (event.payload.status) sessionStatuses.set(proj, event.payload.status);
+            if (tmuxTgt) resolveProjectPath(proj, tmuxTgt);
+          }
+
+          // Handle tmux completion events separately
+          if (event.adapter === "tmux" && event.payload?.source === "completion") {
+            try {
+              await handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log });
+            } catch (err) {
+              log?.error?.(`clawgate: [${accountId}] handleTmuxCompletion failed: ${err}`);
+            }
+            continue;
+          }
 
           const eventText = event.payload?.text || "";
 
