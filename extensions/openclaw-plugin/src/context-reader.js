@@ -324,7 +324,7 @@ export function buildProjectContext(projectPath) {
  * Build a compact project roster for LINE messages.
  * One line per project, ~200 chars total.
  *
- * @param {{ name: string, path: string, mode: string, status?: string }[]} projects
+ * @param {{ name: string, path: string, mode: string, status?: string, pendingQuestion?: string }[]} projects
  * @returns {string}
  */
 export function buildProjectRoster(projects) {
@@ -333,7 +333,10 @@ export function buildProjectRoster(projects) {
   const lines = projects.map((p) => {
     const branch = getProjectBranch(p.path);
     const status = p.status || "unknown";
-    return `- ${p.name} (${branch}) [${p.mode}] ${status}`;
+    const asking = p.pendingQuestion
+      ? ` [ASKING: ${p.pendingQuestion.slice(0, 30)}]`
+      : "";
+    return `- ${p.name} (${branch}) [${p.mode}] ${status}${asking}`;
   });
 
   return lines.join("\n");
