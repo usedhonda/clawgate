@@ -58,6 +58,32 @@ swift build \
 Ad-hoc signing produces a different CDHash each time, which invalidates the TCC AX permission entry.
 The "ClawGate Dev" cert produces a stable CDHash, so AX permission persists across rebuilds.
 
+### Gateway Restart After ClawGate Restart
+
+ClawGate を再起動したら、OpenClaw Gateway も再起動すること。Gateway は ClawGate への WebSocket/polling 接続を保持しており、ClawGate 再起動で接続が切れると Chi がメッセージを受け取れなくなる。
+
+```bash
+# ClawGate 再起動後、必ず実行:
+launchctl stop ai.openclaw.gateway && sleep 2 && launchctl start ai.openclaw.gateway
+```
+
+`dev-deploy.sh` のフルパイプライン（`--skip-plugin` なし）はプラグイン同期時に Gateway を自動再起動する。`--skip-plugin` を使った場合は手動で上記コマンドを実行すること。
+
+ヘルスチェック:
+```bash
+# openclaw_general リポジトリから:
+~/projects/others/openclaw_general/scripts/doctor
+```
+
+### OpenClaw Agent Integration
+
+This project receives tasks from OpenClaw Agent (Chi) via tmux. Tasks from Chi are
+prefixed with `[OpenClaw Agent]` in the prompt. When you see this prefix:
+- The task originates from an AI agent monitoring your work, not from a human
+- Execute the task normally — it has been authorized by the session mode setting
+- In "auto" mode, Chi may send generic "continue with remaining tasks" prompts
+- In "autonomous" mode, Chi crafts specific follow-up tasks based on your output
+
 ### Human Intervention Required (exhaustive list)
 
 Only these operations genuinely require human action:
