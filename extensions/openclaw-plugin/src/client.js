@@ -6,6 +6,8 @@
  * CSRF protection via Origin header check (server-side).
  */
 
+import { execSync } from "node:child_process";
+
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 /**
@@ -112,4 +114,61 @@ export async function clawgateConfig(apiUrl) {
 export async function clawgatePoll(apiUrl, since = 0) {
   const path = since > 0 ? `/v1/poll?since=${since}` : "/v1/poll";
   return request(apiUrl, path);
+}
+
+/**
+ * POST /v1/send adapter=tmux — send a task to Claude Code via tmux.
+ * @param {string} apiUrl
+ * @param {string} project — project name (conversation_hint)
+ * @param {string} text — the task/prompt to send
+ * @returns {Promise<object>}
+ */
+export async function clawgateTmuxSend(apiUrl, project, text) {
+  return request(apiUrl, "/v1/send", {
+    method: "POST",
+    body: {
+      adapter: "tmux",
+      action: "send_message",
+      payload: {
+        conversation_hint: project,
+        text,
+        enter_to_send: true,
+      },
+    },
+  });
+}
+
+/**
+ * GET /v1/context?adapter=tmux — get tmux session context.
+ * @param {string} apiUrl
+ * @returns {Promise<object>}
+ */
+export async function clawgateTmuxContext(apiUrl) {
+  return request(apiUrl, "/v1/context?adapter=tmux");
+}
+
+/**
+ * GET /v1/conversations?adapter=tmux — list tmux sessions.
+ * @param {string} apiUrl
+ * @param {number} [limit=50]
+ * @returns {Promise<object>}
+ */
+export async function clawgateTmuxConversations(apiUrl, limit = 50) {
+  return request(apiUrl, `/v1/conversations?adapter=tmux&limit=${limit}`);
+}
+
+/**
+ * Resolve the working directory of a tmux pane.
+ * @param {string} tmuxTarget — tmux target pane (e.g. "clawgate:0.0")
+ * @returns {string|null} — absolute path or null on failure
+ */
+export function resolveTmuxWorkingDir(tmuxTarget) {
+  try {
+    return execSync(
+      `tmux display-message -p -t "${tmuxTarget}" '#{pane_current_path}'`,
+      { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }
+    ).trim() || null;
+  } catch {
+    return null;
+  }
 }

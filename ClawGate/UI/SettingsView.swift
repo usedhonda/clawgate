@@ -35,6 +35,21 @@ struct SettingsView: View {
                 .padding(.vertical, 4)
             }
 
+            GroupBox(label: Text("Tmux")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Enabled", isOn: $config.tmuxEnabled)
+                    HStack {
+                        Text("Status Bar URL:")
+                        TextField("ws://localhost:8080/ws/sessions", text: $config.tmuxStatusBarUrl)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Text("Session selection is in the menu bar submenu.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+
             HStack {
                 Spacer()
                 Button("Save") {
