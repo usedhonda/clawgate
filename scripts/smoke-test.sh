@@ -25,7 +25,6 @@ done
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
@@ -109,8 +108,8 @@ if [ "$WITH_OPENCLAW" = "true" ]; then
 
     if [ -f "$OC_LOG" ]; then
         # Check for recent successful doctor + cursor
-        DOCTOR_OK=$(tail -100 "$OC_LOG" | grep -c "doctor OK" 2>/dev/null || echo "0")
-        CURSOR=$(tail -100 "$OC_LOG" | grep -c "initial cursor" 2>/dev/null || echo "0")
+        DOCTOR_OK=$(tail -100 "$OC_LOG" | grep -c "doctor OK" 2>/dev/null | tr -d '[:space:]' || echo "0")
+        CURSOR=$(tail -100 "$OC_LOG" | grep -c "initial cursor" 2>/dev/null | tr -d '[:space:]' || echo "0")
 
         if [ "$DOCTOR_OK" -gt 0 ] && [ "$CURSOR" -gt 0 ]; then
             pass "S5 OpenClaw plugin (doctor OK + polling)"
