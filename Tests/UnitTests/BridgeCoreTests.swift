@@ -214,7 +214,8 @@ final class BridgeCoreTests: XCTestCase {
         return BridgeCore(
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
-            logger: AppLogger(configStore: cfg)
+            logger: AppLogger(configStore: cfg),
+            configStore: cfg
         )
     }
 
@@ -226,7 +227,8 @@ final class BridgeCoreTests: XCTestCase {
         return BridgeCore(
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter(), FailingAdapter()]),
-            logger: AppLogger(configStore: cfg)
+            logger: AppLogger(configStore: cfg),
+            configStore: cfg
         )
     }
 
