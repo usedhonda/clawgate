@@ -31,13 +31,23 @@ final class TmuxInboundWatcher {
 
     private func handleStateChange(session: CCStatusBarClient.CCSession,
                                    oldStatus: String, newStatus: String) {
-        // Only care about running -> waiting_input (task completion)
-        guard oldStatus == "running" && newStatus == "waiting_input" else { return }
-
         // Check session mode — ignore sessions are skipped
         let config = configStore.load()
         let mode = config.tmuxSessionModes[session.project] ?? "ignore"
-        guard mode == "observe" || mode == "autonomous" else {
+
+        // Permission prompt auto-approval (autonomous only)
+        if newStatus == "waiting_input" && session.waitingReason == "permission_prompt" {
+            guard mode == "autonomous" || mode == "auto" else { return }
+            BlockingWork.queue.async { [weak self] in
+                self?.autoApprovePermission(session: session)
+            }
+            return
+        }
+
+        // Task completion: running -> waiting_input (but NOT permission prompt)
+        guard oldStatus == "running" && newStatus == "waiting_input" else { return }
+
+        guard mode == "observe" || mode == "auto" || mode == "autonomous" else {
             logger.log(.debug, "TmuxInboundWatcher: ignoring \(session.project) (mode=ignore)")
             return
         }
@@ -47,6 +57,16 @@ final class TmuxInboundWatcher {
         // Capture pane output on background queue
         BlockingWork.queue.async { [weak self] in
             self?.captureAndEmit(session: session, mode: mode)
+        }
+    }
+
+    private func autoApprovePermission(session: CCStatusBarClient.CCSession) {
+        guard let target = session.tmuxTarget else { return }
+        do {
+            try TmuxShell.sendSpecialKey(target: target, key: "y")
+            logger.log(.info, "TmuxInboundWatcher: auto-approved permission for \(session.project)")
+        } catch {
+            logger.log(.warning, "TmuxInboundWatcher: auto-approve failed: \(error)")
         }
     }
 

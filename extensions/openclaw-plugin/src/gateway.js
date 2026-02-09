@@ -140,9 +140,6 @@ function recordInbound(eventText) {
 }
 
 // ── Autonomous task chaining ──────────────────────────────────
-const MAX_CONSECUTIVE_TASKS = 5;
-/** @type {Map<string, number>} project -> consecutive task count */
-const consecutiveTaskCount = new Map();
 
 /**
  * Extract <cc_task> from AI reply and send to Claude Code via tmux.
@@ -163,20 +160,13 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, log }) {
 
   const lineText = replyText.replace(/<cc_task>[\s\S]*?<\/cc_task>/, "").trim();
 
-  // Check consecutive task limit
-  const count = (consecutiveTaskCount.get(project) || 0) + 1;
-  if (count > MAX_CONSECUTIVE_TASKS) {
-    log?.warn?.(`clawgate: consecutive task limit reached (${MAX_CONSECUTIVE_TASKS}) for ${project}, skipping task`);
-    const limitMsg = `[Task chain limit reached (${MAX_CONSECUTIVE_TASKS}). Sending full reply to LINE instead.]\n\n${replyText}`;
-    consecutiveTaskCount.set(project, 0);
-    return { error: new Error("consecutive task limit reached"), lineText: limitMsg };
-  }
+  // Prefix task with [OpenClaw Agent] so CC knows the origin
+  const prefixedTask = `[OpenClaw Agent] ${taskText}`;
 
   try {
-    const result = await clawgateTmuxSend(apiUrl, project, taskText);
+    const result = await clawgateTmuxSend(apiUrl, project, prefixedTask);
     if (result?.ok) {
-      consecutiveTaskCount.set(project, count);
-      log?.info?.(`clawgate: task ${count}/${MAX_CONSECUTIVE_TASKS} sent to CC (${project}): "${taskText.slice(0, 80)}"`);
+      log?.info?.(`clawgate: task sent to CC (${project}): "${taskText.slice(0, 80)}"`);
       return { lineText, taskText };
     } else {
       const errMsg = result?.error || "unknown error";
@@ -187,13 +177,6 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, log }) {
     log?.error?.(`clawgate: failed to send task to CC (${project}): ${err}`);
     return { error: err, lineText: replyText };
   }
-}
-
-/**
- * Reset consecutive task counter for a project (called on human input or completion without task).
- */
-function resetTaskChain(project) {
-  consecutiveTaskCount.set(project, 0);
 }
 
 /**
@@ -265,8 +248,8 @@ function buildRosterPrefix() {
   if (!roster) return "";
 
   // Check if any project is in autonomous mode
-  const hasAutonomous = [...sessionModes.values()].some((m) => m === "autonomous");
-  const taskHint = hasAutonomous
+  const hasTaskCapable = [...sessionModes.values()].some((m) => m === "autonomous" || m === "auto");
+  const taskHint = hasTaskCapable
     ? `\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to LINE.`
     : "";
 
@@ -338,11 +321,6 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   const ctx = buildMsgContext(event, accountId, defaultConversation);
   const conversation = ctx.ConversationLabel;
 
-  // Human input resets all task chain counters (user is back in the loop)
-  for (const project of consecutiveTaskCount.keys()) {
-    resetTaskChain(project);
-  }
-
   log?.info?.(`clawgate: [${accountId}] inbound from "${ctx.SenderName}" in "${conversation}": "${ctx.Body?.slice(0, 80)}"`);
 
   // Record session
@@ -366,9 +344,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     log?.warn?.(`clawgate: recordInboundSession failed: ${err}`);
   }
 
-  // Find autonomous projects for potential task routing from LINE replies
-  const autonomousProjects = [...sessionModes.entries()]
-    .filter(([, m]) => m === "autonomous")
+  // Find task-capable projects (autonomous or auto) for potential task routing from LINE replies
+  const taskCapableProjects = [...sessionModes.entries()]
+    .filter(([, m]) => m === "autonomous" || m === "auto")
     .map(([p]) => p);
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
@@ -376,10 +354,10 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     const text = payload.text || payload.body || "";
     if (!text.trim()) return;
 
-    // If there are autonomous projects, try to extract <cc_task> from AI reply
-    if (autonomousProjects.length > 0) {
+    // If there are task-capable projects, try to extract <cc_task> from AI reply
+    if (taskCapableProjects.length > 0) {
       const result = await tryExtractAndSendTask({
-        replyText: text, project: autonomousProjects[0], apiUrl, log,
+        replyText: text, project: taskCapableProjects[0], apiUrl, log,
       });
       if (result) {
         if (result.error) {
@@ -480,10 +458,10 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   let taskSummary;
   if (mode === "observe") {
     taskSummary = `[OBSERVE MODE - You can comment, suggest, and give opinions, but do NOT send tasks to Claude Code]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+  } else if (mode === "auto") {
+    taskSummary = `[AUTO MODE - You are a task driver. Your ONLY job is to keep Claude Code working until everything is done.\n- If there are ANY remaining or pending tasks in the output, immediately send: <cc_task>There are still pending tasks. Continue working — do not stop until all tasks are complete.</cc_task>\n- ONLY when ALL tasks are genuinely complete, report the final result to the user on LINE.\n- Do NOT design new tasks. Do NOT add your own ideas. Just crack the whip and keep Claude Code moving.]\n\nClaude Code (${project}) output:\n\n${text}`;
   } else if (mode === "autonomous") {
-    const chainCount = consecutiveTaskCount.get(project) || 0;
-    const remaining = MAX_CONSECUTIVE_TASKS - chainCount;
-    taskSummary = `[AUTONOMOUS MODE - You may send a follow-up task to Claude Code by wrapping it in <cc_task>your task here</cc_task> tags. Only send a task when you have a clear, actionable follow-up. Do not send tasks just because you can. Your message outside the tags goes to the user on LINE. Chain: ${chainCount}/${MAX_CONSECUTIVE_TASKS} (${remaining} remaining)]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+    taskSummary = `[AUTONOMOUS MODE - You may send a follow-up task to Claude Code by wrapping it in <cc_task>your task here</cc_task> tags. Only send a task when you have a clear, actionable follow-up. Do not send tasks just because you can. Your message outside the tags goes to the user on LINE.]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
   } else {
     taskSummary = `Claude Code (${project}) completed a task:\n\n${text}`;
   }
@@ -522,8 +500,8 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     const replyText = replyPayload.text || replyPayload.body || "";
     if (!replyText.trim()) return;
 
-    // Autonomous mode: try to extract and send <cc_task>
-    if (mode === "autonomous") {
+    // Autonomous/auto mode: try to extract and send <cc_task>
+    if (mode === "autonomous" || mode === "auto") {
       const result = await tryExtractAndSendTask({
         replyText, project, apiUrl, log,
       });
@@ -550,8 +528,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         }
         return;
       }
-      // No <cc_task> found — reset chain counter and fall through to normal delivery
-      resetTaskChain(project);
+      // No <cc_task> found — fall through to normal delivery
     }
 
     // Default: forward all to LINE

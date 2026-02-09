@@ -16,7 +16,7 @@ final class TmuxAdapter: AdapterProtocol {
         self.logger = logger
     }
 
-    /// Returns the mode for a project: "ignore", "observe", or "autonomous".
+    /// Returns the mode for a project: "ignore", "observe", "auto", or "autonomous".
     private func sessionMode(for project: String) -> String {
         let modes = configStore.load().tmuxSessionModes
         return modes[project] ?? "ignore"
@@ -46,7 +46,7 @@ final class TmuxAdapter: AdapterProtocol {
 
         // Check session mode — only autonomous can send
         let mode = sessionMode(for: project)
-        guard mode == "autonomous" else {
+        guard mode == "autonomous" || mode == "auto" else {
             let errorCode = mode == "observe" ? "session_read_only" : "session_not_allowed"
             let errorMsg = mode == "observe"
                 ? "Session '\(project)' is in observe mode (read-only)"
@@ -127,7 +127,7 @@ final class TmuxAdapter: AdapterProtocol {
 
         // hasInputField = true only if any autonomous session is waiting_input
         let hasReady = filtered.contains {
-            $0.status == "waiting_input" && modes[$0.project] == "autonomous"
+            $0.status == "waiting_input" && (modes[$0.project] == "autonomous" || modes[$0.project] == "auto")
         }
 
         return ConversationContext(
