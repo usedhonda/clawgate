@@ -28,8 +28,11 @@ while true; do
   HASH=$(security find-certificate -c "$CERT_NAME" -Z "$KEYCHAIN" 2>/dev/null \
     | grep "SHA-1" | awk '{print $NF}' | head -1 || true)
   if [ -z "$HASH" ]; then break; fi
-  security delete-certificate -Z "$HASH" "$KEYCHAIN" 2>/dev/null && \
-    echo "  Deleted cert $HASH" || break
+  if security delete-certificate -Z "$HASH" "$KEYCHAIN" 2>/dev/null; then
+    echo "  Deleted cert $HASH"
+  else
+    break
+  fi
 done
 
 # Delete orphaned private keys by label

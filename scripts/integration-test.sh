@@ -137,7 +137,7 @@ else
 fi
 
 # T3.3 SSE connection
-SSE_OUTPUT=$(curl -s -N -m 3 "$BASE_URL/v1/events" 2>&1 || true)
+curl -s -N -m 3 "$BASE_URL/v1/events" >/dev/null 2>&1 || true
 # SSE always returns partial (timeout), exit code 28 is expected
 pass "T3.3 SSE connection established"
 
