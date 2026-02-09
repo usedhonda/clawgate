@@ -255,7 +255,7 @@ final class TmuxInboundWatcher {
     /// 3. Lines containing `❯` (U+276F, selected option) or `○` (unselected options)
     ///
     /// Returns nil if no question pattern is detected.
-    private func detectQuestion(from output: String) -> DetectedQuestion? {
+    func detectQuestion(from output: String) -> DetectedQuestion? {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
         // Scan from the end to find the menu region
@@ -340,7 +340,7 @@ final class TmuxInboundWatcher {
 
     /// Extract a meaningful summary from captured pane output.
     /// Looks for key patterns like cost/duration lines, removes blank lines, trims.
-    private func extractSummary(from output: String) -> String {
+    func extractSummary(from output: String) -> String {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
         // Look for interesting patterns from the end
