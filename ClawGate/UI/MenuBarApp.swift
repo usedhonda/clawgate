@@ -145,7 +145,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                 let modeSubmenu = NSMenu()
 
                 let modeOptions: [(label: String, value: String, tag: Int, symbol: String)] = [
-                    ("Autonomous", "autonomous", 2, "bolt.fill"),
+                    ("Autonomous", "autonomous", 3, "bolt.fill"),
+                    ("Simple Auto", "auto", 2, "gearshape"),
                     ("Observe", "observe", 1, "eye"),
                     ("Ignore", "ignore", 0, "minus"),
                 ]
@@ -170,6 +171,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         let name: String
         switch mode {
         case "autonomous": name = "bolt.fill"
+        case "auto": name = "gearshape"
         case "observe": name = "eye"
         default: name = "minus"
         }
@@ -182,7 +184,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         let newMode: String?
         switch sender.tag {
-        case 2: newMode = "autonomous"
+        case 3: newMode = "autonomous"
+        case 2: newMode = "auto"
         case 1: newMode = "observe"
         default: newMode = nil // ignore = remove from dict
         }

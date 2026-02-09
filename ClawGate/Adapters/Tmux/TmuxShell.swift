@@ -37,6 +37,26 @@ enum TmuxShell {
             .filter { !$0.isEmpty }
     }
 
+    /// Keys that must NEVER be sent — they exit Claude Code to raw shell.
+    private static let forbiddenKeys: Set<String> = ["C-c", "C-d", "C-z", "C-\\"]
+
+    /// Send a special key (non-literal) to a tmux pane.
+    /// Examples: "Up", "Down", "BTab", "Escape", "Enter", "y"
+    /// SECURITY: C-c, C-d, C-z, C-\ are blocked — they exit CC to raw shell.
+    @discardableResult
+    static func sendSpecialKey(target: String, key: String) throws -> String {
+        guard !forbiddenKeys.contains(key) else {
+            throw BridgeRuntimeError(
+                code: "forbidden_key",
+                message: "Key '\(key)' is forbidden — it would exit Claude Code to raw shell",
+                retriable: false,
+                failedStep: "send_special_key",
+                details: nil
+            )
+        }
+        return try run(arguments: ["send-keys", "-t", target, key])
+    }
+
     // MARK: - Private
 
     private static func run(arguments: [String]) throws -> String {

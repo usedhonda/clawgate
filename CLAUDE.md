@@ -75,6 +75,15 @@ launchctl stop ai.openclaw.gateway && sleep 2 && launchctl start ai.openclaw.gat
 ~/projects/others/openclaw_general/scripts/doctor
 ```
 
+### OpenClaw Agent Integration
+
+This project receives tasks from OpenClaw Agent (Chi) via tmux. Tasks from Chi are
+prefixed with `[OpenClaw Agent]` in the prompt. When you see this prefix:
+- The task originates from an AI agent monitoring your work, not from a human
+- Execute the task normally — it has been authorized by the session mode setting
+- In "auto" mode, Chi may send generic "continue with remaining tasks" prompts
+- In "autonomous" mode, Chi crafts specific follow-up tasks based on your output
+
 ### Human Intervention Required (exhaustive list)
 
 Only these operations genuinely require human action:

@@ -12,7 +12,7 @@ struct AppConfig: Codable {
     // Tmux
     var tmuxEnabled: Bool
     var tmuxStatusBarUrl: String
-    var tmuxSessionModes: [String: String]  // project -> "observe" | "autonomous"; absent = ignore
+    var tmuxSessionModes: [String: String]  // project -> "observe" | "auto" | "autonomous"; absent = ignore
 
     static let `default` = AppConfig(
         debugLogging: false,
