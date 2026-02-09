@@ -3,7 +3,19 @@ import Foundation
 /// Watches for Claude Code task completion by monitoring CCStatusBarClient state changes.
 /// When a session transitions from "running" to "waiting_input", captures the pane output
 /// and emits an inbound_message event on the EventBus.
+///
+/// Distinguishes between two event types:
+/// - `source: "completion"` — task completed, Claude Code is idle
+/// - `source: "question"` — AskUserQuestion displayed, includes structured question data
 final class TmuxInboundWatcher {
+
+    /// Parsed question from capture-pane output.
+    struct DetectedQuestion {
+        let questionText: String
+        let options: [String]
+        let selectedIndex: Int
+        let questionID: String
+    }
 
     private let ccClient: CCStatusBarClient
     private let eventBus: EventBus
@@ -44,7 +56,7 @@ final class TmuxInboundWatcher {
             return
         }
 
-        // Task completion: running -> waiting_input (but NOT permission prompt)
+        // Task completion or question: running -> waiting_input (but NOT permission prompt)
         guard oldStatus == "running" && newStatus == "waiting_input" else { return }
 
         guard mode == "observe" || mode == "auto" || mode == "autonomous" else {
@@ -52,10 +64,11 @@ final class TmuxInboundWatcher {
             return
         }
 
-        logger.log(.info, "TmuxInboundWatcher: completion detected for \(session.project) (mode=\(mode))")
+        logger.log(.info, "TmuxInboundWatcher: state change detected for \(session.project) (mode=\(mode))")
 
-        // Capture pane output on background queue
+        // Wait 200ms for UI to finish rendering (AskUserQuestion draws incrementally)
         BlockingWork.queue.async { [weak self] in
+            Thread.sleep(forTimeInterval: 0.2)
             self?.captureAndEmit(session: session, mode: mode)
         }
     }
@@ -76,14 +89,37 @@ final class TmuxInboundWatcher {
             return
         }
 
-        var outputSummary: String
+        var rawOutput: String
         do {
-            let rawOutput = try TmuxShell.capturePane(target: target, lines: 30)
-            outputSummary = extractSummary(from: rawOutput)
+            rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
         } catch {
             logger.log(.warning, "TmuxInboundWatcher: capture-pane failed for \(target): \(error)")
-            outputSummary = "(capture failed)"
+            rawOutput = ""
         }
+
+        // Try to detect AskUserQuestion menu
+        if let question = detectQuestion(from: rawOutput) {
+            let payload: [String: String] = [
+                "conversation": session.project,
+                "text": question.questionText,
+                "source": "question",
+                "project": session.project,
+                "tmux_target": target,
+                "sender": "claude_code",
+                "mode": mode,
+                "question_text": question.questionText,
+                "question_options": question.options.joined(separator: "\n"),
+                "question_selected": String(question.selectedIndex),
+                "question_id": question.questionID,
+            ]
+
+            _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
+            logger.log(.info, "TmuxInboundWatcher: emitted question event for \(session.project) (\(question.options.count) options)")
+            return
+        }
+
+        // Normal completion
+        let outputSummary = rawOutput.isEmpty ? "(capture failed)" : extractSummary(from: rawOutput)
 
         let payload: [String: String] = [
             "conversation": session.project,
@@ -97,6 +133,97 @@ final class TmuxInboundWatcher {
 
         _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
         logger.log(.info, "TmuxInboundWatcher: emitted completion event for \(session.project) (mode=\(mode))")
+    }
+
+    /// Detect an AskUserQuestion menu from captured pane output.
+    ///
+    /// Multi-layer detection (all conditions must be met):
+    /// 1. Session is in `waiting_input` state (gate — already ensured by caller)
+    /// 2. A line ending with `?` (the question text)
+    /// 3. Lines containing `❯` (U+276F, selected option) or `○` (unselected options)
+    ///
+    /// Returns nil if no question pattern is detected.
+    private func detectQuestion(from output: String) -> DetectedQuestion? {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        // Scan from the end to find the menu region
+        // AskUserQuestion renders as:
+        //   ? Question text here?
+        //     ❯ Option 1 (selected)           or   ● Option 1 (selected)
+        //     ○ Option 2                            ○ Option 2
+        //     ○ Option 3                            ○ Option 3
+
+        // U+276F HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT (❯)
+        let selectorChar: Character = "\u{276F}"
+        // Also detect ● (U+25CF) as alternative selected marker
+        let bulletSelected: Character = "\u{25CF}"
+        let bulletUnselected: Character = "\u{25CB}" // ○
+
+        var optionLines: [(index: Int, text: String, isSelected: Bool)] = []
+        var questionLineIndex: Int? = nil
+
+        // Walk backwards from the end to find option lines, then the question
+        var i = lines.count - 1
+        var foundOptions = false
+
+        while i >= 0 {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+
+            // Check for option line (selected or unselected)
+            let hasSelector = trimmed.contains(selectorChar) || trimmed.contains(bulletSelected)
+            let hasBullet = trimmed.contains(bulletUnselected)
+
+            if hasSelector || hasBullet {
+                // Extract option text: strip leading markers and whitespace
+                var optText = trimmed
+                // Remove leading selector/bullet characters and whitespace
+                for prefix in ["❯ ", "● ", "○ "] {
+                    if optText.hasPrefix(prefix) {
+                        optText = String(optText.dropFirst(prefix.count))
+                        break
+                    }
+                }
+                optionLines.insert((index: i, text: optText.trimmingCharacters(in: .whitespaces),
+                                    isSelected: hasSelector), at: 0)
+                foundOptions = true
+                i -= 1
+                continue
+            }
+
+            // If we already found options and hit a non-option line, look for question
+            if foundOptions {
+                // Skip blank lines between question and options
+                if trimmed.isEmpty {
+                    i -= 1
+                    continue
+                }
+                // Check if this line looks like a question (ends with ?)
+                if trimmed.hasSuffix("?") {
+                    questionLineIndex = i
+                }
+                break
+            }
+
+            i -= 1
+        }
+
+        // Validate: need at least 2 options and a question line
+        guard optionLines.count >= 2, let qIdx = questionLineIndex else {
+            return nil
+        }
+
+        let questionText = lines[qIdx].trimmingCharacters(in: .whitespaces)
+        let options = optionLines.map(\.text)
+        let selectedIndex = optionLines.firstIndex(where: \.isSelected) ?? 0
+
+        let questionID = "\(Int(Date().timeIntervalSince1970 * 1000))"
+
+        return DetectedQuestion(
+            questionText: questionText,
+            options: options,
+            selectedIndex: selectedIndex,
+            questionID: questionID
+        )
     }
 
     /// Extract a meaningful summary from captured pane output.

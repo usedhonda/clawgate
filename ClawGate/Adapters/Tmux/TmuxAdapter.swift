@@ -98,16 +98,33 @@ final class TmuxAdapter: AdapterProtocol {
         stepLogger.record(step: "check_status", start: start2, success: true,
                           details: "status=waiting_input")
 
-        // Step 3: Send keys
+        // Step 3: Send keys (or menu selection)
         let start3 = Date()
-        do {
-            try TmuxShell.sendKeys(target: target, text: payload.text, enter: payload.enterToSend)
-            stepLogger.record(step: "send_keys", start: start3, success: true,
-                              details: "target=\(target) enter=\(payload.enterToSend)")
-        } catch {
-            stepLogger.record(step: "send_keys", start: start3, success: false,
-                              details: "\(error)")
-            throw error
+
+        // Detect __cc_select:N prefix for AskUserQuestion menu navigation
+        if let selectRange = payload.text.range(of: #"^__cc_select:(\d+)$"#, options: .regularExpression) {
+            let indexStr = payload.text[selectRange].split(separator: ":").last.map(String.init) ?? "0"
+            let optionIndex = Int(indexStr) ?? 0
+
+            do {
+                try sendMenuSelect(target: target, optionIndex: optionIndex)
+                stepLogger.record(step: "menu_select", start: start3, success: true,
+                                  details: "target=\(target) option=\(optionIndex)")
+            } catch {
+                stepLogger.record(step: "menu_select", start: start3, success: false,
+                                  details: "\(error)")
+                throw error
+            }
+        } else {
+            do {
+                try TmuxShell.sendKeys(target: target, text: payload.text, enter: payload.enterToSend)
+                stepLogger.record(step: "send_keys", start: start3, success: true,
+                                  details: "target=\(target) enter=\(payload.enterToSend)")
+            } catch {
+                stepLogger.record(step: "send_keys", start: start3, success: false,
+                                  details: "\(error)")
+                throw error
+            }
         }
 
         let result = SendResult(
@@ -166,6 +183,67 @@ final class TmuxAdapter: AdapterProtocol {
             messageCount: messages.count,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
+    }
+
+    /// Navigate an AskUserQuestion menu and select an option by index.
+    ///
+    /// Strategy:
+    /// 1. Capture pane to detect current selected position (look for ❯ or ●)
+    /// 2. Calculate delta from current position to target index
+    /// 3. Send Up/Down keys to navigate, then Enter to confirm
+    /// Fallback: if detection fails, press Up×20 (go to top) then Down×N
+    private func sendMenuSelect(target: String, optionIndex: Int) throws {
+        let keyDelay: TimeInterval = 0.05  // 50ms between keys
+
+        // Try to detect current selection from pane output
+        var currentIndex: Int? = nil
+        if let paneOutput = try? TmuxShell.capturePane(target: target, lines: 50) {
+            let lines = paneOutput.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            var optIdx = 0
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                let hasSelector = trimmed.contains("\u{276F}") || trimmed.contains("\u{25CF}")
+                let hasBullet = trimmed.contains("\u{25CB}")
+                if hasSelector {
+                    currentIndex = optIdx
+                    optIdx += 1
+                } else if hasBullet {
+                    optIdx += 1
+                }
+            }
+        }
+
+        if let current = currentIndex {
+            // Smart navigation: move exactly the needed steps
+            let delta = optionIndex - current
+            if delta > 0 {
+                for _ in 0..<delta {
+                    try TmuxShell.sendSpecialKey(target: target, key: "Down")
+                    Thread.sleep(forTimeInterval: keyDelay)
+                }
+            } else if delta < 0 {
+                for _ in 0..<(-delta) {
+                    try TmuxShell.sendSpecialKey(target: target, key: "Up")
+                    Thread.sleep(forTimeInterval: keyDelay)
+                }
+            }
+        } else {
+            // Fallback: go to top, then navigate down to target
+            for _ in 0..<20 {
+                try TmuxShell.sendSpecialKey(target: target, key: "Up")
+                Thread.sleep(forTimeInterval: keyDelay)
+            }
+            for _ in 0..<optionIndex {
+                try TmuxShell.sendSpecialKey(target: target, key: "Down")
+                Thread.sleep(forTimeInterval: keyDelay)
+            }
+        }
+
+        // Confirm selection
+        Thread.sleep(forTimeInterval: keyDelay)
+        try TmuxShell.sendSpecialKey(target: target, key: "Enter")
+
+        logger.log(.info, "TmuxAdapter: menu select option \(optionIndex) on \(target)")
     }
 
     func getConversations(limit: Int) throws -> ConversationList {

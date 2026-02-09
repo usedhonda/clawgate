@@ -123,9 +123,10 @@ export function markContextSent(project, hash) {
  * Uses pathCache to list projects we've seen.
  * @param {Map<string, string>} [sessionModes] — project -> mode mapping
  * @param {Map<string, string>} [sessionStatuses] — project -> status mapping
+ * @param {Map<string, { questionText: string }>} [pendingQuestions] — project -> pending question
  * @returns {string}
  */
-export function getProjectRoster(sessionModes, sessionStatuses) {
+export function getProjectRoster(sessionModes, sessionStatuses, pendingQuestions) {
   if (pathCache.size === 0) return "";
 
   const projects = [];
@@ -134,7 +135,9 @@ export function getProjectRoster(sessionModes, sessionStatuses) {
     // Only include observe/autonomous projects in roster
     if (mode === "ignore") continue;
     const status = sessionStatuses?.get(name) || "unknown";
-    projects.push({ name, path, mode, status });
+    const pending = pendingQuestions?.get(name);
+    const pendingQuestion = pending ? pending.questionText : undefined;
+    projects.push({ name, path, mode, status, pendingQuestion });
   }
 
   if (!projects.length) return "";

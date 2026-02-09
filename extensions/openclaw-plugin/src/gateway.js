@@ -139,6 +139,13 @@ function recordInbound(eventText) {
   recentInbounds.push({ fingerprint: eventFingerprint(eventText), time: Date.now() });
 }
 
+// ── Pending questions tracking ────────────────────────────────
+// Tracks AskUserQuestion menus displayed in Claude Code sessions.
+// Used by roster and answer routing.
+
+/** @type {Map<string, { questionText: string, questionId: string, options: string[], selectedIndex: number }>} */
+const pendingQuestions = new Map();
+
 // ── Autonomous task chaining ──────────────────────────────────
 
 /**
@@ -175,6 +182,59 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, log }) {
     }
   } catch (err) {
     log?.error?.(`clawgate: failed to send task to CC (${project}): ${err}`);
+    return { error: err, lineText: replyText };
+  }
+}
+
+/**
+ * Extract <cc_answer> from AI reply and send menu selection to Claude Code.
+ * Returns null if no answer tag found.
+ * @param {object} params
+ * @param {string} params.replyText — full AI reply text
+ * @param {string} params.apiUrl
+ * @param {object} [params.log]
+ * @returns {Promise<{lineText: string, answerIndex: number} | {error: Error, lineText: string} | null>}
+ */
+async function tryExtractAndSendAnswer({ replyText, apiUrl, log }) {
+  const answerMatch = replyText.match(/<cc_answer\s+project="([^"]+)">([\s\S]*?)<\/cc_answer>/);
+  if (!answerMatch) return null;
+
+  const project = answerMatch[1].trim();
+  const answerBody = answerMatch[2].trim();
+
+  // Parse answer index — expect a number (0-based or 1-based)
+  const answerIndex = parseInt(answerBody, 10);
+  if (isNaN(answerIndex)) {
+    log?.warn?.(`clawgate: cc_answer index is not a number: "${answerBody}"`);
+    return null;
+  }
+
+  // Convert to 0-based if user sends 1-based
+  const zeroBasedIndex = answerIndex >= 1 ? answerIndex - 1 : answerIndex;
+
+  const lineText = replyText.replace(/<cc_answer\s+project="[^"]*">[\s\S]*?<\/cc_answer>/, "").trim();
+
+  // Verify the question is still pending
+  const pending = pendingQuestions.get(project);
+  if (!pending) {
+    log?.warn?.(`clawgate: no pending question for project "${project}", answer may be stale`);
+  }
+
+  const selectCmd = `__cc_select:${zeroBasedIndex}`;
+
+  try {
+    const result = await clawgateTmuxSend(apiUrl, project, selectCmd);
+    if (result?.ok) {
+      log?.info?.(`clawgate: answer sent to CC (${project}): option ${zeroBasedIndex}`);
+      pendingQuestions.delete(project);
+      return { lineText, answerIndex: zeroBasedIndex };
+    } else {
+      const errMsg = result?.error || "unknown error";
+      log?.error?.(`clawgate: failed to send answer to CC (${project}): ${errMsg}`);
+      return { error: new Error(errMsg), lineText: replyText };
+    }
+  } catch (err) {
+    log?.error?.(`clawgate: failed to send answer to CC (${project}): ${err}`);
     return { error: err, lineText: replyText };
   }
 }
@@ -244,7 +304,7 @@ function buildLocationPrefix() {
  * @returns {string}
  */
 function buildRosterPrefix() {
-  const roster = getProjectRoster(sessionModes, sessionStatuses);
+  const roster = getProjectRoster(sessionModes, sessionStatuses, pendingQuestions);
   if (!roster) return "";
 
   // Check if any project is in autonomous mode
@@ -253,7 +313,13 @@ function buildRosterPrefix() {
     ? `\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to LINE.`
     : "";
 
-  return `[Active Claude Code Projects]\n${roster}${taskHint}`;
+  // Check for pending questions
+  const hasQuestions = pendingQuestions.size > 0;
+  const answerHint = hasQuestions
+    ? `\nTo answer a pending question, include <cc_answer project="name">{option number}</cc_answer> in your reply.`
+    : "";
+
+  return `[Active Claude Code Projects]\n${roster}${taskHint}${answerHint}`;
 }
 
 /**
@@ -354,6 +420,18 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     const text = payload.text || payload.body || "";
     if (!text.trim()) return;
 
+    // Try to extract <cc_answer> first (from AI reply to question)
+    const answerResult = await tryExtractAndSendAnswer({ replyText: text, apiUrl, log });
+    if (answerResult) {
+      if (answerResult.error) {
+        const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
+        try { await clawgateSend(apiUrl, conversation, msg); recordPluginSend(msg); } catch {}
+      } else if (answerResult.lineText) {
+        try { await clawgateSend(apiUrl, conversation, answerResult.lineText); recordPluginSend(answerResult.lineText); } catch {}
+      }
+      return;
+    }
+
     // If there are task-capable projects, try to extract <cc_task> from AI reply
     if (taskCapableProjects.length > 0) {
       const result = await tryExtractAndSendTask({
@@ -410,6 +488,136 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 }
 
 /**
+ * Handle a tmux question event: Claude Code is displaying an AskUserQuestion menu.
+ * Dispatches the question + options to AI, which can answer via <cc_answer>.
+ * @param {object} params
+ */
+async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
+  const runtime = getRuntime();
+  const payload = event.payload ?? {};
+  const project = payload.project || payload.conversation || "unknown";
+  const questionText = payload.question_text || payload.text || "(no question)";
+  const optionsRaw = payload.question_options || "";
+  const selectedIndex = parseInt(payload.question_selected || "0", 10);
+  const questionId = payload.question_id || String(Date.now());
+  const mode = payload.mode || "autonomous";
+  const tmuxTarget = payload.tmux_target || "";
+
+  // Track session state
+  sessionModes.set(project, mode);
+  sessionStatuses.set(project, "waiting_input");
+
+  // Track pending question
+  const options = optionsRaw.split("\n").filter(Boolean);
+  pendingQuestions.set(project, { questionText, questionId, options, selectedIndex });
+
+  if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
+
+  // Format numbered options for Chi
+  const numberedOptions = options.map((opt, i) => {
+    const marker = i === selectedIndex ? ">>>" : "   ";
+    return `${marker} ${i + 1}. ${opt}`;
+  }).join("\n");
+
+  const body = `[Claude Code (${project}) is asking a question]\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
+
+  const ctx = {
+    Body: body,
+    RawBody: body,
+    CommandBody: body,
+    From: `tmux:${project}`,
+    To: `clawgate:${accountId}`,
+    SessionKey: `clawgate:${accountId}:tmux:${project}`,
+    AccountId: accountId,
+    ChatType: "direct",
+    Provider: "clawgate",
+    Surface: "clawgate",
+    ConversationLabel: defaultConversation || project,
+    SenderName: `Claude Code (${project})`,
+    SenderId: `tmux:${project}`,
+    MessageSid: String(event.id ?? Date.now()),
+    Timestamp: event.observed_at ? Date.parse(event.observed_at) : Date.now(),
+    CommandAuthorized: true,
+    OriginatingChannel: "clawgate",
+    OriginatingTo: defaultConversation || project,
+    _clawgateSource: "tmux_question",
+    _tmuxMode: mode,
+  };
+
+  log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options)`);
+
+  // Deliver reply — parse <cc_answer> and route answer, or forward to LINE
+  const deliver = async (replyPayload) => {
+    const replyText = replyPayload.text || replyPayload.body || "";
+    if (!replyText.trim()) return;
+
+    // Try to extract <cc_answer> first
+    const answerResult = await tryExtractAndSendAnswer({ replyText, apiUrl, log });
+    if (answerResult) {
+      if (answerResult.error) {
+        const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
+        try {
+          await clawgateSend(apiUrl, defaultConversation || project, msg);
+          recordPluginSend(msg);
+        } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
+        }
+      } else if (answerResult.lineText) {
+        try {
+          await clawgateSend(apiUrl, defaultConversation || project, answerResult.lineText);
+          recordPluginSend(answerResult.lineText);
+        } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
+        }
+      }
+      return;
+    }
+
+    // No <cc_answer> — try <cc_task> fallback (autonomous mode)
+    if (mode === "autonomous" || mode === "auto") {
+      const taskResult = await tryExtractAndSendTask({ replyText, project, apiUrl, log });
+      if (taskResult) {
+        if (taskResult.error) {
+          const msg = `[Task send failed: ${taskResult.error.message || taskResult.error}]\n\n${taskResult.lineText}`;
+          try { await clawgateSend(apiUrl, defaultConversation || project, msg); recordPluginSend(msg); } catch {}
+        } else if (taskResult.lineText) {
+          try { await clawgateSend(apiUrl, defaultConversation || project, taskResult.lineText); recordPluginSend(taskResult.lineText); } catch {}
+        }
+        return;
+      }
+    }
+
+    // Default: forward to LINE
+    log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${replyText.slice(0, 80)}"`);
+    try {
+      await clawgateSend(apiUrl, defaultConversation || project, replyText);
+      recordPluginSend(replyText);
+    } catch (err) {
+      log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
+    }
+  };
+
+  try {
+    const dispatch = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
+    if (dispatch) {
+      await dispatch({
+        ctx,
+        cfg,
+        dispatcherOptions: {
+          deliver,
+          humanDelay: { mode: "off" },
+          onError: (err) => log?.error?.(`clawgate: question dispatch error: ${err}`),
+        },
+      });
+    } else {
+      log?.error?.("clawgate: dispatchReplyWithBufferedBlockDispatcher not found on runtime");
+    }
+  } catch (err) {
+    log?.error?.(`clawgate: [${accountId}] question dispatch failed: ${err}`);
+  }
+}
+
+/**
  * Handle a tmux completion event: Claude Code finished a task.
  * Dispatches the completion summary to AI, which then reports to LINE.
  * @param {object} params
@@ -425,6 +633,9 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Track session state for roster
   sessionModes.set(project, mode);
   sessionStatuses.set(project, "waiting_input");
+
+  // Clear any pending question (completion means question was answered or session moved on)
+  pendingQuestions.delete(project);
 
   // Resolve project path and register for roster
   if (tmuxTarget) {
@@ -645,6 +856,16 @@ export async function startAccount(ctx) {
             if (event.payload.mode) sessionModes.set(proj, event.payload.mode);
             if (event.payload.status) sessionStatuses.set(proj, event.payload.status);
             if (tmuxTgt) resolveProjectPath(proj, tmuxTgt);
+          }
+
+          // Handle tmux question events (AskUserQuestion)
+          if (event.adapter === "tmux" && event.payload?.source === "question") {
+            try {
+              await handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log });
+            } catch (err) {
+              log?.error?.(`clawgate: [${accountId}] handleTmuxQuestion failed: ${err}`);
+            }
+            continue;
           }
 
           // Handle tmux completion events separately
