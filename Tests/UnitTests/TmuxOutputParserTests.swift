@@ -10,7 +10,7 @@ final class TmuxOutputParserTests: XCTestCase {
         defaults.removePersistentDomain(forName: "clawgate.tests.tmux-parser")
         let cfg = ConfigStore(defaults: defaults)
         let logger = AppLogger(configStore: cfg)
-        let ccClient = CCStatusBarClient(url: "ws://localhost:0/unused", logger: logger)
+        let ccClient = CCStatusBarClient(logger: logger, urlString: "ws://localhost:0/unused")
         return TmuxInboundWatcher(ccClient: ccClient, eventBus: EventBus(), logger: logger, configStore: cfg)
     }
 
