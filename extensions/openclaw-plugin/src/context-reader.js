@@ -322,9 +322,9 @@ export function buildProjectContext(projectPath) {
 
 /**
  * Build a compact project roster for LINE messages.
- * One line per project, ~200 chars total.
+ * One line per project, ~200 chars total. Running projects show latest output.
  *
- * @param {{ name: string, path: string, mode: string, status?: string, pendingQuestion?: string }[]} projects
+ * @param {{ name: string, path: string, mode: string, status?: string, pendingQuestion?: string, progressText?: string }[]} projects
  * @returns {string}
  */
 export function buildProjectRoster(projects) {
@@ -336,7 +336,10 @@ export function buildProjectRoster(projects) {
     const asking = p.pendingQuestion
       ? ` [ASKING: ${p.pendingQuestion.slice(0, 30)}]`
       : "";
-    return `- ${p.name} (${branch}) [${p.mode}] ${status}${asking}`;
+    const progress = p.progressText
+      ? `\n  Latest output:\n  ${p.progressText.split("\n").slice(-5).join("\n  ")}`
+      : "";
+    return `- ${p.name} (${branch}) [${p.mode}] ${status}${asking}${progress}`;
   });
 
   return lines.join("\n");

@@ -31,6 +31,9 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     /// Callback: (session, oldStatus, newStatus)
     var onStateChange: ((CCSession, String, String) -> Void)?
 
+    /// Callback: session detached (for auto-ignore). (session)
+    var onSessionDetached: ((CCSession) -> Void)?
+
     /// Callback: fired when the sessions dictionary is updated (for UI refresh)
     var onSessionsChanged: (() -> Void)?
 
@@ -171,36 +174,49 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
         switch type {
         case "sessions.list":
-            // Initial full session list
+            // Initial full session list — only include attached sessions
             guard let sessions = json["sessions"] as? [[String: Any]] else { return }
             lock.lock()
             _sessions.removeAll()
             for s in sessions {
-                if let session = parseSession(s) {
+                if let session = parseSession(s), session.isAttached {
                     _sessions[session.id] = session
                 }
             }
             lock.unlock()
-            logger.log(.info, "CCStatusBarClient: received \(_sessions.count) sessions")
+            logger.log(.info, "CCStatusBarClient: received \(_sessions.count) attached sessions")
             onSessionsChanged?()
 
         case "session.updated":
             guard let sessionData = json["session"] as? [String: Any],
                   let session = parseSession(sessionData) else { return }
-            lock.lock()
-            let oldStatus = _sessions[session.id]?.status ?? "unknown"
-            _sessions[session.id] = session
-            lock.unlock()
 
-            if oldStatus != session.status {
-                logger.log(.info, "CCStatusBarClient: \(session.project) status \(oldStatus) -> \(session.status)")
-                onStateChange?(session, oldStatus, session.status)
+            if session.isAttached {
+                lock.lock()
+                let oldStatus = _sessions[session.id]?.status ?? "unknown"
+                _sessions[session.id] = session
+                lock.unlock()
+
+                if oldStatus != session.status {
+                    logger.log(.info, "CCStatusBarClient: \(session.project) status \(oldStatus) -> \(session.status)")
+                    onStateChange?(session, oldStatus, session.status)
+                }
+            } else {
+                // Detached: remove from sessions and notify
+                lock.lock()
+                let removed = _sessions.removeValue(forKey: session.id)
+                lock.unlock()
+                if removed != nil {
+                    logger.log(.info, "CCStatusBarClient: \(session.project) detached, removing")
+                    onSessionDetached?(session)
+                }
             }
             onSessionsChanged?()
 
         case "session.added":
             guard let sessionData = json["session"] as? [String: Any],
-                  let session = parseSession(sessionData) else { return }
+                  let session = parseSession(sessionData),
+                  session.isAttached else { return }
             lock.lock()
             _sessions[session.id] = session
             lock.unlock()

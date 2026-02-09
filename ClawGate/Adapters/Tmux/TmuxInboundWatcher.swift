@@ -22,6 +22,11 @@ final class TmuxInboundWatcher {
     private let logger: AppLogger
     private let configStore: ConfigStore
 
+    // Progress timer — emits running session output periodically
+    private var progressTimer: DispatchSourceTimer?
+    private var lastProgressHash: [String: Int] = [:]
+    private let progressInterval: TimeInterval = 20
+
     init(ccClient: CCStatusBarClient, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
         self.ccClient = ccClient
         self.eventBus = eventBus
@@ -33,11 +38,13 @@ final class TmuxInboundWatcher {
         ccClient.onStateChange = { [weak self] session, oldStatus, newStatus in
             self?.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus)
         }
+        startProgressTimer()
         logger.log(.info, "TmuxInboundWatcher: started")
     }
 
     func stop() {
         ccClient.onStateChange = nil
+        stopProgressTimer()
         logger.log(.info, "TmuxInboundWatcher: stopped")
     }
 
@@ -83,6 +90,101 @@ final class TmuxInboundWatcher {
         }
     }
 
+    // MARK: - Progress Timer
+
+    private func startProgressTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: BlockingWork.queue)
+        timer.schedule(deadline: .now() + progressInterval, repeating: progressInterval)
+        timer.setEventHandler { [weak self] in
+            self?.emitProgressForRunningSessions()
+        }
+        timer.resume()
+        progressTimer = timer
+    }
+
+    private func stopProgressTimer() {
+        progressTimer?.cancel()
+        progressTimer = nil
+    }
+
+    private func emitProgressForRunningSessions() {
+        let config = configStore.load()
+        let sessions = ccClient.allSessions()
+
+        for session in sessions {
+            guard session.status == "running" else { continue }
+
+            let mode = config.tmuxSessionModes[session.project] ?? "ignore"
+            guard mode != "ignore" else { continue }
+
+            guard let target = session.tmuxTarget else { continue }
+
+            do {
+                let rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
+                let hash = rawOutput.hashValue
+
+                if let lastHash = lastProgressHash[session.project], lastHash == hash {
+                    continue // No change
+                }
+                lastProgressHash[session.project] = hash
+
+                let summary = extractSummary(from: rawOutput)
+                let payload: [String: String] = [
+                    "conversation": session.project,
+                    "text": summary,
+                    "source": "progress",
+                    "project": session.project,
+                    "tmux_target": target,
+                    "sender": "claude_code",
+                    "mode": mode,
+                ]
+
+                _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
+                logger.log(.debug, "TmuxInboundWatcher: emitted progress for \(session.project)")
+            } catch {
+                logger.log(.debug, "TmuxInboundWatcher: progress capture failed for \(session.project): \(error)")
+            }
+        }
+    }
+
+    // MARK: - Auto-Answer (auto mode)
+
+    private func autoAnswerQuestion(session: CCStatusBarClient.CCSession,
+                                    question: DetectedQuestion, target: String) {
+        let keywords = ["(recommended)", "don't ask", "always", "yes", "ok", "proceed", "approve"]
+        let keyDelay: TimeInterval = 0.05
+
+        // Find best affirmative option (0-indexed)
+        var bestIndex = 0
+        for (i, option) in question.options.enumerated() {
+            let lower = option.lowercased()
+            if keywords.contains(where: { lower.contains($0) }) {
+                bestIndex = i
+                break
+            }
+        }
+
+        let delta = bestIndex - question.selectedIndex
+        do {
+            if delta > 0 {
+                for _ in 0..<delta {
+                    try TmuxShell.sendSpecialKey(target: target, key: "Down")
+                    Thread.sleep(forTimeInterval: keyDelay)
+                }
+            } else if delta < 0 {
+                for _ in 0..<(-delta) {
+                    try TmuxShell.sendSpecialKey(target: target, key: "Up")
+                    Thread.sleep(forTimeInterval: keyDelay)
+                }
+            }
+            try TmuxShell.sendSpecialKey(target: target, key: "Enter")
+            logger.log(.info, "TmuxInboundWatcher: auto-answered for \(session.project): "
+                        + "option[\(bestIndex)]=\(question.options[bestIndex])")
+        } catch {
+            logger.log(.warning, "TmuxInboundWatcher: auto-answer failed: \(error)")
+        }
+    }
+
     private func captureAndEmit(session: CCStatusBarClient.CCSession, mode: String) {
         guard let target = session.tmuxTarget else {
             logger.log(.warning, "TmuxInboundWatcher: no tmux target for \(session.project)")
@@ -99,6 +201,13 @@ final class TmuxInboundWatcher {
 
         // Try to detect AskUserQuestion menu
         if let question = detectQuestion(from: rawOutput) {
+            // Auto mode: answer locally without sending to Chi
+            if mode == "auto" {
+                autoAnswerQuestion(session: session, question: question, target: target)
+                return
+            }
+
+            // observe/autonomous: send to Chi via EventBus
             let payload: [String: String] = [
                 "conversation": session.project,
                 "text": question.questionText,
@@ -117,6 +226,9 @@ final class TmuxInboundWatcher {
             logger.log(.info, "TmuxInboundWatcher: emitted question event for \(session.project) (\(question.options.count) options)")
             return
         }
+
+        // Clear progress hash on completion (session finished)
+        lastProgressHash.removeValue(forKey: session.project)
 
         // Normal completion
         let outputSummary = rawOutput.isEmpty ? "(capture failed)" : extractSummary(from: rawOutput)

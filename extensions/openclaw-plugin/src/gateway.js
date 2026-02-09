@@ -34,6 +34,8 @@ import {
   invalidateProject,
   registerProjectPath,
   resolveProjectPath,
+  setProgressSnapshot,
+  clearProgressSnapshot,
 } from "./context-cache.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
@@ -637,6 +639,9 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Clear any pending question (completion means question was answered or session moved on)
   pendingQuestions.delete(project);
 
+  // Clear progress snapshot (task is done)
+  clearProgressSnapshot(project);
+
   // Resolve project path and register for roster
   if (tmuxTarget) {
     resolveProjectPath(project, tmuxTarget);
@@ -856,6 +861,13 @@ export async function startAccount(ctx) {
             if (event.payload.mode) sessionModes.set(proj, event.payload.mode);
             if (event.payload.status) sessionStatuses.set(proj, event.payload.status);
             if (tmuxTgt) resolveProjectPath(proj, tmuxTgt);
+          }
+
+          // Handle tmux progress events (output during running) — store only, don't dispatch to AI
+          if (event.adapter === "tmux" && event.payload?.source === "progress") {
+            setProgressSnapshot(event.payload.project, event.payload.text || "");
+            sessionStatuses.set(event.payload.project, "running");
+            continue;
           }
 
           // Handle tmux question events (AskUserQuestion)
