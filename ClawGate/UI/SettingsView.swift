@@ -1,63 +1,71 @@
 import SwiftUI
 
-struct SettingsView: View {
-    @State private var config: AppConfig
-
+final class SettingsModel: ObservableObject {
     private let configStore: ConfigStore
+    @Published var config: AppConfig
 
     init(configStore: ConfigStore) {
         self.configStore = configStore
-        self._config = State(initialValue: configStore.load())
+        self.config = configStore.load()
     }
 
+    func reload() { config = configStore.load() }
+    func save() { configStore.save(config) }
+}
+
+struct InlineSettingsView: View {
+    @ObservedObject var model: SettingsModel
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("ClawGate Settings")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("General")
 
-            GroupBox(label: Text("General")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Debug Logging", isOn: $config.debugLogging)
-                    Toggle("Include Message Body in Logs", isOn: $config.includeMessageBodyInLogs)
-                }
-                .padding(.vertical, 4)
-            }
+            Toggle("Debug Logging", isOn: $model.config.debugLogging)
+            Toggle("Include Message Body", isOn: $model.config.includeMessageBodyInLogs)
 
-            GroupBox(label: Text("LINE")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Default Conversation:")
-                        TextField("e.g. John Doe", text: $config.lineDefaultConversation)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    Stepper("Poll Interval: \(config.linePollIntervalSeconds)s", value: $config.linePollIntervalSeconds, in: 1...30)
-                }
-                .padding(.vertical, 4)
-            }
-
-            GroupBox(label: Text("Tmux")) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Enabled", isOn: $config.tmuxEnabled)
-                    HStack {
-                        Text("Status Bar URL:")
-                        TextField("ws://localhost:8080/ws/sessions", text: $config.tmuxStatusBarUrl)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                    Text("Session selection is in the menu bar submenu.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .padding(.vertical, 4)
-            }
+            Divider()
+            sectionHeader("LINE")
 
             HStack {
-                Spacer()
-                Button("Save") {
-                    configStore.save(config)
-                }
+                Text("Conversation:")
+                    .font(.system(size: 11))
+                TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+            }
+
+            Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
+                    value: $model.config.linePollIntervalSeconds, in: 1...30)
+
+            Divider()
+            sectionHeader("Tmux")
+
+            Toggle("Enabled", isOn: $model.config.tmuxEnabled)
+
+            HStack {
+                Text("URL:")
+                    .font(.system(size: 11))
+                TextField("ws://...", text: $model.config.tmuxStatusBarUrl)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
             }
         }
-        .padding(16)
-        .frame(width: 560)
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .padding(12)
+        .frame(width: 280)
+        .onChange(of: model.config.debugLogging) { _ in model.save() }
+        .onChange(of: model.config.includeMessageBodyInLogs) { _ in model.save() }
+        .onChange(of: model.config.lineDefaultConversation) { _ in model.save() }
+        .onChange(of: model.config.linePollIntervalSeconds) { _ in model.save() }
+        .onChange(of: model.config.tmuxEnabled) { _ in model.save() }
+        .onChange(of: model.config.tmuxStatusBarUrl) { _ in model.save() }
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(.secondary)
+            .textCase(.uppercase)
     }
 }

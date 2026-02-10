@@ -1,11 +1,11 @@
 import AppKit
 import SwiftUI
 
-final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
+final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
-    private var settingsWindow: NSWindow?
     private var qrCodeWindow: NSWindow?
     private var ccSessionsMenu: NSMenu?
+    private var settingsSubmenu: NSMenu?
     private var todayStatsItem: NSMenuItem?
     private var timelineSeparatorItem: NSMenuItem?
     private var recentEventItems: [NSMenuItem] = []
@@ -13,10 +13,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
     private let runtime: AppRuntime
     private let statsCollector: StatsCollector
+    private let settingsModel: SettingsModel
 
     init(runtime: AppRuntime, statsCollector: StatsCollector) {
         self.runtime = runtime
         self.statsCollector = statsCollector
+        self.settingsModel = SettingsModel(configStore: runtime.configStore)
         super.init()
     }
 
@@ -65,8 +67,16 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        let settingsItem = NSMenuItem(title: "Settings", action: #selector(openSettings), keyEquivalent: ",")
-        settingsItem.target = self
+        let settingsItem = NSMenuItem(title: "Settings", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu(title: "Settings")
+        let settingsViewItem = NSMenuItem()
+        let hostingView = NSHostingView(rootView: InlineSettingsView(model: settingsModel))
+        hostingView.frame.size = hostingView.fittingSize
+        settingsViewItem.view = hostingView
+        settingsMenu.addItem(settingsViewItem)
+        settingsMenu.delegate = self
+        settingsItem.submenu = settingsMenu
+        self.settingsSubmenu = settingsMenu
         menu.addItem(settingsItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -106,29 +116,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         qrCodeWindow = window
     }
 
-    @objc private func openSettings() {
-        if let w = settingsWindow, w.isVisible {
-            w.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
+    // MARK: - NSMenuDelegate
+
+    func menuWillOpen(_ menu: NSMenu) {
+        if menu === settingsSubmenu {
+            settingsModel.reload()
         }
-
-        let view = SettingsView(configStore: runtime.configStore)
-        let content = NSHostingView(rootView: view)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 580, height: 360),
-            styleMask: [.titled, .closable, .miniaturizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.isReleasedWhenClosed = false
-        window.title = "ClawGate"
-        window.center()
-        window.contentView = content
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        settingsWindow = window
     }
 
     /// Called by AppRuntime after CCStatusBarClient updates sessions.
