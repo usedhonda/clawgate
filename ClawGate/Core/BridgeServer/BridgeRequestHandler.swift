@@ -20,6 +20,7 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         (.GET, "/v1/health"),
         (.GET, "/v1/config"),
         (.GET, "/v1/poll"),
+        (.GET, "/v1/stats"),
         (.POST, "/v1/send"),
         (.GET, "/v1/context"),
         (.GET, "/v1/messages"),
@@ -79,6 +80,12 @@ final class BridgeRequestHandler: ChannelInboundHandler {
             return
         }
 
+        // Track meaningful API requests (exclude high-frequency polling/monitoring)
+        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats"]
+        if !noTrack.contains(path) {
+            core.statsCollector.increment("api_requests", adapter: "system")
+        }
+
         // Non-blocking: health check responds immediately on event loop
         if head.method == .GET && path == "/v1/health" {
             writeResponse(context: context, result: core.health())
@@ -88,6 +95,14 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         // Non-blocking: config responds immediately on event loop (UserDefaults read only)
         if head.method == .GET && path == "/v1/config" {
             writeResponse(context: context, result: core.config())
+            return
+        }
+
+        // Stats: lightweight in-memory read, respond on event loop
+        if head.method == .GET && path == "/v1/stats" {
+            let daysStr = components?.queryItems?.first(where: { $0.name == "days" })?.value
+            let days = min(daysStr.flatMap(Int.init) ?? 7, 90)
+            writeResponse(context: context, result: core.stats(days: days))
             return
         }
 

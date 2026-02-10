@@ -358,7 +358,7 @@ final class TmuxInboundWatcher {
             summaryLines.insert(trimmed, at: 0)
 
             // Stop once we have enough lines
-            if summaryLines.filter({ !$0.isEmpty }).count >= 15 { break }
+            if summaryLines.filter({ !$0.isEmpty }).count >= 30 { break }
         }
 
         let summary = summaryLines
@@ -366,8 +366,8 @@ final class TmuxInboundWatcher {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Truncate if too long (keep last part which is more relevant)
-        if summary.count > 1000 {
-            return String(summary.suffix(1000))
+        if summary.count > 2000 {
+            return String(summary.suffix(2000))
         }
         return summary
     }

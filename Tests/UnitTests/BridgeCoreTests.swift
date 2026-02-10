@@ -211,11 +211,13 @@ final class BridgeCoreTests: XCTestCase {
         defaults.removePersistentDomain(forName: "clawgate.tests.core")
         let cfg = ConfigStore(defaults: defaults)
 
+        let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
         return BridgeCore(
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg),
-            configStore: cfg
+            configStore: cfg,
+            statsCollector: StatsCollector(filePath: statsFile)
         )
     }
 
@@ -224,11 +226,13 @@ final class BridgeCoreTests: XCTestCase {
         defaults.removePersistentDomain(forName: "clawgate.tests.failing")
         let cfg = ConfigStore(defaults: defaults)
 
+        let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
         return BridgeCore(
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter(), FailingAdapter()]),
             logger: AppLogger(configStore: cfg),
-            configStore: cfg
+            configStore: cfg,
+            statsCollector: StatsCollector(filePath: statsFile)
         )
     }
 
