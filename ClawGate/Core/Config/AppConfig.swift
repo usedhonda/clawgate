@@ -8,6 +8,11 @@ struct AppConfig: Codable {
     // LINE
     var lineDefaultConversation: String
     var linePollIntervalSeconds: Int
+    var lineDetectionMode: String
+    var lineFusionThreshold: Int
+    var lineEnablePixelSignal: Bool
+    var lineEnableProcessSignal: Bool
+    var lineEnableNotificationStoreSignal: Bool
 
     // Tmux
     var tmuxEnabled: Bool
@@ -19,6 +24,11 @@ struct AppConfig: Codable {
         includeMessageBodyInLogs: false,
         lineDefaultConversation: "",
         linePollIntervalSeconds: 2,
+        lineDetectionMode: "hybrid",
+        lineFusionThreshold: 60,
+        lineEnablePixelSignal: true,
+        lineEnableProcessSignal: false,
+        lineEnableNotificationStoreSignal: false,
         tmuxEnabled: false,
         tmuxStatusBarUrl: "ws://localhost:8080/ws/sessions",
         tmuxSessionModes: [:]
@@ -31,6 +41,11 @@ final class ConfigStore {
         static let includeMessageBodyInLogs = "clawgate.includeMessageBodyInLogs"
         static let lineDefaultConversation = "clawgate.lineDefaultConversation"
         static let linePollIntervalSeconds = "clawgate.linePollIntervalSeconds"
+        static let lineDetectionMode = "clawgate.lineDetectionMode"
+        static let lineFusionThreshold = "clawgate.lineFusionThreshold"
+        static let lineEnablePixelSignal = "clawgate.lineEnablePixelSignal"
+        static let lineEnableProcessSignal = "clawgate.lineEnableProcessSignal"
+        static let lineEnableNotificationStoreSignal = "clawgate.lineEnableNotificationStoreSignal"
         // Tmux
         static let tmuxEnabled = "clawgate.tmuxEnabled"
         static let tmuxStatusBarUrl = "clawgate.tmuxStatusBarUrl"
@@ -65,6 +80,21 @@ final class ConfigStore {
         if defaults.object(forKey: Keys.linePollIntervalSeconds) != nil {
             cfg.linePollIntervalSeconds = max(1, defaults.integer(forKey: Keys.linePollIntervalSeconds))
         }
+        if let mode = defaults.string(forKey: Keys.lineDetectionMode), !mode.isEmpty {
+            cfg.lineDetectionMode = mode
+        }
+        if defaults.object(forKey: Keys.lineFusionThreshold) != nil {
+            cfg.lineFusionThreshold = min(100, max(1, defaults.integer(forKey: Keys.lineFusionThreshold)))
+        }
+        if defaults.object(forKey: Keys.lineEnablePixelSignal) != nil {
+            cfg.lineEnablePixelSignal = defaults.bool(forKey: Keys.lineEnablePixelSignal)
+        }
+        if defaults.object(forKey: Keys.lineEnableProcessSignal) != nil {
+            cfg.lineEnableProcessSignal = defaults.bool(forKey: Keys.lineEnableProcessSignal)
+        }
+        if defaults.object(forKey: Keys.lineEnableNotificationStoreSignal) != nil {
+            cfg.lineEnableNotificationStoreSignal = defaults.bool(forKey: Keys.lineEnableNotificationStoreSignal)
+        }
 
         // Tmux
         if defaults.object(forKey: Keys.tmuxEnabled) != nil {
@@ -87,6 +117,11 @@ final class ConfigStore {
         defaults.set(cfg.includeMessageBodyInLogs, forKey: Keys.includeMessageBodyInLogs)
         defaults.set(cfg.lineDefaultConversation, forKey: Keys.lineDefaultConversation)
         defaults.set(cfg.linePollIntervalSeconds, forKey: Keys.linePollIntervalSeconds)
+        defaults.set(cfg.lineDetectionMode, forKey: Keys.lineDetectionMode)
+        defaults.set(cfg.lineFusionThreshold, forKey: Keys.lineFusionThreshold)
+        defaults.set(cfg.lineEnablePixelSignal, forKey: Keys.lineEnablePixelSignal)
+        defaults.set(cfg.lineEnableProcessSignal, forKey: Keys.lineEnableProcessSignal)
+        defaults.set(cfg.lineEnableNotificationStoreSignal, forKey: Keys.lineEnableNotificationStoreSignal)
         // Tmux
         defaults.set(cfg.tmuxEnabled, forKey: Keys.tmuxEnabled)
         defaults.set(cfg.tmuxStatusBarUrl, forKey: Keys.tmuxStatusBarUrl)

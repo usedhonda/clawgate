@@ -3,6 +3,7 @@ import Foundation
 
 final class AppRuntime {
     let configStore = ConfigStore()
+    lazy var statsCollector = StatsCollector()
 
     private lazy var logger = AppLogger(configStore: configStore)
     private lazy var recentSendTracker = RecentSendTracker()
@@ -25,14 +26,20 @@ final class AppRuntime {
         eventBus: eventBus,
         registry: registry,
         logger: logger,
-        configStore: configStore
+        configStore: configStore,
+        statsCollector: statsCollector
     )
     private lazy var server = BridgeServer(core: core)
     private lazy var inboundWatcher = LINEInboundWatcher(
         eventBus: eventBus,
         logger: logger,
         pollIntervalSeconds: configStore.load().linePollIntervalSeconds,
-        recentSendTracker: recentSendTracker
+        recentSendTracker: recentSendTracker,
+        detectionMode: configStore.load().lineDetectionMode,
+        fusionThreshold: configStore.load().lineFusionThreshold,
+        enablePixelSignal: configStore.load().lineEnablePixelSignal,
+        enableProcessSignal: configStore.load().lineEnableProcessSignal,
+        enableNotificationStoreSignal: configStore.load().lineEnableNotificationStoreSignal
     )
     private lazy var notificationBannerWatcher = NotificationBannerWatcher(
         eventBus: eventBus,
@@ -60,6 +67,16 @@ final class AppRuntime {
             logger.log(.info, "ClawGate started on 127.0.0.1:8765")
         } catch {
             logger.log(.error, "ClawGate failed: \(error)")
+        }
+
+        eventBus.subscribe { [weak statsCollector] event in
+            statsCollector?.handleEvent(event)
+        }
+        eventBus.subscribe { [weak self] _ in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                self.menuBarDelegate?.refreshStatsAndTimeline()
+            }
         }
 
         inboundWatcher.start()
@@ -105,7 +122,7 @@ final class AppRuntime {
 
 let app = NSApplication.shared
 let runtime = AppRuntime()
-let delegate = MenuBarAppDelegate(runtime: runtime)
+let delegate = MenuBarAppDelegate(runtime: runtime, statsCollector: runtime.statsCollector)
 runtime.menuBarDelegate = delegate
 app.delegate = delegate
 app.setActivationPolicy(.accessory)

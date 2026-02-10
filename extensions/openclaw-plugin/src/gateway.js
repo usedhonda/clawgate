@@ -35,7 +35,6 @@ import {
   registerProjectPath,
   resolveProjectPath,
   setProgressSnapshot,
-  clearProgressSnapshot,
 } from "./context-cache.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
@@ -64,6 +63,22 @@ try {
 const sessionModes = new Map();
 /** @type {Map<string, string>} project -> status */
 const sessionStatuses = new Map();
+
+// ── Progress dispatch throttle ──────────────────────────────────
+// Limit how often progress events are forwarded to the AI (to avoid noise)
+const PROGRESS_DISPATCH_INTERVAL_MS = 60_000; // 60 seconds minimum between dispatches
+/** @type {Map<string, number>} project -> last dispatch timestamp */
+const lastProgressDispatch = new Map();
+
+function shouldDispatchProgress(project) {
+  const now = Date.now();
+  const last = lastProgressDispatch.get(project) || 0;
+  if (now - last >= PROGRESS_DISPATCH_INTERVAL_MS) {
+    lastProgressDispatch.set(project, now);
+    return true;
+  }
+  return false;
+}
 
 // ── Plugin-level echo suppression ──────────────────────────────
 // ClawGate's RecentSendTracker uses an 8-second window which is too short
@@ -620,6 +635,80 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 }
 
 /**
+ * Handle a tmux progress event: Claude Code is running and produced new output.
+ * Dispatches a progress update to AI (throttled, read-only — no task sending).
+ * @param {object} params
+ */
+async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
+  const runtime = getRuntime();
+  const payload = event.payload ?? {};
+  const project = payload.project || "unknown";
+  const text = payload.text || "(no output)";
+  const mode = payload.mode || sessionModes.get(project) || "observe";
+  const tmuxTarget = payload.tmux_target || "";
+
+  if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
+
+  const body = `[OpenClaw Agent - ${mode.charAt(0).toUpperCase() + mode.slice(1)}] [PROGRESS UPDATE]\n\nClaude Code (${project}) is currently running. Latest output:\n\n${text}`;
+
+  const ctx = {
+    Body: body,
+    RawBody: body,
+    CommandBody: body,
+    From: `tmux:${project}`,
+    To: `clawgate:${accountId}`,
+    SessionKey: `clawgate:${accountId}:tmux:${project}`,
+    AccountId: accountId,
+    ChatType: "direct",
+    Provider: "clawgate",
+    Surface: "clawgate",
+    ConversationLabel: defaultConversation || project,
+    SenderName: `Claude Code (${project})`,
+    SenderId: `tmux:${project}`,
+    MessageSid: String(event.id ?? Date.now()),
+    Timestamp: event.observed_at ? Date.parse(event.observed_at) : Date.now(),
+    CommandAuthorized: true,
+    OriginatingChannel: "clawgate",
+    OriginatingTo: defaultConversation || project,
+    _clawgateSource: "tmux_progress",
+    _tmuxMode: mode,
+  };
+
+  log?.info?.(`clawgate: [${accountId}] tmux progress from "${project}" (mode=${mode}): "${text.slice(0, 80)}"`);
+
+  // Progress updates are read-only — no task sending, just forward to LINE
+  const deliver = async (replyPayload) => {
+    const replyText = replyPayload.text || replyPayload.body || "";
+    if (!replyText.trim()) return;
+
+    log?.info?.(`clawgate: [${accountId}] sending progress reply to LINE: "${replyText.slice(0, 80)}"`);
+    try {
+      await clawgateSend(apiUrl, defaultConversation || project, replyText);
+      recordPluginSend(replyText);
+    } catch (err) {
+      log?.error?.(`clawgate: [${accountId}] send progress reply to LINE failed: ${err}`);
+    }
+  };
+
+  try {
+    const dispatch = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
+    if (dispatch) {
+      await dispatch({
+        ctx,
+        cfg,
+        dispatcherOptions: {
+          deliver,
+          humanDelay: { mode: "off" },
+          onError: (err) => log?.error?.(`clawgate: progress dispatch error: ${err}`),
+        },
+      });
+    }
+  } catch (err) {
+    log?.error?.(`clawgate: [${accountId}] progress dispatch failed: ${err}`);
+  }
+}
+
+/**
  * Handle a tmux completion event: Claude Code finished a task.
  * Dispatches the completion summary to AI, which then reports to LINE.
  * @param {object} params
@@ -639,8 +728,8 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Clear any pending question (completion means question was answered or session moved on)
   pendingQuestions.delete(project);
 
-  // Clear progress snapshot (task is done)
-  clearProgressSnapshot(project);
+  // Keep last output in progress snapshot for roster visibility (waiting_input shows last output)
+  setProgressSnapshot(project, text);
 
   // Resolve project path and register for roster
   if (tmuxTarget) {
@@ -672,14 +761,14 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   }
 
   let taskSummary;
-  if (mode === "observe") {
-    taskSummary = `[OBSERVE MODE - You can comment, suggest, and give opinions, but do NOT send tasks to Claude Code]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
-  } else if (mode === "auto") {
-    taskSummary = `[AUTO MODE - You are a task driver. Your ONLY job is to keep Claude Code working until everything is done.\n- If there are ANY remaining or pending tasks in the output, immediately send: <cc_task>There are still pending tasks. Continue working — do not stop until all tasks are complete.</cc_task>\n- ONLY when ALL tasks are genuinely complete, report the final result to the user on LINE.\n- Do NOT design new tasks. Do NOT add your own ideas. Just crack the whip and keep Claude Code moving.]\n\nClaude Code (${project}) output:\n\n${text}`;
+  if (mode === "auto") {
+    taskSummary = `[OpenClaw Agent - Auto]\n\nClaude Code (${project}) output:\n\n${text}`;
+  } else if (mode === "observe") {
+    taskSummary = `[OpenClaw Agent - Observe]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
   } else if (mode === "autonomous") {
-    taskSummary = `[AUTONOMOUS MODE - You may send a follow-up task to Claude Code by wrapping it in <cc_task>your task here</cc_task> tags. Only send a task when you have a clear, actionable follow-up. Do not send tasks just because you can. Your message outside the tags goes to the user on LINE.]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+    taskSummary = `[OpenClaw Agent - Autonomous]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
   } else {
-    taskSummary = `Claude Code (${project}) completed a task:\n\n${text}`;
+    taskSummary = `[OpenClaw Agent]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
   }
 
   contextParts.push(taskSummary);
@@ -863,10 +952,21 @@ export async function startAccount(ctx) {
             if (tmuxTgt) resolveProjectPath(proj, tmuxTgt);
           }
 
-          // Handle tmux progress events (output during running) — store only, don't dispatch to AI
+          // Handle tmux progress events (output during running)
           if (event.adapter === "tmux" && event.payload?.source === "progress") {
-            setProgressSnapshot(event.payload.project, event.payload.text || "");
-            sessionStatuses.set(event.payload.project, "running");
+            const proj = event.payload.project;
+            setProgressSnapshot(proj, event.payload.text || "");
+            sessionStatuses.set(proj, "running");
+
+            // Dispatch progress to AI for non-ignore modes (throttled)
+            const progressMode = event.payload.mode || sessionModes.get(proj) || "ignore";
+            if (progressMode !== "ignore" && shouldDispatchProgress(proj)) {
+              try {
+                await handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConversation, log });
+              } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] handleTmuxProgress failed: ${err}`);
+              }
+            }
             continue;
           }
 

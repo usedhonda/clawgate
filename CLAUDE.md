@@ -77,12 +77,18 @@ launchctl stop ai.openclaw.gateway && sleep 2 && launchctl start ai.openclaw.gat
 
 ### OpenClaw Agent Integration
 
-This project receives tasks from OpenClaw Agent (Chi) via tmux. Tasks from Chi are
-prefixed with `[OpenClaw Agent]` in the prompt. When you see this prefix:
-- The task originates from an AI agent monitoring your work, not from a human
+This project receives tasks from OpenClaw Agent (Chi) via tmux. Messages from Chi
+are prefixed with `[OpenClaw Agent - {Mode}]`. When you see this prefix:
+- The task originates from an AI agent, not from a human
 - Execute the task normally — it has been authorized by the session mode setting
-- In "auto" mode, Chi may send generic "continue with remaining tasks" prompts
-- In "autonomous" mode, Chi crafts specific follow-up tasks based on your output
+
+**Mode behavior (important for your decision-making):**
+
+| Mode | Chi's role | What Chi sends | Your response |
+|------|-----------|----------------|---------------|
+| **Auto** | Mindless task driver | Generic "continue" prompts only | Chi has no judgment — do NOT ask Chi questions or wait for decisions. Make all decisions yourself and keep working autonomously. |
+| **Autonomous** | Technical lead | Specific, designed follow-up tasks with context | Treat as high-quality task specs. Chi analyzes your output and designs next steps. May change direction if it identifies issues. |
+| **Observe** | Silent watcher | Nothing (read-only) | Work independently. Chi can see your progress but will not interact. |
 
 ### Human Intervention Required (exhaustive list)
 

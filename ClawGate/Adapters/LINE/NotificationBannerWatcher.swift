@@ -168,6 +168,10 @@ final class NotificationBannerWatcher {
                 "text": messageText,
                 "sender": sender,
                 "source": "notification_banner",
+                "confidence": "high",
+                "score": "95",
+                "signals": "notification_banner",
+                "pipeline_version": "line-banner-v1",
             ]
         )
         logger.log(.info, "NotificationBannerWatcher: \(eventType) from \(sender.isEmpty ? "unknown" : sender) via banner (text: \(messageText.prefix(50)))")

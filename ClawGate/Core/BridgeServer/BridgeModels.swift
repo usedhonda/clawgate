@@ -170,6 +170,21 @@ struct ConfigGeneralSection: Codable {
 struct ConfigLineSection: Codable {
     let defaultConversation: String
     let pollIntervalSeconds: Int
+    let detectionMode: String
+    let fusionThreshold: Int
+    let enablePixelSignal: Bool
+    let enableProcessSignal: Bool
+    let enableNotificationStoreSignal: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case defaultConversation = "default_conversation"
+        case pollIntervalSeconds = "poll_interval_seconds"
+        case detectionMode = "detection_mode"
+        case fusionThreshold = "fusion_threshold"
+        case enablePixelSignal = "enable_pixel_signal"
+        case enableProcessSignal = "enable_process_signal"
+        case enableNotificationStoreSignal = "enable_notification_store_signal"
+    }
 }
 
 struct ConfigTmuxSection: Codable {
@@ -185,3 +200,21 @@ struct ConfigResult: Codable {
     let tmux: ConfigTmuxSection
 }
 
+// MARK: - Stats Response
+
+struct DayStatsEntry: Codable {
+    let date: String
+    let stats: DayStats
+}
+
+struct StatsResult: Codable {
+    let today: DayStats
+    let history: [DayStatsEntry]
+    let totalDaysTracked: Int
+
+    enum CodingKeys: String, CodingKey {
+        case today
+        case history
+        case totalDaysTracked = "total_days_tracked"
+    }
+}
