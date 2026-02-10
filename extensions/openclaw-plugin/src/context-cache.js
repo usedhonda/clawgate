@@ -141,7 +141,7 @@ export function getProjectRoster(sessionModes, sessionStatuses, pendingQuestions
     const pending = pendingQuestions?.get(name);
     const pendingQuestion = pending ? pending.questionText : undefined;
     const progress = progressSnapshots.get(name);
-    const progressText = status === "running" && progress ? progress.text : undefined;
+    const progressText = progress ? progress.text : undefined;
     projects.push({ name, path, mode, status, pendingQuestion, progressText });
   }
 

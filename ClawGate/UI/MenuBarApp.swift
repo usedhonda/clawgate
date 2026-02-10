@@ -6,11 +6,17 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var qrCodeWindow: NSWindow?
     private var ccSessionsMenu: NSMenu?
+    private var todayStatsItem: NSMenuItem?
+    private var timelineSeparatorItem: NSMenuItem?
+    private var recentEventItems: [NSMenuItem] = []
+    private var timelineEndSeparatorItem: NSMenuItem?
 
     private let runtime: AppRuntime
+    private let statsCollector: StatsCollector
 
-    init(runtime: AppRuntime) {
+    init(runtime: AppRuntime, statsCollector: StatsCollector) {
         self.runtime = runtime
+        self.statsCollector = statsCollector
         super.init()
     }
 
@@ -19,6 +25,26 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.title = "🦀"
 
         let menu = NSMenu()
+
+        // Today stats (info-only)
+        let statsItem = NSMenuItem(title: "Today: 0 sent, 0 received", action: nil, keyEquivalent: "")
+        statsItem.isEnabled = false
+        menu.addItem(statsItem)
+        self.todayStatsItem = statsItem
+
+        // Timeline separator + recent events
+        let tlSep = NSMenuItem.separator()
+        menu.addItem(tlSep)
+        self.timelineSeparatorItem = tlSep
+
+        let noEvents = NSMenuItem(title: "  No recent events", action: nil, keyEquivalent: "")
+        noEvents.isEnabled = false
+        menu.addItem(noEvents)
+        self.recentEventItems = [noEvents]
+
+        let tlEndSep = NSMenuItem.separator()
+        menu.addItem(tlEndSep)
+        self.timelineEndSeparatorItem = tlEndSep
 
         // Show QR Code item
         let qrCodeItem = NSMenuItem(title: "Show QR Code...", action: #selector(openQRCodeWindow), keyEquivalent: "r")
@@ -52,6 +78,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.menu = menu
 
         runtime.startServer()
+        refreshStatsAndTimeline()
     }
 
     @objc private func openQRCodeWindow() {
@@ -202,6 +229,61 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         // Refresh menu to reflect new state
         refreshSessionsMenu(sessions: runtime.allCCSessions())
+    }
+
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        f.timeZone = .current
+        return f
+    }()
+
+    func refreshStatsAndTimeline() {
+        let stats = statsCollector.today()
+        var title = "Today: \(stats.lineSent) sent, \(stats.lineReceived) received"
+        let tmuxTotal = stats.tmuxSent + stats.tmuxCompletion
+        if tmuxTotal > 0 {
+            title += " \u{00B7} \(stats.tmuxSent) tasks"
+        }
+        todayStatsItem?.title = title
+
+        // Update timeline
+        guard let menu = statusItem?.menu,
+              let endSep = timelineEndSeparatorItem,
+              let endIdx = menu.items.firstIndex(of: endSep) else { return }
+
+        // Remove old event items
+        for item in recentEventItems {
+            menu.removeItem(item)
+        }
+        recentEventItems.removeAll()
+
+        let events = statsCollector.recentTimeline(count: 5)
+        var insertIdx = endIdx
+
+        if events.isEmpty {
+            let item = NSMenuItem(title: "  No recent events", action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.insertItem(item, at: insertIdx)
+            recentEventItems.append(item)
+        } else {
+            for event in events {
+                let timeStr = Self.timeFormatter.string(from: event.timestamp)
+                let preview = event.textPreview.prefix(30)
+                let truncated = preview.count < event.textPreview.count ? "\(preview)..." : String(preview)
+                let itemTitle: String
+                if truncated.isEmpty {
+                    itemTitle = "  \(timeStr)  \(event.icon) \(event.label)"
+                } else {
+                    itemTitle = "  \(timeStr)  \(event.icon) \(event.label) \"\(truncated)\""
+                }
+                let item = NSMenuItem(title: itemTitle, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                menu.insertItem(item, at: insertIdx)
+                recentEventItems.append(item)
+                insertIdx += 1
+            }
+        }
     }
 
     @objc private func quit() {

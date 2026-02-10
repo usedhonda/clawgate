@@ -4,6 +4,7 @@ import NIOHTTP1
 
 final class BridgeCore {
     let eventBus: EventBus
+    let statsCollector: StatsCollector
 
     private let registry: AdapterRegistry
     private let logger: AppLogger
@@ -11,11 +12,12 @@ final class BridgeCore {
     private let jsonDecoder = JSONDecoder()
     private let jsonEncoder = JSONEncoder()
 
-    init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, configStore: ConfigStore) {
+    init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, configStore: ConfigStore, statsCollector: StatsCollector) {
         self.eventBus = eventBus
         self.registry = registry
         self.logger = logger
         self.configStore = configStore
+        self.statsCollector = statsCollector
         self.jsonEncoder.outputFormatting = [.withoutEscapingSlashes]
     }
 
@@ -51,7 +53,12 @@ final class BridgeCore {
             ),
             line: ConfigLineSection(
                 defaultConversation: cfg.lineDefaultConversation,
-                pollIntervalSeconds: cfg.linePollIntervalSeconds
+                pollIntervalSeconds: cfg.linePollIntervalSeconds,
+                detectionMode: cfg.lineDetectionMode,
+                fusionThreshold: cfg.lineFusionThreshold,
+                enablePixelSignal: cfg.lineEnablePixelSignal,
+                enableProcessSignal: cfg.lineEnableProcessSignal,
+                enableNotificationStoreSignal: cfg.lineEnableNotificationStoreSignal
             ),
             tmux: ConfigTmuxSection(
                 enabled: cfg.tmuxEnabled,
@@ -106,6 +113,11 @@ final class BridgeCore {
 
             let (result, steps) = try adapter.sendMessage(payload: request.payload)
             logger.log(.info, "send_message completed with \(steps.count) steps")
+            statsCollector.increment("sent", adapter: request.adapter)
+            eventBus.append(type: "outbound_message", adapter: request.adapter, payload: [
+                "text": String(request.payload.text.prefix(100)),
+                "conversation": request.payload.conversationHint,
+            ])
 
             let content = APIResponse(ok: true, result: result, error: nil)
             return jsonResponse(status: .ok, body: encode(content))
@@ -217,6 +229,20 @@ final class BridgeCore {
             )
             return jsonResponse(status: .internalServerError, body: encode(APIResponse<ConversationList>(ok: false, result: nil, error: payload)))
         }
+    }
+
+    func stats(days: Int) -> HTTPResult {
+        let todayStats = statsCollector.today()
+        let historyEntries = statsCollector.history(count: days).map { (date, stats) in
+            DayStatsEntry(date: date, stats: stats)
+        }
+        let result = StatsResult(
+            today: todayStats,
+            history: historyEntries,
+            totalDaysTracked: historyEntries.count + 1
+        )
+        let content = APIResponse(ok: true, result: result, error: nil)
+        return jsonResponse(status: .ok, body: encode(content))
     }
 
     func poll(since: Int64?) -> HTTPResult {

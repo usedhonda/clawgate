@@ -20,6 +20,7 @@ final class EventBus {
     private var subscribers: [UUID: Subscriber] = [:]
     private let maxEvents = 1000
 
+    @discardableResult
     func append(type: String, adapter: String, payload: [String: String]) -> BridgeEvent {
         lock.lock()
 
