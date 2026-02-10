@@ -189,7 +189,28 @@ struct ConfigLineSection: Codable {
 
 struct ConfigTmuxSection: Codable {
     let enabled: Bool
+    let statusBarURL: String
     let sessionModes: [String: String]  // project -> "observe" | "auto" | "autonomous"
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case statusBarURL = "statusBarUrl"
+        case sessionModes
+    }
+}
+
+struct ConfigRemoteSection: Codable {
+    let nodeRole: String
+    let accessEnabled: Bool
+    let federationEnabled: Bool
+    let federationURL: String
+
+    enum CodingKeys: String, CodingKey {
+        case nodeRole = "node_role"
+        case accessEnabled = "access_enabled"
+        case federationEnabled = "federation_enabled"
+        case federationURL = "federation_url"
+    }
 }
 
 struct ConfigResult: Codable {
@@ -197,6 +218,7 @@ struct ConfigResult: Codable {
     let general: ConfigGeneralSection
     let line: ConfigLineSection
     let tmux: ConfigTmuxSection
+    let remote: ConfigRemoteSection
 }
 
 // MARK: - Stats Response

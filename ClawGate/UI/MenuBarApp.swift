@@ -24,7 +24,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.button?.title = "🦀"
+        updateStatusIcon()
 
         let menu = NSMenu()
 
@@ -131,6 +131,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         // Must update menu on main thread
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.updateStatusIcon()
             menu.removeAllItems()
 
             if sessions.isEmpty {
@@ -219,9 +220,46 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         }
 
         runtime.configStore.save(config)
+        updateStatusIcon()
 
         // Refresh menu to reflect new state
         refreshSessionsMenu(sessions: runtime.allCCSessions())
+    }
+
+    private func updateStatusIcon() {
+        guard let button = statusItem?.button else { return }
+        let mode = dominantSessionMode()
+        let dotColor: NSColor
+        switch mode {
+        case "autonomous":
+            dotColor = NSColor.systemRed
+        case "auto":
+            dotColor = NSColor.systemOrange
+        case "observe":
+            dotColor = NSColor.systemBlue
+        default:
+            dotColor = NSColor.systemGray
+        }
+
+        let crab = NSAttributedString(string: "🦀 ", attributes: [
+            .font: NSFont.systemFont(ofSize: 14),
+        ])
+        let dot = NSAttributedString(string: "●", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: dotColor,
+        ])
+        let title = NSMutableAttributedString()
+        title.append(crab)
+        title.append(dot)
+        button.attributedTitle = title
+    }
+
+    private func dominantSessionMode() -> String {
+        let modes = runtime.configStore.load().tmuxSessionModes.values
+        if modes.contains("autonomous") { return "autonomous" }
+        if modes.contains("auto") { return "auto" }
+        if modes.contains("observe") { return "observe" }
+        return "ignore"
     }
 
     private static let timeFormatter: DateFormatter = {

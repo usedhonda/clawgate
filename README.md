@@ -10,7 +10,7 @@ ClawGate is a lightweight macOS menubar-resident application that exposes a loca
 
 The first supported target is **LINE Desktop for Mac** (Qt-based), with full send/receive automation including hybrid inbound message detection. ClawGate also includes a **tmux adapter** for sending tasks to Claude Code sessions and monitoring their progress.
 
-ClawGate is designed for privacy-first, single-user operation. It binds exclusively to `127.0.0.1` with no authentication required and no external network access.
+ClawGate is designed for privacy-first, single-user operation. It binds to `127.0.0.1` by default with no authentication required. Optional remote mode is available via settings (`0.0.0.0` bind + Bearer token).
 
 ## Key Features
 
@@ -21,7 +21,7 @@ ClawGate is designed for privacy-first, single-user operation. It binds exclusiv
 - **Tmux / Claude Code Adapter** -- Monitor Claude Code sessions via cc-status-bar WebSocket, send tasks, auto-approve permissions, detect questions
 - **4-Stage Session Modes** -- Per-project control: ignore, observe, auto, autonomous
 - **OpenClaw Integration** -- Channel plugin for the OpenClaw AI gateway ecosystem
-- **Privacy-First** -- Localhost-only binding, no tokens, no cloud, no telemetry
+- **Privacy-First** -- Localhost by default, optional remote mode with token, no cloud relay dependency
 
 ## Architecture
 
@@ -32,7 +32,7 @@ ClawGate is designed for privacy-first, single-user operation. It binds exclusiv
 │  │ SettingsView     │  │ Sessions Submenu (Tmux)      │  │
 │  └─────────────────┘  └──────────────────────────────┘  │
 ├─────────────────────────────────────────────────────────┤
-│  BridgeServer (SwiftNIO HTTP/1.1 on 127.0.0.1:8765)    │
+│  BridgeServer (SwiftNIO HTTP/1.1 on 127.0.0.1:8765 by default) │
 │  ┌──────────────────────────────────────────────────┐   │
 │  │ BridgeCore: routing, validation, adapter dispatch │   │
 │  │ EventBus: ring buffer (1000) + SSE streaming      │   │
@@ -114,7 +114,7 @@ ClawGate is designed for privacy-first, single-user operation. It binds exclusiv
 | GET | `/v1/axdump[?adapter=line]` | Raw AX tree dump (debugging) |
 | POST | `/v1/send` | Send a message via adapter |
 
-All endpoints return JSON. No authentication required (localhost-only).
+All endpoints return JSON. In local mode no authentication is required. In remote mode, `Authorization: Bearer <token>` is required.
 POST requests with an `Origin` header are rejected (CSRF protection).
 
 See [SPEC.md](SPEC.md) for full API documentation.
@@ -139,6 +139,20 @@ See [SPEC.md](SPEC.md) for full API documentation.
 
 # Release build (universal binary + DMG + notarize)
 ./scripts/release.sh
+
+# Remote relay (Phase 3 foundation)
+swift run ClawGateRelay \
+  --host 0.0.0.0 \
+  --port 8765 \
+  --federation-port 8766 \
+  --token YOUR_GATEWAY_TOKEN \
+  --federation-token YOUR_FEDERATION_TOKEN \
+  --cc-status-url ws://localhost:8080/ws/sessions \
+  --tmux-mode project-a=autonomous \
+  --tmux-mode project-b=observe
+
+# Host A ClawGate federation URL
+# ws://<HOST_B_IP>:8766/federation
 ```
 
 ## Configuration
@@ -147,7 +161,7 @@ ClawGate stores configuration in UserDefaults, accessible via `GET /v1/config`:
 
 | Group | Keys | Description |
 |-------|------|-------------|
-| **General** | `debugLogging`, `includeMessageBodyInLogs` | Logging verbosity |
+| **General** | `nodeRole`, `debugLogging`, `includeMessageBodyInLogs` | Node role (`server`/`client`) and logging |
 | **LINE** | `defaultConversation`, `pollIntervalSeconds`, `detectionMode`, `fusionThreshold`, signal enables | Detection and polling settings |
 | **Tmux** | `enabled`, `statusBarUrl`, `sessionModes` | Claude Code session monitoring |
 
@@ -158,6 +172,8 @@ See [SPEC.md](SPEC.md) for the full configuration schema.
 ```
 ClawGate/
   main.swift                              # App entry point, NSApplication setup
+ClawGateRelay/
+  main.swift                              # Remote relay HTTP + federation WebSocket server
   Adapters/
     AdapterProtocol.swift                 # AdapterProtocol + AdapterRegistry
     LINE/

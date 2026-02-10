@@ -17,7 +17,7 @@ final class AppRuntime {
         logger: logger
     )
 
-    private lazy var registry = AdapterRegistry(adapters: [lineAdapter, tmuxAdapter])
+    private lazy var registry = AdapterRegistry(adapters: enabledAdapters())
     private lazy var eventBus = EventBus()
     private lazy var core = BridgeCore(
         eventBus: eventBus,
@@ -26,7 +26,13 @@ final class AppRuntime {
         configStore: configStore,
         statsCollector: statsCollector
     )
-    private lazy var server = BridgeServer(core: core)
+    private lazy var server = BridgeServer(core: core, host: bindHost())
+    private lazy var federationClient = FederationClient(
+        eventBus: eventBus,
+        core: core,
+        configStore: configStore,
+        logger: logger
+    )
     private lazy var inboundWatcher = LINEInboundWatcher(
         eventBus: eventBus,
         logger: logger,
@@ -59,9 +65,11 @@ final class AppRuntime {
     }
 
     func startServer() {
+        requestPermissionPromptsIfNeeded()
+
         do {
             try server.start()
-            logger.log(.info, "ClawGate started on 127.0.0.1:8765")
+            logger.log(.info, "ClawGate started on \(bindHost()):8765")
         } catch {
             logger.log(.error, "ClawGate failed: \(error)")
         }
@@ -76,28 +84,58 @@ final class AppRuntime {
             }
         }
 
-        inboundWatcher.start()
-        notificationBannerWatcher.start()
+        if configStore.load().nodeRole != .client {
+            inboundWatcher.start()
+            notificationBannerWatcher.start()
+        } else {
+            logger.log(.info, "LINE subsystems are disabled (nodeRole=client)")
+        }
 
         // Start tmux subsystem if enabled
         let config = configStore.load()
         if config.tmuxEnabled {
             startTmuxSubsystem()
         }
+        federationClient.start()
+    }
+
+    private func requestPermissionPromptsIfNeeded() {
+        // Show macOS Accessibility consent prompt if not yet granted.
+        if !AXIsProcessTrusted() {
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+            logger.log(.warning, "Requested Accessibility permission prompt")
+        }
     }
 
     func stopServer() {
-        notificationBannerWatcher.stop()
-        inboundWatcher.stop()
+        if configStore.load().nodeRole != .client {
+            notificationBannerWatcher.stop()
+            inboundWatcher.stop()
+        }
         tmuxInboundWatcher.stop()
+        federationClient.stop()
         ccStatusBarClient.onSessionDetached = nil
         ccStatusBarClient.disconnect()
         server.stop()
         logger.log(.info, "ClawGate stopped")
     }
 
+    private func bindHost() -> String {
+        configStore.load().remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"
+    }
+
+    private func enabledAdapters() -> [AdapterProtocol] {
+        var adapters: [AdapterProtocol] = [tmuxAdapter]
+        if configStore.load().nodeRole != .client {
+            adapters.insert(lineAdapter, at: 0)
+        }
+        return adapters
+    }
+
     func startTmuxSubsystem() {
         logger.log(.info, "Tmux subsystem starting")
+        ccStatusBarClient.setPreferredWebSocketURL(configStore.load().tmuxStatusBarURL)
         ccStatusBarClient.onSessionsChanged = { [weak self] in
             guard let self else { return }
             self.menuBarDelegate?.refreshSessionsMenu(sessions: self.ccStatusBarClient.allSessions())

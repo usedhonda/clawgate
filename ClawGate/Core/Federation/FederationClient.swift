@@ -1,0 +1,185 @@
+import Foundation
+
+final class FederationClient: NSObject, URLSessionWebSocketDelegate {
+    private let eventBus: EventBus
+    private let core: BridgeCore
+    private let configStore: ConfigStore
+    private let logger: AppLogger
+
+    private var session: URLSession?
+    private var socketTask: URLSessionWebSocketTask?
+    private var reconnectAttempts = 0
+    private var eventSubscriptionID: UUID?
+    private var shouldRun = false
+
+    init(eventBus: EventBus, core: BridgeCore, configStore: ConfigStore, logger: AppLogger) {
+        self.eventBus = eventBus
+        self.core = core
+        self.configStore = configStore
+        self.logger = logger
+    }
+
+    func start() {
+        shouldRun = true
+        reconnectAttempts = 0
+        logger.log(.info, "FederationClient start requested")
+        connectIfNeeded()
+    }
+
+    func stop() {
+        shouldRun = false
+        if let id = eventSubscriptionID {
+            eventBus.unsubscribe(id)
+            eventSubscriptionID = nil
+        }
+        socketTask?.cancel(with: .goingAway, reason: nil)
+        socketTask = nil
+        session?.invalidateAndCancel()
+        session = nil
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        reconnectAttempts = 0
+        logger.log(.info, "FederationClient connected")
+        sendHello()
+        subscribeEventsIfNeeded()
+        receiveLoop()
+    }
+
+    func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        logger.log(.warning, "FederationClient closed: \(closeCode.rawValue)")
+        scheduleReconnect()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            logger.log(.warning, "FederationClient error: \(error.localizedDescription)")
+        }
+        scheduleReconnect()
+    }
+
+    private func connectIfNeeded() {
+        guard shouldRun else { return }
+        let cfg = configStore.load()
+        guard cfg.federationEnabled else {
+            logger.log(.info, "FederationClient disabled by config")
+            return
+        }
+        guard let url = URL(string: cfg.federationURL), !cfg.federationURL.isEmpty else {
+            logger.log(.warning, "FederationClient disabled: federationURL is empty or invalid")
+            return
+        }
+        logger.log(.info, "FederationClient connecting to \(cfg.federationURL)")
+
+        var request = URLRequest(url: url)
+        let token = cfg.federationToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        self.session = session
+        let task = session.webSocketTask(with: request)
+        self.socketTask = task
+        task.resume()
+    }
+
+    private func scheduleReconnect() {
+        guard shouldRun else { return }
+        reconnectAttempts += 1
+        let maxDelay = Double(configStore.load().federationReconnectMaxSeconds)
+        let delay = min(pow(2.0, Double(min(reconnectAttempts, 6))), maxDelay)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.connectIfNeeded()
+        }
+    }
+
+    private func sendHello() {
+        let hello = FederationEnvelope(
+            type: "hello",
+            timestamp: FederationMessage.now(),
+            payload: FederationHelloPayload(version: "0.1.0", capabilities: ["line", "tmux"])
+        )
+        send(hello)
+    }
+
+    private func subscribeEventsIfNeeded() {
+        guard eventSubscriptionID == nil else { return }
+        eventSubscriptionID = eventBus.subscribe { [weak self] event in
+            guard let self else { return }
+            let message = FederationEnvelope(
+                type: "event",
+                timestamp: FederationMessage.now(),
+                payload: FederationEventPayload(event: event)
+            )
+            self.send(message)
+        }
+    }
+
+    private func receiveLoop() {
+        socketTask?.receive { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let message):
+                if case .string(let text) = message {
+                    self.handle(text: text)
+                } else if case .data(let data) = message,
+                          let text = String(data: data, encoding: .utf8) {
+                    self.handle(text: text)
+                }
+                self.receiveLoop()
+            case .failure(let error):
+                self.logger.log(.warning, "FederationClient receive failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func handle(text: String) {
+        guard let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String else {
+            return
+        }
+
+        if type == "ping" {
+            let pong = FederationEnvelope(type: "pong", timestamp: FederationMessage.now(), payload: ["ok": true])
+            send(pong)
+            return
+        }
+        if type == "command",
+           let payload = json["payload"] as? [String: Any],
+           let id = payload["id"] as? String,
+           let method = payload["method"] as? String,
+           let path = payload["path"] as? String {
+            let headers = payload["headers"] as? [String: String] ?? [:]
+            let body = payload["body"] as? String
+            let command = FederationCommandPayload(
+                id: id,
+                method: method,
+                path: path,
+                headers: headers,
+                body: body
+            )
+            let response = core.handleFederationCommand(command)
+            let envelope = FederationEnvelope(
+                type: "response",
+                timestamp: FederationMessage.now(),
+                payload: response
+            )
+            send(envelope)
+        }
+    }
+
+    private func send<T: Codable>(_ payload: T) {
+        guard let socketTask else { return }
+        guard let data = try? JSONEncoder().encode(payload),
+              let text = String(data: data, encoding: .utf8) else {
+            return
+        }
+        socketTask.send(.string(text)) { [weak self] error in
+            if let error {
+                self?.logger.log(.warning, "FederationClient send failed: \(error.localizedDescription)")
+            }
+        }
+    }
+}

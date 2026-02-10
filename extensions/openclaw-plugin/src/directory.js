@@ -15,7 +15,7 @@
  */
 
 import { resolveAccount } from "./config.js";
-import { clawgateConversations } from "./client.js";
+import { clawgateConversations, setClawgateAuthToken } from "./client.js";
 
 /**
  * Build directory entries for a ClawGate account.
@@ -39,6 +39,7 @@ async function buildEntries(cfg, accountId) {
 
   // Layer 2: Live conversations from LINE (available when window is in foreground)
   try {
+    setClawgateAuthToken(account.token || "");
     const res = await clawgateConversations(account.apiUrl);
     if (res.ok && res.result?.conversations) {
       for (const c of res.result.conversations) {

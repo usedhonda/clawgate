@@ -4,6 +4,7 @@
  * Expected config shape in ~/.openclaw/openclaw.json:
  *   channels.clawgate.<accountId> = {
  *     apiUrl: "http://127.0.0.1:8765"      // required
+ *     token: "optional-bearer-token"        // optional (remote mode)
  *     // All below are optional — ClawGate Settings UI manages these via GET /v1/config
  *     // enabled: true,
  *     // pollIntervalMs: 3000,
@@ -42,6 +43,7 @@ export function resolveAccount(cfg, accountId) {
     apiUrl: section.apiUrl || DEFAULTS.apiUrl,
     pollIntervalMs: section.pollIntervalMs || DEFAULTS.pollIntervalMs,
     defaultConversation: section.defaultConversation || DEFAULTS.defaultConversation,
+    token: section.token || "",
     config: section,
   };
 }

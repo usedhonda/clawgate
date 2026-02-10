@@ -50,6 +50,7 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     private var connectedPort: Int?
     private var isConnected = false
     private var shouldReconnect = true
+    private var preferredWebSocketURL: String?
 
     init(logger: AppLogger) {
         self.logger = logger
@@ -62,6 +63,10 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
         shouldReconnect = true
         reconnectAttempts = 0
         doConnect()
+    }
+
+    func setPreferredWebSocketURL(_ url: String?) {
+        preferredWebSocketURL = url
     }
 
     func disconnect() {
@@ -124,6 +129,16 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
     private func doConnect() {
         guard shouldReconnect else { return }
+
+        if let preferredWebSocketURL,
+           let preferredURL = URL(string: preferredWebSocketURL) {
+            let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+            let task = session.webSocketTask(with: preferredURL)
+            self.urlSession = session
+            self.webSocketTask = task
+            task.resume()
+            return
+        }
 
         // Build port list: try last-known port first, then scan all others
         var ports = Array(Self.portRange)

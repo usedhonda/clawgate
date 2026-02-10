@@ -204,6 +204,107 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testAuthorizationDisabledByDefault() {
+        let core = makeCore()
+        let result = core.checkAuthorization(headers: HTTPHeaders())
+        XCTAssertNil(result)
+    }
+
+    func testAuthorizationRejectsInvalidBearerWhenEnabled() {
+        let defaults = UserDefaults(suiteName: "clawgate.tests.auth")!
+        defaults.removePersistentDomain(forName: "clawgate.tests.auth")
+        let cfg = ConfigStore(defaults: defaults)
+        var appCfg = cfg.load()
+        appCfg.remoteAccessEnabled = true
+        appCfg.remoteAccessToken = "secret-token"
+        cfg.save(appCfg)
+
+        let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
+        let core = BridgeCore(
+            eventBus: EventBus(),
+            registry: AdapterRegistry(adapters: [FakeAdapter()]),
+            logger: AppLogger(configStore: cfg),
+            configStore: cfg,
+            statsCollector: StatsCollector(filePath: statsFile)
+        )
+
+        var headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer wrong")
+        let result = core.checkAuthorization(headers: headers)
+        XCTAssertEqual(result?.status, .unauthorized)
+
+        headers = HTTPHeaders()
+        headers.add(name: "Authorization", value: "Bearer secret-token")
+        let okResult = core.checkAuthorization(headers: headers)
+        XCTAssertNil(okResult)
+    }
+
+    func testFederationCommandDispatchesHealth() {
+        let core = makeCore()
+        let command = FederationCommandPayload(
+            id: "cmd-1",
+            method: "GET",
+            path: "/v1/health",
+            headers: [:],
+            body: nil
+        )
+
+        let response = core.handleFederationCommand(command)
+        XCTAssertEqual(response.id, "cmd-1")
+        XCTAssertEqual(response.status, 200)
+        XCTAssertTrue(response.body.contains("\"ok\":true"))
+    }
+
+    func testLineSendIsRejectedOnClientRole() {
+        let defaults = UserDefaults(suiteName: "clawgate.tests.rolegate.send")!
+        defaults.removePersistentDomain(forName: "clawgate.tests.rolegate.send")
+        let cfg = ConfigStore(defaults: defaults)
+        var appCfg = cfg.load()
+        appCfg.nodeRole = .client
+        cfg.save(appCfg)
+
+        let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
+        let core = BridgeCore(
+            eventBus: EventBus(),
+            registry: AdapterRegistry(adapters: [FakeAdapter()]),
+            logger: AppLogger(configStore: cfg),
+            configStore: cfg,
+            statsCollector: StatsCollector(filePath: statsFile)
+        )
+        let json = """
+        {"adapter":"line","action":"send_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
+        """
+        let response = core.send(body: Data(json.utf8))
+        XCTAssertEqual(response.status, .forbidden)
+        let parsed = try! JSONDecoder().decode(APIResponse<SendResult>.self, from: response.body)
+        XCTAssertEqual(parsed.error?.code, "line_disabled_on_client")
+    }
+
+    func testConfigIncludesNodeRole() {
+        let defaults = UserDefaults(suiteName: "clawgate.tests.rolegate.config")!
+        defaults.removePersistentDomain(forName: "clawgate.tests.rolegate.config")
+        let cfg = ConfigStore(defaults: defaults)
+        var appCfg = cfg.load()
+        appCfg.nodeRole = .client
+        cfg.save(appCfg)
+
+        let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
+        let core = BridgeCore(
+            eventBus: EventBus(),
+            registry: AdapterRegistry(adapters: [FakeAdapter()]),
+            logger: AppLogger(configStore: cfg),
+            configStore: cfg,
+            statsCollector: StatsCollector(filePath: statsFile)
+        )
+
+        let response = core.config()
+        XCTAssertEqual(response.status, .ok)
+        let json = try! JSONSerialization.jsonObject(with: response.body) as! [String: Any]
+        let result = json["result"] as! [String: Any]
+        let remote = result["remote"] as! [String: Any]
+        XCTAssertEqual(remote["node_role"] as? String, "client")
+    }
+
     // MARK: - Helpers
 
     private func makeCore() -> BridgeCore {

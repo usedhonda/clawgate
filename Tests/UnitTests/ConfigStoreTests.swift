@@ -13,37 +13,59 @@ final class ConfigStoreTests: XCTestCase {
         let store = ConfigStore(defaults: freshDefaults("cfg-defaults"))
         let cfg = store.load()
 
+        XCTAssertEqual(cfg.nodeRole, .server)
         XCTAssertEqual(cfg.debugLogging, false)
         XCTAssertEqual(cfg.includeMessageBodyInLogs, false)
         XCTAssertEqual(cfg.lineDefaultConversation, "")
         XCTAssertEqual(cfg.linePollIntervalSeconds, 2)
         XCTAssertEqual(cfg.tmuxEnabled, false)
+        XCTAssertEqual(cfg.tmuxStatusBarURL, "ws://localhost:8080/ws/sessions")
         XCTAssertEqual(cfg.tmuxSessionModes, [:])
+        XCTAssertEqual(cfg.remoteAccessEnabled, false)
+        XCTAssertEqual(cfg.remoteAccessToken, "")
+        XCTAssertEqual(cfg.federationEnabled, false)
+        XCTAssertEqual(cfg.federationURL, "")
+        XCTAssertEqual(cfg.federationToken, "")
+        XCTAssertEqual(cfg.federationReconnectMaxSeconds, 60)
     }
 
     func testSaveLoadRoundTrip() {
         let store = ConfigStore(defaults: freshDefaults("cfg-roundtrip"))
 
         var cfg = AppConfig.default
+        cfg.nodeRole = .client
         cfg.debugLogging = true
         cfg.includeMessageBodyInLogs = true
         cfg.lineDefaultConversation = "Test User"
         cfg.linePollIntervalSeconds = 5
         cfg.tmuxEnabled = true
-        cfg.tmuxStatusBarUrl = "ws://custom:9999/sessions"
+        cfg.tmuxStatusBarURL = "ws://custom:9999/sessions"
         cfg.tmuxSessionModes = ["project-a": "autonomous", "project-b": "observe"]
+        cfg.remoteAccessEnabled = true
+        cfg.remoteAccessToken = "test-token"
+        cfg.federationEnabled = true
+        cfg.federationURL = "ws://remote:9100/federation"
+        cfg.federationToken = "fed-token"
+        cfg.federationReconnectMaxSeconds = 120
 
         store.save(cfg)
         let loaded = store.load()
 
+        XCTAssertEqual(loaded.nodeRole, .client)
         XCTAssertEqual(loaded.debugLogging, true)
         XCTAssertEqual(loaded.includeMessageBodyInLogs, true)
         XCTAssertEqual(loaded.lineDefaultConversation, "Test User")
         XCTAssertEqual(loaded.linePollIntervalSeconds, 5)
         XCTAssertEqual(loaded.tmuxEnabled, true)
-        XCTAssertEqual(loaded.tmuxStatusBarUrl, "ws://custom:9999/sessions")
+        XCTAssertEqual(loaded.tmuxStatusBarURL, "ws://custom:9999/sessions")
         XCTAssertEqual(loaded.tmuxSessionModes["project-a"], "autonomous")
         XCTAssertEqual(loaded.tmuxSessionModes["project-b"], "observe")
+        XCTAssertEqual(loaded.remoteAccessEnabled, true)
+        XCTAssertEqual(loaded.remoteAccessToken, "test-token")
+        XCTAssertEqual(loaded.federationEnabled, true)
+        XCTAssertEqual(loaded.federationURL, "ws://remote:9100/federation")
+        XCTAssertEqual(loaded.federationToken, "fed-token")
+        XCTAssertEqual(loaded.federationReconnectMaxSeconds, 120)
     }
 
     func testPollIntervalMigration() {

@@ -24,6 +24,7 @@ import {
   clawgateSend,
   clawgatePoll,
   clawgateTmuxSend,
+  setClawgateAuthToken,
 } from "./client.js";
 import {
   getProjectContext,
@@ -154,6 +155,52 @@ function isDuplicateInbound(eventText) {
 
 function recordInbound(eventText) {
   recentInbounds.push({ fingerprint: eventFingerprint(eventText), time: Date.now() });
+}
+
+function isUiChromeLine(line) {
+  const s = line.trim();
+  if (!s) return true;
+  if (/^既読$/.test(s)) return true;
+  if (/^未読$/.test(s)) return true;
+  if (/^ここから未読メッセージ$/.test(s)) return true;
+  if (/^LINE$/.test(s)) return true;
+  if (/^Test User\b/.test(s)) return true;
+  if (/^(午前|午後)\s*\d{1,2}:\d{2}$/.test(s)) return true;
+  if (/^\d{1,2}:\d{2}$/.test(s)) return true;
+  if (/^\d+$/.test(s)) return true;
+  if (/^[\W_]+$/.test(s)) return true;
+  return false;
+}
+
+function normalizeInboundText(rawText, source) {
+  const text = (rawText || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!text) return "";
+
+  // Notification banner is already structured enough; keep as-is.
+  if (source === "notification_banner") {
+    return text;
+  }
+
+  let lines = text
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter((l) => l.length > 0)
+    .filter((l) => !isUiChromeLine(l));
+
+  // Remove adjacent duplicates created by OCR jitter.
+  const deduped = [];
+  for (const line of lines) {
+    if (deduped.length === 0 || deduped[deduped.length - 1] !== line) deduped.push(line);
+  }
+  lines = deduped;
+
+  // Pixel/hybrid OCR often contains entire screen history.
+  // To avoid mojibake-like noise, keep only the latest meaningful line.
+  if (source === "hybrid_fusion" || source === "pixel_diff") {
+    lines = lines.length > 0 ? [lines[lines.length - 1]] : [];
+  }
+
+  return lines.join("\n").trim();
 }
 
 // ── Pending questions tracking ────────────────────────────────
@@ -881,6 +928,7 @@ export async function startAccount(ctx) {
   const { cfg, account, abortSignal, log } = ctx;
   const accountId = account.accountId;
   const apiUrl = account.apiUrl;
+  setClawgateAuthToken(account.token || "");
   let pollIntervalMs = account.pollIntervalMs || 3000;
   let defaultConversation = account.defaultConversation || "";
 
@@ -990,11 +1038,13 @@ export async function startAccount(ctx) {
             continue;
           }
 
-          const eventText = event.payload?.text || "";
+          const source = event.payload?.source || "poll";
+          const rawEventText = event.payload?.text || "";
+          const eventText = normalizeInboundText(rawEventText, source);
 
           // Skip empty/short texts (OCR noise, read-receipts, scroll artifacts)
           if (eventText.trim().length < MIN_TEXT_LENGTH) {
-            log?.debug?.(`clawgate: [${accountId}] skipped short text (${eventText.length} chars)`);
+            log?.debug?.(`clawgate: [${accountId}] skipped short/noisy text (raw=${rawEventText.length}, clean=${eventText.length})`);
             continue;
           }
 
@@ -1012,6 +1062,9 @@ export async function startAccount(ctx) {
 
           // Record before dispatch so subsequent duplicates are caught
           recordInbound(eventText);
+          if (event.payload) {
+            event.payload.text = eventText;
+          }
 
           try {
             await handleInboundMessage({

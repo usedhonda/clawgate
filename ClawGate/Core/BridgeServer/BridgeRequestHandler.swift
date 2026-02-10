@@ -92,6 +92,12 @@ final class BridgeRequestHandler: ChannelInboundHandler {
             return
         }
 
+        // Optional auth (enabled only in remote access mode)
+        if let authResult = core.checkAuthorization(headers: head.headers) {
+            writeResponse(context: context, result: authResult)
+            return
+        }
+
         // Non-blocking: config responds immediately on event loop (UserDefaults read only)
         if head.method == .GET && path == "/v1/config" {
             writeResponse(context: context, result: core.config())

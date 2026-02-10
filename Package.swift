@@ -10,6 +10,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "ClawGate", targets: ["ClawGate"]),
+        .executable(name: "ClawGateRelay", targets: ["ClawGateRelay"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.67.0"),
@@ -23,6 +24,16 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
             ],
             path: "ClawGate"
+        ),
+        .executableTarget(
+            name: "ClawGateRelay",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+            ],
+            path: "ClawGateRelay"
         ),
         .testTarget(
             name: "UnitTests",

@@ -3,7 +3,7 @@
  */
 
 import { resolveAccount } from "./config.js";
-import { clawgateSend } from "./client.js";
+import { clawgateSend, setClawgateAuthToken } from "./client.js";
 
 export const outbound = {
   deliveryMode: "direct",
@@ -21,6 +21,7 @@ export const outbound = {
   sendMedia: async ({ to, text, mediaUrl, accountId, cfg }) => {
     // LINE via ClawGate does not support media — send text fallback
     const account = resolveAccount(cfg, accountId);
+    setClawgateAuthToken(account.token || "");
     const conversationHint = (to === "default" || to.includes(":"))
       ? (account.defaultConversation || to)
       : to;
@@ -41,6 +42,7 @@ export const outbound = {
 
   sendText: async ({ to, text, accountId, cfg }) => {
     const account = resolveAccount(cfg, accountId);
+    setClawgateAuthToken(account.token || "");
     // Account-format targets (e.g. "default", "clawgate:default") -> use defaultConversation
     const conversationHint = (to === "default" || to.includes(":"))
       ? (account.defaultConversation || to)

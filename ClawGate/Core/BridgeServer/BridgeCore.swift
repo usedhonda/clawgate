@@ -38,6 +38,31 @@ final class BridgeCore {
         )
     }
 
+    /// Optional Bearer auth for remote access mode.
+    /// Localhost default mode keeps auth disabled for backward compatibility.
+    func checkAuthorization(headers: HTTPHeaders) -> HTTPResult? {
+        let cfg = configStore.load()
+        guard cfg.remoteAccessEnabled else { return nil }
+        let token = cfg.remoteAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else { return nil }
+
+        let authHeader = headers.first(name: "Authorization") ?? ""
+        guard authHeader == "Bearer \(token)" else {
+            let payload = ErrorPayload(
+                code: "unauthorized",
+                message: "Missing or invalid bearer token",
+                retriable: false,
+                failedStep: "auth",
+                details: nil
+            )
+            return jsonResponse(
+                status: .unauthorized,
+                body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
+            )
+        }
+        return nil
+    }
+
     func health() -> HTTPResult {
         let body = encode(HealthResponse(ok: true, version: "0.1.0"))
         return jsonResponse(status: .ok, body: body)
@@ -62,7 +87,14 @@ final class BridgeCore {
             ),
             tmux: ConfigTmuxSection(
                 enabled: cfg.tmuxEnabled,
+                statusBarURL: cfg.tmuxStatusBarURL,
                 sessionModes: cfg.tmuxSessionModes
+            ),
+            remote: ConfigRemoteSection(
+                nodeRole: cfg.nodeRole.rawValue,
+                accessEnabled: cfg.remoteAccessEnabled,
+                federationEnabled: cfg.federationEnabled,
+                federationURL: cfg.federationURL
             )
         )
         let body = encode(APIResponse(ok: true, result: result, error: nil))
@@ -98,6 +130,9 @@ final class BridgeCore {
                     failedStep: "validate_request",
                     details: nil
                 )
+            }
+            if let denied = rejectLineOnClient(adapterName: request.adapter) {
+                return denied
             }
 
             guard let adapter = registry.adapter(for: request.adapter) else {
@@ -138,6 +173,9 @@ final class BridgeCore {
     }
 
     func context(adapter adapterName: String) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName) {
+            return denied
+        }
         do {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
@@ -169,6 +207,9 @@ final class BridgeCore {
     }
 
     func messages(adapter adapterName: String, limit: Int) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName) {
+            return denied
+        }
         do {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
@@ -200,6 +241,9 @@ final class BridgeCore {
     }
 
     func conversations(adapter adapterName: String, limit: Int) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName) {
+            return denied
+        }
         do {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
@@ -251,6 +295,9 @@ final class BridgeCore {
     }
 
     func axdump(adapter adapterName: String) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName) {
+            return denied
+        }
         do {
             guard let adapter = registry.adapter(for: adapterName) else {
                 throw BridgeRuntimeError(
@@ -282,6 +329,8 @@ final class BridgeCore {
 
     func doctor() -> HTTPResult {
         var checks: [DoctorCheck] = []
+        let cfg = configStore.load()
+        let lineEnabled = cfg.nodeRole != .client
 
         // Check 1: Accessibility permission
         let axTrusted = AXIsProcessTrusted()
@@ -293,24 +342,24 @@ final class BridgeCore {
         ))
 
         // Check 2: LINE running
-        let lineRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "jp.naver.line.mac").first != nil
+        let lineRunning = lineEnabled && (NSRunningApplication.runningApplications(withBundleIdentifier: "jp.naver.line.mac").first != nil)
         checks.append(DoctorCheck(
             name: "line_running",
-            status: lineRunning ? "ok" : "warning",
-            message: lineRunning ? "LINE is running" : "LINE is not running",
-            details: lineRunning ? nil : "Please launch LINE"
+            status: lineEnabled ? (lineRunning ? "ok" : "warning") : "ok",
+            message: lineEnabled ? (lineRunning ? "LINE is running" : "LINE is not running") : "LINE checks disabled on client role",
+            details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : nil
         ))
 
         // Check 3: LINE window accessible (only if LINE is running and AX is trusted)
-        if axTrusted && lineRunning {
+        if lineEnabled && axTrusted && lineRunning {
             let windowCheck = checkLINEWindowAccessible()
             checks.append(windowCheck)
         } else {
             checks.append(DoctorCheck(
                 name: "line_window_accessible",
-                status: "warning",
+                status: lineEnabled ? "warning" : "ok",
                 message: "LINE window check skipped",
-                details: !axTrusted ? "Accessibility permission required" : "LINE is not running"
+                details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE is not running") : "nodeRole=client"
             ))
         }
 
@@ -351,6 +400,59 @@ final class BridgeCore {
         )
 
         return jsonResponse(status: allOk ? .ok : .serviceUnavailable, body: encode(report))
+    }
+
+    // MARK: - Federation command dispatch
+
+    func handleFederationCommand(_ command: FederationCommandPayload) -> FederationResponsePayload {
+        let components = URLComponents(string: "http://localhost\(command.path)")
+        let path = components?.path ?? command.path
+        let method = httpMethod(from: command.method)
+
+        if path != "/v1/health" {
+            var headerBag = HTTPHeaders()
+            for (key, value) in command.headers {
+                headerBag.add(name: key, value: value)
+            }
+            if let auth = checkAuthorization(headers: headerBag) {
+                return federationResponse(id: command.id, result: auth)
+            }
+        }
+
+        let result: HTTPResult
+        switch (method, path) {
+        case (.GET, "/v1/health"):
+            result = health()
+        case (.GET, "/v1/config"):
+            result = config()
+        case (.GET, "/v1/poll"):
+            let since = components?.queryItems?.first(where: { $0.name == "since" })?.value.flatMap(Int64.init)
+            result = poll(since: since)
+        case (.POST, "/v1/send"):
+            let body = command.body?.data(using: .utf8) ?? Data()
+            result = send(body: body)
+        case (.GET, "/v1/context"):
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            result = context(adapter: adapter)
+        case (.GET, "/v1/messages"):
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            let limit = min(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 50, 200)
+            result = messages(adapter: adapter, limit: limit)
+        case (.GET, "/v1/conversations"):
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            let limit = min(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 50, 200)
+            result = conversations(adapter: adapter, limit: limit)
+        case (.GET, "/v1/axdump"):
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            result = axdump(adapter: adapter)
+        case (.GET, "/v1/doctor"):
+            result = doctor()
+        default:
+            let notFound = ErrorPayload(code: "not_found", message: "not found", retriable: false, failedStep: "routing", details: nil)
+            result = jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: notFound)))
+        }
+
+        return federationResponse(id: command.id, result: result)
     }
 
     private func checkLINEWindowAccessible() -> DoctorCheck {
@@ -411,5 +513,47 @@ final class BridgeCore {
         headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
         headers.add(name: "Content-Length", value: "\(body.count)")
         return HTTPResult(status: status, headers: headers, body: body)
+    }
+
+    private func federationResponse(id: String, result: HTTPResult) -> FederationResponsePayload {
+        var headers: [String: String] = [:]
+        for header in result.headers {
+            headers[header.name] = header.value
+        }
+        let body = String(data: result.body, encoding: .utf8) ?? "{}"
+        return FederationResponsePayload(
+            id: id,
+            status: Int(result.status.code),
+            headers: headers,
+            body: body
+        )
+    }
+
+    private func httpMethod(from value: String) -> HTTPMethod {
+        switch value.uppercased() {
+        case "POST": return .POST
+        case "PUT": return .PUT
+        case "DELETE": return .DELETE
+        case "PATCH": return .PATCH
+        case "HEAD": return .HEAD
+        case "OPTIONS": return .OPTIONS
+        default: return .GET
+        }
+    }
+
+    private func rejectLineOnClient(adapterName: String) -> HTTPResult? {
+        let cfg = configStore.load()
+        guard cfg.nodeRole == .client, adapterName == "line" else { return nil }
+        let payload = ErrorPayload(
+            code: "line_disabled_on_client",
+            message: "line adapter is disabled on client node role",
+            retriable: false,
+            failedStep: "role_gate",
+            details: "nodeRole=client"
+        )
+        return jsonResponse(
+            status: .forbidden,
+            body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
+        )
     }
 }

@@ -121,8 +121,8 @@ AXUIElement calls.
 
 ## 4. Security
 
-ClawGate binds exclusively to `127.0.0.1:8765` — no external access is possible.
-No token authentication is required. All endpoints are open to localhost callers.
+ClawGate binds to `127.0.0.1:8765` by default. Optional remote mode binds `0.0.0.0:8765`.
+In local mode, token authentication is not required. In remote mode, Bearer auth is required for all endpoints except `/v1/health`.
 
 ### CSRF Protection
 All `POST` requests are checked for an `Origin` header. If present and non-empty,

@@ -2,13 +2,19 @@
  * ClawGate HTTP client — thin wrapper around the localhost API.
  * Uses Node.js 22+ built-in fetch (no dependencies).
  *
- * No authentication required — ClawGate binds to 127.0.0.1 only.
+ * Local mode: no authentication required (127.0.0.1 bind).
+ * Remote mode: optional Bearer token via setClawgateAuthToken().
  * CSRF protection via Origin header check (server-side).
  */
 
 import { execSync } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+let clawgateAuthToken = "";
+
+export function setClawgateAuthToken(token) {
+  clawgateAuthToken = (token || "").trim();
+}
 
 /**
  * @param {string} apiUrl
@@ -23,6 +29,9 @@ async function request(apiUrl, path, opts = {}) {
   const { method = "GET", body, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
   const url = `${apiUrl}${path}`;
   const headers = { "Content-Type": "application/json" };
+  if (clawgateAuthToken) {
+    headers.Authorization = `Bearer ${clawgateAuthToken}`;
+  }
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

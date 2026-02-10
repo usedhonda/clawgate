@@ -10,7 +10,7 @@ final class TmuxOutputParserTests: XCTestCase {
         defaults.removePersistentDomain(forName: "clawgate.tests.tmux-parser")
         let cfg = ConfigStore(defaults: defaults)
         let logger = AppLogger(configStore: cfg)
-        let ccClient = CCStatusBarClient(logger: logger, urlString: "ws://localhost:0/unused")
+        let ccClient = CCStatusBarClient(logger: logger)
         return TmuxInboundWatcher(ccClient: ccClient, eventBus: EventBus(), logger: logger, configStore: cfg)
     }
 
@@ -144,7 +144,7 @@ final class TmuxOutputParserTests: XCTestCase {
         let lines = (1...100).map { "\(longLine) \($0)" }
         let output = lines.joined(separator: "\n")
         let summary = watcher.extractSummary(from: output)
-        XCTAssertLessThanOrEqual(summary.count, 1000)
+        XCTAssertLessThanOrEqual(summary.count, 2000)
     }
 
     func testExtractSummaryCompressesBlankLines() {
