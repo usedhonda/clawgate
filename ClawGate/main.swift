@@ -10,10 +10,7 @@ final class AppRuntime {
     private lazy var lineAdapter = LINEAdapter(logger: logger, recentSendTracker: recentSendTracker)
 
     // Tmux
-    private lazy var ccStatusBarClient: CCStatusBarClient = {
-        let config = configStore.load()
-        return CCStatusBarClient(logger: logger, urlString: config.tmuxStatusBarUrl)
-    }()
+    private lazy var ccStatusBarClient = CCStatusBarClient(logger: logger)
     private lazy var tmuxAdapter = TmuxAdapter(
         ccClient: ccStatusBarClient,
         configStore: configStore,

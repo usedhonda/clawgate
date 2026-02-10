@@ -41,14 +41,6 @@ struct InlineSettingsView: View {
             sectionHeader("Tmux")
 
             Toggle("Enabled", isOn: $model.config.tmuxEnabled)
-
-            HStack {
-                Text("URL:")
-                    .font(.system(size: 11))
-                TextField("ws://...", text: $model.config.tmuxStatusBarUrl)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11))
-            }
         }
         .toggleStyle(.switch)
         .controlSize(.small)
@@ -59,7 +51,6 @@ struct InlineSettingsView: View {
         .onChange(of: model.config.lineDefaultConversation) { _ in model.save() }
         .onChange(of: model.config.linePollIntervalSeconds) { _ in model.save() }
         .onChange(of: model.config.tmuxEnabled) { _ in model.save() }
-        .onChange(of: model.config.tmuxStatusBarUrl) { _ in model.save() }
     }
 
     private func sectionHeader(_ title: String) -> some View {

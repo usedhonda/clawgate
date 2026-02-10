@@ -62,7 +62,6 @@ final class BridgeCore {
             ),
             tmux: ConfigTmuxSection(
                 enabled: cfg.tmuxEnabled,
-                statusBarUrl: cfg.tmuxStatusBarUrl,
                 sessionModes: cfg.tmuxSessionModes
             )
         )

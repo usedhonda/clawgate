@@ -189,7 +189,6 @@ struct ConfigLineSection: Codable {
 
 struct ConfigTmuxSection: Codable {
     let enabled: Bool
-    let statusBarUrl: String
     let sessionModes: [String: String]  // project -> "observe" | "auto" | "autonomous"
 }
 

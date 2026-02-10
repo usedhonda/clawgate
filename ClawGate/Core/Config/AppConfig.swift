@@ -16,7 +16,6 @@ struct AppConfig: Codable {
 
     // Tmux
     var tmuxEnabled: Bool
-    var tmuxStatusBarUrl: String
     var tmuxSessionModes: [String: String]  // project -> "observe" | "auto" | "autonomous"; absent = ignore
 
     static let `default` = AppConfig(
@@ -30,7 +29,6 @@ struct AppConfig: Codable {
         lineEnableProcessSignal: false,
         lineEnableNotificationStoreSignal: false,
         tmuxEnabled: false,
-        tmuxStatusBarUrl: "ws://localhost:8080/ws/sessions",
         tmuxSessionModes: [:]
     )
 }
@@ -48,7 +46,6 @@ final class ConfigStore {
         static let lineEnableNotificationStoreSignal = "clawgate.lineEnableNotificationStoreSignal"
         // Tmux
         static let tmuxEnabled = "clawgate.tmuxEnabled"
-        static let tmuxStatusBarUrl = "clawgate.tmuxStatusBarUrl"
         static let tmuxSessionModes = "clawgate.tmuxSessionModes"
         // Legacy keys for migration
         static let legacyPollIntervalSeconds = "clawgate.pollIntervalSeconds"
@@ -100,9 +97,6 @@ final class ConfigStore {
         if defaults.object(forKey: Keys.tmuxEnabled) != nil {
             cfg.tmuxEnabled = defaults.bool(forKey: Keys.tmuxEnabled)
         }
-        if let url = defaults.string(forKey: Keys.tmuxStatusBarUrl), !url.isEmpty {
-            cfg.tmuxStatusBarUrl = url
-        }
         if let json = defaults.string(forKey: Keys.tmuxSessionModes),
            let data = json.data(using: .utf8),
            let dict = try? JSONDecoder().decode([String: String].self, from: data) {
@@ -124,7 +118,6 @@ final class ConfigStore {
         defaults.set(cfg.lineEnableNotificationStoreSignal, forKey: Keys.lineEnableNotificationStoreSignal)
         // Tmux
         defaults.set(cfg.tmuxEnabled, forKey: Keys.tmuxEnabled)
-        defaults.set(cfg.tmuxStatusBarUrl, forKey: Keys.tmuxStatusBarUrl)
         if let json = try? JSONEncoder().encode(cfg.tmuxSessionModes),
            let str = String(data: json, encoding: .utf8) {
             defaults.set(str, forKey: Keys.tmuxSessionModes)

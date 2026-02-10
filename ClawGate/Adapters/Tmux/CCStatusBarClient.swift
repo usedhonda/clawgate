@@ -1,6 +1,7 @@
 import Foundation
 
-/// WebSocket client for cc-status-bar (`ws://localhost:8080/ws/sessions`).
+/// WebSocket client for cc-status-bar.
+/// Auto-scans ports 8080-8089 to find the running instance.
 /// Tracks Claude Code session state and notifies on status changes.
 final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
@@ -37,20 +38,21 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     /// Callback: fired when the sessions dictionary is updated (for UI refresh)
     var onSessionsChanged: (() -> Void)?
 
+    private static let portRange: ClosedRange<Int> = 8080...8089
+    private static let wsPathSuffix = "/ws/sessions"
+
     private let logger: AppLogger
-    private let urlString: String
     private var webSocketTask: URLSessionWebSocketTask?
     private var urlSession: URLSession?
     private let lock = NSLock()
     private var _sessions: [String: CCSession] = [:]
     private var reconnectAttempts = 0
-    private let maxReconnectAttempts = 20
+    private var connectedPort: Int?
     private var isConnected = false
     private var shouldReconnect = true
 
-    init(logger: AppLogger, urlString: String = "ws://localhost:8080/ws/sessions") {
+    init(logger: AppLogger) {
         self.logger = logger
-        self.urlString = urlString
         super.init()
     }
 
@@ -91,7 +93,13 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
                     didOpenWithProtocol protocol: String?) {
-        logger.log(.info, "CCStatusBarClient: WebSocket connected")
+        // Extract port from the URL for logging
+        if let port = webSocketTask.originalRequest?.url?.port {
+            connectedPort = port
+            logger.log(.info, "CCStatusBarClient: connected on port \(port)")
+        } else {
+            logger.log(.info, "CCStatusBarClient: WebSocket connected")
+        }
         isConnected = true
         reconnectAttempts = 0
         receiveMessage()
@@ -116,26 +124,33 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
     private func doConnect() {
         guard shouldReconnect else { return }
-        guard let url = URL(string: urlString) else {
-            logger.log(.error, "CCStatusBarClient: invalid URL: \(urlString)")
-            return
+
+        // Build port list: try last-known port first, then scan all others
+        var ports = Array(Self.portRange)
+        if let last = connectedPort, ports.contains(last) {
+            ports.removeAll { $0 == last }
+            ports.insert(last, at: 0)
         }
 
-        let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
-        let task = session.webSocketTask(with: url)
-        self.urlSession = session
-        self.webSocketTask = task
-        task.resume()
+        for port in ports {
+            guard shouldReconnect else { return }
+            let urlString = "ws://localhost:\(port)\(Self.wsPathSuffix)"
+            guard let url = URL(string: urlString) else { continue }
+
+            let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+            let task = session.webSocketTask(with: url)
+            self.urlSession = session
+            self.webSocketTask = task
+            task.resume()
+            return  // URLSessionWebSocketDelegate callbacks handle the rest
+        }
     }
 
     private func scheduleReconnect() {
         guard shouldReconnect else { return }
         reconnectAttempts += 1
-        if reconnectAttempts > maxReconnectAttempts {
-            logger.log(.warning, "CCStatusBarClient: max reconnect attempts reached, giving up")
-            return
-        }
-        let delay = min(Double(reconnectAttempts) * 3.0, 30.0)
+        // No max limit — keep trying indefinitely (cc-status-bar may start later)
+        let delay = min(Double(reconnectAttempts) * 3.0, 60.0)
         logger.log(.debug, "CCStatusBarClient: reconnecting in \(delay)s (attempt \(reconnectAttempts))")
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
             self?.doConnect()
