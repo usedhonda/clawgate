@@ -64,7 +64,12 @@ cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
 ok "Binary copied"
 
 # Sign with stable cert (not ad-hoc)
+if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
+    err "'ClawGate Dev' certificate not found. Run ./scripts/setup-cert.sh once."
+    exit 1
+fi
 codesign --force --deep --options runtime \
+    --identifier com.clawgate.app \
     --entitlements ClawGate.entitlements \
     --sign "ClawGate Dev" ClawGate.app
 ok "Code signed (ClawGate Dev)"

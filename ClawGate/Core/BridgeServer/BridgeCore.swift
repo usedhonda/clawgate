@@ -332,7 +332,10 @@ final class BridgeCore {
         let cfg = configStore.load()
         let lineEnabled = cfg.nodeRole != .client
 
-        // Check 1: Accessibility permission
+        // Check 1: App signature authority (avoid TCC re-prompt churn)
+        checks.append(appSignatureCheck())
+
+        // Check 2: Accessibility permission
         let axTrusted = AXIsProcessTrusted()
         checks.append(DoctorCheck(
             name: "accessibility_permission",
@@ -341,7 +344,7 @@ final class BridgeCore {
             details: axTrusted ? nil : "System Settings > Privacy & Security > Accessibility"
         ))
 
-        // Check 2: LINE running
+        // Check 3: LINE running
         let lineRunning = lineEnabled && (NSRunningApplication.runningApplications(withBundleIdentifier: "jp.naver.line.mac").first != nil)
         checks.append(DoctorCheck(
             name: "line_running",
@@ -350,7 +353,7 @@ final class BridgeCore {
             details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : nil
         ))
 
-        // Check 3: LINE window accessible (only if LINE is running and AX is trusted)
+        // Check 4: LINE window accessible (only if LINE is running and AX is trusted)
         if lineEnabled && axTrusted && lineRunning {
             let windowCheck = checkLINEWindowAccessible()
             checks.append(windowCheck)
@@ -363,7 +366,7 @@ final class BridgeCore {
             ))
         }
 
-        // Check 4: Port 8765 (we're already listening, so this is informational)
+        // Check 5: Port 8765 (we're already listening, so this is informational)
         checks.append(DoctorCheck(
             name: "server_port",
             status: "ok",
@@ -371,7 +374,7 @@ final class BridgeCore {
             details: "127.0.0.1:8765"
         ))
 
-        // Check 5: Screen Recording permission (for Vision OCR)
+        // Check 6: Screen Recording permission (for Vision OCR)
         let screenOk = CGPreflightScreenCaptureAccess()
         checks.append(DoctorCheck(
             name: "screen_recording_permission",
@@ -502,6 +505,67 @@ final class BridgeCore {
                 details: "Node count: \(nodes.count), open a chat to see the input field"
             )
         }
+    }
+
+    private func appSignatureCheck() -> DoctorCheck {
+        let appPath = Bundle.main.bundlePath
+        guard let output = runProcess(executable: "/usr/bin/codesign", arguments: ["-dv", "--verbose=4", appPath]) else {
+            return DoctorCheck(
+                name: "app_signature",
+                status: "warning",
+                message: "Could not verify app signature",
+                details: "codesign output unavailable"
+            )
+        }
+
+        let authorities = output
+            .split(separator: "\n")
+            .compactMap { line -> String? in
+                let prefix = "Authority="
+                guard line.hasPrefix(prefix) else { return nil }
+                return String(line.dropFirst(prefix.count))
+            }
+
+        let isTrusted = authorities.contains("ClawGate Dev")
+        if isTrusted {
+            return DoctorCheck(
+                name: "app_signature",
+                status: "ok",
+                message: "App signature authority is ClawGate Dev",
+                details: nil
+            )
+        }
+
+        let detail = authorities.first.map { "Current authority: \($0)" } ?? "No authority found in signature"
+        return DoctorCheck(
+            name: "app_signature",
+            status: "error",
+            message: "App is not signed with ClawGate Dev",
+            details: detail
+        )
+    }
+
+    private func runProcess(executable: String, arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+
+        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let merged = [out, err].joined(separator: "\n")
+        return merged.isEmpty ? nil : merged
     }
 
     private func encode<T: Codable>(_ value: T) -> Data {

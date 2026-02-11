@@ -49,25 +49,51 @@ fi
 ssh "$REMOTE_HOST" "PROJECT_PATH='$PROJECT_PATH' BUILD_FLAG='$BUILD_FLAG' STOP_RELAY_FLAG='$STOP_RELAY_FLAG' /bin/zsh -lc '
 set -euo pipefail
 cd \"\$PROJECT_PATH\"
+APP_PATH=\"\$PROJECT_PATH/ClawGate.app\"
+TMP_BACKUP=\"/tmp/ClawGate.app.backup.\$\$\"
 
 if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
   echo \"[remote] swift build (Intel)\"
   swift build
 fi
 
-if [[ ! -f .build/debug/ClawGate ]]; then
-  echo \"[remote] missing .build/debug/ClawGate\" >&2
-  exit 1
-fi
+if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
+  if [[ ! -f .build/debug/ClawGate ]]; then
+    echo \"[remote] missing .build/debug/ClawGate\" >&2
+    exit 1
+  fi
 
-cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
-# Prefer stable dev identity to reduce TCC permission churn.
-if security find-identity -v -p codesigning 2>/dev/null | grep -q \"ClawGate Dev\"; then
+  cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
+  # Always use stable cert to avoid TCC/Accessibility re-prompt churn.
+  if ! security find-identity -v -p codesigning 2>/dev/null | grep -q \"ClawGate Dev\"; then
+    echo \"[remote] missing ClawGate Dev codesign identity. run: ./scripts/setup-cert.sh\" >&2
+    exit 1
+  fi
+  rm -rf \"\$TMP_BACKUP\"
+  cp -R \"\$APP_PATH\" \"\$TMP_BACKUP\"
+  set +e
   codesign --force --deep --options runtime \
+    --identifier com.clawgate.app \
     --entitlements ClawGate.entitlements \
-    --sign \"ClawGate Dev\" ClawGate.app >/dev/null 2>&1 || true
+    --sign \"ClawGate Dev\" \"\$APP_PATH\"
+  SIGN_EXIT=\$?
+  set -e
+  if [[ \"\$SIGN_EXIT\" != \"0\" ]]; then
+    echo \"[remote] WARN: codesign failed; restoring previous ClawGate.app\" >&2
+    rm -rf \"\$APP_PATH\"
+    mv \"\$TMP_BACKUP\" \"\$APP_PATH\"
+    echo \"[remote] run this ON macmini local desktop session:\" >&2
+    echo \"[remote]   KEYCHAIN_PASSWORD=\\\"...\\\" ./scripts/macmini-local-sign-and-restart.sh\" >&2
+    exit 1
+  fi
+  rm -rf \"\$TMP_BACKUP\"
 else
-  codesign --force --deep --sign - ClawGate.app >/dev/null 2>&1 || true
+  echo \"[remote] restart-only mode (skip build/deploy/sign)\"
+  CURRENT_AUTH=\$(codesign -dv --verbose=4 ClawGate.app 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true)
+  if [[ \"\$CURRENT_AUTH\" != \"ClawGate Dev\" ]]; then
+    echo \"[remote] WARN: current app signature authority is '\$CURRENT_AUTH' (expected ClawGate Dev).\"
+    echo \"[remote]       run ./scripts/setup-cert.sh and rebuild/sign to reduce TCC re-prompts.\"
+  fi
 fi
 
 # Stop old app from both historical and current paths, then launch current one.
@@ -92,6 +118,8 @@ echo \"[remote] app process:\"
 ps aux | grep \"/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate\" | grep -v grep || true
 echo \"[remote] app binary arch:\"
 file /Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate || true
+echo \"[remote] app signature authority:\"
+codesign -dv --verbose=4 /Users/usedhonda/projects/ios/clawgate/ClawGate.app 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true
 echo \"[remote] gateway launchctl:\"
 launchctl list | grep ai.openclaw.gateway || true
 echo \"[remote] health:\"

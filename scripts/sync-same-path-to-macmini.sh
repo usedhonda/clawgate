@@ -3,17 +3,30 @@
 #
 # Usage:
 #   ./scripts/sync-same-path-to-macmini.sh
-#   ./scripts/sync-same-path-to-macmini.sh --dry-run
+#   ./scripts/sync-same-path-to-macmini.sh --remote-host macmini --dry-run
 
 set -euo pipefail
 
 DRY_RUN=false
-if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=true
-fi
-
 LOCAL_PATH="$(pwd)"
 REMOTE_HOST="macmini"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --remote-host)
+      REMOTE_HOST="$2"
+      shift 2
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
 
 if [[ "$LOCAL_PATH" != /Users/* ]]; then
   echo "Expected local path under /Users/*, got: $LOCAL_PATH" >&2
@@ -38,6 +51,8 @@ RSYNC_CMD+=(
   --exclude '*.xcuserstate'
   --exclude '*.xcuserdata/'
   --exclude docs/log/
+  # App bundles are architecture-specific; remote host must keep its own built app.
+  --exclude ClawGate.app/
   "$LOCAL_PATH/"
   "$REMOTE_HOST:$LOCAL_PATH/"
 )

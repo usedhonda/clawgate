@@ -50,4 +50,16 @@ final class RecentSendTrackerTests: XCTestCase {
         let result = group.wait(timeout: .now() + 5)
         XCTAssertEqual(result, .success, "Concurrent access should not crash or deadlock")
     }
+
+    func testIsLikelyEchoByTextMatch() {
+        let tracker = RecentSendTracker(windowSeconds: 60)
+        tracker.recordSend(conversation: "TestUser", text: "これは非常に長いテキストです command line sample 12345")
+        XCTAssertTrue(tracker.isLikelyEcho(text: "これは非常に長いテキストです\ncommand line sample 12345\n既読"))
+    }
+
+    func testIsLikelyEchoByTextMatchRequiresEnoughSignal() {
+        let tracker = RecentSendTracker(windowSeconds: 60)
+        tracker.recordSend(conversation: "TestUser", text: "ok")
+        XCTAssertFalse(tracker.isLikelyEcho(text: "ok"))
+    }
 }

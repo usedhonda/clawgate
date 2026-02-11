@@ -4,6 +4,7 @@
 # Usage:
 #   ./scripts/fix-macmini-ax-permission.sh
 #   ./scripts/fix-macmini-ax-permission.sh --remote-host macmini --wait-seconds 120
+#   ./scripts/fix-macmini-ax-permission.sh --force-reset
 
 set -euo pipefail
 
@@ -11,6 +12,7 @@ REMOTE_HOST="macmini"
 WAIT_SECONDS=120
 BUNDLE_ID="com.clawgate.app"
 APP_PATH="/Users/usedhonda/projects/ios/clawgate/ClawGate.app"
+FORCE_RESET=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -22,6 +24,8 @@ while [[ $# -gt 0 ]]; do
       BUNDLE_ID="$2"; shift 2 ;;
     --app-path)
       APP_PATH="$2"; shift 2 ;;
+    --force-reset)
+      FORCE_RESET=true; shift ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 2 ;;
@@ -31,16 +35,19 @@ done
 echo "Remote host: $REMOTE_HOST"
 echo "Bundle ID: $BUNDLE_ID"
 echo "App path: $APP_PATH"
+echo "Force reset: $FORCE_RESET"
 
 if ! ssh -o ConnectTimeout=8 "$REMOTE_HOST" "echo ok" >/dev/null 2>&1; then
   echo "Cannot SSH to '$REMOTE_HOST'" >&2
   exit 1
 fi
 
-ssh "$REMOTE_HOST" "/bin/zsh -lc '
+ssh "$REMOTE_HOST" "FORCE_RESET='$FORCE_RESET' /bin/zsh -lc '
 set -euo pipefail
 
-tccutil reset Accessibility \"$BUNDLE_ID\" >/dev/null 2>&1 || true
+if [[ \"$FORCE_RESET\" == \"true\" ]]; then
+  tccutil reset Accessibility \"$BUNDLE_ID\" >/dev/null 2>&1 || true
+fi
 
 open \"$APP_PATH\" >/dev/null 2>&1 || true
 open \"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility\" >/dev/null 2>&1 || true

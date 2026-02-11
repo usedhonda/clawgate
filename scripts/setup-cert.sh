@@ -2,7 +2,7 @@
 # Setup self-signed code signing certificate for ClawGate development.
 # This eliminates the need to re-grant AX permission after every rebuild.
 #
-# Usage: ./scripts/setup-cert.sh
+# Usage: ./scripts/setup-cert.sh [--reset] [--non-interactive] [--keychain-password <password>]
 #
 # Uses macOS built-in LibreSSL (/usr/bin/openssl) to create P12 files
 # compatible with macOS Security.framework. Homebrew OpenSSL 3.x creates
@@ -14,40 +14,76 @@ CERT_NAME="ClawGate Dev"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 CERT_DIR="/tmp/clawgate-cert-setup"
 OPENSSL=/usr/bin/openssl
+RESET=false
+NON_INTERACTIVE=false
+KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
 
-# --- Step 0: Nuke ALL existing "ClawGate Dev" items (certs, keys, identities) ---
-echo "=== Cleaning up ALL existing '$CERT_NAME' items ==="
-
-# Delete identities (cert + key pairs) — may fail if ambiguous, that's fine
-security delete-identity -c "$CERT_NAME" 2>/dev/null || true
-security delete-identity -c "$CERT_NAME" 2>/dev/null || true
-security delete-identity -c "$CERT_NAME" 2>/dev/null || true
-
-# Delete any remaining certificates by SHA-1 hash (handles duplicates)
-while true; do
-  HASH=$(security find-certificate -c "$CERT_NAME" -Z "$KEYCHAIN" 2>/dev/null \
-    | grep "SHA-1" | awk '{print $NF}' | head -1 || true)
-  if [ -z "$HASH" ]; then break; fi
-  if security delete-certificate -Z "$HASH" "$KEYCHAIN" 2>/dev/null; then
-    echo "  Deleted cert $HASH"
-  else
-    break
-  fi
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reset)
+      RESET=true; shift ;;
+    --non-interactive)
+      NON_INTERACTIVE=true; shift ;;
+    --keychain-password)
+      KEYCHAIN_PASSWORD="$2"; shift 2 ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      echo "Usage: ./scripts/setup-cert.sh [--reset] [--non-interactive] [--keychain-password <password>]" >&2
+      exit 2 ;;
+  esac
 done
-
-# Delete orphaned private keys by label
-security delete-key -l "$CERT_NAME" 2>/dev/null || true
-security delete-key -l "$CERT_NAME" 2>/dev/null || true
-security delete-key -l "$CERT_NAME" 2>/dev/null || true
-
-echo "  Cleanup done"
 
 # --- Step 1: Check if we already have a valid identity ---
 if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
-  echo ""
-  echo "=== '$CERT_NAME' is already installed and trusted ==="
-  security find-identity -v -p codesigning | grep "$CERT_NAME"
-  exit 0
+  if [[ "$RESET" != "true" ]]; then
+    # Ensure non-interactive codesign access is configured even when cert already exists.
+    if [[ -n "$KEYCHAIN_PASSWORD" ]]; then
+      security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null 2>&1 || true
+      security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null 2>&1 || true
+    fi
+    echo ""
+    echo "=== '$CERT_NAME' is already installed and trusted ==="
+    security find-identity -v -p codesigning | grep "$CERT_NAME"
+    echo ""
+    echo "No action needed. Re-run with --reset only when certificate is broken."
+    exit 0
+  fi
+fi
+
+if [[ "$RESET" == "true" ]]; then
+  # --- Step 0: Nuke ALL existing "ClawGate Dev" items (certs, keys, identities) ---
+  echo "=== Cleaning up ALL existing '$CERT_NAME' items ==="
+
+  # Delete identities (cert + key pairs) — may fail if ambiguous, that's fine
+  security delete-identity -c "$CERT_NAME" 2>/dev/null || true
+  security delete-identity -c "$CERT_NAME" 2>/dev/null || true
+  security delete-identity -c "$CERT_NAME" 2>/dev/null || true
+
+  # Delete any remaining certificates by SHA-1 hash (handles duplicates)
+  while true; do
+    HASH=$(security find-certificate -c "$CERT_NAME" -Z "$KEYCHAIN" 2>/dev/null \
+      | grep "SHA-1" | awk '{print $NF}' | head -1 || true)
+    if [ -z "$HASH" ]; then break; fi
+    if security delete-certificate -Z "$HASH" "$KEYCHAIN" 2>/dev/null; then
+      echo "  Deleted cert $HASH"
+    else
+      break
+    fi
+  done
+
+  # Delete orphaned private keys by label
+  security delete-key -l "$CERT_NAME" 2>/dev/null || true
+  security delete-key -l "$CERT_NAME" 2>/dev/null || true
+  security delete-key -l "$CERT_NAME" 2>/dev/null || true
+
+  echo "  Cleanup done"
+
+  # Re-check after cleanup
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
+    echo ""
+    echo "Cleanup did not remove all '$CERT_NAME' identities. Resolve manually." >&2
+    exit 1
+  fi
 fi
 
 # --- Step 2: Generate certificate using LibreSSL ---
@@ -91,8 +127,13 @@ $OPENSSL pkcs12 -export \
 echo "  P12 bundle created"
 
 # --- Step 4: Unlock keychain + Import ---
-echo "  Unlocking keychain (may prompt for login password)..."
-security unlock-keychain "$KEYCHAIN"
+if [[ -n "$KEYCHAIN_PASSWORD" ]]; then
+  echo "  Unlocking keychain with provided password..."
+  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+else
+  echo "  Unlocking keychain (may prompt for login password)..."
+  security unlock-keychain "$KEYCHAIN"
+fi
 
 security import "$CERT_DIR/cert.p12" \
   -k "$KEYCHAIN" \
@@ -101,15 +142,27 @@ security import "$CERT_DIR/cert.p12" \
 
 echo "  Imported to login keychain"
 
+# Allow non-interactive codesign access to private key.
+if [[ -n "$KEYCHAIN_PASSWORD" ]]; then
+  if security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null 2>&1; then
+    echo "  Key partition list configured (codesign prompt suppression)"
+  else
+    echo "  WARN: Failed to set key partition list automatically" >&2
+  fi
+fi
+
 # --- Step 5: Trust the certificate ---
 # Self-signed certs need explicit trust for codesign to accept them.
 # Try CLI first (needs GUI auth dialog), fall back to manual instructions.
 echo ""
 echo "=== Trust setting ==="
-echo "  Trying CLI trust (a system dialog may appear - click 'Always Allow')..."
-if sudo security add-trusted-cert -d -r trustRoot -k "$KEYCHAIN" "$CERT_DIR/cert.pem" 2>/dev/null; then
+echo "  Trying CLI trust..."
+if security add-trusted-cert -d -r trustRoot -k "$KEYCHAIN" "$CERT_DIR/cert.pem" 2>/dev/null; then
   echo "  Trusted via CLI"
 else
+  if [[ "$NON_INTERACTIVE" == "true" ]]; then
+    echo "  WARN: CLI trust failed in non-interactive mode. Manual trust may be required." >&2
+  else
   echo ""
   echo "  CLI trust failed. Please trust manually in Keychain Access:"
   echo ""
@@ -122,6 +175,7 @@ else
   open -a "Keychain Access"
   echo "  Press Enter after trusting..."
   read -r
+  fi
 fi
 
 # --- Step 6: Cleanup temp files ---

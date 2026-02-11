@@ -144,7 +144,8 @@ final class LINEInboundWatcher {
             return
         }
 
-        let isEcho = recentSendTracker.isLikelyEcho()
+        let decisionText = signals.first(where: { !$0.text.isEmpty })?.text ?? ""
+        let isEcho = recentSendTracker.isLikelyEcho() || recentSendTracker.isLikelyEcho(text: decisionText)
         let decision = fusionEngine.decide(
             signals: signals,
             fallbackText: "",
@@ -166,8 +167,14 @@ final class LINEInboundWatcher {
             return
         }
 
+        let filteredDecisionText = LineTextSanitizer.sanitize(decision.text)
+        guard !filteredDecisionText.isEmpty else {
+            logger.log(.debug, "LINEInboundWatcher: dropped empty/standalone-ui text after sanitize")
+            return
+        }
+
         var payload: [String: String] = [
-            "text": decision.text,
+            "text": filteredDecisionText,
             "conversation": decision.conversation,
             "source": "hybrid_fusion",
             "confidence": decision.confidence,
@@ -184,11 +191,13 @@ final class LINEInboundWatcher {
     }
 
     private func emitFromSignal(_ signal: LineDetectionSignal) {
-        let isEcho = recentSendTracker.isLikelyEcho()
+        let filtered = LineTextSanitizer.sanitize(signal.text)
+        guard !filtered.isEmpty else { return }
+        let isEcho = recentSendTracker.isLikelyEcho() || recentSendTracker.isLikelyEcho(text: filtered)
         let eventType = isEcho ? "echo_message" : "inbound_message"
 
         var payload: [String: String] = [
-            "text": signal.text,
+            "text": filtered,
             "conversation": signal.conversation,
             "source": signal.name,
             "confidence": signal.score >= 80 ? "high" : (signal.score >= 50 ? "medium" : "low"),
@@ -208,11 +217,13 @@ final class LINEInboundWatcher {
 
     private func collectStructuralSignal(chatList: AXUIElement, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
         let rowChildren = AXQuery.children(of: chatList)
-        let rowFrames: [CGRect] = rowChildren.compactMap { child in
+        let rowEntries: [(element: AXUIElement, frame: CGRect)] = rowChildren.compactMap { child in
             let role = AXQuery.copyStringAttribute(child, attribute: kAXRoleAttribute)
-            guard role == "AXRow" else { return nil }
-            return AXQuery.copyFrameAttribute(child)
-        }.sorted { $0.origin.y < $1.origin.y }
+            guard role == "AXRow", let frame = AXQuery.copyFrameAttribute(child) else { return nil }
+            return (child, frame)
+        }.sorted { $0.frame.origin.y < $1.frame.origin.y }
+
+        let rowFrames = rowEntries.map(\.frame)
 
         let currentCount = rowFrames.count
         guard currentCount > 0 else { return nil }
@@ -241,26 +252,131 @@ final class LINEInboundWatcher {
         guard countChanged || bottomChanged else { return nil }
 
         let newRowCount = max(0, currentCount - previousCount)
+        let newRowElements: [AXUIElement]
         let newRowFrames: [CGRect]
         if currentCount > previousCount {
+            newRowElements = Array(rowEntries.suffix(currentCount - previousCount)).map(\.element)
             newRowFrames = Array(rowFrames.suffix(currentCount - previousCount))
         } else {
+            newRowElements = [rowEntries.last!.element]
             newRowFrames = [lastFrame]
         }
 
-        let ocrText = VisionOCR.extractText(from: newRowFrames, padding: 4, windowID: lineWindowID) ?? ""
+        let incomingCandidates = zip(newRowElements, newRowFrames).filter { element, frame in
+            rowLikelyInbound(rowElement: element, rowFrame: frame, chatList: chatList, lineWindowID: lineWindowID)
+        }
+        let incomingRows = incomingCandidates.map(\.0)
+        let incomingFrames = incomingCandidates.map(\.1)
+        let hasOnlyOutgoingRows = !newRowFrames.isEmpty && incomingFrames.isEmpty
+        if hasOnlyOutgoingRows {
+            return nil
+        }
+
+        let ocrText = (VisionOCR.extractText(from: incomingFrames, padding: 4, windowID: lineWindowID) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let axFallbackText = extractTextFromRows(incomingRows)
+        let structuralFallbackOCR = collectStructuralFallbackOCR(
+            lastFrame: lastFrame,
+            lineWindowID: lineWindowID
+        )
+        let mergedText: String
+        if !ocrText.isEmpty {
+            mergedText = ocrText
+        } else if !axFallbackText.isEmpty {
+            mergedText = axFallbackText
+        } else {
+            mergedText = structuralFallbackOCR
+        }
 
         return LineDetectionSignal(
             name: "ax_structure",
             score: countChanged ? 70 : 58,
-            text: ocrText,
+            text: mergedText,
             conversation: conversation,
             details: [
                 "row_count_delta": String(newRowCount),
                 "total_rows": String(currentCount),
                 "ax_bottom_changed": bottomChanged ? "1" : "0",
+                "incoming_rows": String(incomingFrames.count),
+                "ocr_empty_fallback_ax": ocrText.isEmpty ? "1" : "0",
+                "ax_fallback_text_len": String(axFallbackText.count),
+                "ocr_fallback_text_len": String(structuralFallbackOCR.count),
             ]
         )
+    }
+
+    private func collectStructuralFallbackOCR(lastFrame: CGRect, lineWindowID: CGWindowID) -> String {
+        // Fallback 1: OCR from latest row with wider padding.
+        let rowText = (VisionOCR.extractText(from: [lastFrame], padding: 12, windowID: lineWindowID) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return rowText
+    }
+
+    private func extractTextFromRows(_ rows: [AXUIElement]) -> String {
+        var collected: [String] = []
+        var seen = Set<String>()
+
+        for row in rows {
+            collectTextRecursive(
+                row,
+                depth: 0,
+                maxDepth: 6,
+                maxNodes: 220,
+                visited: 0,
+                out: &collected,
+                seen: &seen
+            )
+            if collected.count >= 8 {
+                break
+            }
+        }
+
+        return collected.joined(separator: "\n")
+    }
+
+    private func collectTextRecursive(
+        _ element: AXUIElement,
+        depth: Int,
+        maxDepth: Int,
+        maxNodes: Int,
+        visited: Int,
+        out: inout [String],
+        seen: inout Set<String>
+    ) {
+        guard depth <= maxDepth, visited < maxNodes else { return }
+
+        let attrs = [kAXValueAttribute as String, kAXTitleAttribute as String, kAXDescriptionAttribute as String]
+        for attr in attrs {
+            guard let raw = AXQuery.copyStringAttribute(element, attribute: attr) else { continue }
+            let normalized = LineTextSanitizer.sanitize(raw)
+            guard !normalized.isEmpty else { continue }
+            if seen.insert(normalized).inserted {
+                out.append(normalized)
+                if out.count >= 8 {
+                    return
+                }
+            }
+        }
+
+        let children = AXQuery.children(of: element)
+        if children.isEmpty { return }
+
+        var localVisited = visited + 1
+        for child in children {
+            collectTextRecursive(
+                child,
+                depth: depth + 1,
+                maxDepth: maxDepth,
+                maxNodes: maxNodes,
+                visited: localVisited,
+                out: &out,
+                seen: &seen
+            )
+            localVisited += 1
+            if out.count >= 8 || localVisited >= maxNodes {
+                return
+            }
+        }
     }
 
     private func collectPixelSignal(chatList: AXUIElement, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
@@ -283,7 +399,7 @@ final class LINEInboundWatcher {
 
         if !baselineCaptured {
             lastImageHash = hash
-            lastOCRText = VisionOCR.extractText(from: chatListFrame, windowID: lineWindowID) ?? ""
+            lastOCRText = VisionOCR.extractText(from: bottomHalf, windowID: lineWindowID) ?? ""
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
             return nil
@@ -293,7 +409,7 @@ final class LINEInboundWatcher {
         let previousHash = lastImageHash
         lastImageHash = hash
 
-        let pixelOCRText = VisionOCR.extractText(from: chatListFrame, windowID: lineWindowID) ?? ""
+        let pixelOCRText = VisionOCR.extractText(from: bottomHalf, windowID: lineWindowID) ?? ""
         let textChanged = pixelOCRText != lastOCRText
         if textChanged {
             lastOCRText = pixelOCRText
@@ -301,8 +417,9 @@ final class LINEInboundWatcher {
 
         return LineDetectionSignal(
             name: "pixel_diff",
-            score: textChanged ? 48 : 35,
-            text: textChanged ? pixelOCRText : "",
+            // Allow pixel-only path to emit when structural AX signal is unstable.
+            score: textChanged ? 62 : 35,
+            text: textChanged ? LineTextSanitizer.sanitize(pixelOCRText) : "",
             conversation: conversation,
             details: [
                 "pixel_hash_prev": String(previousHash),
@@ -317,6 +434,80 @@ final class LINEInboundWatcher {
         // additional low-level APIs and entitlement validation in a dedicated phase.
         guard !app.isTerminated else { return nil }
         return nil
+    }
+
+    private func rowLikelyInbound(
+        rowElement: AXUIElement,
+        rowFrame: CGRect,
+        chatList: AXUIElement,
+        lineWindowID: CGWindowID
+    ) -> Bool {
+        guard let chatFrame = AXQuery.copyFrameAttribute(chatList) else {
+            return true
+        }
+        let centerX = chatFrame.midX
+        let rowMidX = rowFrame.midX
+
+        // Geometry is the cheapest first filter.
+        if rowMidX < centerX - 28 {
+            return true
+        }
+        if rowMidX > centerX + 28 {
+            return false
+        }
+
+        // Color pre-filter before OCR for ambiguous center-aligned rows.
+        guard let avg = averageRowColor(rowFrame: rowFrame, lineWindowID: lineWindowID) else {
+            return true
+        }
+        if looksOutgoingBubbleColor(avg) {
+            return false
+        }
+        if looksIncomingBubbleColor(avg) {
+            return true
+        }
+
+        // AX metadata fallback: sender name often appears on inbound rows.
+        let marker = extractTextFromRows([rowElement]).lowercased()
+        if marker.contains("既読") {
+            return false
+        }
+        return true
+    }
+
+    private func averageRowColor(rowFrame: CGRect, lineWindowID: CGWindowID) -> (r: CGFloat, g: CGFloat, b: CGFloat)? {
+        let options: CGWindowListOption = lineWindowID != kCGNullWindowID ? .optionIncludingWindow : .optionOnScreenOnly
+        guard let image = CGWindowListCreateImage(rowFrame, options, lineWindowID, [.bestResolution]) else {
+            return nil
+        }
+        guard let ctx = CGContext(
+            data: nil,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+        ctx.interpolationQuality = .low
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard let data = ctx.data else { return nil }
+        let bytes = data.assumingMemoryBound(to: UInt8.self)
+        return (
+            r: CGFloat(bytes[0]),
+            g: CGFloat(bytes[1]),
+            b: CGFloat(bytes[2])
+        )
+    }
+
+    private func looksOutgoingBubbleColor(_ avg: (r: CGFloat, g: CGFloat, b: CGFloat)) -> Bool {
+        avg.g > 118 && avg.g > avg.r + 10 && avg.g > avg.b + 16
+    }
+
+    private func looksIncomingBubbleColor(_ avg: (r: CGFloat, g: CGFloat, b: CGFloat)) -> Bool {
+        abs(avg.r - avg.g) < 18 && abs(avg.g - avg.b) < 18 && avg.r > 108 && avg.r < 240
     }
 
     /// Downsample image to 32x32 and compute FNV-1a hash for fast change detection.

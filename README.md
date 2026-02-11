@@ -87,6 +87,11 @@ ClawGate is designed for privacy-first, single-user operation. It binds to `127.
    ./scripts/setup-cert.sh
    ```
 
+   For remote Intel host (macmini) non-interactive setup:
+   ```bash
+   KEYCHAIN_PASSWORD='your-login-password' ./scripts/setup-cert-macmini.sh --remote-host macmini
+   ```
+
 3. **Deploy**:
    ```bash
    ./scripts/dev-deploy.sh
@@ -98,6 +103,29 @@ ClawGate is designed for privacy-first, single-user operation. It binds to `127.
    ```bash
    curl -s http://127.0.0.1:8765/v1/doctor | jq .
    ```
+
+## LINE Stability Runbook (Host A + Host B)
+
+Use this when LINE delivery/reply stops:
+
+```bash
+# LINE_CORE (Host A only): regular recovery
+./scripts/line-fast-recover.sh --remote-host macmini
+
+# Host A local GUI session (only when signature needs repair)
+KEYCHAIN_PASSWORD='your-login-password' ./scripts/macmini-local-sign-and-restart.sh
+
+# FEDERATION_EXT (optional): verify Host B relay route separately
+./scripts/federation-verify.sh
+```
+
+Notes:
+- `line-fast-recover.sh` now requires `doctor` checks to be healthy for:
+  - `app_signature` (`ClawGate Dev`)
+  - `accessibility_permission`
+  - `screen_recording_permission`
+- Do not run `tccutil reset` in normal operation. Use reset only as a last resort.
+- Reference notes for colocated LINE behavior: `docs/line-core-reference-notes.md`.
 
 ## API Overview
 

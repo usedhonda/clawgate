@@ -77,6 +77,7 @@ echo ""
 # Step 4: Sign app
 echo -e "${GREEN}[4/7] Signing app...${NC}"
 codesign --force --deep --options runtime \
+  --identifier com.clawgate.app \
   --entitlements "${APP_NAME}.entitlements" \
   --sign "${SIGNING_ID}" \
   ${APP_NAME}.app

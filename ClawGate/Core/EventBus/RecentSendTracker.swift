@@ -8,9 +8,12 @@ import Foundation
 final class RecentSendTracker {
     private let lock = NSLock()
     private var entries: [(conversation: String, text: String, timestamp: Date)] = []
-    private let windowSeconds: TimeInterval = 8.0
+    private let windowSeconds: TimeInterval
 
-    /// Record that a message was just sent to the given conversation.
+    init(windowSeconds: TimeInterval = 45.0) {
+        self.windowSeconds = windowSeconds
+    }
+
     func recordSend(conversation: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
@@ -18,13 +21,27 @@ final class RecentSendTracker {
         entries.append((conversation: conversation, text: text, timestamp: Date()))
     }
 
-    /// Returns true if any send was recorded within the temporal window.
-    /// Conversation name is ignored because LINE Qt window title is always "LINE".
     func isLikelyEcho() -> Bool {
         lock.lock()
         defer { lock.unlock() }
         purgeStale()
         return !entries.isEmpty
+    }
+
+    /// Returns true if an inbound candidate text likely matches recent sent text.
+    /// Uses both temporal window and normalized text matching.
+    func isLikelyEcho(text candidateText: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        purgeStale()
+        guard !entries.isEmpty else { return false }
+
+        for entry in entries.reversed() {
+            if LineTextSanitizer.textLikelyContainsSentText(candidate: candidateText, sentText: entry.text) {
+                return true
+            }
+        }
+        return false
     }
 
     /// Returns the most recently sent text (for OCR text matching).

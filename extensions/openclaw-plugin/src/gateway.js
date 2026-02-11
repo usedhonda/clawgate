@@ -134,9 +134,12 @@ function isPluginEcho(eventText) {
 
 const DEDUP_WINDOW_MS = 15_000; // 15 seconds
 const MIN_TEXT_LENGTH = 5;      // Skip empty/short texts (OCR noise, read-receipts)
+const STALE_REPEAT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes for OCR-like repeated same text
 
 /** @type {{ fingerprint: string, time: number }[]} */
 const recentInbounds = [];
+/** @type {{ key: string, time: number }[]} */
+const recentStableInbounds = [];
 
 function eventFingerprint(text) {
   return text.replace(/\s+/g, " ").trim().slice(0, 60);
@@ -155,6 +158,29 @@ function isDuplicateInbound(eventText) {
 
 function recordInbound(eventText) {
   recentInbounds.push({ fingerprint: eventFingerprint(eventText), time: Date.now() });
+}
+
+function stableKey(eventText, conversation) {
+  const normalizedText = eventText.replace(/\s+/g, " ").trim().toLowerCase();
+  const normalizedConv = (conversation || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return `${normalizedConv}::${normalizedText}`;
+}
+
+function isStaleRepeatInbound(eventText, conversation, source) {
+  // Notification banner is explicit new-message signal; don't block it.
+  if (source === "notification_banner") return false;
+
+  const now = Date.now();
+  while (recentStableInbounds.length > 0 && recentStableInbounds[0].time < now - STALE_REPEAT_WINDOW_MS) {
+    recentStableInbounds.shift();
+  }
+  const key = stableKey(eventText, conversation);
+  if (key.length < 12) return false;
+  return recentStableInbounds.some((r) => r.key === key);
+}
+
+function recordStableInbound(eventText, conversation) {
+  recentStableInbounds.push({ key: stableKey(eventText, conversation), time: Date.now() });
 }
 
 function isUiChromeLine(line) {
@@ -1039,6 +1065,7 @@ export async function startAccount(ctx) {
           }
 
           const source = event.payload?.source || "poll";
+          const conversation = event.payload?.conversation || "";
           const rawEventText = event.payload?.text || "";
           const eventText = normalizeInboundText(rawEventText, source);
 
@@ -1059,9 +1086,14 @@ export async function startAccount(ctx) {
             log?.debug?.(`clawgate: [${accountId}] suppressed duplicate: "${eventText.slice(0, 60)}"`);
             continue;
           }
+          if (isStaleRepeatInbound(eventText, conversation, source)) {
+            log?.debug?.(`clawgate: [${accountId}] suppressed stale repeat: "${eventText.slice(0, 60)}"`);
+            continue;
+          }
 
           // Record before dispatch so subsequent duplicates are caught
           recordInbound(eventText);
+          recordStableInbound(eventText, conversation);
           if (event.payload) {
             event.payload.text = eventText;
           }
