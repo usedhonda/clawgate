@@ -19,6 +19,10 @@ enum LineTextSanitizer {
             guard !isStandaloneUIArtifact(line) else { continue }
             kept.append(line)
         }
+        // Drop obvious OCR crumbs only when there is enough real content.
+        if kept.count >= 2 {
+            kept = kept.filter { !isShortAsciiCrumb($0) }
+        }
         return kept.joined(separator: "\n")
     }
 
@@ -60,6 +64,9 @@ enum LineTextSanitizer {
         if standaloneNoiseTokens.contains(line) {
             return true
         }
+        if isInputPlaceholderLine(line) {
+            return true
+        }
         if line == "ここから未読メッセージ" {
             return true
         }
@@ -74,8 +81,26 @@ enum LineTextSanitizer {
             #"^\d{1,2}:\d{2}$"#,
             #"^\d{1,2}:\d{2}:\d{2}$"#,
             #"^(午前|午後)\s*\d{1,2}:\d{2}$"#,
+            #"^[=~\-–—\s]*(午前|午後|前|後)\s*\d{1,2}:\d{2}$"#,
         ]
         return patterns.contains { line.range(of: $0, options: .regularExpression) != nil }
+    }
+
+    private static func isShortAsciiCrumb(_ line: String) -> Bool {
+        line.range(of: #"^[A-Za-z]$"#, options: .regularExpression) != nil
+            || line.range(of: #"^[=~\-–—•·\s]+$"#, options: .regularExpression) != nil
+    }
+
+    private static func isInputPlaceholderLine(_ line: String) -> Bool {
+        let compact = line
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "　", with: "")
+        let patterns = [
+            #"^メ[ッツ]セージを入力$"#,
+            #"^messageinput$"#,
+            #"^メ[ッツ]セージ入力$"#,
+        ]
+        return patterns.contains { compact.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
     }
 
     private static func isMostlySymbols(_ line: String) -> Bool {

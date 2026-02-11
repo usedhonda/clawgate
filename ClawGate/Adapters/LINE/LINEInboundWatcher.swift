@@ -37,6 +37,9 @@ final class LINEInboundWatcher {
     private var lastSignalNames: [String] = []
     private var lastScore: Int = 0
     private var lastConfidence: String = "low"
+    private var lastInboundFingerprint: String = ""
+    private var lastInboundAt: Date = .distantPast
+    private let inboundDedupWindowSeconds: TimeInterval = 20
 
     init(
         eventBus: EventBus,
@@ -103,6 +106,8 @@ final class LINEInboundWatcher {
         lastSignalNames = []
         lastScore = 0
         lastConfidence = "low"
+        lastInboundFingerprint = ""
+        lastInboundAt = .distantPast
     }
 
     private func poll() {
@@ -253,6 +258,10 @@ final class LINEInboundWatcher {
             logger.log(.debug, "LINEInboundWatcher: dropped empty/standalone-ui text after sanitize")
             return
         }
+        if shouldSuppressDuplicateInbound(text: filteredDecisionText, conversation: decision.conversation) {
+            logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window")
+            return
+        }
 
         var payload: [String: String] = [
             "text": filteredDecisionText,
@@ -274,6 +283,10 @@ final class LINEInboundWatcher {
     private func emitFromSignal(_ signal: LineDetectionSignal) {
         let filtered = LineTextSanitizer.sanitize(signal.text)
         guard !filtered.isEmpty else { return }
+        if shouldSuppressDuplicateInbound(text: filtered, conversation: signal.conversation) {
+            logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window (legacy)")
+            return
+        }
         let isEcho = recentSendTracker.isLikelyEcho(text: filtered)
         let eventType = isEcho ? "echo_message" : "inbound_message"
 
@@ -294,6 +307,19 @@ final class LINEInboundWatcher {
         lastSignalNames = [signal.name]
         lastScore = signal.score
         lastConfidence = payload["confidence"] ?? "low"
+    }
+
+    private func shouldSuppressDuplicateInbound(text: String, conversation: String) -> Bool {
+        let normalized = LineTextSanitizer.normalizeForEcho(text)
+        guard !normalized.isEmpty else { return false }
+        let fingerprint = "\(conversation.lowercased())|\(normalized)"
+        let now = Date()
+        if fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < inboundDedupWindowSeconds {
+            return true
+        }
+        lastInboundFingerprint = fingerprint
+        lastInboundAt = now
+        return false
     }
 
     private func collectStructuralSignal(chatList: AXUIElement, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
@@ -386,6 +412,9 @@ final class LINEInboundWatcher {
                 "ax_bottom_changed": bottomChanged ? "1" : "0",
                 "incoming_rows": String(incomingFrames.count),
                 "ocr_empty_fallback_ax": ocrText.isEmpty ? "1" : "0",
+                "ocr_text_len": String(ocrText.count),
+                "merged_text_len": String(mergedText.count),
+                "merged_text_head": textHeadForLog(mergedText),
                 "ax_fallback_text_len": String(axFallbackText.count),
                 "ocr_fallback_text_len": String(structuralFallbackOCR.count),
             ]
@@ -405,19 +434,48 @@ final class LINEInboundWatcher {
         // OCR each row independently to avoid a wide union-crop pulling in older/adjacent bubbles.
         let ordered = incomingFrames.sorted { $0.origin.y < $1.origin.y }
         var rows: [String] = []
-        var seen = Set<String>()
         for frame in ordered {
             let crop = inboundCropRect(for: frame, horizontalRatio: 0.90)
             let text = (VisionOCR.extractTextLineInbound(from: crop, windowID: lineWindowID) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
                 let normalized = LineTextSanitizer.sanitize(text)
-                if !normalized.isEmpty, seen.insert(normalized).inserted {
-                    rows.append(normalized)
+                if !normalized.isEmpty {
+                    mergeOCRRowPreferLonger(normalized, into: &rows)
                 }
             }
         }
         return rows.joined(separator: "\n")
+    }
+
+    /// Deduplicate OCR rows while preserving richer text.
+    /// If one candidate contains another, keep the longer one.
+    private func mergeOCRRowPreferLonger(_ candidate: String, into rows: inout [String]) {
+        var replaced = false
+        rows.removeAll { existing in
+            if existing == candidate { return true }
+            if existing.contains(candidate) {
+                replaced = true
+                return false
+            }
+            if candidate.contains(existing) {
+                return true
+            }
+            return false
+        }
+        if !replaced {
+            rows.append(candidate)
+        }
+    }
+
+    private func textHeadForLog(_ text: String, maxChars: Int = 48) -> String {
+        guard !text.isEmpty else { return "" }
+        let compact = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if compact.count <= maxChars { return compact }
+        let end = compact.index(compact.startIndex, offsetBy: maxChars)
+        return String(compact[..<end]) + "..."
     }
 
     private func selectOCRFrames(
@@ -720,11 +778,15 @@ final class LINEInboundWatcher {
                 height: baseRect.height
             )
         }
-        let y = baseRect.origin.y + CGFloat(lineY) + 4
-        let h = max(80, baseRect.maxY - y)
+
+        // The separator we want is the thin gray line above the input area.
+        // OCR should target the message area ABOVE that line, not below.
+        // Keep only a tiny safety gap from the separator (just above input area).
+        let maxY = baseRect.origin.y + CGFloat(lineY) - 2
+        let h = max(80, maxY - baseRect.origin.y)
         return CGRect(
             x: baseRect.origin.x,
-            y: y,
+            y: baseRect.origin.y,
             width: baseRect.width * 0.90,
             height: h
         )
@@ -750,12 +812,14 @@ final class LINEInboundWatcher {
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
         let minY = max(0, Int(Double(height) * 0.05))
-        let maxY = max(minY, Int(Double(height) * 0.85))
+        let maxY = max(minY, Int(Double(height) * 0.92))
         var bestY: Int?
         var bestScore = 0.0
         for y in minY..<maxY {
             let rowOffset = y * bytesPerRow
             var grayCount = 0
+            var longestRun = 0
+            var currentRun = 0
             for x in 0..<width {
                 let i = rowOffset + x * 4
                 let r = Int(buffer[i])
@@ -765,17 +829,25 @@ final class LINEInboundWatcher {
                 let minC = min(r, min(g, b))
                 let sat = maxC - minC
                 let yv = 0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)
-                if sat <= 12 && yv >= 210 && yv <= 246 {
+                if sat <= 10 && yv >= 188 && yv <= 232 {
                     grayCount += 1
+                    currentRun += 1
+                    if currentRun > longestRun { longestRun = currentRun }
+                } else {
+                    currentRun = 0
                 }
             }
             let score = Double(grayCount) / Double(max(width, 1))
-            if score > bestScore {
-                bestScore = score
+            let runScore = Double(longestRun) / Double(max(width, 1))
+            let yRatio = Double(y) / Double(max(height - 1, 1))
+            // Prefer lower separators (input boundary) over mid-list separators.
+            let weighted = (0.45 * score + 0.55 * runScore) * (1.0 + 0.45 * yRatio)
+            if weighted > bestScore {
+                bestScore = weighted
                 bestY = y
             }
         }
-        guard let y = bestY, bestScore >= 0.30 else { return nil }
+        guard let y = bestY, bestScore >= 0.32 else { return nil }
         return y
     }
 
