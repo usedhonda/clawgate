@@ -75,6 +75,14 @@ struct RelayEvent: Codable {
     let adapter: String
     let payload: [String: String]
     let observedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case type
+        case adapter
+        case payload
+        case observedAt = "observed_at"
+    }
 }
 
 struct RelaySendPayload: Codable {
@@ -111,6 +119,10 @@ enum RelayTmuxShell {
         if enter {
             _ = try run(arguments: ["send-keys", "-t", target, "Enter"])
         }
+    }
+
+    static func sendSpecialKey(target: String, key: String) throws {
+        _ = try run(arguments: ["send-keys", "-t", target, key])
     }
 
     static func listSessions() throws -> [String] {
@@ -315,10 +327,21 @@ final class RelayCCStatusClient: NSObject, URLSessionWebSocketDelegate {
 }
 
 final class RelayTmuxRouter {
+    struct DetectedQuestion {
+        let questionText: String
+        let options: [String]
+        let selectedIndex: Int
+        let questionID: String
+    }
+
     private let ccClient: RelayCCStatusClient
     private let eventBus: RelayEventBus
     private let enabled: Bool
     private let sessionModes: [String: String]
+    private let workQueue = DispatchQueue(label: "com.clawgate.relay.tmux", qos: .userInitiated)
+    private var progressTimer: DispatchSourceTimer?
+    private var lastProgressHash: [String: Int] = [:]
+    private let progressInterval: TimeInterval = 20
 
     init(config: RelayConfig, eventBus: RelayEventBus) {
         self.ccClient = RelayCCStatusClient(urlString: config.ccStatusURL)
@@ -331,28 +354,14 @@ final class RelayTmuxRouter {
         guard enabled else { return }
         ccClient.onStateChange = { [weak self] session, oldStatus, newStatus in
             guard let self else { return }
-            if oldStatus == "running" && newStatus == "waiting_input" {
-                _ = self.eventBus.append(type: "inbound_message", adapter: "tmux", payload: [
-                    "project": session.project,
-                    "status": "completed",
-                    "source": "completion",
-                ])
-            }
-            if newStatus == "waiting_input", let reason = session.waitingReason, reason == "permission_prompt" {
-                let mode = self.mode(for: session.project)
-                if mode == "auto" || mode == "autonomous" {
-                    _ = self.eventBus.append(type: "inbound_message", adapter: "tmux", payload: [
-                        "project": session.project,
-                        "status": "waiting_input",
-                        "source": "permission_prompt",
-                    ])
-                }
-            }
+            self.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus)
         }
+        startProgressTimer()
         ccClient.connect()
     }
 
     func stop() {
+        stopProgressTimer()
         ccClient.disconnect()
     }
 
@@ -368,7 +377,7 @@ final class RelayTmuxRouter {
         if mode == "ignore" {
             throw NSError(domain: "RelayTmuxRouter", code: 400, userInfo: [NSLocalizedDescriptionKey: "session is not enabled"])
         }
-        if mode == "observe" {
+        if mode == "observe" || mode == "auto" {
             throw NSError(domain: "RelayTmuxRouter", code: 400, userInfo: [NSLocalizedDescriptionKey: "session is read-only"])
         }
         guard let session = ccClient.session(forProject: project) else {
@@ -458,6 +467,217 @@ final class RelayTmuxRouter {
 
     private func mode(for project: String) -> String {
         sessionModes[project] ?? "ignore"
+    }
+
+    private func handleStateChange(session: RelayCCSession, oldStatus: String, newStatus: String) {
+        let mode = mode(for: session.project)
+        guard mode != "ignore" else { return }
+
+        if newStatus == "waiting_input", session.waitingReason == "permission_prompt",
+           (mode == "auto" || mode == "autonomous") {
+            workQueue.async { [weak self] in
+                self?.autoApprovePermission(session: session)
+            }
+            return
+        }
+
+        guard oldStatus == "running", newStatus == "waiting_input" else { return }
+        workQueue.async { [weak self] in
+            self?.captureAndEmitCompletionOrQuestion(session: session, mode: mode)
+        }
+    }
+
+    private func autoApprovePermission(session: RelayCCSession) {
+        guard let target = session.tmuxTarget else { return }
+        do {
+            try RelayTmuxShell.sendSpecialKey(target: target, key: "y")
+            Thread.sleep(forTimeInterval: 0.05)
+            try RelayTmuxShell.sendSpecialKey(target: target, key: "Enter")
+        } catch {
+            // Best effort.
+        }
+    }
+
+    private func startProgressTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: workQueue)
+        timer.schedule(deadline: .now() + progressInterval, repeating: progressInterval)
+        timer.setEventHandler { [weak self] in
+            self?.emitProgressForRunningSessions()
+        }
+        timer.resume()
+        progressTimer = timer
+    }
+
+    private func stopProgressTimer() {
+        progressTimer?.cancel()
+        progressTimer = nil
+    }
+
+    private func emitProgressForRunningSessions() {
+        let sessions = ccClient.allSessions()
+        for session in sessions {
+            guard session.status == "running", session.isAttached else { continue }
+            let mode = mode(for: session.project)
+            guard mode != "ignore", let target = session.tmuxTarget else { continue }
+            do {
+                let raw = try RelayTmuxShell.capturePane(target: target, lines: 50)
+                let hash = raw.hashValue
+                if let last = lastProgressHash[session.project], last == hash {
+                    continue
+                }
+                lastProgressHash[session.project] = hash
+                let summary = extractSummary(from: raw)
+                _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: [
+                    "project": session.project,
+                    "mode": mode,
+                    "tmux_target": target,
+                    "source": "progress",
+                    "text": summary,
+                    "status": "running",
+                    "sender": "claude_code",
+                ])
+            } catch {
+                continue
+            }
+        }
+    }
+
+    private func captureAndEmitCompletionOrQuestion(session: RelayCCSession, mode: String) {
+        guard let target = session.tmuxTarget else { return }
+        let rawOutput: String
+        do {
+            rawOutput = try RelayTmuxShell.capturePane(target: target, lines: 50)
+        } catch {
+            emitCompletion(session: session, mode: mode, target: target, text: "(capture failed)")
+            return
+        }
+
+        if let question = detectQuestion(from: rawOutput) {
+            if mode == "auto" {
+                autoAnswerQuestion(session: session, question: question, target: target)
+                return
+            }
+            _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: [
+                "project": session.project,
+                "mode": mode,
+                "tmux_target": target,
+                "source": "question",
+                "text": question.questionText,
+                "question_text": question.questionText,
+                "question_options": question.options.joined(separator: "\n"),
+                "question_selected": String(question.selectedIndex),
+                "question_id": question.questionID,
+                "status": "waiting_input",
+                "sender": "claude_code",
+            ])
+            return
+        }
+
+        let summary = extractSummary(from: rawOutput)
+        emitCompletion(session: session, mode: mode, target: target, text: summary)
+    }
+
+    private func emitCompletion(session: RelayCCSession, mode: String, target: String, text: String) {
+        lastProgressHash.removeValue(forKey: session.project)
+        _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: [
+            "project": session.project,
+            "mode": mode,
+            "tmux_target": target,
+            "source": "completion",
+            "text": text,
+            "status": "waiting_input",
+            "sender": "claude_code",
+        ])
+    }
+
+    private func extractSummary(from output: String) -> String {
+        let lines = output
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if lines.isEmpty { return "(no output)" }
+        let tail = lines.suffix(12).joined(separator: "\n")
+        return String(tail.prefix(1200))
+    }
+
+    private func autoAnswerQuestion(session: RelayCCSession, question: DetectedQuestion, target: String) {
+        let keywords = ["(recommended)", "don't ask", "always", "yes", "ok", "proceed", "approve"]
+        var bestIndex = 0
+        for (i, option) in question.options.enumerated() {
+            let lower = option.lowercased()
+            if keywords.contains(where: { lower.contains($0) }) {
+                bestIndex = i
+                break
+            }
+        }
+        let delta = bestIndex - question.selectedIndex
+        do {
+            if delta > 0 {
+                for _ in 0..<delta {
+                    try RelayTmuxShell.sendSpecialKey(target: target, key: "Down")
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+            } else if delta < 0 {
+                for _ in 0..<(-delta) {
+                    try RelayTmuxShell.sendSpecialKey(target: target, key: "Up")
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+            }
+            try RelayTmuxShell.sendSpecialKey(target: target, key: "Enter")
+        } catch {
+            // Best effort.
+        }
+    }
+
+    private func detectQuestion(from output: String) -> DetectedQuestion? {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let selectorChar: Character = "\u{276F}"    // ❯
+        let bulletSelected: Character = "\u{25CF}"  // ●
+        let bulletUnselected: Character = "\u{25CB}" // ○
+
+        var optionLines: [(text: String, isSelected: Bool)] = []
+        var questionText: String?
+
+        var i = lines.count - 1
+        var foundOptions = false
+        while i >= 0 {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            let hasSelector = trimmed.contains(selectorChar) || trimmed.contains(bulletSelected)
+            let hasBullet = trimmed.contains(bulletUnselected)
+
+            if hasSelector || hasBullet {
+                var option = trimmed
+                for prefix in ["❯ ", "● ", "○ "] {
+                    if option.hasPrefix(prefix) {
+                        option = String(option.dropFirst(prefix.count))
+                        break
+                    }
+                }
+                optionLines.insert((text: option.trimmingCharacters(in: .whitespaces), isSelected: hasSelector), at: 0)
+                foundOptions = true
+                i -= 1
+                continue
+            }
+
+            if foundOptions {
+                if trimmed.isEmpty {
+                    i -= 1
+                    continue
+                }
+                if trimmed.hasSuffix("?") {
+                    questionText = trimmed
+                }
+                break
+            }
+            i -= 1
+        }
+
+        guard let q = questionText, optionLines.count >= 2 else { return nil }
+        let selected = optionLines.firstIndex(where: { $0.isSelected }) ?? 0
+        let options = optionLines.map(\.text)
+        let fingerprint = "\(q)\n\(options.joined(separator: "|"))"
+        let qid = String(fingerprint.hashValue)
+        return DetectedQuestion(questionText: q, options: options, selectedIndex: selected, questionID: qid)
     }
 }
 
@@ -710,6 +930,7 @@ final class RelayHTTPHandler: ChannelInboundHandler {
                     "type": $0.type,
                     "adapter": $0.adapter,
                     "payload": $0.payload,
+                    "observed_at": $0.observedAt,
                     "observedAt": $0.observedAt,
                 ] },
                 "next_cursor": polled.nextCursor,

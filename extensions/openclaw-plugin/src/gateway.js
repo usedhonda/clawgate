@@ -81,6 +81,13 @@ function shouldDispatchProgress(project) {
   return false;
 }
 
+function eventTimestamp(event) {
+  const raw = event?.observed_at ?? event?.observedAt;
+  if (!raw) return Date.now();
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? Date.now() : parsed;
+}
+
 // ── Plugin-level echo suppression ──────────────────────────────
 // ClawGate's RecentSendTracker uses an 8-second window which is too short
 // for AI replies (typically 10-30s). We maintain a secondary tracker here.
@@ -398,7 +405,7 @@ function buildRosterPrefix() {
   if (!roster) return "";
 
   // Check if any project is in autonomous mode
-  const hasTaskCapable = [...sessionModes.values()].some((m) => m === "autonomous" || m === "auto");
+  const hasTaskCapable = [...sessionModes.values()].some((m) => m === "autonomous");
   const taskHint = hasTaskCapable
     ? `\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to LINE.`
     : "";
@@ -427,7 +434,7 @@ function buildMsgContext(event, accountId, defaultConversation) {
   const sender = payload.sender || conversation;
   const text = payload.text || "";
   const source = payload.source || "poll";
-  const timestamp = event.observed_at ? Date.parse(event.observed_at) : Date.now();
+  const timestamp = eventTimestamp(event);
 
   const ctx = {
     Body: text,
@@ -502,7 +509,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
   // Find task-capable projects (autonomous or auto) for potential task routing from LINE replies
   const taskCapableProjects = [...sessionModes.entries()]
-    .filter(([, m]) => m === "autonomous" || m === "auto")
+    .filter(([, m]) => m === "autonomous")
     .map(([p]) => p);
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
@@ -626,7 +633,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     SenderName: `Claude Code (${project})`,
     SenderId: `tmux:${project}`,
     MessageSid: String(event.id ?? Date.now()),
-    Timestamp: event.observed_at ? Date.parse(event.observed_at) : Date.now(),
+    Timestamp: eventTimestamp(event),
     CommandAuthorized: true,
     OriginatingChannel: "clawgate",
     OriginatingTo: defaultConversation || project,
@@ -664,7 +671,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     }
 
     // No <cc_answer> — try <cc_task> fallback (autonomous mode)
-    if (mode === "autonomous" || mode === "auto") {
+    if (mode === "autonomous") {
       const taskResult = await tryExtractAndSendTask({ replyText, project, apiUrl, log });
       if (taskResult) {
         if (taskResult.error) {
@@ -739,7 +746,7 @@ async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConver
     SenderName: `Claude Code (${project})`,
     SenderId: `tmux:${project}`,
     MessageSid: String(event.id ?? Date.now()),
-    Timestamp: event.observed_at ? Date.parse(event.observed_at) : Date.now(),
+    Timestamp: eventTimestamp(event),
     CommandAuthorized: true,
     OriginatingChannel: "clawgate",
     OriginatingTo: defaultConversation || project,
@@ -862,7 +869,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     SenderName: `Claude Code (${project})`,
     SenderId: `tmux:${project}`,
     MessageSid: String(event.id ?? Date.now()),
-    Timestamp: event.observed_at ? Date.parse(event.observed_at) : Date.now(),
+    Timestamp: eventTimestamp(event),
     CommandAuthorized: true,
     OriginatingChannel: "clawgate",
     OriginatingTo: defaultConversation || project,
@@ -879,7 +886,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     if (!replyText.trim()) return;
 
     // Autonomous/auto mode: try to extract and send <cc_task>
-    if (mode === "autonomous" || mode === "auto") {
+    if (mode === "autonomous") {
       const result = await tryExtractAndSendTask({
         replyText, project, apiUrl, log,
       });

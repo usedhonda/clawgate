@@ -16,6 +16,7 @@ final class SettingsModel: ObservableObject {
 struct InlineSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var showAdvanced = false
+    @State private var tailscalePeers: [TailscalePeer] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -27,6 +28,12 @@ struct InlineSettingsView: View {
             }
             .pickerStyle(.segmented)
 
+            Text(model.config.nodeRole == .server
+                 ? "Host A: LINE and Gateway run on this machine."
+                 : "Host B: tmux and federation client only.")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+
             HStack(spacing: 8) {
                 Button("Host A Preset") { applyHostAPreset() }
                 Button("Host B Preset") { applyHostBPreset() }
@@ -34,70 +41,14 @@ struct InlineSettingsView: View {
             .buttonStyle(.bordered)
 
             Toggle("Debug Logging", isOn: $model.config.debugLogging)
-            Toggle("Include Message Body", isOn: $model.config.includeMessageBodyInLogs)
-
-            if model.config.nodeRole != .client {
-                Divider()
-                sectionHeader("LINE")
-
-                HStack {
-                    Text("Conversation:")
-                        .font(.system(size: 11))
-                    TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11))
-                }
-
-                Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
-                        value: $model.config.linePollIntervalSeconds, in: 1...30)
+            if showAdvanced {
+                Toggle("Include Message Body", isOn: $model.config.includeMessageBodyInLogs)
             }
 
-            Divider()
-            sectionHeader("Tmux")
-
-            Toggle("Enabled", isOn: $model.config.tmuxEnabled)
-            if model.config.tmuxEnabled {
-                HStack {
-                    Text("Status Host:")
-                        .font(.system(size: 11))
-                    TextField("localhost", text: tmuxStatusHostBinding)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11))
-                }
-                Stepper("Status Port: \(tmuxStatusPortBinding.wrappedValue)",
-                        value: tmuxStatusPortBinding, in: 1...65535)
-                Text("Path: /ws/sessions")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-            }
-
-            if model.config.nodeRole == .client {
-                Divider()
-                sectionHeader("Remote")
-
-                Toggle("Federation Client", isOn: $model.config.federationEnabled)
-                if model.config.federationEnabled {
-                    HStack {
-                        Text("Host A:")
-                            .font(.system(size: 11))
-                        TextField("sshmacmini", text: federationHostBinding)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11))
-                    }
-                    Stepper("Federation Port: \(federationPortBinding.wrappedValue)",
-                            value: federationPortBinding, in: 1...65535)
-                    HStack {
-                        Text("Token:")
-                            .font(.system(size: 11))
-                        TextField("optional bearer token", text: $model.config.federationToken)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11))
-                    }
-                    Text("Auto URL: \(model.config.federationURL)")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                }
+            if model.config.nodeRole == .server {
+                serverSection
+            } else {
+                clientSection
             }
 
             Divider()
@@ -106,31 +57,37 @@ struct InlineSettingsView: View {
             if showAdvanced {
                 sectionHeader("Advanced")
 
-                Toggle("Remote Access (bind 0.0.0.0)", isOn: $model.config.remoteAccessEnabled)
-                HStack {
-                    Text("Remote Bearer:")
-                        .font(.system(size: 11))
-                    TextField("remote access token", text: $model.config.remoteAccessToken)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11))
+                if model.config.nodeRole == .server {
+                    Toggle("Remote Access (bind 0.0.0.0)", isOn: $model.config.remoteAccessEnabled)
+                    HStack {
+                        Text("Remote Bearer:")
+                            .font(.system(size: 11))
+                        TextField("remote access token", text: $model.config.remoteAccessToken)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11))
+                    }
                 }
 
-                Toggle("Federation Client", isOn: $model.config.federationEnabled)
-                HStack {
-                    Text("Federation URL:")
-                        .font(.system(size: 11))
-                    TextField("ws://host:9100/federation", text: $model.config.federationURL)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 11))
+                if model.config.nodeRole == .client {
+                    HStack {
+                        Text("Federation Token:")
+                            .font(.system(size: 11))
+                        TextField("optional bearer token", text: $model.config.federationToken)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11))
+                    }
+                    Stepper("Reconnect Max: \(model.config.federationReconnectMaxSeconds)s",
+                            value: $model.config.federationReconnectMaxSeconds, in: 5...300)
                 }
-                Stepper("Reconnect Max: \(model.config.federationReconnectMaxSeconds)s",
-                        value: $model.config.federationReconnectMaxSeconds, in: 5...300)
             }
         }
         .toggleStyle(.switch)
         .controlSize(.small)
         .padding(12)
-        .frame(width: 320)
+        .frame(width: 340)
+        .onAppear {
+            loadTailscalePeers()
+        }
         .onChange(of: model.config.nodeRole) { _ in model.save() }
         .onChange(of: model.config.debugLogging) { _ in model.save() }
         .onChange(of: model.config.includeMessageBodyInLogs) { _ in model.save() }
@@ -144,6 +101,110 @@ struct InlineSettingsView: View {
         .onChange(of: model.config.federationURL) { _ in model.save() }
         .onChange(of: model.config.federationToken) { _ in model.save() }
         .onChange(of: model.config.federationReconnectMaxSeconds) { _ in model.save() }
+    }
+
+    private var serverSection: some View {
+        Group {
+            Divider()
+            sectionHeader("LINE")
+
+            HStack {
+                Text("Conversation:")
+                    .font(.system(size: 11))
+                TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11))
+            }
+
+            Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
+                    value: $model.config.linePollIntervalSeconds, in: 1...30)
+
+            Divider()
+            sectionHeader("Tmux")
+
+            Toggle("Enabled", isOn: $model.config.tmuxEnabled)
+            if model.config.tmuxEnabled {
+                HStack {
+                    Text("Status Host")
+                        .font(.system(size: 11))
+                    TextField("localhost", text: tmuxStatusHostBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                }
+                Stepper("Status Port: \(tmuxStatusPortBinding.wrappedValue)",
+                        value: tmuxStatusPortBinding, in: 1...65535)
+                Text("Path: /ws/sessions")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var clientSection: some View {
+        Group {
+            Divider()
+            sectionHeader("Tmux")
+
+            Toggle("Enabled", isOn: $model.config.tmuxEnabled)
+            if model.config.tmuxEnabled {
+                HStack {
+                    Text("Status Host")
+                        .font(.system(size: 11))
+                    TextField("localhost", text: tmuxStatusHostBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                }
+                Stepper("Status Port: \(tmuxStatusPortBinding.wrappedValue)",
+                        value: tmuxStatusPortBinding, in: 1...65535)
+            }
+
+            Divider()
+            sectionHeader("Federation")
+
+            Toggle("Enabled", isOn: $model.config.federationEnabled)
+            if model.config.federationEnabled {
+                HStack {
+                    Text("Host A")
+                        .font(.system(size: 11))
+                    Picker("", selection: federationPeerSelectionBinding) {
+                        Text("Manual").tag("")
+                        ForEach(tailscalePeers) { peer in
+                            Text(peerLabel(peer)).tag(peer.hostname)
+                        }
+                    }
+                    .labelsHidden()
+                }
+
+                if federationPeerSelectionBinding.wrappedValue.isEmpty {
+                    TextField("host-a.tailnet.ts.net", text: federationHostBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 11))
+                }
+
+                Stepper("Federation Port: \(federationPortBinding.wrappedValue)",
+                        value: federationPortBinding, in: 1...65535)
+
+                Text("URL: \(model.config.federationURL)")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+
+            HStack(spacing: 8) {
+                Button("Refresh Tailscale Hosts") {
+                    loadTailscalePeers()
+                }
+                .buttonStyle(.bordered)
+
+                HStack {
+                    Text("Detected:")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Text("\(tailscalePeers.count)")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+        }
     }
 
     private func sectionHeader(_ title: String) -> some View {
@@ -210,6 +271,19 @@ struct InlineSettingsView: View {
         )
     }
 
+    private var federationPeerSelectionBinding: Binding<String> {
+        Binding(
+            get: {
+                let host = federationHostBinding.wrappedValue
+                return tailscalePeers.contains(where: { $0.hostname == host }) ? host : ""
+            },
+            set: { selected in
+                guard !selected.isEmpty else { return }
+                federationHostBinding.wrappedValue = selected
+            }
+        )
+    }
+
     private func parseWSURL(_ value: String, defaultHost: String, defaultPort: Int) -> (String, Int) {
         guard let url = URL(string: value),
               let host = url.host, !host.isEmpty else {
@@ -220,6 +294,18 @@ struct InlineSettingsView: View {
 
     private func buildWSURL(host: String, port: Int, path: String) -> String {
         "ws://\(host):\(port)\(path)"
+    }
+
+    private func peerLabel(_ peer: TailscalePeer) -> String {
+        let status = peer.online ? "online" : "offline"
+        if peer.ip.isEmpty {
+            return "\(peer.hostname) (\(status))"
+        }
+        return "\(peer.hostname) (\(peer.ip), \(status))"
+    }
+
+    private func loadTailscalePeers() {
+        tailscalePeers = TailscalePeerService.loadPeers()
     }
 
     private func applyHostAPreset() {
@@ -241,9 +327,10 @@ struct InlineSettingsView: View {
         if model.config.tmuxStatusBarURL.isEmpty {
             model.config.tmuxStatusBarURL = "ws://localhost:8080/ws/sessions"
         }
-        if model.config.federationURL.isEmpty {
-            model.config.federationURL = "ws://sshmacmini:9100/federation"
-        }
+        let preferredHost = tailscalePeers.first(where: { $0.online })?.hostname
+            ?? tailscalePeers.first?.hostname
+            ?? "sshmacmini"
+        model.config.federationURL = buildWSURL(host: preferredHost, port: 9100, path: "/federation")
         model.save()
     }
 }
