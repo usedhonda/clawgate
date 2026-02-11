@@ -1,5 +1,6 @@
 import SwiftUI
 import Network
+import Foundation
 
 final class SettingsModel: ObservableObject {
     private let configStore: ConfigStore
@@ -44,6 +45,8 @@ struct InlineSettingsView: View {
     @State private var tailscalePeers: [TailscalePeer] = []
     @State private var tmuxState: ConnectivityState = .unknown
     @State private var federationState: ConnectivityState = .unknown
+    @State private var relayState: ConnectivityState = .unknown
+    @State private var relayActionInFlight = false
     @State private var probeTimer: Timer?
 
     var body: some View {
@@ -197,6 +200,40 @@ struct InlineSettingsView: View {
                     .buttonStyle(.bordered)
 
                     Text("Detected: \(tailscalePeers.count)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            card("Relay (Gateway)") {
+                statusRow(state: relayState)
+                Text("Local relay endpoint: http://127.0.0.1:9765/v1/health")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+
+                HStack(spacing: 8) {
+                    Button("Start") {
+                        startRelay()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(relayActionInFlight)
+
+                    Button("Stop") {
+                        stopRelay()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(relayActionInFlight)
+
+                    Button("Restart") {
+                        restartRelay()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(relayActionInFlight)
+                }
+
+                if relayActionInFlight {
+                    Text("Applying relay action...")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                 }
@@ -390,6 +427,7 @@ struct InlineSettingsView: View {
     private func refreshConnectivity() {
         probeTmux()
         probeFederation()
+        probeRelay()
     }
 
     private func probeTmux() {
@@ -424,6 +462,33 @@ struct InlineSettingsView: View {
         }
     }
 
+    private func probeRelay() {
+        guard model.config.nodeRole == .client else {
+            relayState = .unknown
+            return
+        }
+        relayState = .checking
+        guard let url = URL(string: "http://127.0.0.1:9765/v1/health") else {
+            relayState = .offline
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.2
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                if error != nil {
+                    relayState = .offline
+                    return
+                }
+                if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                    relayState = .online
+                } else {
+                    relayState = .offline
+                }
+            }
+        }.resume()
+    }
+
     private func probeTCP(host: String, port: Int, timeout: TimeInterval = 1.2, completion: @escaping (Bool) -> Void) {
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             completion(false)
@@ -455,6 +520,58 @@ struct InlineSettingsView: View {
         conn.start(queue: queue)
         queue.asyncAfter(deadline: .now() + timeout) {
             finish(false)
+        }
+    }
+
+    private func startRelay() {
+        relayActionInFlight = true
+        relayState = .checking
+        runRelayScript(["./scripts/restart-hostb-relay.sh"]) { _ in
+            relayActionInFlight = false
+            refreshConnectivity()
+        }
+    }
+
+    private func restartRelay() {
+        relayActionInFlight = true
+        relayState = .checking
+        runRelayScript(["./scripts/restart-hostb-relay.sh"]) { _ in
+            relayActionInFlight = false
+            refreshConnectivity()
+        }
+    }
+
+    private func stopRelay() {
+        relayActionInFlight = true
+        relayState = .checking
+        runRelayScript(["/usr/bin/pkill", "-f", "ClawGateRelay --host"]) { _ in
+            runRelayScript(["/usr/bin/pkill", "-f", "swift run ClawGateRelay"]) { _ in
+                relayActionInFlight = false
+                refreshConnectivity()
+            }
+        }
+    }
+
+    private func runRelayScript(_ command: [String], completion: @escaping (Int32) -> Void) {
+        guard let executable = command.first else {
+            completion(-1)
+            return
+        }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: executable)
+        task.arguments = Array(command.dropFirst())
+        task.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        task.terminationHandler = { process in
+            DispatchQueue.main.async {
+                completion(process.terminationStatus)
+            }
+        }
+
+        do {
+            try task.run()
+        } catch {
+            completion(-1)
         }
     }
 }
