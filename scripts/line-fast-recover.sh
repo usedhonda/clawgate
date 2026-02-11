@@ -2,20 +2,21 @@
 set -euo pipefail
 
 # Fast recovery path for LINE-core operations (Host A only):
-# - Restart Host A app + OpenClaw gateway by default.
+# - Restart OpenClaw gateway by default.
+# - Host A app restart is opt-in (to avoid triggering macOS re-authorization loops).
 # - Verify Host A readiness (health/doctor/poll).
 # - Never depend on Host B relay/federation in this script.
 #
 # Usage:
 #   ./scripts/line-fast-recover.sh
 #   ./scripts/line-fast-recover.sh --remote-host macmini
-#   ./scripts/line-fast-recover.sh --no-restart-hosta-app
+#   ./scripts/line-fast-recover.sh --restart-hosta-app
 #   KEYCHAIN_PASSWORD='...' ./scripts/line-fast-recover.sh --setup-cert
 
 REMOTE_HOST="macmini"
 PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
 RESTART_GATEWAY=true
-RESTART_HOSTA_APP=true
+RESTART_HOSTA_APP=false
 RUN_CERT_SETUP=false
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +47,10 @@ echo "Project path: $PROJECT_PATH"
 echo "Restart gateway: $RESTART_GATEWAY"
 echo "Restart hostA app: $RESTART_HOSTA_APP"
 echo "Run cert setup: $RUN_CERT_SETUP"
+
+if [[ "$RESTART_HOSTA_APP" != "true" ]]; then
+  echo "Policy: Host A app restart is disabled by default to avoid permission re-prompts."
+fi
 
 if [[ "$RESTART_GATEWAY" != "true" ]]; then
   echo "ERROR: --no-restart-gateway is not allowed for LINE fast recovery." >&2

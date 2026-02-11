@@ -140,8 +140,8 @@ function isPluginEcho(eventText) {
 // We deduplicate by fingerprint within a sliding time window.
 
 const DEDUP_WINDOW_MS = 15_000; // 15 seconds
-const MIN_TEXT_LENGTH = 5;      // Skip empty/short texts (OCR noise, read-receipts)
-const STALE_REPEAT_WINDOW_MS = 10 * 60 * 1000; // 10 minutes for OCR-like repeated same text
+const MIN_TEXT_LENGTH = 2;      // Keep short Japanese test messages like "てすと"
+const STALE_REPEAT_WINDOW_MS = 90 * 1000; // 90 seconds; keep loop guard but allow legitimate repeated phrases
 
 /** @type {{ fingerprint: string, time: number }[]} */
 const recentInbounds = [];
@@ -220,6 +220,18 @@ function normalizeInboundText(rawText, source) {
     .filter((l) => l.length > 0)
     .filter((l) => !isUiChromeLine(l));
 
+  // Fallback: if chrome filtering removed everything, keep the last raw non-empty line.
+  // This avoids dropping valid short test messages mixed with noisy OCR blocks.
+  if (lines.length === 0) {
+    const rawLines = text
+      .split("\n")
+      .map((l) => l.replace(/\s+/g, " ").trim())
+      .filter((l) => l.length > 0);
+    if (rawLines.length > 0) {
+      lines = [rawLines[rawLines.length - 1]];
+    }
+  }
+
   // Remove adjacent duplicates created by OCR jitter.
   const deduped = [];
   for (const line of lines) {
@@ -228,9 +240,24 @@ function normalizeInboundText(rawText, source) {
   lines = deduped;
 
   // Pixel/hybrid OCR often contains entire screen history.
-  // To avoid mojibake-like noise, keep only the latest meaningful line.
+  // Keep the latest meaningful line, but avoid dropping valid short trailing lines
+  // by falling back to a previous richer line when available.
   if (source === "hybrid_fusion" || source === "pixel_diff") {
-    lines = lines.length > 0 ? [lines[lines.length - 1]] : [];
+    if (lines.length > 0) {
+      let picked = lines[lines.length - 1];
+      // If the tail is too short, prefer the nearest previous line with enough signal.
+      if (picked.length < 5) {
+        for (let i = lines.length - 2; i >= 0; i -= 1) {
+          if (lines[i].length >= 5) {
+            picked = lines[i];
+            break;
+          }
+        }
+      }
+      lines = [picked];
+    } else {
+      lines = [];
+    }
   }
 
   return lines.join("\n").trim();
