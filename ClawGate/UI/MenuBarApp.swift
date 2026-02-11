@@ -307,18 +307,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         }
 
         for entry in entries {
-            let icon: String
-            switch entry.level.lowercased() {
-            case "error":
-                icon = "✖"
-            case "warning", "warn":
-                icon = "▲"
-            default:
-                icon = "•"
-            }
             let t = Self.timeFormatter.string(from: entry.date)
-            let text = compactMessage(entry.message, max: 52)
-            let item = makeReadableInfoItem("  \(t) \(icon) \(entry.event) \(text)")
+            let style = compactLogStyle(for: entry)
+            let item = makeReadableInfoItem("  \(t) \(style.text)")
+            applyReadableTitle(to: item, text: "  \(t) \(style.text)", color: style.color)
             menu.insertItem(item, at: insertIdx)
             logItems.append(item)
             insertIdx += 1
@@ -329,6 +321,129 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         let single = text.replacingOccurrences(of: "\n", with: " ")
         if single.count <= max { return single }
         return String(single.prefix(max)) + "..."
+    }
+
+    private func humanReadableSummary(for entry: OpsLogEntry) -> String {
+        let fields = parseMessageFields(entry.message)
+        let project = shortProject(fields.project)
+        let bytes = fields.bytes.map { "\($0)b" } ?? "-b"
+        let preview = compactMessage(fields.text, max: 32)
+
+        switch entry.event {
+        case "federation.connected":
+            return "FED UP \(compactMessage(entry.message, max: 32))"
+        case "federation.connecting":
+            return "FED CONNECT \(compactMessage(entry.message, max: 28))"
+        case "federation.closed":
+            return "FED CLOSED \(compactMessage(entry.message, max: 24))"
+        case "federation.receive_failed", "federation.send_failed", "federation.error":
+            return "FED ERR \(compactMessage(entry.message, max: 28))"
+        case "federation.disabled", "federation.invalid_url":
+            return "FED OFF \(compactMessage(entry.message, max: 28))"
+        case "tmux.completion":
+            return "CAP DONE \(project) \(bytes) \(preview)"
+        case "tmux.question":
+            return "CAP Q \(project) \(bytes) \(preview)"
+        case "tmux.progress":
+            return "CAP PROG \(project) \(bytes) \(preview)"
+        case "tmux.forward":
+            return "FWD \(project) \(bytes) \(preview)"
+        case "tmux_gateway_deliver":
+            return "ACK \(project)"
+        case "line_send_ok":
+            return "LINE OK"
+        case "line_send_start":
+            return "LINE SEND"
+        case "send_failed":
+            let parts = parseKeyValueMessage(entry.message)
+            let code = parts["error_code"] ?? "unknown"
+            let msg = compactMessage(parts["error_message"] ?? "", max: 32)
+            return "ERR \(project) \(code) \(msg)"
+        case "ingress_received":
+            return "SRV IN"
+        case "ingress_validated":
+            return "SRV VALID"
+        default:
+            let fallback = compactMessage(entry.message, max: 40)
+            if fallback.isEmpty {
+                return entry.event
+            }
+            return "\(entry.event) \(fallback)"
+        }
+    }
+
+    private struct ParsedMessageFields {
+        let project: String?
+        let bytes: Int?
+        let text: String
+    }
+
+    private func parseMessageFields(_ message: String) -> ParsedMessageFields {
+        let kv = parseKeyValueMessage(message)
+        let project = kv["project"]
+        let bytes = kv["bytes"].flatMap(Int.init)
+
+        // Preserve full text after "text=" including spaces.
+        let text: String
+        if let range = message.range(of: "text=") {
+            text = String(message[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            text = ""
+        }
+        return ParsedMessageFields(project: project, bytes: bytes, text: text)
+    }
+
+    private func parseKeyValueMessage(_ message: String) -> [String: String] {
+        var result: [String: String] = [:]
+        let tokens = message.split(separator: " ")
+        for token in tokens {
+            guard let eq = token.firstIndex(of: "=") else { continue }
+            let key = String(token[..<eq])
+            let value = String(token[token.index(after: eq)...])
+            if !key.isEmpty && !value.isEmpty {
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    private func shortProject(_ raw: String?) -> String {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "-" }
+        return String(trimmed.prefix(16))
+    }
+
+    private func compactLogStyle(for entry: OpsLogEntry) -> (text: String, color: NSColor) {
+        let text = humanReadableSummary(for: entry)
+        switch entry.event {
+        case "federation.connected":
+            return (text, .systemGreen)
+        case "federation.connecting":
+            return (text, .systemBlue)
+        case "federation.closed", "federation.receive_failed", "federation.send_failed", "federation.error":
+            return (text, .systemRed)
+        case "federation.disabled", "federation.invalid_url":
+            return (text, .systemOrange)
+        case "tmux.completion", "tmux.question", "tmux.progress":
+            return (text, .labelColor) // captured only
+        case "line_send_ok":
+            return (text, .systemGreen)
+        case "line_send_start":
+            return (text, .systemBlue)
+        case "tmux.forward":
+            return (text, .systemBlue)
+        case "tmux_gateway_deliver":
+            return (text, .systemPurple)
+        case "ingress_received", "ingress_validated":
+            return (text, .systemPurple)
+        case "send_failed", "decode_failed":
+            return (text, .systemRed)
+        default:
+            if entry.level.lowercased() == "error" {
+                return (text, .systemRed)
+            }
+            return (text, .labelColor)
+        }
     }
 
     @objc private func quit() {
@@ -350,12 +465,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         return item
     }
 
-    private func applyReadableTitle(to item: NSMenuItem?, text: String, emphasis: Bool = false) {
+    private func applyReadableTitle(to item: NSMenuItem?, text: String, emphasis: Bool = false, color: NSColor = .controlTextColor) {
         guard let item else { return }
         let weight: NSFont.Weight = emphasis ? .semibold : .medium
         let attributed = NSAttributedString(string: text, attributes: [
             .font: NSFont.monospacedSystemFont(ofSize: 13, weight: weight),
-            .foregroundColor: NSColor.controlTextColor,
+            .foregroundColor: color,
         ])
         item.attributedTitle = attributed
     }

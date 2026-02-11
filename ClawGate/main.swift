@@ -79,6 +79,9 @@ final class AppRuntime {
         eventBus.subscribe { [weak statsCollector] event in
             statsCollector?.handleEvent(event)
         }
+        eventBus.subscribe { [weak self] event in
+            self?.persistOpsLogForMenu(event)
+        }
         eventBus.subscribe { [weak self] _ in
             guard let self else { return }
             DispatchQueue.main.async {
@@ -154,6 +157,82 @@ final class AppRuntime {
         }
         ccStatusBarClient.connect()
         tmuxInboundWatcher.start()
+    }
+
+    private func persistOpsLogForMenu(_ event: BridgeEvent) {
+        let role = configStore.load().nodeRole.rawValue
+        switch event.type {
+        case "federation_status":
+            guard event.adapter == "federation" else { return }
+            let state = event.payload["state"] ?? "unknown"
+            let detail = (event.payload["detail"] ?? "")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let short = detail.isEmpty ? "-" : String(detail.prefix(120))
+            let level = (state == "connected") ? "info" : (state.contains("fail") || state == "error" ? "error" : "warning")
+            opsLogStore.append(
+                level: level,
+                event: "federation.\(state)",
+                role: role,
+                script: "clawgate.app",
+                message: short
+            )
+        case "inbound_message":
+            guard event.adapter == "tmux" else { return }
+            let source = event.payload["source"] ?? ""
+            let project = event.payload["project"] ?? "unknown"
+            let text = (event.payload["text"] ?? "")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let byteCount = text.lengthOfBytes(using: .utf8)
+            let short = text.isEmpty ? "(empty)" : String(text.prefix(96))
+
+            switch source {
+            case "completion":
+                opsLogStore.append(
+                    level: "info",
+                    event: "tmux.completion",
+                    role: role,
+                    script: "clawgate.app",
+                    message: "project=\(project) bytes=\(byteCount) text=\(short)"
+                )
+            case "question":
+                opsLogStore.append(
+                    level: "info",
+                    event: "tmux.question",
+                    role: role,
+                    script: "clawgate.app",
+                    message: "project=\(project) bytes=\(byteCount) text=\(short)"
+                )
+            case "progress":
+                opsLogStore.append(
+                    level: "debug",
+                    event: "tmux.progress",
+                    role: role,
+                    script: "clawgate.app",
+                    message: "project=\(project) bytes=\(byteCount) text=\(short)"
+                )
+            default:
+                break
+            }
+        case "outbound_message":
+            guard event.adapter == "tmux" else { return }
+            let project = event.payload["conversation"] ?? "unknown"
+            let text = (event.payload["text"] ?? "")
+                .replacingOccurrences(of: "\n", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let byteCount = text.lengthOfBytes(using: .utf8)
+            let short = text.isEmpty ? "(empty)" : String(text.prefix(96))
+            opsLogStore.append(
+                level: "info",
+                event: "tmux.forward",
+                role: role,
+                script: "clawgate.app",
+                message: "project=\(project) bytes=\(byteCount) text=\(short)"
+            )
+        default:
+            break
+        }
     }
 }
 

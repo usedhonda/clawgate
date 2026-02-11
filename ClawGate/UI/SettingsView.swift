@@ -374,9 +374,15 @@ struct InlineSettingsView: View {
             if force || !model.config.lineEnabled {
                 model.config.lineEnabled = true
             }
-            if force || model.config.federationEnabled {
-                model.config.federationEnabled = false
-                model.config.federationURL = ""
+            if force || !model.config.federationEnabled {
+                model.config.federationEnabled = true
+            }
+            if force || model.config.federationURL.isEmpty {
+                let preferredHost = tailscalePeers.first(where: { $0.online && $0.hostname != localMachineName() })?.hostname
+                    ?? tailscalePeers.first(where: { $0.online })?.hostname
+                    ?? tailscalePeers.first?.hostname
+                    ?? "sshmacmini"
+                model.config.federationURL = buildWSURL(host: preferredHost, port: 8766, path: "/federation")
             }
             if force || !model.config.tmuxEnabled {
                 model.config.tmuxEnabled = true
@@ -544,11 +550,9 @@ struct InlineSettingsView: View {
     private func stopRelay() {
         relayActionInFlight = true
         relayState = .checking
-        runRelayScript(["/usr/bin/pkill", "-f", "ClawGateRelay --host"]) { _ in
-            runRelayScript(["/usr/bin/pkill", "-f", "swift run ClawGateRelay"]) { _ in
-                relayActionInFlight = false
-                refreshConnectivity()
-            }
+        runRelayScript(["./scripts/stop-hostb-relay.sh"]) { _ in
+            relayActionInFlight = false
+            refreshConnectivity()
         }
     }
 

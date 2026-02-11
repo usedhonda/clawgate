@@ -23,6 +23,7 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
         shouldRun = true
         reconnectAttempts = 0
         logger.log(.info, "FederationClient start requested")
+        emitStatus(state: "start", detail: "client start requested")
         connectIfNeeded()
     }
 
@@ -36,11 +37,13 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
         socketTask = nil
         session?.invalidateAndCancel()
         session = nil
+        emitStatus(state: "stopped", detail: "client stopped")
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         reconnectAttempts = 0
         logger.log(.info, "FederationClient connected")
+        emitStatus(state: "connected", detail: "websocket connected")
         sendHello()
         subscribeEventsIfNeeded()
         receiveLoop()
@@ -48,12 +51,14 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         logger.log(.warning, "FederationClient closed: \(closeCode.rawValue)")
+        emitStatus(state: "closed", detail: "close_code=\(closeCode.rawValue)")
         scheduleReconnect()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error {
             logger.log(.warning, "FederationClient error: \(error.localizedDescription)")
+            emitStatus(state: "error", detail: "task_error=\(error.localizedDescription)")
         }
         scheduleReconnect()
     }
@@ -63,13 +68,16 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
         let cfg = configStore.load()
         guard cfg.federationEnabled else {
             logger.log(.info, "FederationClient disabled by config")
+            emitStatus(state: "disabled", detail: "federation disabled in config")
             return
         }
         guard let url = URL(string: cfg.federationURL), !cfg.federationURL.isEmpty else {
             logger.log(.warning, "FederationClient disabled: federationURL is empty or invalid")
+            emitStatus(state: "invalid_url", detail: "federationURL is empty or invalid")
             return
         }
         logger.log(.info, "FederationClient connecting to \(cfg.federationURL)")
+        emitStatus(state: "connecting", detail: cfg.federationURL)
 
         var request = URLRequest(url: url)
         let token = cfg.federationToken.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -107,6 +115,7 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
         guard eventSubscriptionID == nil else { return }
         eventSubscriptionID = eventBus.subscribe { [weak self] event in
             guard let self else { return }
+            if event.payload["_from_federation"] == "1" { return }
             let message = FederationEnvelope(
                 type: "event",
                 timestamp: FederationMessage.now(),
@@ -130,6 +139,12 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
                 self.receiveLoop()
             case .failure(let error):
                 self.logger.log(.warning, "FederationClient receive failed: \(error.localizedDescription)")
+                self.emitStatus(state: "receive_failed", detail: error.localizedDescription)
+                self.socketTask?.cancel(with: .goingAway, reason: nil)
+                self.socketTask = nil
+                self.session?.invalidateAndCancel()
+                self.session = nil
+                self.scheduleReconnect()
             }
         }
     }
@@ -146,6 +161,20 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
             send(pong)
             return
         }
+
+        if type == "event",
+           let envelope = try? JSONDecoder().decode(FederationEnvelope<FederationEventPayload>.self, from: data) {
+            var payload = envelope.payload.event.payload
+            payload["_from_federation"] = "1"
+            _ = eventBus.append(
+                type: envelope.payload.event.type,
+                adapter: envelope.payload.event.adapter,
+                payload: payload
+            )
+            logger.log(.debug, "FederationClient received event: \(envelope.payload.event.adapter).\(envelope.payload.event.type)")
+            return
+        }
+
         if type == "command",
            let payload = json["payload"] as? [String: Any],
            let id = payload["id"] as? String,
@@ -179,7 +208,19 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
         socketTask.send(.string(text)) { [weak self] error in
             if let error {
                 self?.logger.log(.warning, "FederationClient send failed: \(error.localizedDescription)")
+                self?.emitStatus(state: "send_failed", detail: error.localizedDescription)
             }
         }
+    }
+
+    private func emitStatus(state: String, detail: String) {
+        _ = eventBus.append(
+            type: "federation_status",
+            adapter: "federation",
+            payload: [
+                "state": state,
+                "detail": String(detail.prefix(160)),
+            ]
+        )
     }
 }

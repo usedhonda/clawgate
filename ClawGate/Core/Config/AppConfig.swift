@@ -171,6 +171,11 @@ final class ConfigStore {
             cfg.federationReconnectMaxSeconds = min(300, max(5, defaults.integer(forKey: Keys.federationReconnectMaxSeconds)))
         }
 
+        // Backward-compat: when federation token is unset, reuse remote access token.
+        if cfg.federationToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            cfg.federationToken = cfg.remoteAccessToken
+        }
+
         return cfg
     }
 
