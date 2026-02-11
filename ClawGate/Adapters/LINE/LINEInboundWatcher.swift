@@ -272,7 +272,13 @@ final class LINEInboundWatcher {
             return nil
         }
 
-        let ocrText = (VisionOCR.extractText(from: incomingFrames, padding: 4, windowID: lineWindowID) ?? "")
+        let ocrFrames = selectOCRFrames(
+            incomingFrames: incomingFrames,
+            lastFrame: lastFrame,
+            countChanged: countChanged,
+            newRowCount: newRowCount
+        )
+        let ocrText = extractInboundOCRText(from: ocrFrames, lineWindowID: lineWindowID)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let axFallbackText = extractTextFromRows(incomingRows)
         let structuralFallbackOCR = collectStructuralFallbackOCR(
@@ -307,9 +313,64 @@ final class LINEInboundWatcher {
 
     private func collectStructuralFallbackOCR(lastFrame: CGRect, lineWindowID: CGWindowID) -> String {
         // Fallback 1: OCR from latest row with wider padding.
-        let rowText = (VisionOCR.extractText(from: [lastFrame], padding: 12, windowID: lineWindowID) ?? "")
+        let rowText = (VisionOCR.extractText(from: inboundCropRect(for: lastFrame, horizontalRatio: 0.82), windowID: lineWindowID) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return rowText
+    }
+
+    private func extractInboundOCRText(from incomingFrames: [CGRect], lineWindowID: CGWindowID) -> String {
+        guard !incomingFrames.isEmpty else { return "" }
+
+        // OCR each row independently to avoid a wide union-crop pulling in older/adjacent bubbles.
+        let ordered = incomingFrames.sorted { $0.origin.y < $1.origin.y }
+        var rows: [String] = []
+        for frame in ordered {
+            let crop = inboundCropRect(for: frame, horizontalRatio: 0.82)
+            let text = (VisionOCR.extractText(from: crop, windowID: lineWindowID) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                rows.append(text)
+            }
+        }
+        return rows.joined(separator: "\n")
+    }
+
+    private func selectOCRFrames(
+        incomingFrames: [CGRect],
+        lastFrame: CGRect,
+        countChanged: Bool,
+        newRowCount: Int
+    ) -> [CGRect] {
+        guard !incomingFrames.isEmpty else { return [newestSliceRect(for: lastFrame)] }
+        // Qt/LINE frequently keeps row count unchanged while appending text to the tail.
+        // In that case, prioritize the bottom slice to avoid re-reading older bubbles above.
+        if !countChanged || newRowCount == 0 {
+            return [newestSliceRect(for: lastFrame)]
+        }
+        return incomingFrames
+    }
+
+    private func newestSliceRect(for frame: CGRect) -> CGRect {
+        let h = frame.height
+        let sliceHeight = min(max(h * 0.72, 120), 420)
+        return CGRect(
+            x: frame.origin.x,
+            y: frame.maxY - sliceHeight,
+            width: frame.width,
+            height: sliceHeight
+        )
+    }
+
+    private func inboundCropRect(for frame: CGRect, horizontalRatio: CGFloat) -> CGRect {
+        let ratio = max(0.45, min(horizontalRatio, 1.0))
+        let width = max(40, frame.width * ratio)
+        let rect = CGRect(
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: width,
+            height: frame.height
+        )
+        return rect.insetBy(dx: -4, dy: -2)
     }
 
     private func extractTextFromRows(_ rows: [AXUIElement]) -> String {
@@ -388,6 +449,12 @@ final class LINEInboundWatcher {
             width: chatListFrame.width,
             height: chatListFrame.height / 2
         )
+        let inboundHalf = CGRect(
+            x: bottomHalf.origin.x,
+            y: bottomHalf.origin.y,
+            width: bottomHalf.width * 0.78,
+            height: bottomHalf.height
+        )
         let captureOptions: CGWindowListOption = lineWindowID != kCGNullWindowID
             ? .optionIncludingWindow : .optionOnScreenOnly
 
@@ -399,7 +466,7 @@ final class LINEInboundWatcher {
 
         if !baselineCaptured {
             lastImageHash = hash
-            lastOCRText = VisionOCR.extractText(from: bottomHalf, windowID: lineWindowID) ?? ""
+            lastOCRText = VisionOCR.extractText(from: inboundHalf, windowID: lineWindowID) ?? ""
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
             return nil
@@ -409,17 +476,19 @@ final class LINEInboundWatcher {
         let previousHash = lastImageHash
         lastImageHash = hash
 
-        let pixelOCRText = VisionOCR.extractText(from: bottomHalf, windowID: lineWindowID) ?? ""
-        let textChanged = pixelOCRText != lastOCRText
+        let pixelOCRText = VisionOCR.extractText(from: inboundHalf, windowID: lineWindowID) ?? ""
+        let previousOCRText = lastOCRText
+        let textChanged = pixelOCRText != previousOCRText
         if textChanged {
             lastOCRText = pixelOCRText
         }
+        let deltaText = textChanged ? extractDeltaText(previous: previousOCRText, current: pixelOCRText) : ""
 
         return LineDetectionSignal(
             name: "pixel_diff",
             // Allow pixel-only path to emit when structural AX signal is unstable.
             score: textChanged ? 62 : 35,
-            text: textChanged ? LineTextSanitizer.sanitize(pixelOCRText) : "",
+            text: textChanged ? LineTextSanitizer.sanitize(deltaText) : "",
             conversation: conversation,
             details: [
                 "pixel_hash_prev": String(previousHash),
@@ -427,6 +496,31 @@ final class LINEInboundWatcher {
                 "pixel_text_changed": textChanged ? "1" : "0",
             ]
         )
+    }
+
+    private func extractDeltaText(previous: String, current: String) -> String {
+        let normalizedPrevious = LineTextSanitizer.sanitize(previous)
+        let normalizedCurrent = LineTextSanitizer.sanitize(current)
+        guard !normalizedCurrent.isEmpty else { return "" }
+        guard !normalizedPrevious.isEmpty else { return normalizedCurrent }
+
+        let previousLines = Set(
+            normalizedPrevious
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+        let currentLines = normalizedCurrent
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let delta = currentLines.filter { !previousLines.contains($0) }
+        if delta.isEmpty {
+            // Keep current text to avoid false drops caused by OCR line segmentation drift.
+            return normalizedCurrent
+        }
+        return delta.joined(separator: "\n")
     }
 
     private func collectProcessSignal(app: NSRunningApplication, conversation: String) -> LineDetectionSignal? {

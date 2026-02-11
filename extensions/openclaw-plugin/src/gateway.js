@@ -201,7 +201,9 @@ function isUiChromeLine(line) {
   if (/^(午前|午後)\s*\d{1,2}:\d{2}$/.test(s)) return true;
   if (/^\d{1,2}:\d{2}$/.test(s)) return true;
   if (/^\d+$/.test(s)) return true;
-  if (/^[\W_]+$/.test(s)) return true;
+  // Treat only punctuation/symbol-only tokens as noise.
+  // NOTE: Do not use \W here; in JS it classifies Japanese text as non-word.
+  if (/^[\p{P}\p{S}\s_]+$/u.test(s)) return true;
   return false;
 }
 

@@ -15,12 +15,9 @@ enum LineTextSanitizer {
             .filter { !$0.isEmpty }
 
         var kept: [String] = []
-        var seen = Set<String>()
         for line in lines {
             guard !isStandaloneUIArtifact(line) else { continue }
-            if seen.insert(line).inserted {
-                kept.append(line)
-            }
+            kept.append(line)
         }
         return kept.joined(separator: "\n")
     }
@@ -61,6 +58,9 @@ enum LineTextSanitizer {
 
     static func isStandaloneUIArtifact(_ line: String) -> Bool {
         if standaloneNoiseTokens.contains(line) {
+            return true
+        }
+        if line == "ここから未読メッセージ" {
             return true
         }
         if isTimeOnlyLine(line) {

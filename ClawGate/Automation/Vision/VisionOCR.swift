@@ -59,7 +59,14 @@ enum VisionOCR {
             return nil
         }
 
-        let texts = observations.compactMap { $0.topCandidates(1).first?.string }
+        let texts = observations.compactMap { observation -> String? in
+            let candidates = observation.topCandidates(3)
+            if let accepted = candidates.first(where: { $0.confidence >= 0.34 }) {
+                return accepted.string
+            }
+            // Keep best candidate as fallback to avoid dropping long/complex Japanese text.
+            return candidates.first?.string
+        }
         guard !texts.isEmpty else {
             return nil
         }
