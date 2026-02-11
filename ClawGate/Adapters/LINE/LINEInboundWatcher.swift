@@ -313,7 +313,7 @@ final class LINEInboundWatcher {
 
     private func collectStructuralFallbackOCR(lastFrame: CGRect, lineWindowID: CGWindowID) -> String {
         // Fallback 1: OCR from latest row with wider padding.
-        let rowText = (VisionOCR.extractText(from: inboundCropRect(for: lastFrame, horizontalRatio: 0.82), windowID: lineWindowID) ?? "")
+        let rowText = (VisionOCR.extractTextLineInbound(from: inboundCropRect(for: lastFrame, horizontalRatio: 0.82), windowID: lineWindowID) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return rowText
     }
@@ -326,7 +326,7 @@ final class LINEInboundWatcher {
         var rows: [String] = []
         for frame in ordered {
             let crop = inboundCropRect(for: frame, horizontalRatio: 0.82)
-            let text = (VisionOCR.extractText(from: crop, windowID: lineWindowID) ?? "")
+            let text = (VisionOCR.extractTextLineInbound(from: crop, windowID: lineWindowID) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
                 rows.append(text)
@@ -466,7 +466,7 @@ final class LINEInboundWatcher {
 
         if !baselineCaptured {
             lastImageHash = hash
-            lastOCRText = VisionOCR.extractText(from: inboundHalf, windowID: lineWindowID) ?? ""
+            lastOCRText = VisionOCR.extractTextLineInbound(from: inboundHalf, windowID: lineWindowID) ?? ""
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
             return nil
@@ -476,7 +476,7 @@ final class LINEInboundWatcher {
         let previousHash = lastImageHash
         lastImageHash = hash
 
-        let pixelOCRText = VisionOCR.extractText(from: inboundHalf, windowID: lineWindowID) ?? ""
+        let pixelOCRText = VisionOCR.extractTextLineInbound(from: inboundHalf, windowID: lineWindowID) ?? ""
         let previousOCRText = lastOCRText
         let textChanged = pixelOCRText != previousOCRText
         if textChanged {

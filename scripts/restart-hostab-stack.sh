@@ -14,8 +14,11 @@ set -euo pipefail
 REMOTE_HOST="macmini"
 PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
 SKIP_SYNC=false
-SKIP_REMOTE_BUILD=false
+SKIP_REMOTE_BUILD=true
 SKIP_LOCAL_RELAY=false
+ALLOW_REMOTE_BUILD=false
+CLAWGATE_ROLE="host_b_client"
+OPS_SCRIPT_NAME="restart-hostab-stack.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,6 +30,8 @@ while [[ $# -gt 0 ]]; do
       SKIP_SYNC=true; shift ;;
     --skip-remote-build)
       SKIP_REMOTE_BUILD=true; shift ;;
+    --allow-remote-build)
+      ALLOW_REMOTE_BUILD=true; SKIP_REMOTE_BUILD=false; shift ;;
     --skip-local-relay)
       SKIP_LOCAL_RELAY=true; shift ;;
     *)
@@ -35,12 +40,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+source "$PROJECT_PATH/scripts/lib-ops-log.sh"
+ops_log info "stack_restart_begin" "stack restart begin (remote_host=$REMOTE_HOST skip_sync=$SKIP_SYNC skip_remote_build=$SKIP_REMOTE_BUILD skip_local_relay=$SKIP_LOCAL_RELAY)"
+trap 'ops_log error "stack_restart_failed" "stack restart failed (line=$LINENO exit=$?)"' ERR
+
 echo "== restart-hostab-stack =="
 echo "Remote host : $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
 echo "Skip sync   : $SKIP_SYNC"
 echo "Skip build  : $SKIP_REMOTE_BUILD"
 echo "Skip relay  : $SKIP_LOCAL_RELAY"
+
+# Safety rule: Host A (macmini) build/update must be performed by the
+# local desktop script to avoid intermittent SSH codesign rollback.
+# If you really need remote build here, pass --allow-remote-build explicitly.
+if [[ "$ALLOW_REMOTE_BUILD" != "true" ]]; then
+  echo "[policy] Host A remote build is disabled by default."
+  echo "[policy] Run on macmini local session first:"
+  echo "         KEYCHAIN_PASSWORD='...' ./scripts/macmini-local-sign-and-restart.sh"
+  SKIP_REMOTE_BUILD=true
+fi
 
 # Keep federation token aligned with relay default behavior:
 # ClawGateRelay uses gateway token for federation auth unless explicitly overridden.
@@ -64,11 +83,8 @@ else
     --project-path "$PROJECT_PATH"
 fi
 
-echo "[local] Restart Host B ClawGate.app"
-pkill -f '/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate' >/dev/null 2>&1 || true
-sleep 1
-open -na /Users/usedhonda/projects/ios/clawgate/ClawGate.app
-sleep 2
+echo "[local] Restart Host B ClawGate.app (canonical path)"
+./scripts/restart-local-clawgate.sh
 
 if [[ "$SKIP_LOCAL_RELAY" != "true" ]]; then
   echo "[local] Restart Host B ClawGateRelay"
@@ -98,3 +114,4 @@ ssh "$REMOTE_HOST" "launchctl list | grep ai.openclaw.gateway || true; curl -sS 
 echo
 
 echo "Done."
+ops_log info "stack_restart_ok" "stack restart finished"

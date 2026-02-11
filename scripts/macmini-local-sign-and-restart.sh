@@ -51,9 +51,7 @@ codesign --force --deep --options runtime \
   --sign "$CERT_NAME" ClawGate.app
 
 echo "[6/6] Restart ClawGate + OpenClaw gateway"
-pkill -f '/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate' >/dev/null 2>&1 || true
-sleep 1
-open -na /Users/usedhonda/projects/ios/clawgate/ClawGate.app
+./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-sign
 sleep 2
 launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
 sleep 1

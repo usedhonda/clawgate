@@ -10,7 +10,9 @@ set -euo pipefail
 REMOTE_HOST="macmini"
 PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
 SKIP_BUILD=false
-STOP_RELAY=true
+STOP_RELAY=false
+CLAWGATE_ROLE="host_b_client"
+OPS_SCRIPT_NAME="restart-macmini-openclaw.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,6 +22,8 @@ while [[ $# -gt 0 ]]; do
       PROJECT_PATH="$2"; shift 2 ;;
     --skip-build)
       SKIP_BUILD=true; shift ;;
+    --stop-relay)
+      STOP_RELAY=true; shift ;;
     --keep-relay)
       STOP_RELAY=false; shift ;;
     *)
@@ -27,6 +31,10 @@ while [[ $# -gt 0 ]]; do
       exit 2 ;;
   esac
 done
+
+source "$PROJECT_PATH/scripts/lib-ops-log.sh"
+ops_log info "remote_restart_begin" "server restart requested (remote_host=$REMOTE_HOST skip_build=$SKIP_BUILD stop_relay=$STOP_RELAY)"
+trap 'ops_log error "remote_restart_failed" "server restart failed (line=$LINENO exit=$?)"' ERR
 
 echo "Remote host: $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
@@ -48,6 +56,11 @@ fi
 
 ssh "$REMOTE_HOST" "PROJECT_PATH='$PROJECT_PATH' BUILD_FLAG='$BUILD_FLAG' STOP_RELAY_FLAG='$STOP_RELAY_FLAG' /bin/zsh -lc '
 set -euo pipefail
+CLAWGATE_ROLE=\"host_a_server\"
+OPS_SCRIPT_NAME=\"restart-macmini-openclaw.remote\"
+source \"\$PROJECT_PATH/scripts/lib-ops-log.sh\"
+ops_log info \"remote_begin\" \"remote update started (build=\$BUILD_FLAG stop_relay=\$STOP_RELAY_FLAG)\"
+trap '\''ops_log error \"remote_failed\" \"remote update failed (line=\$LINENO exit=\$?)\"'\'' ERR
 cd \"\$PROJECT_PATH\"
 APP_PATH=\"\$PROJECT_PATH/ClawGate.app\"
 TMP_BACKUP=\"/tmp/ClawGate.app.backup.\$\$\"
@@ -96,12 +109,9 @@ else
   fi
 fi
 
-# Stop old app from both historical and current paths, then launch current one.
-pkill -f \"/Users/usedhonda/projects/Mac/clawgate/ClawGate.app/Contents/MacOS/ClawGate\" >/dev/null 2>&1 || true
-pkill -f \"/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate\" >/dev/null 2>&1 || true
+# Canonical local restart path (single source of truth)
+./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-sign
 sleep 1
-open -na /Users/usedhonda/projects/ios/clawgate/ClawGate.app
-sleep 2
 
 launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
 sleep 2
@@ -124,6 +134,8 @@ echo \"[remote] gateway launchctl:\"
 launchctl list | grep ai.openclaw.gateway || true
 echo \"[remote] health:\"
 curl -sS http://127.0.0.1:8765/v1/health || true
+ops_log info \"remote_ok\" \"remote update finished\"
 '"
 
 echo "Done."
+ops_log info "remote_restart_ok" "server restart finished"

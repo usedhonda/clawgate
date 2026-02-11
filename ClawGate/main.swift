@@ -4,6 +4,7 @@ import Foundation
 final class AppRuntime {
     let configStore = ConfigStore()
     lazy var statsCollector = StatsCollector()
+    lazy var opsLogStore = OpsLogStore()
 
     private lazy var logger = AppLogger(configStore: configStore)
     private lazy var recentSendTracker = RecentSendTracker()
@@ -23,6 +24,7 @@ final class AppRuntime {
         eventBus: eventBus,
         registry: registry,
         logger: logger,
+        opsLogStore: opsLogStore,
         configStore: configStore,
         statsCollector: statsCollector
     )
@@ -84,11 +86,11 @@ final class AppRuntime {
             }
         }
 
-        if configStore.load().nodeRole != .client {
+        if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
             inboundWatcher.start()
             notificationBannerWatcher.start()
         } else {
-            logger.log(.info, "LINE subsystems are disabled (nodeRole=client)")
+            logger.log(.info, "LINE subsystems are disabled (nodeRole=client or lineEnabled=false)")
         }
 
         // Start tmux subsystem if enabled
@@ -109,7 +111,7 @@ final class AppRuntime {
     }
 
     func stopServer() {
-        if configStore.load().nodeRole != .client {
+        if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
             notificationBannerWatcher.stop()
             inboundWatcher.stop()
         }
@@ -127,7 +129,7 @@ final class AppRuntime {
 
     private func enabledAdapters() -> [AdapterProtocol] {
         var adapters: [AdapterProtocol] = [tmuxAdapter]
-        if configStore.load().nodeRole != .client {
+        if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
             adapters.insert(lineAdapter, at: 0)
         }
         return adapters
@@ -157,7 +159,7 @@ final class AppRuntime {
 
 let app = NSApplication.shared
 let runtime = AppRuntime()
-let delegate = MenuBarAppDelegate(runtime: runtime, statsCollector: runtime.statsCollector)
+let delegate = MenuBarAppDelegate(runtime: runtime, statsCollector: runtime.statsCollector, opsLogStore: runtime.opsLogStore)
 runtime.menuBarDelegate = delegate
 app.delegate = delegate
 app.setActivationPolicy(.accessory)

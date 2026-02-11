@@ -139,9 +139,9 @@ function isPluginEcho(eventText) {
 // NotificationBanner) that can emit multiple events for the same message.
 // We deduplicate by fingerprint within a sliding time window.
 
-const DEDUP_WINDOW_MS = 15_000; // 15 seconds
-const MIN_TEXT_LENGTH = 2;      // Keep short Japanese test messages like "てすと"
-const STALE_REPEAT_WINDOW_MS = 90 * 1000; // 90 seconds; keep loop guard but allow legitimate repeated phrases
+const DEDUP_WINDOW_MS = 0; // disable duplicate suppression (recall-first)
+const MIN_TEXT_LENGTH = 1;      // Favor recall over precision for OCR-driven ingress
+const STALE_REPEAT_WINDOW_MS = 0; // disable stale-repeat suppression (recall-first)
 
 /** @type {{ fingerprint: string, time: number }[]} */
 const recentInbounds = [];
@@ -153,6 +153,7 @@ function eventFingerprint(text) {
 }
 
 function isDuplicateInbound(eventText) {
+  if (DEDUP_WINDOW_MS <= 0) return false;
   const now = Date.now();
   // Prune expired entries
   while (recentInbounds.length > 0 && recentInbounds[0].time < now - DEDUP_WINDOW_MS) {
@@ -174,6 +175,7 @@ function stableKey(eventText, conversation) {
 }
 
 function isStaleRepeatInbound(eventText, conversation, source) {
+  if (STALE_REPEAT_WINDOW_MS <= 0) return false;
   // Notification banner is explicit new-message signal; don't block it.
   if (source === "notification_banner") return false;
 
@@ -222,6 +224,9 @@ function normalizeInboundText(rawText, source) {
     .filter((l) => l.length > 0)
     .filter((l) => !isUiChromeLine(l));
 
+  // Re-join OCR wrap fragments so one user message is not split into many pieces.
+  lines = mergeWrappedLines(lines);
+
   // Fallback: if chrome filtering removed everything, keep the last raw non-empty line.
   // This avoids dropping valid short test messages mixed with noisy OCR blocks.
   if (lines.length === 0) {
@@ -234,35 +239,42 @@ function normalizeInboundText(rawText, source) {
     }
   }
 
-  // Remove adjacent duplicates created by OCR jitter.
-  const deduped = [];
-  for (const line of lines) {
-    if (deduped.length === 0 || deduped[deduped.length - 1] !== line) deduped.push(line);
-  }
-  lines = deduped;
-
-  // Pixel/hybrid OCR often contains entire screen history.
-  // Keep the latest meaningful line, but avoid dropping valid short trailing lines
-  // by falling back to a previous richer line when available.
-  if (source === "hybrid_fusion" || source === "pixel_diff") {
-    if (lines.length > 0) {
-      let picked = lines[lines.length - 1];
-      // If the tail is too short, prefer the nearest previous line with enough signal.
-      if (picked.length < 5) {
-        for (let i = lines.length - 2; i >= 0; i -= 1) {
-          if (lines[i].length >= 5) {
-            picked = lines[i];
-            break;
-          }
-        }
-      }
-      lines = [picked];
-    } else {
-      lines = [];
-    }
-  }
+  // Keep raw order as much as possible (do not dedupe/slice). Let the AI decide.
 
   return lines.join("\n").trim();
+}
+
+function mergeWrappedLines(lines) {
+  if (!Array.isArray(lines) || lines.length <= 1) return lines || [];
+  const merged = [];
+
+  const shouldAppend = (prev, next) => {
+    if (!prev || !next) return false;
+    if (isUiChromeLine(prev) || isUiChromeLine(next)) return false;
+    // If previous line already ends with sentence punctuation, keep boundary.
+    if (/[。！？!?]$/.test(prev)) return false;
+    // OCR wraps often produce short tail/head fragments.
+    if (prev.length <= 36 || next.length <= 20) return true;
+    // Japanese line wraps in LINE often break without punctuation.
+    if (!/[、。！？!?]$/.test(prev) && /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}A-Za-z0-9]/u.test(next)) {
+      return true;
+    }
+    return false;
+  };
+
+  for (const line of lines) {
+    if (merged.length === 0) {
+      merged.push(line);
+      continue;
+    }
+    const prev = merged[merged.length - 1];
+    if (shouldAppend(prev, line)) {
+      merged[merged.length - 1] = `${prev}${line}`;
+    } else {
+      merged.push(line);
+    }
+  }
+  return merged;
 }
 
 // ── Pending questions tracking ────────────────────────────────
@@ -271,6 +283,25 @@ function normalizeInboundText(rawText, source) {
 
 /** @type {Map<string, { questionText: string, questionId: string, options: string[], selectedIndex: number }>} */
 const pendingQuestions = new Map();
+
+function makeTraceId(prefix, event) {
+  const existing = event?.payload?.trace_id;
+  if (existing) return existing;
+  const id = event?.id || Date.now();
+  return `${prefix}-${id}`;
+}
+
+function traceLog(log, level, fields) {
+  const payload = {
+    ts: new Date().toISOString(),
+    ...fields,
+  };
+  const line = `clawgate_trace ${JSON.stringify(payload)}`;
+  if (level === "error") log?.error?.(line);
+  else if (level === "warn") log?.warn?.(line);
+  else if (level === "debug") log?.debug?.(line);
+  else log?.info?.(line);
+}
 
 // ── Autonomous task chaining ──────────────────────────────────
 
@@ -284,7 +315,7 @@ const pendingQuestions = new Map();
  * @param {object} [params.log]
  * @returns {Promise<{lineText: string, taskText: string} | {error: Error, lineText: string} | null>}
  */
-async function tryExtractAndSendTask({ replyText, project, apiUrl, log }) {
+async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log }) {
   const taskMatch = replyText.match(/<cc_task>([\s\S]*?)<\/cc_task>/);
   if (!taskMatch) return null;
 
@@ -297,7 +328,7 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, log }) {
   const prefixedTask = `[OpenClaw Agent] ${taskText}`;
 
   try {
-    const result = await clawgateTmuxSend(apiUrl, project, prefixedTask);
+    const result = await clawgateTmuxSend(apiUrl, project, prefixedTask, traceId);
     if (result?.ok) {
       log?.info?.(`clawgate: task sent to CC (${project}): "${taskText.slice(0, 80)}"`);
       return { lineText, taskText };
@@ -321,7 +352,7 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, log }) {
  * @param {object} [params.log]
  * @returns {Promise<{lineText: string, answerIndex: number} | {error: Error, lineText: string} | null>}
  */
-async function tryExtractAndSendAnswer({ replyText, apiUrl, log }) {
+async function tryExtractAndSendAnswer({ replyText, apiUrl, traceId, log }) {
   const answerMatch = replyText.match(/<cc_answer\s+project="([^"]+)">([\s\S]*?)<\/cc_answer>/);
   if (!answerMatch) return null;
 
@@ -349,7 +380,7 @@ async function tryExtractAndSendAnswer({ replyText, apiUrl, log }) {
   const selectCmd = `__cc_select:${zeroBasedIndex}`;
 
   try {
-    const result = await clawgateTmuxSend(apiUrl, project, selectCmd);
+    const result = await clawgateTmuxSend(apiUrl, project, selectCmd, traceId);
     if (result?.ok) {
       log?.info?.(`clawgate: answer sent to CC (${project}): option ${zeroBasedIndex}`);
       pendingQuestions.delete(project);
@@ -510,8 +541,19 @@ function buildMsgContext(event, accountId, defaultConversation) {
  */
 async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
   const runtime = getRuntime();
+  const traceId = makeTraceId("line", event);
+  if (!event.payload) event.payload = {};
+  event.payload.trace_id = traceId;
   const ctx = buildMsgContext(event, accountId, defaultConversation);
   const conversation = ctx.ConversationLabel;
+  traceLog(log, "info", {
+    trace_id: traceId,
+    stage: "gateway_inbound_received",
+    action: "dispatch_inbound_message",
+    status: "start",
+    source: event.payload?.source || "poll",
+    adapter: event.adapter || "line",
+  });
 
   log?.info?.(`clawgate: [${accountId}] inbound from "${ctx.SenderName}" in "${conversation}": "${ctx.Body?.slice(0, 80)}"`);
 
@@ -547,13 +589,13 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     if (!text.trim()) return;
 
     // Try to extract <cc_answer> first (from AI reply to question)
-    const answerResult = await tryExtractAndSendAnswer({ replyText: text, apiUrl, log });
+    const answerResult = await tryExtractAndSendAnswer({ replyText: text, apiUrl, traceId, log });
     if (answerResult) {
       if (answerResult.error) {
         const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
-        try { await clawgateSend(apiUrl, conversation, msg); recordPluginSend(msg); } catch {}
+        try { await clawgateSend(apiUrl, conversation, msg, traceId); recordPluginSend(msg); } catch {}
       } else if (answerResult.lineText) {
-        try { await clawgateSend(apiUrl, conversation, answerResult.lineText); recordPluginSend(answerResult.lineText); } catch {}
+        try { await clawgateSend(apiUrl, conversation, answerResult.lineText, traceId); recordPluginSend(answerResult.lineText); } catch {}
       }
       return;
     }
@@ -561,20 +603,20 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     // If there are task-capable projects, try to extract <cc_task> from AI reply
     if (taskCapableProjects.length > 0) {
       const result = await tryExtractAndSendTask({
-        replyText: text, project: taskCapableProjects[0], apiUrl, log,
+        replyText: text, project: taskCapableProjects[0], apiUrl, traceId, log,
       });
       if (result) {
         if (result.error) {
           const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
           try {
-            await clawgateSend(apiUrl, conversation, msg);
+            await clawgateSend(apiUrl, conversation, msg, traceId);
             recordPluginSend(msg);
           } catch (err) {
             log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
           }
         } else if (result.lineText) {
           try {
-            await clawgateSend(apiUrl, conversation, result.lineText);
+            await clawgateSend(apiUrl, conversation, result.lineText, traceId);
             recordPluginSend(result.lineText);
           } catch (err) {
             log?.error?.(`clawgate: [${accountId}] send line reply failed: ${err}`);
@@ -585,11 +627,33 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     }
 
     log?.info?.(`clawgate: [${accountId}] sending reply to "${conversation}": "${text.slice(0, 80)}"`);
+    traceLog(log, "info", {
+      trace_id: traceId,
+      stage: "gateway_forward_start",
+      action: "line_send",
+      status: "start",
+      conversation,
+    });
     try {
-      await clawgateSend(apiUrl, conversation, text);
+      await clawgateSend(apiUrl, conversation, text, traceId);
       recordPluginSend(text); // Track for echo suppression
+      traceLog(log, "info", {
+        trace_id: traceId,
+        stage: "gateway_forward_ok",
+        action: "line_send",
+        status: "ok",
+        conversation,
+      });
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send reply failed: ${err}`);
+      traceLog(log, "error", {
+        trace_id: traceId,
+        stage: "gateway_forward_failed",
+        action: "line_send",
+        status: "failed",
+        conversation,
+        error: String(err),
+      });
     }
   };
 
@@ -605,11 +669,24 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           onError: (err) => log?.error?.(`clawgate: dispatch error: ${err}`),
         },
       });
+      traceLog(log, "info", {
+        trace_id: traceId,
+        stage: "gateway_dispatch_done",
+        action: "dispatch_inbound_message",
+        status: "ok",
+      });
     } else {
       log?.error?.("clawgate: dispatchReplyWithBufferedBlockDispatcher not found on runtime");
     }
   } catch (err) {
     log?.error?.(`clawgate: [${accountId}] dispatch failed: ${err}`);
+    traceLog(log, "error", {
+      trace_id: traceId,
+      stage: "gateway_dispatch_failed",
+      action: "dispatch_inbound_message",
+      status: "failed",
+      error: String(err),
+    });
   }
 }
 
@@ -620,7 +697,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
  */
 async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
   const runtime = getRuntime();
+  const traceId = makeTraceId("tmux-question", event);
   const payload = event.payload ?? {};
+  payload.trace_id = traceId;
   const project = payload.project || payload.conversation || "unknown";
   const questionText = payload.question_text || payload.text || "(no question)";
   const optionsRaw = payload.question_options || "";
@@ -678,19 +757,19 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     if (!replyText.trim()) return;
 
     // Try to extract <cc_answer> first
-    const answerResult = await tryExtractAndSendAnswer({ replyText, apiUrl, log });
+    const answerResult = await tryExtractAndSendAnswer({ replyText, apiUrl, traceId, log });
     if (answerResult) {
       if (answerResult.error) {
         const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
         try {
-          await clawgateSend(apiUrl, defaultConversation || project, msg);
+          await clawgateSend(apiUrl, defaultConversation || project, msg, traceId);
           recordPluginSend(msg);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
         }
       } else if (answerResult.lineText) {
         try {
-          await clawgateSend(apiUrl, defaultConversation || project, answerResult.lineText);
+          await clawgateSend(apiUrl, defaultConversation || project, answerResult.lineText, traceId);
           recordPluginSend(answerResult.lineText);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
@@ -701,13 +780,13 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
     // No <cc_answer> — try <cc_task> fallback (autonomous mode)
     if (mode === "autonomous") {
-      const taskResult = await tryExtractAndSendTask({ replyText, project, apiUrl, log });
+      const taskResult = await tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log });
       if (taskResult) {
         if (taskResult.error) {
           const msg = `[Task send failed: ${taskResult.error.message || taskResult.error}]\n\n${taskResult.lineText}`;
-          try { await clawgateSend(apiUrl, defaultConversation || project, msg); recordPluginSend(msg); } catch {}
+          try { await clawgateSend(apiUrl, defaultConversation || project, msg, traceId); recordPluginSend(msg); } catch {}
         } else if (taskResult.lineText) {
-          try { await clawgateSend(apiUrl, defaultConversation || project, taskResult.lineText); recordPluginSend(taskResult.lineText); } catch {}
+          try { await clawgateSend(apiUrl, defaultConversation || project, taskResult.lineText, traceId); recordPluginSend(taskResult.lineText); } catch {}
         }
         return;
       }
@@ -716,7 +795,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     // Default: forward to LINE
     log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${replyText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, replyText);
+      await clawgateSend(apiUrl, defaultConversation || project, replyText, traceId);
       recordPluginSend(replyText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
@@ -750,7 +829,9 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
  */
 async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
   const runtime = getRuntime();
+  const traceId = makeTraceId("tmux-progress", event);
   const payload = event.payload ?? {};
+  payload.trace_id = traceId;
   const project = payload.project || "unknown";
   const text = payload.text || "(no output)";
   const mode = payload.mode || sessionModes.get(project) || "observe";
@@ -792,7 +873,7 @@ async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConver
 
     log?.info?.(`clawgate: [${accountId}] sending progress reply to LINE: "${replyText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, replyText);
+      await clawgateSend(apiUrl, defaultConversation || project, replyText, traceId);
       recordPluginSend(replyText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send progress reply to LINE failed: ${err}`);
@@ -824,7 +905,9 @@ async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConver
  */
 async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
   const runtime = getRuntime();
+  const traceId = makeTraceId("tmux-completion", event);
   const payload = event.payload ?? {};
+  payload.trace_id = traceId;
   const project = payload.project || payload.conversation || "unknown";
   const text = payload.text || "(no output captured)";
   const mode = payload.mode || "autonomous"; // "observe" or "autonomous"
@@ -917,14 +1000,14 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     // Autonomous/auto mode: try to extract and send <cc_task>
     if (mode === "autonomous") {
       const result = await tryExtractAndSendTask({
-        replyText, project, apiUrl, log,
+        replyText, project, apiUrl, traceId, log,
       });
       if (result) {
         if (result.error) {
           // Task send failed — forward everything to LINE with error notice
           const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
           try {
-            await clawgateSend(apiUrl, defaultConversation || project, msg);
+            await clawgateSend(apiUrl, defaultConversation || project, msg, traceId);
             recordPluginSend(msg);
           } catch (err) {
             log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
@@ -933,7 +1016,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           // Task sent successfully — send remaining text to LINE (if any)
           if (result.lineText) {
             try {
-              await clawgateSend(apiUrl, defaultConversation || project, result.lineText);
+              await clawgateSend(apiUrl, defaultConversation || project, result.lineText, traceId);
               recordPluginSend(result.lineText);
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
@@ -948,7 +1031,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     // Default: forward all to LINE
     log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${replyText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, replyText);
+      await clawgateSend(apiUrl, defaultConversation || project, replyText, traceId);
       recordPluginSend(replyText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send tmux result to LINE failed: ${err}`);
@@ -1052,6 +1135,17 @@ export async function startAccount(ctx) {
 
           // Only process inbound_message events (skip echo_message, heartbeat, etc.)
           if (event.type !== "inbound_message") continue;
+          const traceId = makeTraceId("event", event);
+          if (!event.payload) event.payload = {};
+          event.payload.trace_id = traceId;
+          traceLog(log, "info", {
+            trace_id: traceId,
+            stage: "ingress_received",
+            action: "poll_event",
+            status: "ok",
+            adapter: event.adapter || "unknown",
+            source: event.payload?.source || "poll",
+          });
 
           // Track tmux session state for roster
           if (event.adapter === "tmux" && event.payload?.project) {
@@ -1086,6 +1180,13 @@ export async function startAccount(ctx) {
               await handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log });
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] handleTmuxQuestion failed: ${err}`);
+              traceLog(log, "error", {
+                trace_id: traceId,
+                stage: "gateway_forward_failed",
+                action: "handle_tmux_question",
+                status: "failed",
+                error: String(err),
+              });
             }
             continue;
           }
@@ -1096,6 +1197,13 @@ export async function startAccount(ctx) {
               await handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log });
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] handleTmuxCompletion failed: ${err}`);
+              traceLog(log, "error", {
+                trace_id: traceId,
+                stage: "gateway_forward_failed",
+                action: "handle_tmux_completion",
+                status: "failed",
+                error: String(err),
+              });
             }
             continue;
           }
@@ -1105,7 +1213,7 @@ export async function startAccount(ctx) {
           const rawEventText = event.payload?.text || "";
           const eventText = normalizeInboundText(rawEventText, source);
 
-          // Skip empty/short texts (OCR noise, read-receipts, scroll artifacts)
+          // Skip only near-empty texts; keep short Japanese lines for recall.
           if (eventText.trim().length < MIN_TEXT_LENGTH) {
             log?.debug?.(`clawgate: [${accountId}] skipped short/noisy text (raw=${rawEventText.length}, clean=${eventText.length})`);
             continue;
@@ -1145,6 +1253,13 @@ export async function startAccount(ctx) {
             });
           } catch (err) {
             log?.error?.(`clawgate: [${accountId}] handleInboundMessage failed: ${err}`);
+            traceLog(log, "error", {
+              trace_id: traceId,
+              stage: "gateway_forward_failed",
+              action: "handle_inbound_message",
+              status: "failed",
+              error: String(err),
+            });
           }
         }
         cursor = poll.next_cursor ?? cursor;

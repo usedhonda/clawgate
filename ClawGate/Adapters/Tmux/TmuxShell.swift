@@ -4,7 +4,15 @@ import Foundation
 /// All methods are synchronous and should be called from `BlockingWork.queue`.
 enum TmuxShell {
 
-    private static let tmuxPath = "/usr/local/bin/tmux"
+    private static let candidatePaths = [
+        "/opt/homebrew/bin/tmux",
+        "/usr/local/bin/tmux",
+        "/usr/bin/tmux",
+    ]
+
+    private static var tmuxPath: String {
+        candidatePaths.first(where: { FileManager.default.fileExists(atPath: $0) }) ?? "/usr/bin/tmux"
+    }
 
     /// Send literal text to a tmux pane, optionally followed by Enter.
     /// Uses `-l` for literal mode (no special-character interpretation).

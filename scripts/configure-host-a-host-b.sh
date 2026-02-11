@@ -80,10 +80,8 @@ if [[ "$SET_REMOTE_ROLE" == "true" ]]; then
 fi
 
 if [[ "$RESTART_APP" == "true" ]]; then
-  echo "Restarting Host A ClawGate.app..."
-  pkill -f '/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate' >/dev/null 2>&1 || true
-  sleep 1
-  open '/Users/usedhonda/projects/ios/clawgate/ClawGate.app'
+  echo "Restarting local ClawGate.app (canonical path)..."
+  ./scripts/restart-local-clawgate.sh --skip-build
 fi
 
 echo ""

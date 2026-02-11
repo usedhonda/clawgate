@@ -14,6 +14,7 @@ struct AppConfig: Codable {
     var includeMessageBodyInLogs: Bool
 
     // LINE
+    var lineEnabled: Bool
     var lineDefaultConversation: String
     var linePollIntervalSeconds: Int
     var lineDetectionMode: String
@@ -39,6 +40,7 @@ struct AppConfig: Codable {
         nodeRole: .server,
         debugLogging: false,
         includeMessageBodyInLogs: false,
+        lineEnabled: true,
         lineDefaultConversation: "",
         linePollIntervalSeconds: 2,
         lineDetectionMode: "hybrid",
@@ -63,6 +65,7 @@ final class ConfigStore {
         static let debugLogging = "clawgate.debugLogging"
         static let nodeRole = "clawgate.nodeRole"
         static let includeMessageBodyInLogs = "clawgate.includeMessageBodyInLogs"
+        static let lineEnabled = "clawgate.lineEnabled"
         static let lineDefaultConversation = "clawgate.lineDefaultConversation"
         static let linePollIntervalSeconds = "clawgate.linePollIntervalSeconds"
         static let lineDetectionMode = "clawgate.lineDetectionMode"
@@ -106,6 +109,10 @@ final class ConfigStore {
 
         if defaults.object(forKey: Keys.includeMessageBodyInLogs) != nil {
             cfg.includeMessageBodyInLogs = defaults.bool(forKey: Keys.includeMessageBodyInLogs)
+        }
+
+        if defaults.object(forKey: Keys.lineEnabled) != nil {
+            cfg.lineEnabled = defaults.bool(forKey: Keys.lineEnabled)
         }
 
         if let conv = defaults.string(forKey: Keys.lineDefaultConversation) {
@@ -171,6 +178,7 @@ final class ConfigStore {
         defaults.set(cfg.debugLogging, forKey: Keys.debugLogging)
         defaults.set(cfg.nodeRole.rawValue, forKey: Keys.nodeRole)
         defaults.set(cfg.includeMessageBodyInLogs, forKey: Keys.includeMessageBodyInLogs)
+        defaults.set(cfg.lineEnabled, forKey: Keys.lineEnabled)
         defaults.set(cfg.lineDefaultConversation, forKey: Keys.lineDefaultConversation)
         defaults.set(cfg.linePollIntervalSeconds, forKey: Keys.linePollIntervalSeconds)
         defaults.set(cfg.lineDetectionMode, forKey: Keys.lineDetectionMode)

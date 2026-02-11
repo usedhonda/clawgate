@@ -8,14 +8,16 @@ final class BridgeCore {
 
     private let registry: AdapterRegistry
     private let logger: AppLogger
+    private let opsLogStore: OpsLogStore
     private let configStore: ConfigStore
     private let jsonDecoder = JSONDecoder()
     private let jsonEncoder = JSONEncoder()
 
-    init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, configStore: ConfigStore, statsCollector: StatsCollector) {
+    init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, opsLogStore: OpsLogStore, configStore: ConfigStore, statsCollector: StatsCollector) {
         self.eventBus = eventBus
         self.registry = registry
         self.logger = logger
+        self.opsLogStore = opsLogStore
         self.configStore = configStore
         self.statsCollector = statsCollector
         self.jsonEncoder.outputFormatting = [.withoutEscapingSlashes]
@@ -77,6 +79,7 @@ final class BridgeCore {
                 includeMessageBodyInLogs: cfg.includeMessageBodyInLogs
             ),
             line: ConfigLineSection(
+                enabled: cfg.lineEnabled && cfg.nodeRole != .client,
                 defaultConversation: cfg.lineDefaultConversation,
                 pollIntervalSeconds: cfg.linePollIntervalSeconds,
                 detectionMode: cfg.lineDetectionMode,
@@ -101,9 +104,14 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: body)
     }
 
-    func send(body: Data) -> HTTPResult {
+    func send(body: Data, traceID: String?) -> HTTPResult {
+        let requestTrace = normalizedTraceID(traceID)
+        let start = Date()
+        writeOps(level: "info", event: "ingress_received", traceID: requestTrace, stage: "bridge_server", action: "send_message", status: "start", errorCode: nil, errorMessage: nil, latencyMs: nil)
         do {
             let request = try jsonDecoder.decode(SendRequest.self, from: body)
+            let trace = normalizedTraceID(request.payload.traceID ?? requestTrace)
+            writeOps(level: "info", event: "ingress_validated", traceID: trace, stage: "bridge_server", action: "send_message", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: nil)
             guard request.action == "send_message" else {
                 throw BridgeRuntimeError(
                     code: "unsupported_action",
@@ -145,22 +153,32 @@ final class BridgeCore {
                 )
             }
 
+            let adapterAction = request.adapter == "line" ? "line_send" : "gateway_forward"
+            writeOps(level: "info", event: "\(adapterAction)_start", traceID: trace, stage: "adapter", action: adapterAction, status: "start", errorCode: nil, errorMessage: nil, latencyMs: nil)
             let (result, steps) = try adapter.sendMessage(payload: request.payload)
             logger.log(.info, "send_message completed with \(steps.count) steps")
+            let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+            writeOps(level: "info", event: "\(adapterAction)_ok", traceID: trace, stage: "adapter", action: adapterAction, status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
             statsCollector.increment("sent", adapter: request.adapter)
             eventBus.append(type: "outbound_message", adapter: request.adapter, payload: [
                 "text": String(request.payload.text.prefix(100)),
                 "conversation": request.payload.conversationHint,
+                "trace_id": trace,
             ])
 
             let content = APIResponse(ok: true, result: result, error: nil)
-            return jsonResponse(status: .ok, body: encode(content))
+            return jsonResponse(status: .ok, body: encode(content), traceID: trace)
         } catch let err as BridgeRuntimeError {
+            let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+            writeOps(level: "error", event: "send_failed", traceID: requestTrace, stage: "bridge_server", action: "send_message", status: "failed", errorCode: err.code, errorMessage: err.message, latencyMs: latencyMs)
             return jsonResponse(
                 status: err.retriable ? .serviceUnavailable : .badRequest,
-                body: encode(APIResponse<SendResult>(ok: false, result: nil, error: err.asPayload()))
+                body: encode(APIResponse<SendResult>(ok: false, result: nil, error: err.asPayload())),
+                traceID: requestTrace
             )
         } catch {
+            let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+            writeOps(level: "error", event: "decode_failed", traceID: requestTrace, stage: "bridge_server", action: "send_message", status: "failed", errorCode: "invalid_json", errorMessage: String(describing: error), latencyMs: latencyMs)
             let payload = ErrorPayload(
                 code: "invalid_json",
                 message: "Could not parse request JSON",
@@ -168,8 +186,14 @@ final class BridgeCore {
                 failedStep: "decode_request",
                 details: String(describing: error)
             )
-            return jsonResponse(status: .badRequest, body: encode(APIResponse<SendResult>(ok: false, result: nil, error: payload)))
+            return jsonResponse(status: .badRequest, body: encode(APIResponse<SendResult>(ok: false, result: nil, error: payload)), traceID: requestTrace)
         }
+    }
+
+    func opsLogs(limit: Int, level: String?, traceID: String?) -> HTTPResult {
+        let entries = opsLogStore.recent(limit: limit, levelFilter: level, traceFilter: traceID)
+        let result = OpsLogsResult(entries: entries, count: entries.count)
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
     }
 
     func context(adapter adapterName: String) -> HTTPResult {
@@ -330,7 +354,7 @@ final class BridgeCore {
     func doctor() -> HTTPResult {
         var checks: [DoctorCheck] = []
         let cfg = configStore.load()
-        let lineEnabled = cfg.nodeRole != .client
+        let lineEnabled = cfg.nodeRole != .client && cfg.lineEnabled
 
         // Check 1: App signature authority (avoid TCC re-prompt churn)
         checks.append(appSignatureCheck())
@@ -349,8 +373,8 @@ final class BridgeCore {
         checks.append(DoctorCheck(
             name: "line_running",
             status: lineEnabled ? (lineRunning ? "ok" : "warning") : "ok",
-            message: lineEnabled ? (lineRunning ? "LINE is running" : "LINE is not running") : "LINE checks disabled on client role",
-            details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : nil
+            message: lineEnabled ? (lineRunning ? "LINE is running" : "LINE is not running") : "LINE checks disabled (client role or LINE disabled)",
+            details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : "Enable LINE in Settings when needed"
         ))
 
         // Check 4: LINE window accessible (only if LINE is running and AX is trusted)
@@ -362,7 +386,7 @@ final class BridgeCore {
                 name: "line_window_accessible",
                 status: lineEnabled ? "warning" : "ok",
                 message: "LINE window check skipped",
-                details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE is not running") : "nodeRole=client"
+                details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE is not running") : "nodeRole=client or lineEnabled=false"
             ))
         }
 
@@ -433,7 +457,7 @@ final class BridgeCore {
             result = poll(since: since)
         case (.POST, "/v1/send"):
             let body = command.body?.data(using: .utf8) ?? Data()
-            result = send(body: body)
+            result = send(body: body, traceID: command.headers["X-Trace-ID"] ?? command.headers["x-trace-id"])
         case (.GET, "/v1/context"):
             let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
             result = context(adapter: adapter)
@@ -572,10 +596,13 @@ final class BridgeCore {
         (try? jsonEncoder.encode(value)) ?? Data("{\"ok\":false}".utf8)
     }
 
-    private func jsonResponse(status: HTTPResponseStatus, body: Data) -> HTTPResult {
+    private func jsonResponse(status: HTTPResponseStatus, body: Data, traceID: String? = nil) -> HTTPResult {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json; charset=utf-8")
         headers.add(name: "Content-Length", value: "\(body.count)")
+        if let traceID, !traceID.isEmpty {
+            headers.add(name: "X-Trace-ID", value: traceID)
+        }
         return HTTPResult(status: status, headers: headers, body: body)
     }
 
@@ -618,6 +645,42 @@ final class BridgeCore {
         return jsonResponse(
             status: .forbidden,
             body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
+        )
+    }
+
+    private func normalizedTraceID(_ traceID: String?) -> String {
+        let raw = (traceID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !raw.isEmpty { return raw }
+        return "trace-\(UUID().uuidString)"
+    }
+
+    private func writeOps(
+        level: String,
+        event: String,
+        traceID: String,
+        stage: String,
+        action: String,
+        status: String,
+        errorCode: String?,
+        errorMessage: String?,
+        latencyMs: Int?
+    ) {
+        let role = configStore.load().nodeRole.rawValue
+        let parts: [String] = [
+            "trace_id=\(traceID)",
+            "stage=\(stage)",
+            "action=\(action)",
+            "status=\(status)",
+            latencyMs.map { "latency_ms=\($0)" } ?? nil,
+            errorCode.map { "error_code=\($0)" } ?? nil,
+            errorMessage.map { "error_message=\($0)" } ?? nil,
+        ].compactMap { $0 }
+        opsLogStore.append(
+            level: level,
+            event: event,
+            role: role,
+            script: "clawgate.app",
+            message: parts.joined(separator: " ")
         )
     }
 }

@@ -22,15 +22,19 @@ export function setClawgateAuthToken(token) {
  * @param {object} [opts]
  * @param {string} [opts.method]
  * @param {object} [opts.body]
+ * @param {string} [opts.traceId]
  * @param {number} [opts.timeoutMs]
  * @returns {Promise<object>}
  */
 async function request(apiUrl, path, opts = {}) {
-  const { method = "GET", body, timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
+  const { method = "GET", body, traceId = "", timeoutMs = DEFAULT_TIMEOUT_MS } = opts;
   const url = `${apiUrl}${path}`;
   const headers = { "Content-Type": "application/json" };
   if (clawgateAuthToken) {
     headers.Authorization = `Bearer ${clawgateAuthToken}`;
+  }
+  if (traceId) {
+    headers["X-Trace-ID"] = traceId;
   }
 
   const controller = new AbortController();
@@ -75,9 +79,10 @@ export async function clawgateDoctor(apiUrl) {
  * @param {string} text
  * @returns {Promise<object>}
  */
-export async function clawgateSend(apiUrl, conversationHint, text) {
+export async function clawgateSend(apiUrl, conversationHint, text, traceId = "") {
   return request(apiUrl, "/v1/send", {
     method: "POST",
+    traceId,
     body: {
       adapter: "line",
       action: "send_message",
@@ -85,6 +90,7 @@ export async function clawgateSend(apiUrl, conversationHint, text) {
         conversation_hint: conversationHint,
         text,
         enter_to_send: true,
+        trace_id: traceId || undefined,
       },
     },
   });
@@ -132,9 +138,10 @@ export async function clawgatePoll(apiUrl, since = 0) {
  * @param {string} text — the task/prompt to send
  * @returns {Promise<object>}
  */
-export async function clawgateTmuxSend(apiUrl, project, text) {
+export async function clawgateTmuxSend(apiUrl, project, text, traceId = "") {
   return request(apiUrl, "/v1/send", {
     method: "POST",
+    traceId,
     body: {
       adapter: "tmux",
       action: "send_message",
@@ -142,6 +149,7 @@ export async function clawgateTmuxSend(apiUrl, project, text) {
         conversation_hint: project,
         text,
         enter_to_send: true,
+        trace_id: traceId || undefined,
       },
     },
   });

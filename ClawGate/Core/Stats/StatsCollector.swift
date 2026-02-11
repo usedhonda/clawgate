@@ -119,8 +119,15 @@ final class StatsCollector {
             } else if event.adapter == "tmux" {
                 if source == "completion" {
                     increment("completion", adapter: "tmux")
+                    let project = event.payload["project"] ?? "tmux"
+                    let displayText = rawText.isEmpty ? "(completion)" : rawText
+                    appendRecentEvent(icon: "\u{26A1}", label: "completion:\(project)", text: displayText, adapter: "tmux")
                 } else if source == "question" {
                     increment("question", adapter: "tmux")
+                    let project = event.payload["project"] ?? "tmux"
+                    let questionText = event.payload["question_text"] ?? rawText
+                    let displayText = questionText.isEmpty ? "(question)" : questionText
+                    appendRecentEvent(icon: "?", label: "question:\(project)", text: displayText, adapter: "tmux")
                 }
                 // progress events are excluded (noise)
             }

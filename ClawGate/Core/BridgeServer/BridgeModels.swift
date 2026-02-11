@@ -5,11 +5,13 @@ struct SendPayload: Codable {
     let conversationHint: String
     let text: String
     let enterToSend: Bool
+    let traceID: String?
 
     enum CodingKeys: String, CodingKey {
         case conversationHint = "conversation_hint"
         case text
         case enterToSend = "enter_to_send"
+        case traceID = "trace_id"
     }
 }
 
@@ -168,6 +170,7 @@ struct ConfigGeneralSection: Codable {
 }
 
 struct ConfigLineSection: Codable {
+    let enabled: Bool
     let defaultConversation: String
     let pollIntervalSeconds: Int
     let detectionMode: String
@@ -177,6 +180,7 @@ struct ConfigLineSection: Codable {
     let enableNotificationStoreSignal: Bool
 
     enum CodingKeys: String, CodingKey {
+        case enabled
         case defaultConversation = "default_conversation"
         case pollIntervalSeconds = "poll_interval_seconds"
         case detectionMode = "detection_mode"
@@ -238,4 +242,9 @@ struct StatsResult: Codable {
         case history
         case totalDaysTracked = "total_days_tracked"
     }
+}
+
+struct OpsLogsResult: Codable {
+    let entries: [OpsLogEntry]
+    let count: Int
 }

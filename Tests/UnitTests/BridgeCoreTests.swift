@@ -72,7 +72,7 @@ final class BridgeCoreTests: XCTestCase {
 
     func testSendRejectsInvalidPayload() {
         let core = makeCore()
-        let response = core.send(body: Data("{}".utf8))
+        let response = core.send(body: Data("{}".utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
     }
 
@@ -83,7 +83,7 @@ final class BridgeCoreTests: XCTestCase {
         let json = """
         {"adapter":"slack","action":"send_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
         """
-        let response = core.send(body: Data(json.utf8))
+        let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
         assertErrorCode(response, expected: "adapter_not_found")
     }
@@ -93,7 +93,7 @@ final class BridgeCoreTests: XCTestCase {
         let json = """
         {"adapter":"line","action":"delete_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
         """
-        let response = core.send(body: Data(json.utf8))
+        let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
         assertErrorCode(response, expected: "unsupported_action")
     }
@@ -103,7 +103,7 @@ final class BridgeCoreTests: XCTestCase {
         let json = """
         {"adapter":"line","action":"send_message","payload":{"conversation_hint":"  ","text":"hello","enter_to_send":true}}
         """
-        let response = core.send(body: Data(json.utf8))
+        let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
         assertErrorCode(response, expected: "invalid_conversation_hint")
     }
@@ -113,14 +113,14 @@ final class BridgeCoreTests: XCTestCase {
         let json = """
         {"adapter":"line","action":"send_message","payload":{"conversation_hint":"test","text":" ","enter_to_send":true}}
         """
-        let response = core.send(body: Data(json.utf8))
+        let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
         assertErrorCode(response, expected: "invalid_text")
     }
 
     func testSendReturnsInvalidJson() {
         let core = makeCore()
-        let response = core.send(body: Data("not json at all".utf8))
+        let response = core.send(body: Data("not json at all".utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
         assertErrorCode(response, expected: "invalid_json")
     }
@@ -130,7 +130,7 @@ final class BridgeCoreTests: XCTestCase {
         let json = """
         {"adapter":"failing","action":"send_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
         """
-        let response = core.send(body: Data(json.utf8))
+        let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .serviceUnavailable)
     }
 
@@ -224,6 +224,7 @@ final class BridgeCoreTests: XCTestCase {
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg),
+            opsLogStore: OpsLogStore(),
             configStore: cfg,
             statsCollector: StatsCollector(filePath: statsFile)
         )
@@ -268,13 +269,14 @@ final class BridgeCoreTests: XCTestCase {
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg),
+            opsLogStore: OpsLogStore(),
             configStore: cfg,
             statsCollector: StatsCollector(filePath: statsFile)
         )
         let json = """
         {"adapter":"line","action":"send_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
         """
-        let response = core.send(body: Data(json.utf8))
+        let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .forbidden)
         let parsed = try! JSONDecoder().decode(APIResponse<SendResult>.self, from: response.body)
         XCTAssertEqual(parsed.error?.code, "line_disabled_on_client")
@@ -293,6 +295,7 @@ final class BridgeCoreTests: XCTestCase {
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg),
+            opsLogStore: OpsLogStore(),
             configStore: cfg,
             statsCollector: StatsCollector(filePath: statsFile)
         )
@@ -317,6 +320,7 @@ final class BridgeCoreTests: XCTestCase {
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg),
+            opsLogStore: OpsLogStore(),
             configStore: cfg,
             statsCollector: StatsCollector(filePath: statsFile)
         )
@@ -332,6 +336,7 @@ final class BridgeCoreTests: XCTestCase {
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter(), FailingAdapter()]),
             logger: AppLogger(configStore: cfg),
+            opsLogStore: OpsLogStore(),
             configStore: cfg,
             statsCollector: StatsCollector(filePath: statsFile)
         )

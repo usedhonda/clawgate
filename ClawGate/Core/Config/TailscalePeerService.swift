@@ -43,23 +43,31 @@ enum TailscalePeerService {
             return []
         }
 
-        guard let peerMap = root["Peer"] as? [String: Any] else { return [] }
+        var peers: [TailscalePeer] = []
 
-        let peers: [TailscalePeer] = peerMap.compactMap { _, value in
-            guard let peer = value as? [String: Any] else { return nil }
-            let dnsName = (peer["DNSName"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let normalizedHost = dnsName.hasSuffix(".") ? String(dnsName.dropLast()) : dnsName
-            guard !normalizedHost.isEmpty else { return nil }
-
-            let online = peer["Online"] as? Bool ?? false
-            let ip = (peer["TailscaleIPs"] as? [String])?.first ?? ""
-            return TailscalePeer(
-                id: normalizedHost,
-                hostname: normalizedHost,
-                ip: ip,
-                online: online
-            )
+        if let selfNode = root["Self"] as? [String: Any],
+           let selfPeer = parsePeer(selfNode) {
+            peers.append(selfPeer)
         }
+
+        if let peerMap = root["Peer"] as? [String: Any] {
+            peers.append(contentsOf: peerMap.compactMap { _, value in
+                guard let peer = value as? [String: Any] else { return nil }
+                return parsePeer(peer)
+            })
+        }
+
+        // Deduplicate by hostname because some environments can surface overlaps.
+        peers = Dictionary(grouping: peers, by: { $0.hostname })
+            .values
+            .compactMap { group in
+                group.sorted { lhs, rhs in
+                    if lhs.online != rhs.online {
+                        return lhs.online && !rhs.online
+                    }
+                    return !lhs.ip.isEmpty && rhs.ip.isEmpty
+                }.first
+            }
 
         return peers.sorted {
             if $0.online != $1.online {
@@ -67,5 +75,20 @@ enum TailscalePeerService {
             }
             return $0.hostname.localizedCaseInsensitiveCompare($1.hostname) == .orderedAscending
         }
+    }
+
+    private static func parsePeer(_ peer: [String: Any]) -> TailscalePeer? {
+        let dnsName = (peer["DNSName"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedHost = dnsName.hasSuffix(".") ? String(dnsName.dropLast()) : dnsName
+        guard !normalizedHost.isEmpty else { return nil }
+
+        let online = peer["Online"] as? Bool ?? false
+        let ip = (peer["TailscaleIPs"] as? [String])?.first ?? ""
+        return TailscalePeer(
+            id: normalizedHost,
+            hostname: normalizedHost,
+            ip: ip,
+            online: online
+        )
     }
 }

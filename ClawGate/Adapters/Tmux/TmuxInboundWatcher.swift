@@ -25,6 +25,7 @@ final class TmuxInboundWatcher {
     // Progress timer — emits running session output periodically
     private var progressTimer: DispatchSourceTimer?
     private var lastProgressHash: [String: Int] = [:]
+    private var lastProgressSummary: [String: String] = [:]
     private let progressInterval: TimeInterval = 20
 
     init(ccClient: CCStatusBarClient, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
@@ -129,6 +130,10 @@ final class TmuxInboundWatcher {
                 lastProgressHash[session.project] = hash
 
                 let summary = extractSummary(from: rawOutput)
+                if !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    lastProgressSummary[session.project] = summary
+                }
+                let eventID = UUID().uuidString
                 let payload: [String: String] = [
                     "conversation": session.project,
                     "text": summary,
@@ -137,6 +142,7 @@ final class TmuxInboundWatcher {
                     "tmux_target": target,
                     "sender": "claude_code",
                     "mode": mode,
+                    "event_id": eventID,
                 ]
 
                 _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
@@ -208,6 +214,7 @@ final class TmuxInboundWatcher {
             }
 
             // observe/autonomous: send to Chi via EventBus
+            let eventID = UUID().uuidString
             let payload: [String: String] = [
                 "conversation": session.project,
                 "text": question.questionText,
@@ -216,6 +223,7 @@ final class TmuxInboundWatcher {
                 "tmux_target": target,
                 "sender": "claude_code",
                 "mode": mode,
+                "event_id": eventID,
                 "question_text": question.questionText,
                 "question_options": question.options.joined(separator: "\n"),
                 "question_selected": String(question.selectedIndex),
@@ -227,12 +235,22 @@ final class TmuxInboundWatcher {
             return
         }
 
-        // Clear progress hash on completion (session finished)
-        lastProgressHash.removeValue(forKey: session.project)
+        // Normal completion.
+        // If capture fails/empty at completion boundary, fallback to latest progress summary.
+        var outputSummary = rawOutput.isEmpty ? "" : extractSummary(from: rawOutput)
+        let captureState: String
+        if !outputSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            captureState = "pane"
+        } else if let fallback = lastProgressSummary[session.project],
+                  !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            outputSummary = fallback
+            captureState = "progress_fallback"
+        } else {
+            outputSummary = "(capture failed)"
+            captureState = "failed"
+        }
 
-        // Normal completion
-        let outputSummary = rawOutput.isEmpty ? "(capture failed)" : extractSummary(from: rawOutput)
-
+        let eventID = UUID().uuidString
         let payload: [String: String] = [
             "conversation": session.project,
             "text": outputSummary,
@@ -241,10 +259,16 @@ final class TmuxInboundWatcher {
             "tmux_target": target,
             "sender": "claude_code",
             "mode": mode,
+            "capture": captureState,
+            "event_id": eventID,
         ]
 
         _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
         logger.log(.info, "TmuxInboundWatcher: emitted completion event for \(session.project) (mode=\(mode))")
+
+        // Clear progress snapshots after completion emission.
+        lastProgressHash.removeValue(forKey: session.project)
+        lastProgressSummary.removeValue(forKey: session.project)
     }
 
     /// Detect an AskUserQuestion menu from captured pane output.
@@ -309,8 +333,8 @@ final class TmuxInboundWatcher {
                     i -= 1
                     continue
                 }
-                // Check if this line looks like a question (ends with ?)
-                if trimmed.hasSuffix("?") {
+                // Check if this line looks like a question (supports ASCII and full-width question mark)
+                if trimmed.hasSuffix("?") || trimmed.hasSuffix("？") {
                     questionLineIndex = i
                 }
                 break
@@ -343,7 +367,7 @@ final class TmuxInboundWatcher {
     func extractSummary(from output: String) -> String {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
-        // Look for interesting patterns from the end
+        // Keep a wide tail window to avoid dropping long, meaningful completions.
         var summaryLines: [String] = []
         var blankCount = 0
 
@@ -358,7 +382,7 @@ final class TmuxInboundWatcher {
             summaryLines.insert(trimmed, at: 0)
 
             // Stop once we have enough lines
-            if summaryLines.filter({ !$0.isEmpty }).count >= 30 { break }
+            if summaryLines.filter({ !$0.isEmpty }).count >= 120 { break }
         }
 
         let summary = summaryLines
@@ -366,8 +390,8 @@ final class TmuxInboundWatcher {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Truncate if too long (keep last part which is more relevant)
-        if summary.count > 2000 {
-            return String(summary.suffix(2000))
+        if summary.count > 12000 {
+            return String(summary.suffix(12000))
         }
         return summary
     }

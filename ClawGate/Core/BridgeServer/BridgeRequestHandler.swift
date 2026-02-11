@@ -21,6 +21,7 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         (.GET, "/v1/config"),
         (.GET, "/v1/poll"),
         (.GET, "/v1/stats"),
+        (.GET, "/v1/ops/logs"),
         (.POST, "/v1/send"),
         (.GET, "/v1/context"),
         (.GET, "/v1/messages"),
@@ -81,7 +82,7 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         }
 
         // Track meaningful API requests (exclude high-frequency polling/monitoring)
-        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats"]
+        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs"]
         if !noTrack.contains(path) {
             core.statsCollector.increment("api_requests", adapter: "system")
         }
@@ -135,7 +136,8 @@ final class BridgeRequestHandler: ChannelInboundHandler {
             let result: HTTPResult
 
             if method == .POST && path == "/v1/send" {
-                result = core.send(body: bodyData)
+                let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
+                result = core.send(body: bodyData, traceID: traceID)
             } else if method == .GET && path == "/v1/context" {
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
                 result = core.context(adapter: adapter)
@@ -154,6 +156,11 @@ final class BridgeRequestHandler: ChannelInboundHandler {
                 result = core.axdump(adapter: adapter)
             } else if method == .GET && path == "/v1/doctor" {
                 result = core.doctor()
+            } else if method == .GET && path == "/v1/ops/logs" {
+                let limit = min(max(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 20, 1), 200)
+                let level = components?.queryItems?.first(where: { $0.name == "level" })?.value
+                let traceID = components?.queryItems?.first(where: { $0.name == "trace_id" })?.value
+                result = core.opsLogs(limit: limit, level: level, traceID: traceID)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()
