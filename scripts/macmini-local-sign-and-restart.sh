@@ -58,6 +58,16 @@ sleep 1
 launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true
 sleep 2
 
+mkdir -p "$PROJECT_PATH/.runtime"
+STAMP_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STAMP_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+cat > "$PROJECT_PATH/.runtime/hosta-local-sign.stamp" <<STAMP
+
+ts=$STAMP_TS
+commit=$STAMP_COMMIT
+host=$(hostname)
+STAMP
+
 echo "Health:"
 curl -sS -m 5 http://127.0.0.1:8765/v1/health
 echo

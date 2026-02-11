@@ -705,7 +705,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   const optionsRaw = payload.question_options || "";
   const selectedIndex = parseInt(payload.question_selected || "0", 10);
   const questionId = payload.question_id || String(Date.now());
-  const mode = payload.mode || "autonomous";
+  const mode = payload.mode || sessionModes.get(project) || "observe";
   const tmuxTarget = payload.tmux_target || "";
 
   // Track session state
@@ -910,7 +910,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   payload.trace_id = traceId;
   const project = payload.project || payload.conversation || "unknown";
   const text = payload.text || "(no output captured)";
-  const mode = payload.mode || "autonomous"; // "observe" or "autonomous"
+  const mode = payload.mode || sessionModes.get(project) || "observe"; // observe/auto/autonomous
   const tmuxTarget = payload.tmux_target || "";
 
   // Track session state for roster
@@ -1154,6 +1154,15 @@ export async function startAccount(ctx) {
             if (event.payload.mode) sessionModes.set(proj, event.payload.mode);
             if (event.payload.status) sessionStatuses.set(proj, event.payload.status);
             if (tmuxTgt) resolveProjectPath(proj, tmuxTgt);
+          }
+
+          // Mode gate: ignore sessions must not be processed even if stale events arrive.
+          if (event.adapter === "tmux") {
+            const proj = event.payload?.project || "";
+            const effectiveMode = event.payload?.mode || sessionModes.get(proj) || "ignore";
+            if (effectiveMode === "ignore") {
+              continue;
+            }
           }
 
           // Handle tmux progress events (output during running)

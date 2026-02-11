@@ -244,7 +244,10 @@ final class BridgeCore {
                     details: adapterName
                 )
             }
-            let result = try adapter.getMessages(limit: limit)
+            var result = try adapter.getMessages(limit: limit)
+            if adapterName == "tmux", result.messages.isEmpty {
+                result = buildTmuxMessageListFromEventBus(limit: limit)
+            }
             let content = APIResponse(ok: true, result: result, error: nil)
             return jsonResponse(status: .ok, body: encode(content))
         } catch let err as BridgeRuntimeError {
@@ -278,7 +281,10 @@ final class BridgeCore {
                     details: adapterName
                 )
             }
-            let result = try adapter.getConversations(limit: limit)
+            var result = try adapter.getConversations(limit: limit)
+            if adapterName == "tmux", result.conversations.isEmpty {
+                result = buildTmuxConversationListFromEventBus(limit: limit)
+            }
             let content = APIResponse(ok: true, result: result, error: nil)
             return jsonResponse(status: .ok, body: encode(content))
         } catch let err as BridgeRuntimeError {
@@ -314,6 +320,27 @@ final class BridgeCore {
 
     func poll(since: Int64?) -> HTTPResult {
         let data = eventBus.poll(since: since)
+
+        let deliveredTmux = data.events.filter { event in
+            guard event.adapter == "tmux", event.type == "inbound_message" else { return false }
+            let source = event.payload["source"] ?? ""
+            return source == "completion" || source == "question" || source == "progress"
+        }
+        if !deliveredTmux.isEmpty {
+            let trace = "poll-\(data.nextCursor)"
+            writeOps(
+                level: "info",
+                event: "tmux_gateway_deliver",
+                traceID: trace,
+                stage: "gateway",
+                action: "poll_delivery",
+                status: "ok",
+                errorCode: nil,
+                errorMessage: nil,
+                latencyMs: nil
+            )
+        }
+
         let response = PollResponse(ok: true, events: data.events, nextCursor: data.nextCursor)
         return jsonResponse(status: .ok, body: encode(response))
     }
@@ -681,6 +708,58 @@ final class BridgeCore {
             role: role,
             script: "clawgate.app",
             message: parts.joined(separator: " ")
+        )
+    }
+
+    private func recentTmuxInboundEvents(limit: Int) -> [BridgeEvent] {
+        let all = eventBus.poll(since: nil).events
+        let relevant = all.filter { event in
+            guard event.adapter == "tmux", event.type == "inbound_message" else { return false }
+            return !(event.payload["text"] ?? "").isEmpty
+        }
+        return Array(relevant.suffix(max(1, min(limit, 200))))
+    }
+
+    private func buildTmuxMessageListFromEventBus(limit: Int) -> MessageList {
+        let events = recentTmuxInboundEvents(limit: limit)
+        let messages = events.enumerated().map { index, event in
+            VisibleMessage(
+                text: event.payload["text"] ?? "",
+                sender: "other",
+                yOrder: index
+            )
+        }
+        let conversation = events.last?.payload["project"] ?? events.last?.payload["conversation"]
+        return MessageList(
+            adapter: "tmux",
+            conversationName: conversation,
+            messages: messages,
+            messageCount: messages.count,
+            timestamp: ISO8601DateFormatter().string(from: Date())
+        )
+    }
+
+    private func buildTmuxConversationListFromEventBus(limit: Int) -> ConversationList {
+        let events = recentTmuxInboundEvents(limit: limit * 4)
+        var orderedProjects: [String] = []
+        var seen = Set<String>()
+        for event in events.reversed() {
+            let project = (event.payload["project"] ?? event.payload["conversation"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !project.isEmpty else { continue }
+            if !seen.contains(project) {
+                seen.insert(project)
+                orderedProjects.append(project)
+            }
+            if orderedProjects.count >= limit { break }
+        }
+        let entries = orderedProjects.enumerated().map { idx, project in
+            ConversationEntry(name: project, yOrder: idx, hasUnread: false)
+        }
+        return ConversationList(
+            adapter: "tmux",
+            conversations: entries,
+            count: entries.count,
+            timestamp: ISO8601DateFormatter().string(from: Date())
         )
     }
 }

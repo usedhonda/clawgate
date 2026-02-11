@@ -18,6 +18,9 @@ final class NotificationBannerWatcher {
     private var observer: AXObserver?
     private var fallbackTimer: Timer?
     private let bundleID = "com.apple.notificationcenterui"
+    private let scanQueue = DispatchQueue(label: "com.clawgate.line.notification-scan", qos: .utility)
+    private let scanLock = NSLock()
+    private var scanInFlight = false
 
     /// Fingerprints of recently processed banners to prevent duplicate events.
     /// Entries are pruned after `dedupWindowSeconds`.
@@ -76,7 +79,7 @@ final class NotificationBannerWatcher {
 
     private func startFallbackPolling() {
         fallbackTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            self?.scanBanners()
+            self?.enqueueScan()
         }
     }
 
@@ -84,11 +87,29 @@ final class NotificationBannerWatcher {
     func handleWindowCreated() {
         // Small delay to let the banner populate its AX children
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.scanBanners()
+            self?.enqueueScan()
         }
     }
 
     // MARK: - Banner scanning
+
+    private func enqueueScan() {
+        scanLock.lock()
+        if scanInFlight {
+            scanLock.unlock()
+            return
+        }
+        scanInFlight = true
+        scanLock.unlock()
+
+        scanQueue.async { [weak self] in
+            guard let self else { return }
+            self.scanBanners()
+            self.scanLock.lock()
+            self.scanInFlight = false
+            self.scanLock.unlock()
+        }
+    }
 
     private func scanBanners() {
         guard let ncPid = findNCPid() else { return }
@@ -158,7 +179,7 @@ final class NotificationBannerWatcher {
         processedBanners.append((fingerprint: fingerprint, timestamp: Date()))
 
         // Echo suppression
-        let isEcho = recentSendTracker.isLikelyEcho()
+        let isEcho = recentSendTracker.isLikelyEcho(text: messageText)
         let eventType = isEcho ? "echo_message" : "inbound_message"
 
         _ = eventBus.append(

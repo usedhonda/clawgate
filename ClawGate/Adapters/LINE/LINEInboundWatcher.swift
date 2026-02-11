@@ -15,6 +15,14 @@ final class LINEInboundWatcher {
     private let fusionEngine: LineDetectionFusionEngine
 
     private var timer: Timer?
+    private let watchQueue = DispatchQueue(label: "com.clawgate.line.inbound-watch", qos: .userInitiated)
+    private let stateLock = NSLock()
+    private var isPolling = false
+    private var activePollID: UUID?
+    private var consecutiveTimeouts = 0
+    private var skippedPollCount = 0
+    private let pollTimeoutSeconds: TimeInterval = 3.0
+    private let resetAfterTimeoutStreak = 2
 
     /// Snapshot of chat row frames from last poll (sorted by Y coordinate)
     private var lastRowSnapshot: [CGRect] = []
@@ -62,6 +70,12 @@ final class LINEInboundWatcher {
     func stop() {
         timer?.invalidate()
         timer = nil
+        stateLock.lock()
+        isPolling = false
+        activePollID = nil
+        skippedPollCount = 0
+        consecutiveTimeouts = 0
+        stateLock.unlock()
         logger.log(.info, "LINEInboundWatcher stopped")
     }
 
@@ -92,12 +106,76 @@ final class LINEInboundWatcher {
     }
 
     private func poll() {
-        BlockingWork.queue.async { [weak self] in
-            self?.doPoll()
+        let pollID = UUID()
+        stateLock.lock()
+        if isPolling {
+            skippedPollCount += 1
+            let shouldLog = skippedPollCount == 1 || skippedPollCount % 10 == 0
+            stateLock.unlock()
+            if shouldLog {
+                logger.log(.warning, "LINEInboundWatcher: skipped poll (previous cycle still running, skipped=\(skippedPollCount))")
+            }
+            return
+        }
+        isPolling = true
+        activePollID = pollID
+        stateLock.unlock()
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + pollTimeoutSeconds) { [weak self] in
+            self?.handlePollTimeout(pollID: pollID)
+        }
+
+        watchQueue.async { [weak self] in
+            guard let self else { return }
+            self.doPoll(pollID: pollID)
+            self.finishPoll(pollID: pollID)
         }
     }
 
-    private func doPoll() {
+    private func handlePollTimeout(pollID: UUID) {
+        stateLock.lock()
+        guard isPolling, activePollID == pollID else {
+            stateLock.unlock()
+            return
+        }
+
+        consecutiveTimeouts += 1
+        isPolling = false
+        activePollID = nil
+        let timeoutStreak = consecutiveTimeouts
+        stateLock.unlock()
+
+        logger.log(.warning, "LINEInboundWatcher: poll timeout (\(Int(pollTimeoutSeconds))s). Soft-releasing cycle to keep watcher alive (streak=\(timeoutStreak))")
+
+        if timeoutStreak >= resetAfterTimeoutStreak {
+            resetBaseline()
+            logger.log(.warning, "LINEInboundWatcher: baseline reset after repeated timeouts (streak=\(timeoutStreak))")
+        }
+    }
+
+    private func finishPoll(pollID: UUID) {
+        stateLock.lock()
+        guard activePollID == pollID else {
+            // Timed-out poll finished later; keep current state untouched.
+            stateLock.unlock()
+            return
+        }
+        isPolling = false
+        activePollID = nil
+        consecutiveTimeouts = 0
+        skippedPollCount = 0
+        stateLock.unlock()
+    }
+
+    private func shouldContinue(pollID: UUID) -> Bool {
+        stateLock.lock()
+        let keep = activePollID == pollID
+        stateLock.unlock()
+        return keep
+    }
+
+    private func doPoll(pollID: UUID) {
+        guard shouldContinue(pollID: pollID) else { return }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else {
             return
         }
@@ -105,11 +183,13 @@ final class LINEInboundWatcher {
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
         let lineWindowID = AXActions.findWindowID(pid: app.processIdentifier) ?? kCGNullWindowID
 
+        guard shouldContinue(pollID: pollID) else { return }
         guard let window = AXQuery.focusedWindow(appElement: appElement)
             ?? AXQuery.windows(appElement: appElement).first else {
             return
         }
 
+        guard shouldContinue(pollID: pollID) else { return }
         let windowTitle = AXQuery.copyStringAttribute(window, attribute: kAXTitleAttribute as String) ?? ""
         let nodes = AXQuery.descendants(of: window, maxDepth: 4, maxNodes: 220)
         guard let chatList = findChatList(in: nodes) else {
@@ -122,6 +202,7 @@ final class LINEInboundWatcher {
             signals.append(structuralSignal)
         }
 
+        guard shouldContinue(pollID: pollID) else { return }
         if enablePixelSignal, let pixelSignal = collectPixelSignal(chatList: chatList, lineWindowID: lineWindowID, conversation: windowTitle) {
             signals.append(pixelSignal)
         }
@@ -145,7 +226,7 @@ final class LINEInboundWatcher {
         }
 
         let decisionText = signals.first(where: { !$0.text.isEmpty })?.text ?? ""
-        let isEcho = recentSendTracker.isLikelyEcho() || recentSendTracker.isLikelyEcho(text: decisionText)
+        let isEcho = recentSendTracker.isLikelyEcho(text: decisionText)
         let decision = fusionEngine.decide(
             signals: signals,
             fallbackText: "",
@@ -193,7 +274,7 @@ final class LINEInboundWatcher {
     private func emitFromSignal(_ signal: LineDetectionSignal) {
         let filtered = LineTextSanitizer.sanitize(signal.text)
         guard !filtered.isEmpty else { return }
-        let isEcho = recentSendTracker.isLikelyEcho() || recentSendTracker.isLikelyEcho(text: filtered)
+        let isEcho = recentSendTracker.isLikelyEcho(text: filtered)
         let eventType = isEcho ? "echo_message" : "inbound_message"
 
         var payload: [String: String] = [
@@ -324,12 +405,16 @@ final class LINEInboundWatcher {
         // OCR each row independently to avoid a wide union-crop pulling in older/adjacent bubbles.
         let ordered = incomingFrames.sorted { $0.origin.y < $1.origin.y }
         var rows: [String] = []
+        var seen = Set<String>()
         for frame in ordered {
-            let crop = inboundCropRect(for: frame, horizontalRatio: 0.82)
+            let crop = inboundCropRect(for: frame, horizontalRatio: 0.90)
             let text = (VisionOCR.extractTextLineInbound(from: crop, windowID: lineWindowID) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
-                rows.append(text)
+                let normalized = LineTextSanitizer.sanitize(text)
+                if !normalized.isEmpty, seen.insert(normalized).inserted {
+                    rows.append(normalized)
+                }
             }
         }
         return rows.joined(separator: "\n")
@@ -345,7 +430,8 @@ final class LINEInboundWatcher {
         // Qt/LINE frequently keeps row count unchanged while appending text to the tail.
         // In that case, prioritize the bottom slice to avoid re-reading older bubbles above.
         if !countChanged || newRowCount == 0 {
-            return [newestSliceRect(for: lastFrame)]
+            // Keep both tail slice and full row to avoid dropping long wrapped messages.
+            return [newestSliceRect(for: lastFrame), lastFrame]
         }
         return incomingFrames
     }
@@ -449,24 +535,20 @@ final class LINEInboundWatcher {
             width: chatListFrame.width,
             height: chatListFrame.height / 2
         )
-        let inboundHalf = CGRect(
-            x: bottomHalf.origin.x,
-            y: bottomHalf.origin.y,
-            width: bottomHalf.width * 0.78,
-            height: bottomHalf.height
-        )
         let captureOptions: CGWindowListOption = lineWindowID != kCGNullWindowID
             ? .optionIncludingWindow : .optionOnScreenOnly
 
         guard let image = CGWindowListCreateImage(bottomHalf, captureOptions, lineWindowID, [.bestResolution]) else {
             return nil
         }
+        let inboundHalf = computeInboundAnchorCrop(in: image, baseRect: bottomHalf)
 
         let hash = computeImageHash(image)
 
         if !baselineCaptured {
             lastImageHash = hash
-            lastOCRText = VisionOCR.extractTextLineInbound(from: inboundHalf, windowID: lineWindowID) ?? ""
+            let baseline = burstInboundOCR(from: inboundHalf, windowID: lineWindowID)
+            lastOCRText = baseline.text
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
             return nil
@@ -476,7 +558,8 @@ final class LINEInboundWatcher {
         let previousHash = lastImageHash
         lastImageHash = hash
 
-        let pixelOCRText = VisionOCR.extractTextLineInbound(from: inboundHalf, windowID: lineWindowID) ?? ""
+        let burst = burstInboundOCR(from: inboundHalf, windowID: lineWindowID)
+        let pixelOCRText = burst.text
         let previousOCRText = lastOCRText
         let textChanged = pixelOCRText != previousOCRText
         if textChanged {
@@ -494,6 +577,9 @@ final class LINEInboundWatcher {
                 "pixel_hash_prev": String(previousHash),
                 "pixel_hash_now": String(hash),
                 "pixel_text_changed": textChanged ? "1" : "0",
+                "pixel_burst_delays_ms": burst.delaysDescription,
+                "pixel_burst_chars": burst.lengthsDescription,
+                "pixel_anchor_y": burst.anchorYDescription,
             ]
         )
     }
@@ -602,6 +688,95 @@ final class LINEInboundWatcher {
 
     private func looksIncomingBubbleColor(_ avg: (r: CGFloat, g: CGFloat, b: CGFloat)) -> Bool {
         abs(avg.r - avg.g) < 18 && abs(avg.g - avg.b) < 18 && avg.r > 108 && avg.r < 240
+    }
+
+    private func burstInboundOCR(from rect: CGRect, windowID: CGWindowID) -> (text: String, delaysDescription: String, lengthsDescription: String, anchorYDescription: String) {
+        let delays = [0, 180, 420]
+        var best = ""
+        var lengths: [Int] = []
+        for delay in delays {
+            if delay > 0 { usleep(useconds_t(delay * 1000)) }
+            let raw = VisionOCR.extractTextLineInbound(from: rect, windowID: windowID) ?? ""
+            let sanitized = LineTextSanitizer.sanitize(raw)
+            lengths.append(sanitized.count)
+            if sanitized.count > best.count {
+                best = sanitized
+            }
+        }
+        return (
+            text: best,
+            delaysDescription: delays.map(String.init).joined(separator: ","),
+            lengthsDescription: lengths.map(String.init).joined(separator: ","),
+            anchorYDescription: String(Int(rect.origin.y))
+        )
+    }
+
+    private func computeInboundAnchorCrop(in image: CGImage, baseRect: CGRect) -> CGRect {
+        guard let lineY = detectLightGraySeparatorY(in: image) else {
+            return CGRect(
+                x: baseRect.origin.x,
+                y: baseRect.origin.y,
+                width: baseRect.width * 0.90,
+                height: baseRect.height
+            )
+        }
+        let y = baseRect.origin.y + CGFloat(lineY) + 4
+        let h = max(80, baseRect.maxY - y)
+        return CGRect(
+            x: baseRect.origin.x,
+            y: y,
+            width: baseRect.width * 0.90,
+            height: h
+        )
+    }
+
+    /// Detect a long thin light-gray separator row (e.g. unread separator) in the captured region.
+    private func detectLightGraySeparatorY(in image: CGImage) -> Int? {
+        let width = image.width
+        let height = image.height
+        let bytesPerRow = width * 4
+        var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
+        guard let ctx = CGContext(
+            data: &buffer,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        let minY = max(0, Int(Double(height) * 0.05))
+        let maxY = max(minY, Int(Double(height) * 0.85))
+        var bestY: Int?
+        var bestScore = 0.0
+        for y in minY..<maxY {
+            let rowOffset = y * bytesPerRow
+            var grayCount = 0
+            for x in 0..<width {
+                let i = rowOffset + x * 4
+                let r = Int(buffer[i])
+                let g = Int(buffer[i + 1])
+                let b = Int(buffer[i + 2])
+                let maxC = max(r, max(g, b))
+                let minC = min(r, min(g, b))
+                let sat = maxC - minC
+                let yv = 0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)
+                if sat <= 12 && yv >= 210 && yv <= 246 {
+                    grayCount += 1
+                }
+            }
+            let score = Double(grayCount) / Double(max(width, 1))
+            if score > bestScore {
+                bestScore = score
+                bestY = y
+            }
+        }
+        guard let y = bestY, bestScore >= 0.30 else { return nil }
+        return y
     }
 
     /// Downsample image to 32x32 and compute FNV-1a hash for fast change detection.

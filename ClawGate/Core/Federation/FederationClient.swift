@@ -163,15 +163,32 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
         }
 
         if type == "event",
-           let envelope = try? JSONDecoder().decode(FederationEnvelope<FederationEventPayload>.self, from: data) {
-            var payload = envelope.payload.event.payload
+           let payloadObj = json["payload"] as? [String: Any],
+           let eventObj = payloadObj["event"] as? [String: Any],
+           let adapter = eventObj["adapter"] as? String,
+           let eventType = eventObj["type"] as? String {
+            let rawPayload = eventObj["payload"] as? [String: Any] ?? [:]
+            var payload: [String: String] = [:]
+            payload.reserveCapacity(rawPayload.count + 1)
+            for (key, value) in rawPayload {
+                if let stringValue = value as? String {
+                    payload[key] = stringValue
+                } else if let numberValue = value as? NSNumber {
+                    payload[key] = numberValue.stringValue
+                } else if let boolValue = value as? Bool {
+                    payload[key] = boolValue ? "true" : "false"
+                } else {
+                    payload[key] = String(describing: value)
+                }
+            }
             payload["_from_federation"] = "1"
-            _ = eventBus.append(
-                type: envelope.payload.event.type,
-                adapter: envelope.payload.event.adapter,
-                payload: payload
-            )
-            logger.log(.debug, "FederationClient received event: \(envelope.payload.event.adapter).\(envelope.payload.event.type)")
+            _ = eventBus.append(type: eventType, adapter: adapter, payload: payload)
+            let project = payload["project"] ?? payload["conversation"] ?? "-"
+            let source = payload["source"] ?? "-"
+            logger.log(.info, "FederationClient received event: \(adapter).\(eventType) project=\(project) source=\(source)")
+            return
+        } else if type == "event" {
+            logger.log(.warning, "FederationClient received malformed event payload")
             return
         }
 

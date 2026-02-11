@@ -120,6 +120,15 @@ final class BridgeRequestHandler: ChannelInboundHandler {
             writeResponse(context: context, result: result)
             return
         }
+        // Ops logs should remain available even when blocking work queue is busy.
+        if head.method == .GET && path == "/v1/ops/logs" {
+            let limit = min(max(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 20, 1), 200)
+            let level = components?.queryItems?.first(where: { $0.name == "level" })?.value
+            let traceID = components?.queryItems?.first(where: { $0.name == "trace_id" })?.value
+            let result = core.opsLogs(limit: limit, level: level, traceID: traceID)
+            writeResponse(context: context, result: result)
+            return
+        }
 
         // SSE: start on event loop
         if head.method == .GET && path == "/v1/events" {
@@ -156,11 +165,6 @@ final class BridgeRequestHandler: ChannelInboundHandler {
                 result = core.axdump(adapter: adapter)
             } else if method == .GET && path == "/v1/doctor" {
                 result = core.doctor()
-            } else if method == .GET && path == "/v1/ops/logs" {
-                let limit = min(max(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 20, 1), 200)
-                let level = components?.queryItems?.first(where: { $0.name == "level" })?.value
-                let traceID = components?.queryItems?.first(where: { $0.name == "trace_id" })?.value
-                result = core.opsLogs(limit: limit, level: level, traceID: traceID)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()

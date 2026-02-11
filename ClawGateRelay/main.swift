@@ -103,6 +103,12 @@ struct RelaySendRequest: Codable {
     let payload: RelaySendPayload
 }
 
+struct RelayInjectTmuxPayload: Codable {
+    let project: String
+    let text: String
+    let source: String?
+}
+
 enum RelayTmuxShell {
     private static let candidatePaths = [
         "/opt/homebrew/bin/tmux",
@@ -210,14 +216,19 @@ final class RelayCCStatusClient: NSObject, URLSessionWebSocketDelegate {
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         reconnectAttempts = 0
+        print("[relay][tmux] cc-status websocket connected: \(url.absoluteString)")
         receiveLoop()
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        print("[relay][tmux] cc-status websocket closed: code=\(closeCode.rawValue)")
         scheduleReconnect()
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            print("[relay][tmux] cc-status websocket error: \(error.localizedDescription)")
+        }
         scheduleReconnect()
     }
 
@@ -253,7 +264,12 @@ final class RelayCCStatusClient: NSObject, URLSessionWebSocketDelegate {
                 }
                 self.receiveLoop()
             case .failure:
-                break
+                print("[relay][tmux] cc-status receive failed; reconnecting")
+                webSocketTask?.cancel(with: .goingAway, reason: nil)
+                webSocketTask = nil
+                urlSession?.invalidateAndCancel()
+                urlSession = nil
+                scheduleReconnect()
             }
         }
     }
@@ -271,6 +287,7 @@ final class RelayCCStatusClient: NSObject, URLSessionWebSocketDelegate {
             lock.lock()
             sessions = next
             lock.unlock()
+            print("[relay][tmux] sessions.list count=\(next.count)")
             onSessionsChanged?()
         case "session.updated":
             guard let raw = obj["session"] as? [String: Any], let session = parseSession(raw) else { return }
@@ -430,6 +447,21 @@ final class RelayTmuxRouter {
             "count": rows.count,
             "timestamp": FederationMessage.now(),
         ]
+    }
+
+    func debugSessions() -> [[String: Any]] {
+        ccClient.allSessions().map { session in
+            [
+                "id": session.id,
+                "project": session.project,
+                "status": session.status,
+                "is_attached": session.isAttached,
+                "tmux_target": session.tmuxTarget as Any,
+                "mode": mode(for: session.project),
+                "attention_level": session.attentionLevel,
+                "waiting_reason": session.waitingReason as Any,
+            ]
+        }
     }
 
     func messages(limit: Int, project: String?) throws -> [String: Any] {
@@ -759,6 +791,13 @@ final class RelayState {
     private var pending: [String: EventLoopPromise<FederationResponsePayload>] = [:]
 
     let eventBus = RelayEventBus()
+    private var relayEventSubscriptionID: UUID?
+
+    init() {
+        relayEventSubscriptionID = eventBus.subscribe { [weak self] event in
+            self?.forwardLocalTmuxEventToFederation(event)
+        }
+    }
 
     func setFederationChannel(_ channel: Channel?) {
         lock.lock()
@@ -808,6 +847,31 @@ final class RelayState {
 
     func completeCommand(_ response: FederationResponsePayload) {
         resolvePending(id: response.id, result: .success(response))
+    }
+
+    private func forwardLocalTmuxEventToFederation(_ event: RelayEvent) {
+        guard event.adapter == "tmux" else { return }
+        guard event.type == "inbound_message" || event.type == "outbound_message" else { return }
+        if event.payload["_from_federation"] == "1" { return }
+
+        lock.lock()
+        guard let channel = federationChannel else {
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        let envelope = FederationEnvelope(type: "event", timestamp: FederationMessage.now(), payload: FederationEventPayload(event: event))
+        guard let data = try? JSONEncoder().encode(envelope), let text = String(data: data, encoding: .utf8) else {
+            return
+        }
+
+        channel.eventLoop.execute {
+            var buffer = channel.allocator.buffer(capacity: text.utf8.count)
+            buffer.writeString(text)
+            let frame = WebSocketFrame(fin: true, opcode: .text, data: buffer)
+            channel.writeAndFlush(frame, promise: nil)
+        }
     }
 
     private func resolvePending(id: String, result: Result<FederationResponsePayload, Error>) {
@@ -1066,6 +1130,57 @@ final class RelayHTTPHandler: ChannelInboundHandler {
             }
         }
 
+        if head.method == .GET && path == "/v1/debug/tmux-sessions" {
+            let sessions = tmuxRouter.debugSessions()
+            let result: [String: Any] = [
+                "ok": true,
+                "result": [
+                    "sessions": sessions,
+                    "count": sessions.count,
+                    "timestamp": FederationMessage.now(),
+                ],
+            ]
+            return jsonResult(status: .ok, object: result)
+        }
+
+        if head.method == .POST && path == "/v1/debug/inject-tmux-completion" {
+            guard let request = try? JSONDecoder().decode(RelayInjectTmuxPayload.self, from: body) else {
+                return jsonError(status: .badRequest, code: "invalid_json", message: "invalid request json", retriable: false)
+            }
+            let project = request.project.trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = request.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !project.isEmpty else {
+                return jsonError(status: .badRequest, code: "invalid_project", message: "project is required", retriable: false)
+            }
+            guard !text.isEmpty else {
+                return jsonError(status: .badRequest, code: "invalid_text", message: "text is required", retriable: false)
+            }
+            let eventID = UUID().uuidString
+            let source = request.source?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? request.source!
+                : "completion"
+            _ = state.eventBus.append(type: "inbound_message", adapter: "tmux", payload: [
+                "conversation": project,
+                "project": project,
+                "text": text,
+                "source": source,
+                "sender": "claude_code",
+                "mode": "observe",
+                "event_id": eventID,
+                "capture": "inject",
+            ])
+            let result: [String: Any] = [
+                "ok": true,
+                "result": [
+                    "event_id": eventID,
+                    "project": project,
+                    "source": source,
+                    "timestamp": FederationMessage.now(),
+                ],
+            ]
+            return jsonResult(status: .ok, object: result)
+        }
+
         return nil
     }
 
@@ -1219,7 +1334,9 @@ final class RelayWebSocketHandler: ChannelInboundHandler {
            let adapter = eventObj["adapter"] as? String,
            let eventType = eventObj["type"] as? String,
            let payloadDict = eventObj["payload"] as? [String: String] {
-            state.eventBus.append(type: eventType, adapter: adapter, payload: payloadDict)
+            var marked = payloadDict
+            marked["_from_federation"] = "1"
+            state.eventBus.append(type: eventType, adapter: adapter, payload: marked)
             return
         }
 

@@ -17,6 +17,7 @@ WAIT_SECONDS=20
 LABEL="com.clawgate.relay"
 TMUX_SESSION="clawgate-relay"
 USE_TMUX=true
+TMUX_MODE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +40,42 @@ while [[ $# -gt 0 ]]; do
       exit 2 ;;
   esac
 done
+
+load_tmux_mode_args() {
+  local mode_blob json_blob
+  mode_blob="$(defaults read com.clawgate.app clawgate.tmuxSessionModes 2>/dev/null || true)"
+  if [[ -z "$mode_blob" ]]; then
+    mode_blob="$(defaults read ClawGate clawgate.tmuxSessionModes 2>/dev/null || true)"
+  fi
+  [[ -z "$mode_blob" ]] && return 0
+
+  # Stored as a JSON string in defaults (e.g. {"general":"observe","tproj":"observe"}).
+  # Try raw value first, then fallback to unescaped variant.
+  json_blob="$mode_blob"
+  if ! python3 -c 'import json,sys; json.loads(sys.stdin.read())' <<< "$json_blob" >/dev/null 2>&1; then
+    json_blob="$(printf '%b' "$mode_blob")"
+  fi
+
+  while IFS= read -r pair; do
+    local key value
+    key="${pair%%$'\t'*}"
+    value="${pair#*$'\t'}"
+    if [[ "$value" == "ignore" || "$value" == "observe" || "$value" == "auto" || "$value" == "autonomous" ]]; then
+      TMUX_MODE_ARGS+=(--tmux-mode "$key=$value")
+    fi
+  done < <(python3 - <<'PY' "$json_blob"
+import json, sys
+raw = sys.argv[1]
+try:
+    obj = json.loads(raw)
+except Exception:
+    obj = {}
+if isinstance(obj, dict):
+    for k, v in obj.items():
+        print(f"{k}\t{v}")
+PY
+)
+}
 
 if [[ -z "$TOKEN" ]]; then
   TOKEN="$(defaults read com.clawgate.app clawgate.federationToken 2>/dev/null || true)"
@@ -75,6 +112,8 @@ fi
 
 echo "Restarting local relay (port=$PORT, federation_port=$FEDERATION_PORT)"
 echo "Using token: ${TOKEN:0:4}***"
+load_tmux_mode_args
+echo "Loaded tmux modes: ${#TMUX_MODE_ARGS[@]}"
 
 REPO_DIR="$(pwd)"
 BINARY_PATH="$REPO_DIR/.build/arm64-apple-macosx/debug/ClawGateRelay"
@@ -96,12 +135,19 @@ pkill -f 'swift run ClawGateRelay' >/dev/null 2>&1 || true
 sleep 1
 
 if [[ "$USE_TMUX" == "true" ]] && command -v tmux >/dev/null 2>&1; then
-  RELAY_CMD="'$BINARY_PATH' --host '$HOST' --port '$PORT' --federation-port '$FEDERATION_PORT' --token '$TOKEN' --federation-token '$FEDERATION_TOKEN' --cc-status-url '$CC_STATUS_URL' >> /tmp/clawgate-relay-local.log 2>&1"
+  mode_args_str=""
+  if (( ${#TMUX_MODE_ARGS[@]} > 0 )); then
+    for (( idx=0; idx<${#TMUX_MODE_ARGS[@]}; idx+=2 )); do
+      mode_args_str+=" ${TMUX_MODE_ARGS[$idx]} '${TMUX_MODE_ARGS[$((idx+1))]}'"
+    done
+  fi
+  RELAY_CMD="'$BINARY_PATH' --host '$HOST' --port '$PORT' --federation-port '$FEDERATION_PORT' --token '$TOKEN' --federation-token '$FEDERATION_TOKEN' --cc-status-url '$CC_STATUS_URL'${mode_args_str} >> /tmp/clawgate-relay-local.log 2>&1"
   tmux new-session -d -s "$TMUX_SESSION" "cd '$REPO_DIR' && $RELAY_CMD"
 else
   mkdir -p "$HOME/Library/LaunchAgents"
   # Generate a launchd job so relay survives shell/session lifecycle.
-  cat > "$PLIST_PATH" <<EOF
+  {
+  cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -123,6 +169,14 @@ else
     <string>${FEDERATION_TOKEN}</string>
     <string>--cc-status-url</string>
     <string>${CC_STATUS_URL}</string>
+EOF
+    if (( ${#TMUX_MODE_ARGS[@]} > 0 )); then
+      for (( idx=0; idx<${#TMUX_MODE_ARGS[@]}; idx+=2 )); do
+        echo "    <string>${TMUX_MODE_ARGS[$idx]}</string>"
+        echo "    <string>${TMUX_MODE_ARGS[$((idx+1))]}</string>"
+      done
+    fi
+  cat <<EOF
   </array>
   <key>WorkingDirectory</key>
   <string>${REPO_DIR}</string>
@@ -137,6 +191,7 @@ else
 </dict>
 </plist>
 EOF
+  } > "$PLIST_PATH"
 
   launchctl bootout "gui/$UID/$LABEL" >/dev/null 2>&1 || true
   launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
@@ -153,6 +208,7 @@ EOF
       --token "$TOKEN" \
       --federation-token "$FEDERATION_TOKEN" \
       --cc-status-url "$CC_STATUS_URL" \
+      "${TMUX_MODE_ARGS[@]}" \
       > /tmp/clawgate-relay-local.log 2>&1 < /dev/null &
   fi
 fi
