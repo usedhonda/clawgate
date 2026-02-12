@@ -21,7 +21,7 @@ final class LINEInboundWatcher {
     private var activePollID: UUID?
     private var consecutiveTimeouts = 0
     private var skippedPollCount = 0
-    private let pollTimeoutSeconds: TimeInterval = 10.0
+    private let pollTimeoutSeconds: TimeInterval = 30.0
     private let resetAfterTimeoutStreak = 2
 
     /// Snapshot of chat row frames from last poll (sorted by Y coordinate)
