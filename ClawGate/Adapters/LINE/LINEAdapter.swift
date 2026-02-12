@@ -8,6 +8,7 @@ final class LINEAdapter: AdapterProtocol {
     private let logger: AppLogger
     private let retry = RetryPolicy(maxAttempts: 2, initialDelayMs: 120)
     private let recentSendTracker: RecentSendTracker
+    private var lastConversationHint: String?
 
     init(logger: AppLogger, recentSendTracker: RecentSendTracker) {
         self.logger = logger
@@ -118,6 +119,21 @@ final class LINEAdapter: AdapterProtocol {
             AXQuery.descendants(of: rootWindow)
         }
 
+        // Same-conversation cache: skip search if already in the right conversation
+        var canSkipNavigation = false
+        if let lastHint = lastConversationHint, lastHint == payload.conversationHint {
+            let wfNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+            if (SelectorResolver.resolve(
+                selector: LineSelectors.messageInputU, in: nodes, windowFrame: wfNow
+            ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)) != nil {
+                canSkipNavigation = true
+                stepLogger.record(step: "open_conversation", start: Date(), success: true, details: "skipped (same conversation)")
+                stepLogger.record(step: "rescan_after_navigation", start: Date(), success: true, details: "skipped (same conversation)")
+                logger.log(.info, "Same conversation skip: '\(payload.conversationHint)'")
+            }
+        }
+
+        if !canSkipNavigation {
         // Stage 2: Search -> click result row to navigate to matching conversation
         _ = try step("open_conversation", logger: stepLogger) {
             let candidate = SelectorResolver.resolve(
@@ -179,7 +195,7 @@ final class LINEAdapter: AdapterProtocol {
             // setValue alone doesn't fire Qt's textEdited signal, so search doesn't run.
             // HID Enter confirms the search query and populates result rows.
             AXActions.sendSearchEnter()
-            usleep(800_000) // 800ms for search results to populate after Enter
+            usleep(400_000) // 400ms for search results to populate after Enter
 
             // 6. Click first conversation result row (height > 40, skip header rows ~34px)
             let freshNodes = AXQuery.descendants(of: rootWindow)
@@ -217,6 +233,7 @@ final class LINEAdapter: AdapterProtocol {
                 details: "messageInput not found after 3s polling"
             )
         }
+        } // end if !canSkipNavigation
 
         // Stage 2+3: Focus input -> setValue -> verify
         _ = try step("input_message", logger: stepLogger) {
@@ -268,12 +285,13 @@ final class LINEAdapter: AdapterProtocol {
             ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)
             if let input = inputCandidate {
                 AXActions.setFocused(input.node.element)
-                usleep(50_000)
+                usleep(20_000)
             }
             AXActions.sendEnter(pid: pid)
             return true
         }
 
+        lastConversationHint = payload.conversationHint
         logger.log(.info, "LINE send flow finished for \(payload.conversationHint)")
         recentSendTracker.recordSend(conversation: payload.conversationHint, text: payload.text)
 

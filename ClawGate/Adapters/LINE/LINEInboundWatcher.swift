@@ -802,7 +802,7 @@ final class LINEInboundWatcher {
     }
 
     private func burstInboundOCR(from rect: CGRect, windowID: CGWindowID) -> (text: String, delaysDescription: String, lengthsDescription: String, anchorYDescription: String) {
-        let delays = [0, 180, 420]
+        let delays = [0]
         var best = ""
         var lengths: [Int] = []
         for delay in delays {

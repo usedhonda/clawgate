@@ -16,7 +16,7 @@
 
 const DEFAULTS = {
   apiUrl: "http://127.0.0.1:8765",
-  pollIntervalMs: 3000,
+  pollIntervalMs: 1500,
   defaultConversation: "",
 };
 

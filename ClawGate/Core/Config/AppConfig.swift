@@ -42,7 +42,7 @@ struct AppConfig: Codable {
         includeMessageBodyInLogs: false,
         lineEnabled: true,
         lineDefaultConversation: "",
-        linePollIntervalSeconds: 2,
+        linePollIntervalSeconds: 1,
         lineDetectionMode: "hybrid",
         lineFusionThreshold: 60,
         lineEnablePixelSignal: true,

@@ -40,7 +40,7 @@ enum AXActions {
         }
         let app = AXUIElementCreateApplication(pid)
         let downResult = post(app, 0, 36, true)
-        usleep(50_000)
+        usleep(20_000)
         let upResult = post(app, 0, 36, false)
         NSLog("[AXActions] sendEnter AXPost pid=%d down=%d up=%d",
               pid, downResult.rawValue, upResult.rawValue)
