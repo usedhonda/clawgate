@@ -127,6 +127,24 @@ enum VisionOCR {
             }
         }
 
+        // Slightly expand gray mask to remove anti-aliased timestamp/read glyph edges.
+        var expandedGrayMask = lightGrayMask
+        let grayRadius = 2
+        for y in 0..<height {
+            for x in 0..<width {
+                if lightGrayMask[y * width + x] == 0 { continue }
+                let minY = max(0, y - grayRadius)
+                let maxY = min(height - 1, y + grayRadius)
+                let minX = max(0, x - grayRadius)
+                let maxX = min(width - 1, x + grayRadius)
+                for yy in minY...maxY {
+                    for xx in minX...maxX {
+                        expandedGrayMask[yy * width + xx] = 1
+                    }
+                }
+            }
+        }
+
         for y in 0..<height {
             let rowOffset = y * bytesPerRow
             for x in 0..<width {
@@ -138,11 +156,42 @@ enum VisionOCR {
                     buffer[i + 2] = 164
                     continue
                 }
-                if lightGrayMask[y * width + x] == 1 {
+                if expandedGrayMask[y * width + x] == 1 {
                     // Whiten noisy light-gray UI glyphs/lines.
                     buffer[i] = 246
                     buffer[i + 1] = 246
                     buffer[i + 2] = 246
+                }
+            }
+        }
+
+        // Final pass: binarize for OCR (black text / white background).
+        // Keep only truly dark glyphs; push mid-gray UI noise to white.
+        for y in 0..<height {
+            let rowOffset = y * bytesPerRow
+            for x in 0..<width {
+                let i = rowOffset + x * 4
+                let r = Int(buffer[i])
+                let g = Int(buffer[i + 1])
+                let b = Int(buffer[i + 2])
+                let maxC = max(r, max(g, b))
+                let minC = min(r, min(g, b))
+                let sat = maxC - minC
+                let luminance = (299 * r + 587 * g + 114 * b) / 1000
+
+                // Strict threshold:
+                // - very dark pixels are text
+                // - moderate luminance is text only when it has enough chroma/edge contrast
+                //   (avoids gray timestamp/read artifacts being interpreted as text)
+                let isDarkText = luminance <= 92 || (luminance <= 122 && sat >= 18)
+                if isDarkText {
+                    buffer[i] = 0
+                    buffer[i + 1] = 0
+                    buffer[i + 2] = 0
+                } else {
+                    buffer[i] = 255
+                    buffer[i + 1] = 255
+                    buffer[i + 2] = 255
                 }
             }
         }
@@ -188,8 +237,16 @@ enum VisionOCR {
         let minC = min(ri, min(gi, bi))
         let sat = maxC - minC
         let luminance = (299 * ri + 587 * gi + 114 * bi) / 1000
-        // Keep this narrow so inbound bubble body is not erased.
-        return sat <= 10 && luminance >= 188 && luminance <= 232
+        // Timestamp/read marker gray from sampled UI:
+        // RGB roughly 147..217, near-neutral (very low saturation).
+        let inGrayBand = ri >= 144 && ri <= 220
+            && gi >= 144 && gi <= 220
+            && bi >= 144 && bi <= 220
+        if inGrayBand && sat <= 12 {
+            return true
+        }
+        // Keep a luminance fallback for anti-aliased edge pixels.
+        return sat <= 10 && luminance >= 162 && luminance <= 216
     }
 
     private static func rgbToHSV(r: UInt8, g: UInt8, b: UInt8) -> (h: Double, s: Double, v: Double) {
