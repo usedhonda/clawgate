@@ -5,12 +5,6 @@ import Vision
 /// Requires Screen Recording permission for CGWindowListCreateImage.
 /// Gracefully returns nil when permission is not granted.
 enum VisionOCR {
-    // LINE sampled fixed colors (tunable constants).
-    private static let outgoingGreenCenter = (r: 196, g: 232, b: 160)
-    private static let outgoingGreenRadius = 48
-    private static let uiGrayCenter = (r: 214, g: 214, b: 214)
-    private static let uiGrayRadius = 24
-
     /// Extract text from a screen rectangle (in global CG coordinates).
     /// Returns nil if Screen Recording permission is missing or OCR fails.
     /// When windowID is provided, captures only that window (immune to occlusion).
@@ -23,24 +17,23 @@ enum VisionOCR {
     }
 
     /// OCR for LINE inbound text:
-    /// suppress outgoing (green) bubble content before OCR so incoming gray bubbles dominate.
+    /// runs OCR on the raw image and filters results by bounding-box geometry
+    /// to keep only left-aligned (inbound) observations.
     static func extractTextLineInbound(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> String? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
         }
-        guard let masked = preprocessInboundOCRImage(image) else {
-            return performOCR(on: image)
-        }
-        return performOCR(on: masked)
+        return performOCRInbound(on: image)
     }
 
     /// Capture raw + preprocessed images for inbound OCR debugging.
     /// Returns nil when capture failed (e.g. Screen Recording permission missing).
+    /// Preprocessing is now a no-op; preprocessed is identical to raw.
     static func captureInboundDebugImages(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> (raw: CGImage, preprocessed: CGImage?)? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
         }
-        return (raw: image, preprocessed: preprocessInboundOCRImage(image))
+        return (raw: image, preprocessed: image)
     }
 
     /// Extract text from multiple screen rectangles merged into one capture (with padding).
@@ -73,186 +66,38 @@ enum VisionOCR {
         return image
     }
 
-    private static func preprocessInboundOCRImage(_ image: CGImage) -> CGImage? {
-        let width = image.width
-        let height = image.height
-        let bytesPerRow = width * 4
-        var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
+    /// OCR on raw image with bounding-box filtering for inbound (left-side) text.
+    /// Vision bounding box is normalized (0-1), origin at bottom-left.
+    /// LINE inbound bubbles are left-aligned; outgoing bubbles are right-aligned.
+    private static func performOCRInbound(on image: CGImage) -> String? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["ja-JP", "en-US"]
+        request.usesLanguageCorrection = true
 
-        guard let ctx = CGContext(
-            data: &buffer,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
             return nil
         }
 
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        guard let observations = request.results else { return nil }
 
-        // Seed 1: outgoing green bubble area.
-        var greenSeedMask = [UInt8](repeating: 0, count: width * height)
-        for y in 0..<height {
-            let rowOffset = y * bytesPerRow
-            for x in 0..<width {
-                let i = rowOffset + x * 4
-                let r = buffer[i]
-                let g = buffer[i + 1]
-                let b = buffer[i + 2]
-                if isOutgoingGreenSeed(r: r, g: g, b: b) {
-                    greenSeedMask[y * width + x] = 1
-                }
+        let inboundTexts = observations.compactMap { obs -> String? in
+            // Skip observations whose horizontal center is on the right half (outgoing).
+            guard obs.boundingBox.midX < 0.55 else { return nil }
+            let candidates = obs.topCandidates(3)
+            if let accepted = candidates.first(where: { $0.confidence >= 0.40 }) {
+                return accepted.string
             }
-        }
-
-        // Expand 3px around green regions to erase anti-aliased outgoing text edges.
-        let radius = 3
-        var expandedGreenMask = greenSeedMask
-        for y in 0..<height {
-            for x in 0..<width {
-                if greenSeedMask[y * width + x] == 0 { continue }
-                let minY = max(0, y - radius)
-                let maxY = min(height - 1, y + radius)
-                let minX = max(0, x - radius)
-                let maxX = min(width - 1, x + radius)
-                for yy in minY...maxY {
-                    for xx in minX...maxX {
-                        expandedGreenMask[yy * width + xx] = 1
-                    }
-                }
+            if let best = candidates.first, best.confidence >= 0.25 {
+                return best.string
             }
+            return nil
         }
-
-        // Seed 2: light-gray UI artifacts (timestamp/read line/unread separators).
-        var lightGrayMask = [UInt8](repeating: 0, count: width * height)
-        for y in 0..<height {
-            let rowOffset = y * bytesPerRow
-            for x in 0..<width {
-                let i = rowOffset + x * 4
-                let r = buffer[i]
-                let g = buffer[i + 1]
-                let b = buffer[i + 2]
-                if isLightGrayUIArtifact(r: r, g: g, b: b) {
-                    lightGrayMask[y * width + x] = 1
-                }
-            }
-        }
-
-        // Slightly expand gray mask to remove anti-aliased timestamp/read glyph edges.
-        var expandedGrayMask = lightGrayMask
-        let grayRadius = 2
-        for y in 0..<height {
-            for x in 0..<width {
-                if lightGrayMask[y * width + x] == 0 { continue }
-                let minY = max(0, y - grayRadius)
-                let maxY = min(height - 1, y + grayRadius)
-                let minX = max(0, x - grayRadius)
-                let maxX = min(width - 1, x + grayRadius)
-                for yy in minY...maxY {
-                    for xx in minX...maxX {
-                        expandedGrayMask[yy * width + xx] = 1
-                    }
-                }
-            }
-        }
-
-        for y in 0..<height {
-            let rowOffset = y * bytesPerRow
-            for x in 0..<width {
-                let i = rowOffset + x * 4
-                if expandedGreenMask[y * width + x] == 1 {
-                    // Flatten outgoing side to uniform green so own-side text is not OCR'ed.
-                    buffer[i] = 186
-                    buffer[i + 1] = 230
-                    buffer[i + 2] = 164
-                    continue
-                }
-                if expandedGrayMask[y * width + x] == 1 {
-                    // Whiten noisy light-gray UI glyphs/lines.
-                    buffer[i] = 246
-                    buffer[i + 1] = 246
-                    buffer[i + 2] = 246
-                }
-            }
-        }
-        return ctx.makeImage()
-    }
-
-    private static func isOutgoingGreenSeed(r: UInt8, g: UInt8, b: UInt8) -> Bool {
-        let ri = Int(r)
-        let gi = Int(g)
-        let bi = Int(b)
-
-        // Fixed-color anchor first.
-        if colorDistance2(
-            r: ri, g: gi, b: bi,
-            cr: outgoingGreenCenter.r, cg: outgoingGreenCenter.g, cb: outgoingGreenCenter.b
-        ) <= outgoingGreenRadius * outgoingGreenRadius {
-            return true
-        }
-
-        // Fast RGB guard tuned for LINE outgoing bubble shades.
-        let rgbMatch = gi >= 120 && gi <= 244
-            && ri >= 118 && ri <= 228
-            && bi >= 110 && bi <= 210
-            && gi >= ri + 8
-            && gi >= bi + 12
-
-        if rgbMatch {
-            return true
-        }
-
-        // Hue fallback for anti-aliased edge pixels near bubble/text boundary.
-        let (h, s, v) = rgbToHSV(r: r, g: g, b: b)
-        return (h >= 78 && h <= 150) && s >= 0.12 && v >= 0.40
-    }
-
-    private static func isLightGrayUIArtifact(r: UInt8, g: UInt8, b: UInt8) -> Bool {
-        let ri = Int(r)
-        let gi = Int(g)
-        let bi = Int(b)
-        let maxC = max(ri, max(gi, bi))
-        let minC = min(ri, min(gi, bi))
-        let sat = maxC - minC
-        // Fixed-color anchor around LINE timestamp/separator gray.
-        let nearUiGray = colorDistance2(
-            r: ri, g: gi, b: bi,
-            cr: uiGrayCenter.r, cg: uiGrayCenter.g, cb: uiGrayCenter.b
-        ) <= uiGrayRadius * uiGrayRadius
-        return nearUiGray && sat <= 12
-    }
-
-    private static func colorDistance2(r: Int, g: Int, b: Int, cr: Int, cg: Int, cb: Int) -> Int {
-        let dr = r - cr
-        let dg = g - cg
-        let db = b - cb
-        return dr * dr + dg * dg + db * db
-    }
-
-    private static func rgbToHSV(r: UInt8, g: UInt8, b: UInt8) -> (h: Double, s: Double, v: Double) {
-        let rf = Double(r) / 255.0
-        let gf = Double(g) / 255.0
-        let bf = Double(b) / 255.0
-        let maxV = max(rf, max(gf, bf))
-        let minV = min(rf, min(gf, bf))
-        let delta = maxV - minV
-
-        var hue: Double = 0
-        if delta != 0 {
-            if maxV == rf {
-                hue = 60 * (((gf - bf) / delta).truncatingRemainder(dividingBy: 6))
-            } else if maxV == gf {
-                hue = 60 * (((bf - rf) / delta) + 2)
-            } else {
-                hue = 60 * (((rf - gf) / delta) + 4)
-            }
-        }
-        if hue < 0 { hue += 360 }
-        let saturation = maxV == 0 ? 0 : delta / maxV
-        return (h: hue, s: saturation, v: maxV)
+        guard !inboundTexts.isEmpty else { return nil }
+        return inboundTexts.joined(separator: "\n")
     }
 
     private static func performOCR(on image: CGImage) -> String? {
