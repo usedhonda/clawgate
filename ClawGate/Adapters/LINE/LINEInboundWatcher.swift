@@ -40,6 +40,9 @@ final class LINEInboundWatcher {
     private var lastInboundFingerprint: String = ""
     private var lastInboundAt: Date = .distantPast
     private let inboundDedupWindowSeconds: TimeInterval = 20
+    private var lastSeparatorAnchorY: Int?
+    private var lastSeparatorAnchorConfidence: Int = 0
+    private var lastSeparatorAnchorMethod: String = "none"
 
     init(
         eventBus: EventBus,
@@ -108,6 +111,9 @@ final class LINEInboundWatcher {
         lastConfidence = "low"
         lastInboundFingerprint = ""
         lastInboundAt = .distantPast
+        lastSeparatorAnchorY = nil
+        lastSeparatorAnchorConfidence = 0
+        lastSeparatorAnchorMethod = "none"
     }
 
     private func poll() {
@@ -387,19 +393,18 @@ final class LINEInboundWatcher {
         )
         let ocrText = extractInboundOCRText(from: ocrFrames, lineWindowID: lineWindowID)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let anchorAreaText = collectAnchorAreaOCR(chatList: chatList, lineWindowID: lineWindowID)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let axFallbackText = extractTextFromRows(incomingRows)
         let structuralFallbackOCR = collectStructuralFallbackOCR(
             lastFrame: lastFrame,
             lineWindowID: lineWindowID
         )
         let mergedText: String
-        if !ocrText.isEmpty {
-            mergedText = ocrText
-        } else if !axFallbackText.isEmpty {
-            mergedText = axFallbackText
-        } else {
-            mergedText = structuralFallbackOCR
-        }
+        let mergedCandidates = mergeCandidatesPreservingLines(
+            [ocrText, anchorAreaText, axFallbackText, structuralFallbackOCR]
+        )
+        mergedText = mergedCandidates
 
         return LineDetectionSignal(
             name: "ax_structure",
@@ -413,6 +418,7 @@ final class LINEInboundWatcher {
                 "incoming_rows": String(incomingFrames.count),
                 "ocr_empty_fallback_ax": ocrText.isEmpty ? "1" : "0",
                 "ocr_text_len": String(ocrText.count),
+                "anchor_area_text_len": String(anchorAreaText.count),
                 "merged_text_len": String(mergedText.count),
                 "merged_text_head": textHeadForLog(mergedText),
                 "ax_fallback_text_len": String(axFallbackText.count),
@@ -448,22 +454,47 @@ final class LINEInboundWatcher {
         return rows.joined(separator: "\n")
     }
 
+    private func collectAnchorAreaOCR(chatList: AXUIElement, lineWindowID: CGWindowID) -> String {
+        guard let chatListFrame = AXQuery.copyFrameAttribute(chatList) else { return "" }
+        let bottomHalf = CGRect(
+            x: chatListFrame.origin.x,
+            y: chatListFrame.origin.y + chatListFrame.height / 2,
+            width: chatListFrame.width,
+            height: chatListFrame.height / 2
+        )
+        let captureOptions: CGWindowListOption = lineWindowID != kCGNullWindowID
+            ? .optionIncludingWindow : .optionOnScreenOnly
+        guard let image = CGWindowListCreateImage(bottomHalf, captureOptions, lineWindowID, [.bestResolution]) else {
+            return ""
+        }
+        let anchored = computeInboundAnchorCrop(in: image, baseRect: bottomHalf)
+        let text = VisionOCR.extractTextLineInbound(from: anchored, windowID: lineWindowID) ?? ""
+        return LineTextSanitizer.sanitize(text)
+    }
+
+    private func mergeCandidatesPreservingLines(_ candidates: [String]) -> String {
+        var lines: [String] = []
+        var seen = Set<String>()
+        for candidate in candidates {
+            let clean = LineTextSanitizer.sanitize(candidate)
+            guard !clean.isEmpty else { continue }
+            let parts = clean
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            for part in parts {
+                if seen.insert(part).inserted {
+                    lines.append(part)
+                }
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// Deduplicate OCR rows while preserving richer text.
     /// If one candidate contains another, keep the longer one.
     private func mergeOCRRowPreferLonger(_ candidate: String, into rows: inout [String]) {
-        var replaced = false
-        rows.removeAll { existing in
-            if existing == candidate { return true }
-            if existing.contains(candidate) {
-                replaced = true
-                return false
-            }
-            if candidate.contains(existing) {
-                return true
-            }
-            return false
-        }
-        if !replaced {
+        if !rows.contains(candidate) {
             rows.append(candidate)
         }
     }
@@ -600,6 +631,12 @@ final class LINEInboundWatcher {
             return nil
         }
         let inboundHalf = computeInboundAnchorCrop(in: image, baseRect: bottomHalf)
+        maybeSaveOCRDebugArtifacts(
+            rawImage: image,
+            anchorRect: inboundHalf,
+            lineWindowID: lineWindowID,
+            conversation: conversation
+        )
 
         let hash = computeImageHash(image)
 
@@ -770,7 +807,11 @@ final class LINEInboundWatcher {
     }
 
     private func computeInboundAnchorCrop(in image: CGImage, baseRect: CGRect) -> CGRect {
-        guard let lineY = detectLightGraySeparatorY(in: image) else {
+        guard let anchor = detectLightGraySeparatorY(in: image) else {
+            lastSeparatorAnchorY = nil
+            lastSeparatorAnchorConfidence = 0
+            lastSeparatorAnchorMethod = "none"
+            logger.log(.debug, "LINEInboundWatcher: separator_anchor missing -> full inbound crop")
             return CGRect(
                 x: baseRect.origin.x,
                 y: baseRect.origin.y,
@@ -778,17 +819,22 @@ final class LINEInboundWatcher {
                 height: baseRect.height
             )
         }
+        lastSeparatorAnchorY = anchor.y
+        lastSeparatorAnchorConfidence = anchor.confidence
+        lastSeparatorAnchorMethod = anchor.method
+        logger.log(.debug, "LINEInboundWatcher: separator_anchor y=\(anchor.y) confidence=\(anchor.confidence)% method=\(anchor.method)")
 
         // The separator we want is the thin gray line above the input area.
         // OCR should target the message area ABOVE that line, not below.
         // Keep only a tiny safety gap from the separator (just above input area).
         // Keep a tiny margin BELOW the separator so glyph descenders near the boundary
         // are not clipped out before OCR.
-        let maxY = baseRect.origin.y + CGFloat(lineY) + 6
+        let maxY = baseRect.origin.y + CGFloat(anchor.y) + 6
         let h = max(80, maxY - baseRect.origin.y)
         // Safety fallback: if anchor crop became too short due to false separator pick,
         // use a wider lower-half crop to avoid missing the newest inbound lines.
         if h < baseRect.height * 0.38 {
+            logger.log(.debug, "LINEInboundWatcher: separator_anchor fallback short_h=\(Int(h)) base_h=\(Int(baseRect.height))")
             return CGRect(
                 x: baseRect.origin.x,
                 y: baseRect.origin.y,
@@ -804,8 +850,40 @@ final class LINEInboundWatcher {
         )
     }
 
+    private func maybeSaveOCRDebugArtifacts(
+        rawImage: CGImage,
+        anchorRect: CGRect,
+        lineWindowID: CGWindowID,
+        conversation: String
+    ) {
+        guard logger.isDebugEnabled else { return }
+
+        let debug = VisionOCR.captureInboundDebugImages(from: anchorRect, windowID: lineWindowID)
+        let ts = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let eventID = "\(ts)_\(UUID().uuidString.prefix(8))"
+        let meta: [String: String] = [
+            "conversation": conversation,
+            "anchor_x": String(format: "%.0f", anchorRect.origin.x),
+            "anchor_y": String(format: "%.0f", anchorRect.origin.y),
+            "anchor_w": String(format: "%.0f", anchorRect.width),
+            "anchor_h": String(format: "%.0f", anchorRect.height),
+            "separator_y": lastSeparatorAnchorY.map(String.init) ?? "",
+            "separator_confidence": String(lastSeparatorAnchorConfidence),
+            "separator_method": lastSeparatorAnchorMethod,
+            "window_id": String(lineWindowID),
+        ]
+        OCRDebugArtifactStore.saveEvent(
+            eventID: eventID,
+            raw: rawImage,
+            anchor: debug?.raw,
+            preprocessed: debug?.preprocessed,
+            metadata: meta,
+            retention: 50
+        )
+    }
+
     /// Detect a long thin light-gray separator row (e.g. unread separator) in the captured region.
-    private func detectLightGraySeparatorY(in image: CGImage) -> Int? {
+    private func detectLightGraySeparatorY(in image: CGImage) -> (y: Int, confidence: Int, method: String)? {
         let width = image.width
         let height = image.height
         let bytesPerRow = width * 4
@@ -865,7 +943,7 @@ final class LINEInboundWatcher {
             // Reject suspiciously high separators (likely in-thread separator),
             // keep only lower-region candidates close to the input boundary.
             if Double(lowestStrong) / Double(max(height - 1, 1)) >= 0.62 {
-                return lowestStrong
+                return (lowestStrong, 96, "strong-run")
             }
             return nil
         }
@@ -873,7 +951,8 @@ final class LINEInboundWatcher {
         if Double(y) / Double(max(height - 1, 1)) < 0.62 {
             return nil
         }
-        return y
+        let confidence = max(0, min(95, Int((bestScore / 1.2) * 100.0)))
+        return (y, confidence, "weighted")
     }
 
     /// Pixel classifier for LINE input separator gray.

@@ -34,6 +34,15 @@ enum VisionOCR {
         return performOCR(on: masked)
     }
 
+    /// Capture raw + preprocessed images for inbound OCR debugging.
+    /// Returns nil when capture failed (e.g. Screen Recording permission missing).
+    static func captureInboundDebugImages(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> (raw: CGImage, preprocessed: CGImage?)? {
+        guard let image = captureImage(from: screenRect, windowID: windowID) else {
+            return nil
+        }
+        return (raw: image, preprocessed: preprocessInboundOCRImage(image))
+    }
+
     /// Extract text from multiple screen rectangles merged into one capture (with padding).
     /// More efficient than calling extractText(from:) per-rect: N rects × 300ms → 1 capture × 300ms.
     static func extractText(from rects: [CGRect], padding: CGFloat = 4, windowID: CGWindowID = kCGNullWindowID) -> String? {

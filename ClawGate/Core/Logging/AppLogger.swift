@@ -14,8 +14,12 @@ final class AppLogger {
         self.configStore = configStore
     }
 
+    var isDebugEnabled: Bool {
+        configStore.load().debugLogging
+    }
+
     func log(_ level: Level, _ message: String) {
-        if level == .debug && !configStore.load().debugLogging {
+        if level == .debug && !isDebugEnabled {
             return
         }
 
