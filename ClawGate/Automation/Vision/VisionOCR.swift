@@ -5,6 +5,11 @@ import Vision
 /// Requires Screen Recording permission for CGWindowListCreateImage.
 /// Gracefully returns nil when permission is not granted.
 enum VisionOCR {
+    // LINE sampled fixed colors (tunable constants).
+    private static let outgoingGreenCenter = (r: 196, g: 232, b: 160)
+    private static let outgoingGreenRadius = 48
+    private static let uiGrayCenter = (r: 214, g: 214, b: 214)
+    private static let uiGrayRadius = 24
 
     /// Extract text from a screen rectangle (in global CG coordinates).
     /// Returns nil if Screen Recording permission is missing or OCR fails.
@@ -183,7 +188,10 @@ enum VisionOCR {
                 // - very dark pixels are text
                 // - moderate luminance is text only when it has enough chroma/edge contrast
                 //   (avoids gray timestamp/read artifacts being interpreted as text)
-                let isDarkText = luminance <= 92 || (luminance <= 122 && sat >= 18)
+                // Keep dark glyph strokes even when anti-aliased to dark gray.
+                // This reduces misses on long Japanese lines while gray UI timestamps
+                // are still removed by the explicit gray mask above.
+                let isDarkText = luminance <= 108 || (luminance <= 138 && sat >= 10)
                 if isDarkText {
                     buffer[i] = 0
                     buffer[i + 1] = 0
@@ -204,12 +212,11 @@ enum VisionOCR {
         let gi = Int(g)
         let bi = Int(b)
 
-        // Fixed color band from LINE outgoing bubble sample:
-        // center ~= (196, 232, 160)
-        let nearBubbleCenter = abs(ri - 196) <= 44
-            && abs(gi - 232) <= 28
-            && abs(bi - 160) <= 52
-        if nearBubbleCenter {
+        // Fixed-color anchor first.
+        if colorDistance2(
+            r: ri, g: gi, b: bi,
+            cr: outgoingGreenCenter.r, cg: outgoingGreenCenter.g, cb: outgoingGreenCenter.b
+        ) <= outgoingGreenRadius * outgoingGreenRadius {
             return true
         }
 
@@ -236,17 +243,19 @@ enum VisionOCR {
         let maxC = max(ri, max(gi, bi))
         let minC = min(ri, min(gi, bi))
         let sat = maxC - minC
-        let luminance = (299 * ri + 587 * gi + 114 * bi) / 1000
-        // Timestamp/read marker gray from sampled UI:
-        // RGB roughly 147..217, near-neutral (very low saturation).
-        let inGrayBand = ri >= 144 && ri <= 220
-            && gi >= 144 && gi <= 220
-            && bi >= 144 && bi <= 220
-        if inGrayBand && sat <= 12 {
-            return true
-        }
-        // Keep a luminance fallback for anti-aliased edge pixels.
-        return sat <= 10 && luminance >= 162 && luminance <= 216
+        // Fixed-color anchor around LINE timestamp/separator gray.
+        let nearUiGray = colorDistance2(
+            r: ri, g: gi, b: bi,
+            cr: uiGrayCenter.r, cg: uiGrayCenter.g, cb: uiGrayCenter.b
+        ) <= uiGrayRadius * uiGrayRadius
+        return nearUiGray && sat <= 12
+    }
+
+    private static func colorDistance2(r: Int, g: Int, b: Int, cr: Int, cg: Int, cb: Int) -> Int {
+        let dr = r - cr
+        let dg = g - cg
+        let db = b - cb
+        return dr * dr + dg * dg + db * db
     }
 
     private static func rgbToHSV(r: UInt8, g: UInt8, b: UInt8) -> (h: Double, s: Double, v: Double) {

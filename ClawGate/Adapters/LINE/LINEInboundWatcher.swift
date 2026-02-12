@@ -782,8 +782,20 @@ final class LINEInboundWatcher {
         // The separator we want is the thin gray line above the input area.
         // OCR should target the message area ABOVE that line, not below.
         // Keep only a tiny safety gap from the separator (just above input area).
-        let maxY = baseRect.origin.y + CGFloat(lineY) - 2
+        // Keep a tiny margin BELOW the separator so glyph descenders near the boundary
+        // are not clipped out before OCR.
+        let maxY = baseRect.origin.y + CGFloat(lineY) + 6
         let h = max(80, maxY - baseRect.origin.y)
+        // Safety fallback: if anchor crop became too short due to false separator pick,
+        // use a wider lower-half crop to avoid missing the newest inbound lines.
+        if h < baseRect.height * 0.38 {
+            return CGRect(
+                x: baseRect.origin.x,
+                y: baseRect.origin.y,
+                width: baseRect.width * 0.90,
+                height: baseRect.height
+            )
+        }
         return CGRect(
             x: baseRect.origin.x,
             y: baseRect.origin.y,
@@ -811,10 +823,13 @@ final class LINEInboundWatcher {
         }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        let minY = max(0, Int(Double(height) * 0.05))
-        let maxY = max(minY, Int(Double(height) * 0.92))
+        // We only want the input-area separator near the bottom.
+        // Searching too high often locks onto in-thread separators and causes crop misses.
+        let minY = max(0, Int(Double(height) * 0.45))
+        let maxY = max(minY, Int(Double(height) * 0.97))
         var bestY: Int?
         var bestScore = 0.0
+        var strongCandidates: [Int] = []
         for y in minY..<maxY {
             let rowOffset = y * bytesPerRow
             var grayCount = 0
@@ -825,11 +840,7 @@ final class LINEInboundWatcher {
                 let r = Int(buffer[i])
                 let g = Int(buffer[i + 1])
                 let b = Int(buffer[i + 2])
-                let maxC = max(r, max(g, b))
-                let minC = min(r, min(g, b))
-                let sat = maxC - minC
-                let yv = 0.299 * Double(r) + 0.587 * Double(g) + 0.114 * Double(b)
-                if sat <= 10 && yv >= 188 && yv <= 232 {
+                if isInputSeparatorGrayPixel(r: r, g: g, b: b) {
                     grayCount += 1
                     currentRun += 1
                     if currentRun > longestRun { longestRun = currentRun }
@@ -842,13 +853,45 @@ final class LINEInboundWatcher {
             let yRatio = Double(y) / Double(max(height - 1, 1))
             // Prefer lower separators (input boundary) over mid-list separators.
             let weighted = (0.45 * score + 0.55 * runScore) * (1.0 + 0.45 * yRatio)
+            if runScore >= 0.78 && score >= 0.30 {
+                strongCandidates.append(y)
+            }
             if weighted > bestScore {
                 bestScore = weighted
                 bestY = y
             }
         }
+        if let lowestStrong = strongCandidates.max() {
+            // Reject suspiciously high separators (likely in-thread separator),
+            // keep only lower-region candidates close to the input boundary.
+            if Double(lowestStrong) / Double(max(height - 1, 1)) >= 0.62 {
+                return lowestStrong
+            }
+            return nil
+        }
         guard let y = bestY, bestScore >= 0.32 else { return nil }
+        if Double(y) / Double(max(height - 1, 1)) < 0.62 {
+            return nil
+        }
         return y
+    }
+
+    /// Pixel classifier for LINE input separator gray.
+    /// Tuned to prefer the fixed thin separator color over generic light-gray text.
+    private func isInputSeparatorGrayPixel(r: Int, g: Int, b: Int) -> Bool {
+        // Sampled separator is near neutral light gray. Keep chroma very low.
+        let maxC = max(r, max(g, b))
+        let minC = min(r, min(g, b))
+        let sat = maxC - minC
+        guard sat <= 9 else { return false }
+
+        // Fixed-color anchor around LINE separator gray.
+        // Use distance in RGB space so this stays robust across slight rendering differences.
+        let dr = r - 214
+        let dg = g - 214
+        let db = b - 214
+        let dist2 = dr * dr + dg * dg + db * db
+        return dist2 <= 26 * 26
     }
 
     /// Downsample image to 32x32 and compute FNV-1a hash for fast change detection.
