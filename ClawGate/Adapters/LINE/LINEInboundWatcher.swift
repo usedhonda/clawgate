@@ -43,6 +43,7 @@ final class LINEInboundWatcher {
     private var lastSeparatorAnchorY: Int?
     private var lastSeparatorAnchorConfidence: Int = 0
     private var lastSeparatorAnchorMethod: String = "none"
+    private var shouldSkipPollNoLine: Bool = false
 
     init(
         eventBus: EventBus,
@@ -207,6 +208,7 @@ final class LINEInboundWatcher {
             return
         }
 
+        shouldSkipPollNoLine = false
         var signals: [LineDetectionSignal] = []
 
         if let structuralSignal = collectStructuralSignal(chatList: chatList, lineWindowID: lineWindowID, conversation: windowTitle) {
@@ -214,8 +216,13 @@ final class LINEInboundWatcher {
         }
 
         guard shouldContinue(pollID: pollID) else { return }
-        if enablePixelSignal, let pixelSignal = collectPixelSignal(chatList: chatList, lineWindowID: lineWindowID, conversation: windowTitle) {
+        if enablePixelSignal, let pixelSignal = collectPixelSignal(chatList: chatList, nodes: nodes, windowFrame: AXQuery.copyFrameAttribute(window) ?? .zero, lineWindowID: lineWindowID, conversation: windowTitle) {
             signals.append(pixelSignal)
+        }
+
+        if shouldSkipPollNoLine {
+            logger.log(.debug, "LINEInboundWatcher: skipped frame because fixed separator line is missing")
+            return
         }
 
         if enableProcessSignal, let processSignal = collectProcessSignal(app: app, conversation: windowTitle) {
@@ -615,34 +622,49 @@ final class LINEInboundWatcher {
         }
     }
 
-    private func collectPixelSignal(chatList: AXUIElement, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
+    private func collectPixelSignal(chatList: AXUIElement, nodes: [AXNode], windowFrame: CGRect, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
         guard let chatListFrame = AXQuery.copyFrameAttribute(chatList) else { return nil }
+        guard windowFrame.width > 10, windowFrame.height > 10 else { return nil }
 
-        let bottomHalf = CGRect(
-            x: chatListFrame.origin.x,
-            y: chatListFrame.origin.y + chatListFrame.height / 2,
-            width: chatListFrame.width,
-            height: chatListFrame.height / 2
-        )
         let captureOptions: CGWindowListOption = lineWindowID != kCGNullWindowID
             ? .optionIncludingWindow : .optionOnScreenOnly
 
-        guard let image = CGWindowListCreateImage(bottomHalf, captureOptions, lineWindowID, [.bestResolution]) else {
+        guard let image = CGWindowListCreateImage(windowFrame, captureOptions, lineWindowID, [.bestResolution]) else {
             return nil
         }
-        let inboundHalf = computeInboundAnchorCrop(in: image, baseRect: bottomHalf)
+
+        guard let fixedAnchor = computeInboundAnchorCropFixed(in: image, windowFrame: windowFrame, messageAreaFrame: chatListFrame) else {
+            lastSeparatorAnchorY = nil
+            lastSeparatorAnchorConfidence = 0
+            lastSeparatorAnchorMethod = "none"
+            shouldSkipPollNoLine = true
+            maybeSaveOCRDebugArtifacts(
+                rawImage: image,
+                anchorRect: nil,
+                lineWindowID: lineWindowID,
+                conversation: conversation,
+                frameAction: "skipped_no_line"
+            )
+            return nil
+        }
+
+        lastSeparatorAnchorY = fixedAnchor.y
+        lastSeparatorAnchorConfidence = fixedAnchor.confidence
+        lastSeparatorAnchorMethod = fixedAnchor.method
+
         maybeSaveOCRDebugArtifacts(
             rawImage: image,
-            anchorRect: inboundHalf,
+            anchorRect: fixedAnchor.rect,
             lineWindowID: lineWindowID,
-            conversation: conversation
+            conversation: conversation,
+            frameAction: "processed"
         )
 
         let hash = computeImageHash(image)
 
         if !baselineCaptured {
             lastImageHash = hash
-            let baseline = burstInboundOCR(from: inboundHalf, windowID: lineWindowID)
+            let baseline = burstInboundOCR(from: fixedAnchor.rect, windowID: lineWindowID)
             lastOCRText = baseline.text
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
@@ -653,7 +675,7 @@ final class LINEInboundWatcher {
         let previousHash = lastImageHash
         lastImageHash = hash
 
-        let burst = burstInboundOCR(from: inboundHalf, windowID: lineWindowID)
+        let burst = burstInboundOCR(from: fixedAnchor.rect, windowID: lineWindowID)
         let pixelOCRText = burst.text
         let previousOCRText = lastOCRText
         let textChanged = pixelOCRText != previousOCRText
@@ -664,7 +686,6 @@ final class LINEInboundWatcher {
 
         return LineDetectionSignal(
             name: "pixel_diff",
-            // Allow pixel-only path to emit when structural AX signal is unstable.
             score: textChanged ? 62 : 35,
             text: textChanged ? LineTextSanitizer.sanitize(deltaText) : "",
             conversation: conversation,
@@ -675,6 +696,7 @@ final class LINEInboundWatcher {
                 "pixel_burst_delays_ms": burst.delaysDescription,
                 "pixel_burst_chars": burst.lengthsDescription,
                 "pixel_anchor_y": burst.anchorYDescription,
+                "frame_action": "processed",
             ]
         )
     }
@@ -806,71 +828,65 @@ final class LINEInboundWatcher {
         )
     }
 
-    private func computeInboundAnchorCrop(in image: CGImage, baseRect: CGRect) -> CGRect {
-        guard let anchor = detectLightGraySeparatorY(in: image) else {
-            lastSeparatorAnchorY = nil
-            lastSeparatorAnchorConfidence = 0
-            lastSeparatorAnchorMethod = "none"
-            logger.log(.debug, "LINEInboundWatcher: separator_anchor missing -> full inbound crop")
-            return CGRect(
-                x: baseRect.origin.x,
-                y: baseRect.origin.y,
-                width: baseRect.width * 0.90,
-                height: baseRect.height
-            )
-        }
-        lastSeparatorAnchorY = anchor.y
-        lastSeparatorAnchorConfidence = anchor.confidence
-        lastSeparatorAnchorMethod = anchor.method
-        logger.log(.debug, "LINEInboundWatcher: separator_anchor y=\(anchor.y) confidence=\(anchor.confidence)% method=\(anchor.method)")
+    private func computeInboundAnchorCrop(in image: CGImage, baseRect: CGRect, fallbackCutoffY: CGFloat? = nil) -> CGRect {
+        // Legacy structural path keeps previous crop behavior.
+        baseRect
+    }
 
-        // The separator we want is the thin gray line above the input area.
-        // OCR should target the message area ABOVE that line, not below.
-        // Keep only a tiny safety gap from the separator (just above input area).
-        // Keep a tiny margin BELOW the separator so glyph descenders near the boundary
-        // are not clipped out before OCR.
-        let maxY = baseRect.origin.y + CGFloat(anchor.y) + 6
-        let h = max(80, maxY - baseRect.origin.y)
-        // Safety fallback: if anchor crop became too short due to false separator pick,
-        // use a wider lower-half crop to avoid missing the newest inbound lines.
-        if h < baseRect.height * 0.38 {
-            logger.log(.debug, "LINEInboundWatcher: separator_anchor fallback short_h=\(Int(h)) base_h=\(Int(baseRect.height))")
-            return CGRect(
-                x: baseRect.origin.x,
-                y: baseRect.origin.y,
-                width: baseRect.width * 0.90,
-                height: baseRect.height
-            )
+    private func computeInboundAnchorCropFixed(in image: CGImage, windowFrame: CGRect, messageAreaFrame: CGRect) -> (rect: CGRect, y: Int, confidence: Int, method: String)? {
+        guard let anchor = detectFixedSeparatorLineY(in: image) else { return nil }
+
+        let cutoffY = windowFrame.origin.y + CGFloat(anchor.y) + 6
+        let minY = messageAreaFrame.origin.y
+        let maxY = min(cutoffY, messageAreaFrame.maxY)
+        let height = maxY - minY
+        guard height >= 120 else {
+            return nil
         }
-        return CGRect(
-            x: baseRect.origin.x,
-            y: baseRect.origin.y,
-            width: baseRect.width * 0.90,
-            height: h
+
+        return (
+            rect: CGRect(
+                x: messageAreaFrame.origin.x,
+                y: minY,
+                width: messageAreaFrame.width * 0.90,
+                height: height
+            ),
+            y: anchor.y,
+            confidence: anchor.confidence,
+            method: anchor.method
         )
     }
 
     private func maybeSaveOCRDebugArtifacts(
         rawImage: CGImage,
-        anchorRect: CGRect,
+        anchorRect: CGRect?,
         lineWindowID: CGWindowID,
-        conversation: String
+        conversation: String,
+        frameAction: String
     ) {
         guard logger.isDebugEnabled else { return }
 
-        let debug = VisionOCR.captureInboundDebugImages(from: anchorRect, windowID: lineWindowID)
+        let debug: (raw: CGImage, preprocessed: CGImage?)?
+        if let anchorRect {
+            debug = VisionOCR.captureInboundDebugImages(from: anchorRect, windowID: lineWindowID)
+        } else {
+            debug = nil
+        }
+
         let ts = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let eventID = "\(ts)_\(UUID().uuidString.prefix(8))"
         let meta: [String: String] = [
             "conversation": conversation,
-            "anchor_x": String(format: "%.0f", anchorRect.origin.x),
-            "anchor_y": String(format: "%.0f", anchorRect.origin.y),
-            "anchor_w": String(format: "%.0f", anchorRect.width),
-            "anchor_h": String(format: "%.0f", anchorRect.height),
+            "anchor_x": anchorRect.map { String(format: "%.0f", $0.origin.x) } ?? "",
+            "anchor_y": anchorRect.map { String(format: "%.0f", $0.origin.y) } ?? "",
+            "anchor_w": anchorRect.map { String(format: "%.0f", $0.width) } ?? "",
+            "anchor_h": anchorRect.map { String(format: "%.0f", $0.height) } ?? "",
             "separator_y": lastSeparatorAnchorY.map(String.init) ?? "",
             "separator_confidence": String(lastSeparatorAnchorConfidence),
             "separator_method": lastSeparatorAnchorMethod,
             "window_id": String(lineWindowID),
+            "frame_action": frameAction,
+            "line_found": anchorRect == nil ? "0" : "1",
         ]
         OCRDebugArtifactStore.saveEvent(
             eventID: eventID,
@@ -882,8 +898,8 @@ final class LINEInboundWatcher {
         )
     }
 
-    /// Detect a long thin light-gray separator row (e.g. unread separator) in the captured region.
-    private func detectLightGraySeparatorY(in image: CGImage) -> (y: Int, confidence: Int, method: String)? {
+    /// Detect fixed bottom separator line in LINE window coordinates.
+    private func detectFixedSeparatorLineY(in image: CGImage) -> (y: Int, confidence: Int, method: String)? {
         let width = image.width
         let height = image.height
         let bytesPerRow = width * 4
@@ -901,19 +917,23 @@ final class LINEInboundWatcher {
         }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // We only want the input-area separator near the bottom.
-        // Searching too high often locks onto in-thread separators and causes crop misses.
-        let minY = max(0, Int(Double(height) * 0.45))
-        let maxY = max(minY, Int(Double(height) * 0.97))
+        // Hard-coded search band for the input separator line.
+        let minY = max(0, Int(Double(height) * 0.86))
+        let maxY = min(height - 1, max(minY + 1, Int(Double(height) * 0.95)))
+        let minX = max(0, width - 100)
+        let maxX = width - 1
+        let spanWidth = max(1, maxX - minX + 1)
+
         var bestY: Int?
-        var bestScore = 0.0
-        var strongCandidates: [Int] = []
-        for y in minY..<maxY {
+        var bestRun = 0
+        var bestDensity = 0
+
+        for y in minY...maxY {
             let rowOffset = y * bytesPerRow
             var grayCount = 0
             var longestRun = 0
             var currentRun = 0
-            for x in 0..<width {
+            for x in minX...maxX {
                 let i = rowOffset + x * 4
                 let r = Int(buffer[i])
                 let g = Int(buffer[i + 1])
@@ -926,33 +946,25 @@ final class LINEInboundWatcher {
                     currentRun = 0
                 }
             }
-            let score = Double(grayCount) / Double(max(width, 1))
-            let runScore = Double(longestRun) / Double(max(width, 1))
-            let yRatio = Double(y) / Double(max(height - 1, 1))
-            // Prefer lower separators (input boundary) over mid-list separators.
-            let weighted = (0.45 * score + 0.55 * runScore) * (1.0 + 0.45 * yRatio)
-            if runScore >= 0.78 && score >= 0.30 {
-                strongCandidates.append(y)
-            }
-            if weighted > bestScore {
-                bestScore = weighted
+
+            if longestRun > bestRun || (longestRun == bestRun && grayCount > bestDensity) {
+                bestRun = longestRun
+                bestDensity = grayCount
                 bestY = y
             }
         }
-        if let lowestStrong = strongCandidates.max() {
-            // Reject suspiciously high separators (likely in-thread separator),
-            // keep only lower-region candidates close to the input boundary.
-            if Double(lowestStrong) / Double(max(height - 1, 1)) >= 0.62 {
-                return (lowestStrong, 96, "strong-run")
-            }
+
+        guard let y = bestY else { return nil }
+        let runRatio = Double(bestRun) / Double(spanWidth)
+        let densityRatio = Double(bestDensity) / Double(spanWidth)
+
+        // 1px separator: prioritize contiguous run in right-edge 100px lane.
+        guard bestRun >= 72, runRatio >= 0.72, densityRatio >= 0.30 else {
             return nil
         }
-        guard let y = bestY, bestScore >= 0.32 else { return nil }
-        if Double(y) / Double(max(height - 1, 1)) < 0.62 {
-            return nil
-        }
-        let confidence = max(0, min(95, Int((bestScore / 1.2) * 100.0)))
-        return (y, confidence, "weighted")
+
+        let confidence = max(1, min(99, Int((0.85 * runRatio + 0.15 * densityRatio) * 100.0)))
+        return (y, confidence, "fixed-band-right100")
     }
 
     /// Pixel classifier for LINE input separator gray.
@@ -966,11 +978,12 @@ final class LINEInboundWatcher {
 
         // Fixed-color anchor around LINE separator gray.
         // Use distance in RGB space so this stays robust across slight rendering differences.
-        let dr = r - 214
-        let dg = g - 214
-        let db = b - 214
+        if maxC < 178 || maxC > 245 { return false }
+        let dr = r - 222
+        let dg = g - 222
+        let db = b - 222
         let dist2 = dr * dr + dg * dg + db * db
-        return dist2 <= 26 * 26
+        return dist2 <= 34 * 34
     }
 
     /// Downsample image to 32x32 and compute FNV-1a hash for fast change detection.
