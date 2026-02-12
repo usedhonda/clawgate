@@ -799,8 +799,14 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   const optionsRaw = payload.question_options || "";
   const selectedIndex = parseInt(payload.question_selected || "0", 10);
   const questionId = payload.question_id || String(Date.now());
-  const mode = payload.mode || sessionModes.get(project) || "observe";
+  const mode = payload.mode || sessionModes.get(project) || "ignore";
   const tmuxTarget = payload.tmux_target || "";
+
+  // Guard: ignore-mode sessions must not be dispatched (defense against federation leaks)
+  if (mode === "ignore") {
+    log?.debug?.(`clawgate: [${accountId}] skipping question for "${project}" — mode=ignore`);
+    return;
+  }
 
   // Track session state
   sessionModes.set(project, mode);
@@ -934,8 +940,20 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   payload.trace_id = traceId;
   const project = payload.project || payload.conversation || "unknown";
   const text = payload.text || "(no output captured)";
-  const mode = payload.mode || sessionModes.get(project) || "observe"; // observe/auto/autonomous
+  const mode = payload.mode || sessionModes.get(project) || "ignore";
   const tmuxTarget = payload.tmux_target || "";
+
+  // Guard: ignore-mode sessions must not be dispatched (defense against federation leaks)
+  if (mode === "ignore") {
+    log?.debug?.(`clawgate: [${accountId}] skipping completion for "${project}" — mode=ignore`);
+    return;
+  }
+
+  // Guard: skip useless capture-failed completions — no point dispatching to AI
+  if (text === "(capture failed)" || text === "(no output captured)") {
+    log?.warn?.(`clawgate: [${accountId}] skipping completion dispatch for "${project}" — ${text}`);
+    return;
+  }
 
   // Track session state for roster
   sessionModes.set(project, mode);
