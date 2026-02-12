@@ -133,13 +133,14 @@ enum VisionOCR {
         var maskedCount = 0
         for y in stride(from: height - 1, through: 0, by: -1) {
             let offset = y * bytesPerRow + sampleX * 4
-            let r = buffer[offset]
-            let g = buffer[offset + 1]
-            let b = buffer[offset + 2]
+            let ri = Int(buffer[offset])
+            let gi = Int(buffer[offset + 1])
+            let bi = Int(buffer[offset + 2])
 
             // Same threshold as looksOutgoingBubbleColor:
             // g > 118 && g > r + 10 && g > b + 16
-            if g > 118, g > r &+ 10, g > b &+ 16 {
+            // Use Int to avoid UInt8 overflow on white/bright pixels.
+            if gi > 118, gi > ri + 10, gi > bi + 16 {
                 // White out the entire row (RGBA = 255,255,255,255)
                 let rowStart = y * bytesPerRow
                 for i in stride(from: rowStart, to: rowStart + bytesPerRow, by: 1) {
