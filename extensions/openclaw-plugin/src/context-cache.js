@@ -33,6 +33,12 @@ const sentHash = new Map();
 /** @type {Map<string, { text: string, timestamp: number }>} */
 const progressSnapshots = new Map();
 
+// ── Progress trail (accumulated for completion context) ──────────
+/** @type {Map<string, { entries: string[], timestamps: number[] }>} */
+const progressTrails = new Map();
+const MAX_TRAIL_ENTRIES = 10;
+const MAX_TRAIL_CHARS = 3000;
+
 /**
  * Resolve and cache the working directory for a project via tmux.
  * @param {string} project — project name
@@ -164,6 +170,52 @@ export function setProgressSnapshot(project, text) {
  */
 export function clearProgressSnapshot(project) {
   progressSnapshots.delete(project);
+}
+
+/**
+ * Append a progress entry to the trail for a project.
+ * Keeps last MAX_TRAIL_ENTRIES entries, total MAX_TRAIL_CHARS.
+ * @param {string} project
+ * @param {string} text
+ */
+export function appendProgressTrail(project, text) {
+  if (!text?.trim()) return;
+  let trail = progressTrails.get(project);
+  if (!trail) {
+    trail = { entries: [], timestamps: [] };
+    progressTrails.set(project, trail);
+  }
+  // Keep last 2 lines as summary of each progress snapshot
+  const summary = text.split("\n").filter(Boolean).slice(-2).join("\n");
+  trail.entries.push(summary);
+  trail.timestamps.push(Date.now());
+  while (trail.entries.length > MAX_TRAIL_ENTRIES) {
+    trail.entries.shift();
+    trail.timestamps.shift();
+  }
+}
+
+/**
+ * Get accumulated progress trail for a project.
+ * @param {string} project
+ * @returns {string|null}
+ */
+export function getProgressTrail(project) {
+  const trail = progressTrails.get(project);
+  if (!trail || !trail.entries.length) return null;
+  let result = trail.entries.join("\n---\n");
+  if (result.length > MAX_TRAIL_CHARS) {
+    result = "...(truncated)\n" + result.slice(-MAX_TRAIL_CHARS);
+  }
+  return result;
+}
+
+/**
+ * Clear accumulated progress trail (call after completion dispatch).
+ * @param {string} project
+ */
+export function clearProgressTrail(project) {
+  progressTrails.delete(project);
 }
 
 /**

@@ -36,6 +36,9 @@ import {
   registerProjectPath,
   resolveProjectPath,
   setProgressSnapshot,
+  appendProgressTrail,
+  getProgressTrail,
+  clearProgressTrail,
 } from "./context-cache.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
@@ -65,21 +68,9 @@ const sessionModes = new Map();
 /** @type {Map<string, string>} project -> status */
 const sessionStatuses = new Map();
 
-// ── Progress dispatch throttle ──────────────────────────────────
-// Limit how often progress events are forwarded to the AI (to avoid noise)
-const PROGRESS_DISPATCH_INTERVAL_MS = 60_000; // 60 seconds minimum between dispatches
-/** @type {Map<string, number>} project -> last dispatch timestamp */
-const lastProgressDispatch = new Map();
-
-function shouldDispatchProgress(project) {
-  const now = Date.now();
-  const last = lastProgressDispatch.get(project) || 0;
-  if (now - last >= PROGRESS_DISPATCH_INTERVAL_MS) {
-    lastProgressDispatch.set(project, now);
-    return true;
-  }
-  return false;
-}
+// ── Pairing guidance dedup (full guidance sent once per project) ──
+/** @type {Set<string>} */
+const guidanceSentProjects = new Set();
 
 function eventTimestamp(event) {
   const raw = event?.observed_at ?? event?.observedAt;
@@ -376,11 +367,12 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
   return result;
 }
 
-function buildPairingGuidance({ project = "", mode = "", eventKind = "" } = {}) {
+function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTime = false } = {}) {
   const proj = project || "current";
   const m = mode || "observe";
   const k = eventKind || "update";
   const header = `[Pairing Guidance] [CC ${proj}] Mode: ${m} | Event: ${k}`;
+  if (!firstTime) return header;
   return [
     header,
     "Think as a practical pair programmer:",
@@ -815,7 +807,9 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   }).join("\n");
 
   const body = `[CC ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
-  const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question" })}\n\n---\n\n${body}`;
+  const isFirstGuidance = !guidanceSentProjects.has(project);
+  const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question", firstTime: isFirstGuidance })}\n\n---\n\n${body}`;
+  if (isFirstGuidance) guidanceSentProjects.add(project);
 
   const ctx = {
     Body: guidedBody,
@@ -917,85 +911,6 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 }
 
 /**
- * Handle a tmux progress event: Claude Code is running and produced new output.
- * Dispatches a progress update to AI (throttled, read-only — no task sending).
- * @param {object} params
- */
-async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
-  const runtime = getRuntime();
-  const traceId = makeTraceId("tmux-progress", event);
-  const payload = event.payload ?? {};
-  payload.trace_id = traceId;
-  const project = payload.project || "unknown";
-  const text = payload.text || "(no output)";
-  const mode = payload.mode || sessionModes.get(project) || "observe";
-  const tmuxTarget = payload.tmux_target || "";
-
-  if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
-
-  const Mode = mode.charAt(0).toUpperCase() + mode.slice(1);
-  const baseBody = `[CC ${project}] [${Mode}] [PROGRESS UPDATE]\n\nClaude Code is currently running. Latest output:\n\n${text}`;
-  const body = `${buildPairingGuidance({ project, mode, eventKind: "progress" })}\n\n---\n\n${baseBody}`;
-
-  const ctx = {
-    Body: body,
-    RawBody: body,
-    CommandBody: body,
-    From: `tmux:${project}`,
-    To: `clawgate:${accountId}`,
-    SessionKey: `clawgate:${accountId}:tmux:${project}`,
-    AccountId: accountId,
-    ChatType: "direct",
-    Provider: "clawgate",
-    Surface: "clawgate",
-    ConversationLabel: defaultConversation || project,
-    SenderName: `Claude Code (${project})`,
-    SenderId: `tmux:${project}`,
-    MessageSid: String(event.id ?? Date.now()),
-    Timestamp: eventTimestamp(event),
-    CommandAuthorized: true,
-    OriginatingChannel: "clawgate",
-    OriginatingTo: defaultConversation || project,
-    _clawgateSource: "tmux_progress",
-    _tmuxMode: mode,
-  };
-
-  log?.info?.(`clawgate: [${accountId}] tmux progress from "${project}" (mode=${mode}): "${text.slice(0, 80)}"`);
-
-  // Progress updates are read-only — no task sending, just forward to LINE
-  const deliver = async (replyPayload) => {
-    const replyText = extractReplyText(replyPayload, log, "tmux_progress");
-    if (!replyText.trim()) return;
-
-    const lineText = normalizeLineReplyText(replyText, { project, eventKind: "progress" });
-    log?.info?.(`clawgate: [${accountId}] sending progress reply to LINE: "${lineText.slice(0, 80)}"`);
-    try {
-      await clawgateSend(apiUrl, defaultConversation || project, lineText, traceId);
-      recordPluginSend(lineText);
-    } catch (err) {
-      log?.error?.(`clawgate: [${accountId}] send progress reply to LINE failed: ${err}`);
-    }
-  };
-
-  try {
-    const dispatch = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
-    if (dispatch) {
-      await dispatch({
-        ctx,
-        cfg,
-        dispatcherOptions: {
-          deliver,
-          humanDelay: { mode: "off" },
-          onError: (err) => log?.error?.(`clawgate: progress dispatch error: ${err}`),
-        },
-      });
-    }
-  } catch (err) {
-    log?.error?.(`clawgate: [${accountId}] progress dispatch failed: ${err}`);
-  }
-}
-
-/**
  * Handle a tmux completion event: Claude Code finished a task.
  * Dispatches the completion summary to AI, which then reports to LINE.
  * @param {object} params
@@ -1049,6 +964,17 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     contextParts.push(`[Current State]\n${dynamic.envelope}`);
   }
 
+  // Include accumulated progress trail (what CC did between progress events)
+  const trail = getProgressTrail(project);
+  if (trail) {
+    contextParts.push(`[Execution Progress Trail]\n${trail}`);
+  }
+  clearProgressTrail(project);
+
+  const isFirstGuidance = !guidanceSentProjects.has(project);
+  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion", firstTime: isFirstGuidance }));
+  if (isFirstGuidance) guidanceSentProjects.add(project);
+
   let taskSummary;
   if (mode === "auto") {
     taskSummary = `[CC ${project}] [Auto]\n\nClaude Code output:\n\n${text}`;
@@ -1060,7 +986,6 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     taskSummary = `[CC ${project}]\n\nClaude Code completed a task:\n\n${text}`;
   }
 
-  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion" }));
   contextParts.push(taskSummary);
   const body = contextParts.join("\n\n---\n\n");
 
@@ -1265,21 +1190,13 @@ export async function startAccount(ctx) {
             }
           }
 
-          // Handle tmux progress events (output during running)
+          // Handle tmux progress events — accumulate only, no AI dispatch or LINE send
           if (event.adapter === "tmux" && event.payload?.source === "progress") {
             const proj = event.payload.project;
-            setProgressSnapshot(proj, event.payload.text || "");
+            const progressText = event.payload.text || "";
+            setProgressSnapshot(proj, progressText);
+            appendProgressTrail(proj, progressText);
             sessionStatuses.set(proj, "running");
-
-            // Dispatch progress to AI for non-ignore modes (throttled)
-            const progressMode = event.payload.mode || sessionModes.get(proj) || "ignore";
-            if (progressMode !== "ignore" && shouldDispatchProgress(proj)) {
-              try {
-                await handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConversation, log });
-              } catch (err) {
-                log?.error?.(`clawgate: [${accountId}] handleTmuxProgress failed: ${err}`);
-              }
-            }
             continue;
           }
 
