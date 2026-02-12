@@ -200,7 +200,7 @@ enum VisionOCR {
                 // Keep dark glyph strokes even when anti-aliased to dark gray.
                 // This reduces misses on long Japanese lines while gray UI timestamps
                 // are still removed by the explicit gray mask above.
-                let isDarkText = luminance <= 108 || (luminance <= 138 && sat >= 10)
+                let isDarkText = luminance <= 145 || (luminance <= 170 && sat >= 8)
                 if isDarkText {
                     buffer[i] = 0
                     buffer[i + 1] = 0
@@ -309,11 +309,14 @@ enum VisionOCR {
 
         let texts = observations.compactMap { observation -> String? in
             let candidates = observation.topCandidates(3)
-            if let accepted = candidates.first(where: { $0.confidence >= 0.34 }) {
+            if let accepted = candidates.first(where: { $0.confidence >= 0.40 }) {
                 return accepted.string
             }
-            // Keep best candidate as fallback to avoid dropping long/complex Japanese text.
-            return candidates.first?.string
+            // Keep best candidate as fallback only when confidence is reasonable.
+            if let best = candidates.first, best.confidence >= 0.25 {
+                return best.string
+            }
+            return nil
         }
         guard !texts.isEmpty else {
             return nil

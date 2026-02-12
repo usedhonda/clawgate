@@ -10,7 +10,7 @@ final class RecentSendTracker {
     private var entries: [(conversation: String, text: String, timestamp: Date)] = []
     private let windowSeconds: TimeInterval
 
-    init(windowSeconds: TimeInterval = 45.0) {
+    init(windowSeconds: TimeInterval = 120.0) {
         self.windowSeconds = windowSeconds
     }
 

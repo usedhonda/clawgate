@@ -190,6 +190,41 @@ final class BridgeCore {
         }
     }
 
+    func debugInject(body: Data) -> HTTPResult {
+        struct DebugInjectRequest: Codable {
+            let type: String?
+            let adapter: String?
+            let text: String
+            let conversation: String?
+        }
+        do {
+            let req = try jsonDecoder.decode(DebugInjectRequest.self, from: body)
+            let eventType = req.type ?? "inbound_message"
+            let adapter = req.adapter ?? "line"
+            var payload: [String: String] = ["text": req.text]
+            if let conv = req.conversation {
+                payload["conversation"] = conv
+            }
+            let event = eventBus.append(type: eventType, adapter: adapter, payload: payload)
+            logger.log(.info, "debug/inject: type=\(eventType) adapter=\(adapter) eventID=\(event.id)")
+            let result: [String: String] = [
+                "event_id": "\(event.id)",
+                "type": eventType,
+                "adapter": adapter,
+            ]
+            return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+        } catch {
+            let payload = ErrorPayload(
+                code: "invalid_json",
+                message: "Could not parse debug inject request",
+                retriable: false,
+                failedStep: "decode_request",
+                details: String(describing: error)
+            )
+            return jsonResponse(status: .badRequest, body: encode(APIResponse<[String: String]>(ok: false, result: nil, error: payload)))
+        }
+    }
+
     func opsLogs(limit: Int, level: String?, traceID: String?) -> HTTPResult {
         let entries = opsLogStore.recent(limit: limit, levelFilter: level, traceFilter: traceID)
         let result = OpsLogsResult(entries: entries, count: entries.count)

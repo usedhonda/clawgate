@@ -29,6 +29,7 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         (.GET, "/v1/axdump"),
         (.GET, "/v1/doctor"),
         (.GET, "/v1/events"),
+        (.POST, "/v1/debug/inject"),
     ]
 
     private var requestHead: HTTPRequestHead?
@@ -144,7 +145,9 @@ final class BridgeRequestHandler: ChannelInboundHandler {
         BlockingWork.queue.async { [self, core] in
             let result: HTTPResult
 
-            if method == .POST && path == "/v1/send" {
+            if method == .POST && path == "/v1/debug/inject" {
+                result = core.debugInject(body: bodyData)
+            } else if method == .POST && path == "/v1/send" {
                 let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
                 result = core.send(body: bodyData, traceID: traceID)
             } else if method == .GET && path == "/v1/context" {
