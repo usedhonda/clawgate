@@ -21,7 +21,7 @@ final class LINEInboundWatcher {
     private var activePollID: UUID?
     private var consecutiveTimeouts = 0
     private var skippedPollCount = 0
-    private let pollTimeoutSeconds: TimeInterval = 3.0
+    private let pollTimeoutSeconds: TimeInterval = 10.0
     private let resetAfterTimeoutStreak = 2
 
     /// Snapshot of chat row frames from last poll (sorted by Y coordinate)
@@ -102,6 +102,8 @@ final class LINEInboundWatcher {
     }
 
     func resetBaseline() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         lastRowSnapshot = []
         lastRowCount = 0
         lastImageHash = 0
@@ -220,11 +222,6 @@ final class LINEInboundWatcher {
             signals.append(pixelSignal)
         }
 
-        if shouldSkipPollNoLine {
-            logger.log(.debug, "LINEInboundWatcher: skipped frame because fixed separator line is missing")
-            return
-        }
-
         if enableProcessSignal, let processSignal = collectProcessSignal(app: app, conversation: windowTitle) {
             signals.append(processSignal)
         }
@@ -263,16 +260,19 @@ final class LINEInboundWatcher {
                     "LINEInboundWatcher: detection below threshold (score=\(decision.score), threshold=\(fusionEngine.threshold), signals=\(decision.signals.joined(separator: ",")))"
                 )
             }
+            savePipelineResult(decision: decision, sanitizedText: nil, dedupResult: "n/a", emitted: false)
             return
         }
 
         let filteredDecisionText = LineTextSanitizer.sanitize(decision.text)
         guard !filteredDecisionText.isEmpty else {
             logger.log(.debug, "LINEInboundWatcher: dropped empty/standalone-ui text after sanitize")
+            savePipelineResult(decision: decision, sanitizedText: "", dedupResult: "n/a", emitted: false)
             return
         }
         if shouldSuppressDuplicateInbound(text: filteredDecisionText, conversation: decision.conversation) {
             logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window")
+            savePipelineResult(decision: decision, sanitizedText: filteredDecisionText, dedupResult: "suppressed", emitted: false)
             return
         }
 
@@ -291,6 +291,7 @@ final class LINEInboundWatcher {
 
         _ = eventBus.append(type: decision.eventType, adapter: "line", payload: payload)
         logger.log(.debug, "LINEInboundWatcher: \(decision.eventType) via fusion score=\(decision.score), conf=\(decision.confidence), signals=\(decision.signals.joined(separator: ","))")
+        savePipelineResult(decision: decision, sanitizedText: filteredDecisionText, dedupResult: "passed", emitted: true)
     }
 
     private func emitFromSignal(_ signal: LineDetectionSignal) {
@@ -633,38 +634,28 @@ final class LINEInboundWatcher {
             return nil
         }
 
-        guard let fixedAnchor = computeInboundAnchorCropFixed(in: image, windowFrame: windowFrame, messageAreaFrame: chatListFrame) else {
-            lastSeparatorAnchorY = nil
-            lastSeparatorAnchorConfidence = 0
-            lastSeparatorAnchorMethod = "none"
-            shouldSkipPollNoLine = true
-            maybeSaveOCRDebugArtifacts(
-                rawImage: image,
-                anchorRect: nil,
-                lineWindowID: lineWindowID,
-                conversation: conversation,
-                frameAction: "skipped_no_line"
-            )
-            return nil
-        }
-
-        lastSeparatorAnchorY = fixedAnchor.y
-        lastSeparatorAnchorConfidence = fixedAnchor.confidence
-        lastSeparatorAnchorMethod = fixedAnchor.method
+        let fixedAnchor = computeInboundAnchorCropFixed(windowFrame: windowFrame, messageAreaFrame: chatListFrame)
+        stateLock.lock()
+        lastSeparatorAnchorY = Int(fixedAnchor.origin.y)
+        lastSeparatorAnchorConfidence = 99
+        lastSeparatorAnchorMethod = "fixed-ratio"
+        stateLock.unlock()
 
         maybeSaveOCRDebugArtifacts(
             rawImage: image,
-            anchorRect: fixedAnchor.rect,
+            anchorRect: fixedAnchor,
             lineWindowID: lineWindowID,
             conversation: conversation,
-            frameAction: "processed"
+            frameAction: "processed",
+            separatorConfidence: 99,
+            separatorMethod: "fixed-ratio"
         )
 
         let hash = computeImageHash(image)
 
         if !baselineCaptured {
             lastImageHash = hash
-            let baseline = burstInboundOCR(from: fixedAnchor.rect, windowID: lineWindowID)
+            let baseline = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
             lastOCRText = baseline.text
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
@@ -675,7 +666,7 @@ final class LINEInboundWatcher {
         let previousHash = lastImageHash
         lastImageHash = hash
 
-        let burst = burstInboundOCR(from: fixedAnchor.rect, windowID: lineWindowID)
+        let burst = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
         let pixelOCRText = burst.text
         let previousOCRText = lastOCRText
         let textChanged = pixelOCRText != previousOCRText
@@ -833,28 +824,40 @@ final class LINEInboundWatcher {
         baseRect
     }
 
-    private func computeInboundAnchorCropFixed(in image: CGImage, windowFrame: CGRect, messageAreaFrame: CGRect) -> (rect: CGRect, y: Int, confidence: Int, method: String)? {
-        guard let anchor = detectFixedSeparatorLineY(in: image) else { return nil }
-
-        let cutoffY = windowFrame.origin.y + CGFloat(anchor.y) + 6
-        let minY = messageAreaFrame.origin.y
-        let maxY = min(cutoffY, messageAreaFrame.maxY)
-        let height = maxY - minY
-        guard height >= 120 else {
-            return nil
-        }
-
-        return (
-            rect: CGRect(
-                x: messageAreaFrame.origin.x,
-                y: minY,
-                width: messageAreaFrame.width * 0.90,
-                height: height
-            ),
-            y: anchor.y,
-            confidence: anchor.confidence,
-            method: anchor.method
+    private func computeInboundAnchorCropFixed(windowFrame: CGRect, messageAreaFrame: CGRect) -> CGRect {
+        let inputMargin = messageAreaFrame.height * 0.12  // Input field + toolbar margin
+        let cropHeight = messageAreaFrame.height - inputMargin
+        guard cropHeight >= 120 else { return messageAreaFrame }  // Fallback to full area
+        return CGRect(
+            x: messageAreaFrame.origin.x,
+            y: messageAreaFrame.origin.y,
+            width: messageAreaFrame.width * 0.95,
+            height: cropHeight
         )
+    }
+
+    private func savePipelineResult(
+        decision: LineDetectionDecision,
+        sanitizedText: String?,
+        dedupResult: String,
+        emitted: Bool
+    ) {
+        guard logger.isDebugEnabled else { return }
+        let result: [String: String] = [
+            "ts": ISO8601DateFormatter().string(from: Date()),
+            "fusion_score": String(decision.score),
+            "fusion_threshold": String(fusionEngine.threshold),
+            "fusion_signals": decision.signals.joined(separator: ","),
+            "fusion_should_emit": String(decision.shouldEmit),
+            "sanitized_text": sanitizedText ?? "",
+            "dedup_result": dedupResult,
+            "emitted": String(emitted),
+            "conversation": decision.conversation,
+        ]
+        let url = URL(fileURLWithPath: "/tmp/clawgate-ocr-debug/latest-pipeline.json")
+        if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     private func maybeSaveOCRDebugArtifacts(
@@ -862,7 +865,9 @@ final class LINEInboundWatcher {
         anchorRect: CGRect?,
         lineWindowID: CGWindowID,
         conversation: String,
-        frameAction: String
+        frameAction: String,
+        separatorConfidence: Int = -1,
+        separatorMethod: String = "unset"
     ) {
         guard logger.isDebugEnabled else { return }
 
@@ -882,8 +887,8 @@ final class LINEInboundWatcher {
             "anchor_w": anchorRect.map { String(format: "%.0f", $0.width) } ?? "",
             "anchor_h": anchorRect.map { String(format: "%.0f", $0.height) } ?? "",
             "separator_y": lastSeparatorAnchorY.map(String.init) ?? "",
-            "separator_confidence": String(lastSeparatorAnchorConfidence),
-            "separator_method": lastSeparatorAnchorMethod,
+            "separator_confidence": String(separatorConfidence),
+            "separator_method": separatorMethod,
             "window_id": String(lineWindowID),
             "frame_action": frameAction,
             "line_found": anchorRect == nil ? "0" : "1",

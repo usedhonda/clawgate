@@ -106,6 +106,25 @@ else
   warn "doctor unavailable"
 fi
 
+log "S2.5 OCR artifact (binary check)"
+LATEST_META="$(ssh "$REMOTE_HOST" "ls -t /tmp/clawgate-ocr-debug/*/meta.json 2>/dev/null | head -1 | xargs cat 2>/dev/null" || true)"
+if [[ -n "$LATEST_META" ]]; then
+  SEP_METHOD="$(json_get "d.get('separator_method','')" "$LATEST_META" | tr -d '\r\n[:space:]')"
+  LINE_FOUND="$(json_get "d.get('line_found','')" "$LATEST_META" | tr -d '\r\n[:space:]')"
+  if [[ "$SEP_METHOD" == "fixed-ratio" ]]; then
+    pass "separator_method=fixed-ratio (new binary)"
+  else
+    warn "separator_method=$SEP_METHOD (old binary?)"
+  fi
+  if [[ "$LINE_FOUND" == "1" ]]; then
+    pass "line_found=1"
+  else
+    warn "line_found=$LINE_FOUND"
+  fi
+else
+  warn "no OCR debug artifacts found"
+fi
+
 if [[ -z "$SINCE_CURSOR" ]]; then
   BASE_POLL="$(remote_curl "/v1/poll?since=0" || true)"
   SINCE_CURSOR="$(json_get "d.get('next_cursor',0)" "$BASE_POLL")"
@@ -162,13 +181,55 @@ done
 
 if [[ -z "$FOUND_EVENT" ]]; then
   fail "no line inbound_message detected within ${WAIT_SECONDS}s"
+  log "S4.5 pipeline result (on failure)"
+  PIPELINE="$(ssh "$REMOTE_HOST" "cat /tmp/clawgate-ocr-debug/latest-pipeline.json 2>/dev/null" || true)"
+  if [[ -n "$PIPELINE" ]]; then
+    P_SCORE="$(json_get "d.get('fusion_score','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+    P_THRESH="$(json_get "d.get('fusion_threshold','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+    P_EMIT="$(json_get "d.get('fusion_should_emit','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+    P_SANITIZED="$(json_get "d.get('sanitized_text','')" "$PIPELINE" | tr -d '\r\n')"
+    P_DEDUP="$(json_get "d.get('dedup_result','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+    P_EMITTED="$(json_get "d.get('emitted','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+    P_SIGNALS="$(json_get "d.get('fusion_signals','')" "$PIPELINE" | tr -d '\r\n')"
+    echo "  score=$P_SCORE threshold=$P_THRESH should_emit=$P_EMIT"
+    echo "  signals=$P_SIGNALS"
+    echo "  sanitized_text=$P_SANITIZED"
+    echo "  dedup=$P_DEDUP emitted=$P_EMITTED"
+  else
+    warn "pipeline result not found (debug logging disabled?)"
+  fi
   exit 1
 fi
 
 pass "line inbound_message detected"
 echo "$FOUND_EVENT"
 
-log "S3 OpenClaw log trace"
+log "S4.5 pipeline result"
+PIPELINE="$(ssh "$REMOTE_HOST" "cat /tmp/clawgate-ocr-debug/latest-pipeline.json 2>/dev/null" || true)"
+if [[ -n "$PIPELINE" ]]; then
+  P_SCORE="$(json_get "d.get('fusion_score','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+  P_THRESH="$(json_get "d.get('fusion_threshold','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+  P_EMIT="$(json_get "d.get('fusion_should_emit','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+  P_SANITIZED="$(json_get "d.get('sanitized_text','')" "$PIPELINE" | tr -d '\r\n')"
+  P_DEDUP="$(json_get "d.get('dedup_result','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+  P_EMITTED="$(json_get "d.get('emitted','')" "$PIPELINE" | tr -d '\r\n[:space:]')"
+  P_SIGNALS="$(json_get "d.get('fusion_signals','')" "$PIPELINE" | tr -d '\r\n')"
+
+  echo "  score=$P_SCORE threshold=$P_THRESH should_emit=$P_EMIT"
+  echo "  signals=$P_SIGNALS"
+  echo "  sanitized_text=$P_SANITIZED"
+  echo "  dedup=$P_DEDUP emitted=$P_EMITTED"
+
+  if [[ "$P_EMITTED" == "true" ]]; then
+    pass "pipeline: emitted=true"
+  else
+    fail "pipeline: emitted=false (score=$P_SCORE, dedup=$P_DEDUP)"
+  fi
+else
+  warn "pipeline result not found (debug logging disabled?)"
+fi
+
+log "S5 OpenClaw log trace"
 REMOTE_LOG="$(ssh "$REMOTE_HOST" "tail -n $SHOW_LOG_LINES ~/.openclaw/logs/gateway.log 2>/dev/null || tail -n $SHOW_LOG_LINES ~/Library/Logs/openclaw/gateway.log 2>/dev/null || true")"
 if [[ -z "$REMOTE_LOG" ]]; then
   fail "gateway log not found"

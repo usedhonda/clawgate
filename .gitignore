@@ -11,3 +11,7 @@ plans/
 line-current-state.png
 ClawGate.app/
 .playwright-mcp/
+
+AGENTS.md
+CLAUDE.md
+docs/

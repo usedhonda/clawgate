@@ -84,7 +84,20 @@ fi
 echo "[4/4] Restart app"
 pkill -f "/Users/usedhonda/projects/Mac/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
 pkill -f "/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
-sleep 1
+
+# Wait for old process to fully exit (up to 5s, then SIGKILL)
+for ((w=1; w<=5; w++)); do
+  if ! pgrep -f "clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1; then
+    break
+  fi
+  if [[ $w -eq 5 ]]; then
+    echo "Old process still alive after 5s, sending SIGKILL"
+    pkill -9 -f "clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  sleep 1
+done
+
 open -na "$APP_PATH"
 sleep 2
 
