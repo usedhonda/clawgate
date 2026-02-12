@@ -5,7 +5,16 @@ set -euo pipefail
 # Run this on macmini local login session.
 
 PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
-KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-REDACTED}"
+if [ -z "${KEYCHAIN_PASSWORD:-}" ]; then
+  PW_FILE="$HOME/.local/secrets/keychain-password"
+  if [ -f "$PW_FILE" ]; then
+    KEYCHAIN_PASSWORD="$(cat "$PW_FILE")"
+  else
+    echo "Error: KEYCHAIN_PASSWORD not set and $PW_FILE not found." >&2
+    echo "Run: ./scripts/setup-keychain-password.sh" >&2
+    exit 1
+  fi
+fi
 CERT_NAME="ClawGate Dev"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
