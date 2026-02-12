@@ -172,21 +172,71 @@ export function clearProgressSnapshot(project) {
   progressSnapshots.delete(project);
 }
 
+// ── Progress noise filtering ─────────────────────────────────
+// tmux captures include Claude Code's status bar, separators, spinners, etc.
+// We strip these to keep only meaningful work descriptions.
+const PROGRESS_NOISE_PATTERNS = [
+  /[▁▂▃▄▅▆▇█░▒▓]{2,}/,         // bar chart / meters
+  /⏵⏵/,                          // mode indicator play buttons
+  /shift\+tab/i,                  // keyboard hint
+  /^[─━═\s]{3,}$/,               // separator lines
+  /\[Op\d/,                       // model indicator [Op4.6]
+  /accept edits/i,                // mode indicator text
+  /running stop hooks/i,          // internal CC lifecycle
+  /^\s*❯\s*[─━]*\s*$/,           // empty prompt line
+  /\[message_id:/i,               // internal tracking
+  /\d+[.\d]*[kK]\s*tokens?\s*·/i, // token stats
+  /^\s*[✢✳·]\s*(Mus|Synth|Think|Mosey)/i, // spinner-only lines
+  /^\s*C:\s*[█▒░]+/,             // context meter
+  /^\s*S:\s*[█▒░]+/,             // spending meter
+  /^\s*B:\s*[▁▂▃▄▅▆▇█]+/,       // bandwidth meter
+  /💬\d+/,                        // message count badge
+  /\d+[KMG]\/\d+[KMG]/,          // context size "81.2K/160K"
+  /^\s*\d+[hm]\d*[ms]?$/,        // duration "1h28m"
+  /ctrl\+o to expand/i,           // UI hint
+];
+
+function isProgressNoiseLine(line) {
+  const s = line.trim();
+  if (!s) return true;
+  if (s.length < 4) return true;
+  return PROGRESS_NOISE_PATTERNS.some((p) => p.test(s));
+}
+
+/**
+ * Extract meaningful lines from tmux progress text, stripping UI chrome.
+ * @param {string} text
+ * @returns {string}
+ */
+function extractMeaningfulProgress(text) {
+  if (!text) return "";
+  const lines = text.split("\n").filter(Boolean);
+  const meaningful = lines.filter((l) => !isProgressNoiseLine(l));
+  if (!meaningful.length) return "";
+  // Keep last 3 meaningful lines as a compact summary
+  return meaningful.slice(-3).join("\n");
+}
+
 /**
  * Append a progress entry to the trail for a project.
  * Keeps last MAX_TRAIL_ENTRIES entries, total MAX_TRAIL_CHARS.
+ * Only stores meaningful content (UI noise is stripped).
  * @param {string} project
  * @param {string} text
  */
 export function appendProgressTrail(project, text) {
   if (!text?.trim()) return;
+  const summary = extractMeaningfulProgress(text);
+  if (!summary) return; // all noise, skip
   let trail = progressTrails.get(project);
   if (!trail) {
     trail = { entries: [], timestamps: [] };
     progressTrails.set(project, trail);
   }
-  // Keep last 2 lines as summary of each progress snapshot
-  const summary = text.split("\n").filter(Boolean).slice(-2).join("\n");
+  // Dedup: skip if identical to the last entry
+  if (trail.entries.length > 0 && trail.entries[trail.entries.length - 1] === summary) {
+    return;
+  }
   trail.entries.push(summary);
   trail.timestamps.push(Date.now());
   while (trail.entries.length > MAX_TRAIL_ENTRIES) {

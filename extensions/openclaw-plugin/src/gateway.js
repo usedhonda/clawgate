@@ -372,15 +372,27 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
   const m = mode || "observe";
   const k = eventKind || "update";
   const header = `[Pairing Guidance] [CC ${proj}] Mode: ${m} | Event: ${k}`;
-  if (!firstTime) return header;
-  return [
-    header,
-    "Think as a practical pair programmer:",
-    "1) Summarize what changed and why it matters.",
-    "2) Call out one concrete risk or missing check if any.",
-    "3) Give next action in one short step (no long boilerplate).",
-    "4) If confidence is low, say what signal/log is missing.",
-  ].join("\n");
+  const parts = [header];
+
+  if (firstTime) {
+    parts.push(
+      "Think as a practical pair programmer:",
+      "1) Summarize what changed and why it matters.",
+      "2) Call out one concrete risk or missing check if any.",
+      "3) Give next action in one short step (no long boilerplate).",
+      "4) If confidence is low, say what signal/log is missing.",
+    );
+  }
+
+  // Completion events MUST produce a LINE reply — never NO_REPLY
+  if (k === "completion") {
+    parts.push(
+      "IMPORTANT: This is a completion event. You MUST reply with a brief summary (1-3 sentences) for LINE.",
+      "Do NOT use NO_REPLY. The user expects to see what CC accomplished.",
+    );
+  }
+
+  return parts.join("\n");
 }
 
 // ── Autonomous task chaining ──────────────────────────────────
