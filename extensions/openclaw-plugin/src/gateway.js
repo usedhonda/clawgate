@@ -370,8 +370,7 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
   if (project && !/^\[(CC|Claude Code)\b/.test(result)) {
-    const kind = eventKind.toUpperCase();
-    result = `[CC ${kind} ${project}] ${result}`;
+    result = `[CC ${project}] ${result}`;
   }
 
   return result;
@@ -860,9 +859,10 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
           log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
         }
       } else if (answerResult.lineText) {
+        const normalized = normalizeLineReplyText(answerResult.lineText, { project, eventKind: "question" });
         try {
-          await clawgateSend(apiUrl, defaultConversation || project, answerResult.lineText, traceId);
-          recordPluginSend(answerResult.lineText);
+          await clawgateSend(apiUrl, defaultConversation || project, normalized, traceId);
+          recordPluginSend(normalized);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
         }
@@ -878,7 +878,8 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
           const msg = `[Task send failed: ${taskResult.error.message || taskResult.error}]\n\n${taskResult.lineText}`;
           try { await clawgateSend(apiUrl, defaultConversation || project, msg, traceId); recordPluginSend(msg); } catch {}
         } else if (taskResult.lineText) {
-          try { await clawgateSend(apiUrl, defaultConversation || project, taskResult.lineText, traceId); recordPluginSend(taskResult.lineText); } catch {}
+          const normalized = normalizeLineReplyText(taskResult.lineText, { project, eventKind: "question" });
+          try { await clawgateSend(apiUrl, defaultConversation || project, normalized, traceId); recordPluginSend(normalized); } catch {}
         }
         return;
       }
@@ -1112,9 +1113,10 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         } else {
           // Task sent successfully — send remaining text to LINE (if any)
           if (result.lineText) {
+            const normalized = normalizeLineReplyText(result.lineText, { project, eventKind: "completion" });
             try {
-              await clawgateSend(apiUrl, defaultConversation || project, result.lineText, traceId);
-              recordPluginSend(result.lineText);
+              await clawgateSend(apiUrl, defaultConversation || project, normalized, traceId);
+              recordPluginSend(normalized);
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
             }
