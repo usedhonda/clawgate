@@ -178,41 +178,6 @@ enum VisionOCR {
                 }
             }
         }
-
-        // Final pass: binarize for OCR (black text / white background).
-        // Keep only truly dark glyphs; push mid-gray UI noise to white.
-        for y in 0..<height {
-            let rowOffset = y * bytesPerRow
-            for x in 0..<width {
-                let i = rowOffset + x * 4
-                let r = Int(buffer[i])
-                let g = Int(buffer[i + 1])
-                let b = Int(buffer[i + 2])
-                let maxC = max(r, max(g, b))
-                let minC = min(r, min(g, b))
-                let sat = maxC - minC
-                let luminance = (299 * r + 587 * g + 114 * b) / 1000
-
-                // Strict threshold:
-                // - very dark pixels are text
-                // - moderate luminance is text only when it has enough chroma/edge contrast
-                //   (avoids gray timestamp/read artifacts being interpreted as text)
-                // Keep dark glyph strokes even when anti-aliased to dark gray.
-                // This reduces misses on long Japanese lines while gray UI timestamps
-                // are still removed by the explicit gray mask above.
-                let isDarkText = luminance <= 145 || (luminance <= 170 && sat >= 8)
-                if isDarkText {
-                    buffer[i] = 0
-                    buffer[i + 1] = 0
-                    buffer[i + 2] = 0
-                } else {
-                    buffer[i] = 255
-                    buffer[i + 1] = 255
-                    buffer[i + 2] = 255
-                }
-            }
-        }
-
         return ctx.makeImage()
     }
 
