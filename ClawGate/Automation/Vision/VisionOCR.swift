@@ -66,16 +66,20 @@ enum VisionOCR {
         return image
     }
 
-    /// OCR on raw image with bounding-box filtering for inbound (left-side) text.
-    /// Vision bounding box is normalized (0-1), origin at bottom-left.
-    /// LINE inbound bubbles are left-aligned; outgoing bubbles are right-aligned.
+    /// OCR for inbound text with outgoing (green bubble) rows masked out.
+    /// Before OCR, scans the right edge of the image for green-tinted pixels
+    /// (LINE outgoing bubbles) and whites out those rows entirely.
+    /// This eliminates outgoing text at the pixel level, making bounding-box
+    /// filtering unnecessary.
     private static func performOCRInbound(on image: CGImage) -> String? {
+        let ocrImage = maskOutgoingRows(in: image) ?? image
+
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["ja-JP", "en-US"]
         request.usesLanguageCorrection = true
 
-        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        let handler = VNImageRequestHandler(cgImage: ocrImage, options: [:])
         do {
             try handler.perform([request])
         } catch {
@@ -85,8 +89,6 @@ enum VisionOCR {
         guard let observations = request.results else { return nil }
 
         let inboundTexts = observations.compactMap { obs -> String? in
-            // Skip observations whose horizontal center is on the right half (outgoing).
-            guard obs.boundingBox.midX < 0.55 else { return nil }
             let candidates = obs.topCandidates(3)
             if let accepted = candidates.first(where: { $0.confidence >= 0.40 }) {
                 return accepted.string
@@ -98,6 +100,59 @@ enum VisionOCR {
         }
         guard !inboundTexts.isEmpty else { return nil }
         return inboundTexts.joined(separator: "\n")
+    }
+
+    /// Mask outgoing (green bubble) rows by scanning the right edge column.
+    /// LINE outgoing bubbles are right-aligned, so a single pixel column near
+    /// the right edge reliably detects them. Detected rows are overwritten
+    /// with white pixels in-place before returning a new CGImage.
+    private static func maskOutgoingRows(in image: CGImage) -> CGImage? {
+        let width = image.width
+        let height = image.height
+        guard width > 32, height > 0 else { return nil }
+
+        let bytesPerRow = width * 4
+        var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
+        guard let ctx = CGContext(
+            data: &buffer,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        // Sample column near the right edge (offset inward to avoid border artifacts)
+        let sampleX = width - 16
+
+        // Scan bottom-to-top; CGContext has origin at top-left after draw
+        var maskedCount = 0
+        for y in stride(from: height - 1, through: 0, by: -1) {
+            let offset = y * bytesPerRow + sampleX * 4
+            let r = buffer[offset]
+            let g = buffer[offset + 1]
+            let b = buffer[offset + 2]
+
+            // Same threshold as looksOutgoingBubbleColor:
+            // g > 118 && g > r + 10 && g > b + 16
+            if g > 118, g > r &+ 10, g > b &+ 16 {
+                // White out the entire row (RGBA = 255,255,255,255)
+                let rowStart = y * bytesPerRow
+                for i in stride(from: rowStart, to: rowStart + bytesPerRow, by: 1) {
+                    buffer[i] = 255
+                }
+                maskedCount += 1
+            }
+        }
+
+        // No rows masked — return nil to use original image (avoids CGImage creation cost)
+        guard maskedCount > 0 else { return nil }
+
+        return ctx.makeImage()
     }
 
     private static func performOCR(on image: CGImage) -> String? {
