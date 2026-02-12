@@ -303,6 +303,98 @@ function traceLog(log, level, fields) {
   else log?.info?.(line);
 }
 
+function pickFirstNonEmptyText(value, depth = 0) {
+  if (depth > 4 || value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const text = pickFirstNonEmptyText(item, depth + 1);
+      if (text) return text;
+    }
+    return "";
+  }
+  if (typeof value === "object") {
+    const preferredKeys = [
+      "text",
+      "body",
+      "content",
+      "message",
+      "output",
+      "response",
+      "final",
+      "value",
+    ];
+    for (const key of preferredKeys) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        const text = pickFirstNonEmptyText(value[key], depth + 1);
+        if (text) return text;
+      }
+    }
+    for (const nested of Object.values(value)) {
+      const text = pickFirstNonEmptyText(nested, depth + 1);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+
+function extractReplyText(replyPayload, log, context = "reply") {
+  const directText = `${replyPayload?.text ?? ""}`.trim();
+  if (directText) return directText;
+
+  const directBody = `${replyPayload?.body ?? ""}`.trim();
+  if (directBody) return directBody;
+
+  const deep = pickFirstNonEmptyText(replyPayload);
+  if (deep) {
+    log?.debug?.(`clawgate: extracted ${context} text via deep payload traversal`);
+    return deep;
+  }
+
+  const keys = replyPayload && typeof replyPayload === "object"
+    ? Object.keys(replyPayload).slice(0, 10).join(",")
+    : typeof replyPayload;
+  log?.warn?.(`clawgate: empty ${context} text (payload keys/type=${keys || "none"})`);
+  return "";
+}
+
+function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}) {
+  const trimmed = `${text || ""}`.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  if (!trimmed) return "";
+
+  let result = trimmed
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/\s+\n/g, "\n")
+    .trim();
+
+  // Keep a compact prefix for tmux-origin messages so users can distinguish
+  // CC updates from normal LINE conversations at a glance.
+  if (project && !/^\[(CC|Claude Code)\b/.test(result)) {
+    const kind = eventKind.toUpperCase();
+    result = `[CC ${kind} ${project}] ${result}`;
+  }
+
+  return result;
+}
+
+function buildPairingGuidance({ project = "", mode = "", eventKind = "" } = {}) {
+  const header = `[Pairing Guidance for OpenClaw Agent]`;
+  const target = project ? `Project: ${project}` : "Project: current";
+  const modeLine = mode ? `Mode: ${mode}` : "Mode: observe";
+  const kindLine = eventKind ? `Event: ${eventKind}` : "Event: update";
+  return [
+    header,
+    target,
+    modeLine,
+    kindLine,
+    "Think as a practical pair programmer:",
+    "1) Summarize what changed and why it matters.",
+    "2) Call out one concrete risk or missing check if any.",
+    "3) Give next action in one short step (no long boilerplate).",
+    "4) If confidence is low, say what signal/log is missing.",
+  ].join("\n");
+}
+
 // ── Autonomous task chaining ──────────────────────────────────
 
 /**
@@ -585,7 +677,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
   const deliver = async (payload) => {
-    const text = payload.text || payload.body || "";
+    const text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
 
     // Try to extract <cc_answer> first (from AI reply to question)
@@ -626,7 +718,8 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       }
     }
 
-    log?.info?.(`clawgate: [${accountId}] sending reply to "${conversation}": "${text.slice(0, 80)}"`);
+    const lineText = normalizeLineReplyText(text);
+    log?.info?.(`clawgate: [${accountId}] sending reply to "${conversation}": "${lineText.slice(0, 80)}"`);
     traceLog(log, "info", {
       trace_id: traceId,
       stage: "gateway_forward_start",
@@ -635,8 +728,8 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       conversation,
     });
     try {
-      await clawgateSend(apiUrl, conversation, text, traceId);
-      recordPluginSend(text); // Track for echo suppression
+      await clawgateSend(apiUrl, conversation, lineText, traceId);
+      recordPluginSend(lineText); // Track for echo suppression
       traceLog(log, "info", {
         trace_id: traceId,
         stage: "gateway_forward_ok",
@@ -725,11 +818,12 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   }).join("\n");
 
   const body = `[Claude Code (${project}) is asking a question]\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
+  const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question" })}\n\n---\n\n${body}`;
 
   const ctx = {
-    Body: body,
-    RawBody: body,
-    CommandBody: body,
+    Body: guidedBody,
+    RawBody: guidedBody,
+    CommandBody: guidedBody,
     From: `tmux:${project}`,
     To: `clawgate:${accountId}`,
     SessionKey: `clawgate:${accountId}:tmux:${project}`,
@@ -753,7 +847,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   // Deliver reply — parse <cc_answer> and route answer, or forward to LINE
   const deliver = async (replyPayload) => {
-    const replyText = replyPayload.text || replyPayload.body || "";
+    const replyText = extractReplyText(replyPayload, log, "tmux_question");
     if (!replyText.trim()) return;
 
     // Try to extract <cc_answer> first
@@ -793,10 +887,11 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     }
 
     // Default: forward to LINE
-    log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${replyText.slice(0, 80)}"`);
+    const lineText = normalizeLineReplyText(replyText, { project, eventKind: "question" });
+    log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${lineText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, replyText, traceId);
-      recordPluginSend(replyText);
+      await clawgateSend(apiUrl, defaultConversation || project, lineText, traceId);
+      recordPluginSend(lineText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
     }
@@ -839,7 +934,8 @@ async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConver
 
   if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
 
-  const body = `[OpenClaw Agent - ${mode.charAt(0).toUpperCase() + mode.slice(1)}] [PROGRESS UPDATE]\n\nClaude Code (${project}) is currently running. Latest output:\n\n${text}`;
+  const baseBody = `[OpenClaw Agent - ${mode.charAt(0).toUpperCase() + mode.slice(1)}] [PROGRESS UPDATE]\n\nClaude Code (${project}) is currently running. Latest output:\n\n${text}`;
+  const body = `${buildPairingGuidance({ project, mode, eventKind: "progress" })}\n\n---\n\n${baseBody}`;
 
   const ctx = {
     Body: body,
@@ -868,13 +964,14 @@ async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConver
 
   // Progress updates are read-only — no task sending, just forward to LINE
   const deliver = async (replyPayload) => {
-    const replyText = replyPayload.text || replyPayload.body || "";
+    const replyText = extractReplyText(replyPayload, log, "tmux_progress");
     if (!replyText.trim()) return;
 
-    log?.info?.(`clawgate: [${accountId}] sending progress reply to LINE: "${replyText.slice(0, 80)}"`);
+    const lineText = normalizeLineReplyText(replyText, { project, eventKind: "progress" });
+    log?.info?.(`clawgate: [${accountId}] sending progress reply to LINE: "${lineText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, replyText, traceId);
-      recordPluginSend(replyText);
+      await clawgateSend(apiUrl, defaultConversation || project, lineText, traceId);
+      recordPluginSend(lineText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send progress reply to LINE failed: ${err}`);
     }
@@ -963,6 +1060,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     taskSummary = `[OpenClaw Agent]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
   }
 
+  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion" }));
   contextParts.push(taskSummary);
   const body = contextParts.join("\n\n---\n\n");
 
@@ -994,7 +1092,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Dispatch to AI — the AI will summarize and reply via LINE
   // In autonomous mode, parse <cc_task> tags and route tasks to Claude Code
   const deliver = async (replyPayload) => {
-    const replyText = replyPayload.text || replyPayload.body || "";
+    const replyText = extractReplyText(replyPayload, log, "tmux_completion");
     if (!replyText.trim()) return;
 
     // Autonomous/auto mode: try to extract and send <cc_task>
@@ -1029,10 +1127,11 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     }
 
     // Default: forward all to LINE
-    log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${replyText.slice(0, 80)}"`);
+    const lineText = normalizeLineReplyText(replyText, { project, eventKind: "completion" });
+    log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${lineText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, replyText, traceId);
-      recordPluginSend(replyText);
+      await clawgateSend(apiUrl, defaultConversation || project, lineText, traceId);
+      recordPluginSend(lineText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send tmux result to LINE failed: ${err}`);
     }
