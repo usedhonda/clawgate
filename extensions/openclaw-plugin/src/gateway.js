@@ -378,15 +378,12 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
 }
 
 function buildPairingGuidance({ project = "", mode = "", eventKind = "" } = {}) {
-  const header = `[Pairing Guidance for OpenClaw Agent]`;
-  const target = project ? `Project: ${project}` : "Project: current";
-  const modeLine = mode ? `Mode: ${mode}` : "Mode: observe";
-  const kindLine = eventKind ? `Event: ${eventKind}` : "Event: update";
+  const proj = project || "current";
+  const m = mode || "observe";
+  const k = eventKind || "update";
+  const header = `[Pairing Guidance] [CC ${proj}] Mode: ${m} | Event: ${k}`;
   return [
     header,
-    target,
-    modeLine,
-    kindLine,
     "Think as a practical pair programmer:",
     "1) Summarize what changed and why it matters.",
     "2) Call out one concrete risk or missing check if any.",
@@ -568,7 +565,8 @@ function buildRosterPrefix() {
     ? `\nTo answer a pending question, include <cc_answer project="name">{option number}</cc_answer> in your reply.`
     : "";
 
-  return `[Active Claude Code Projects]\n${roster}${taskHint}${answerHint}`;
+  const sessionCount = sessionModes.size;
+  return `[Active Claude Code Projects: ${sessionCount} session${sessionCount !== 1 ? "s" : ""}]\n${roster}${taskHint}${answerHint}`;
 }
 
 /**
@@ -817,7 +815,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     return `${marker} ${i + 1}. ${opt}`;
   }).join("\n");
 
-  const body = `[Claude Code (${project}) is asking a question]\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
+  const body = `[CC ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
   const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question" })}\n\n---\n\n${body}`;
 
   const ctx = {
@@ -934,7 +932,8 @@ async function handleTmuxProgress({ event, accountId, apiUrl, cfg, defaultConver
 
   if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
 
-  const baseBody = `[OpenClaw Agent - ${mode.charAt(0).toUpperCase() + mode.slice(1)}] [PROGRESS UPDATE]\n\nClaude Code (${project}) is currently running. Latest output:\n\n${text}`;
+  const Mode = mode.charAt(0).toUpperCase() + mode.slice(1);
+  const baseBody = `[CC ${project}] [${Mode}] [PROGRESS UPDATE]\n\nClaude Code is currently running. Latest output:\n\n${text}`;
   const body = `${buildPairingGuidance({ project, mode, eventKind: "progress" })}\n\n---\n\n${baseBody}`;
 
   const ctx = {
@@ -1051,13 +1050,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   let taskSummary;
   if (mode === "auto") {
-    taskSummary = `[OpenClaw Agent - Auto]\n\nClaude Code (${project}) output:\n\n${text}`;
+    taskSummary = `[CC ${project}] [Auto]\n\nClaude Code output:\n\n${text}`;
   } else if (mode === "observe") {
-    taskSummary = `[OpenClaw Agent - Observe]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+    taskSummary = `[CC ${project}] [Observe]\n\nClaude Code completed a task:\n\n${text}`;
   } else if (mode === "autonomous") {
-    taskSummary = `[OpenClaw Agent - Autonomous]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+    taskSummary = `[CC ${project}] [Autonomous]\n\nClaude Code completed a task:\n\n${text}`;
   } else {
-    taskSummary = `[OpenClaw Agent]\n\nClaude Code (${project}) completed a task:\n\n${text}`;
+    taskSummary = `[CC ${project}]\n\nClaude Code completed a task:\n\n${text}`;
   }
 
   contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion" }));
