@@ -634,7 +634,10 @@ final class LINEInboundWatcher {
             return nil
         }
 
-        let fixedAnchor = computeInboundAnchorCropFixed(windowFrame: windowFrame, messageAreaFrame: chatListFrame)
+        let inputFieldY = nodes.first(where: { $0.role == "AXTextArea" })
+            .flatMap { AXQuery.copyFrameAttribute($0.element) }
+            .map(\.origin.y)
+        let fixedAnchor = computeInboundAnchorCropFixed(windowFrame: windowFrame, messageAreaFrame: chatListFrame, inputFieldY: inputFieldY)
         stateLock.lock()
         lastSeparatorAnchorY = Int(fixedAnchor.origin.y)
         lastSeparatorAnchorConfidence = 99
@@ -824,14 +827,24 @@ final class LINEInboundWatcher {
         baseRect
     }
 
-    private func computeInboundAnchorCropFixed(windowFrame: CGRect, messageAreaFrame: CGRect) -> CGRect {
-        let inputMargin = messageAreaFrame.height * 0.12  // Input field + toolbar margin
-        let cropHeight = messageAreaFrame.height - inputMargin
-        guard cropHeight >= 120 else { return messageAreaFrame }  // Fallback to full area
+    /// Avatar icon width (measured 38px @1x + 2px margin).
+    private static let avatarLeftInset: CGFloat = 40
+
+    private func computeInboundAnchorCropFixed(windowFrame: CGRect, messageAreaFrame: CGRect, inputFieldY: CGFloat? = nil) -> CGRect {
+        let cropBottom: CGFloat
+        if let inputY = inputFieldY, inputY > messageAreaFrame.origin.y {
+            cropBottom = inputY  // Crop up to, but not including, the input field
+        } else {
+            cropBottom = messageAreaFrame.origin.y + messageAreaFrame.height
+        }
+        let cropX = messageAreaFrame.origin.x + Self.avatarLeftInset
+        let cropWidth = messageAreaFrame.width - Self.avatarLeftInset
+        let cropHeight = cropBottom - messageAreaFrame.origin.y
+        guard cropHeight >= 120, cropWidth >= 100 else { return messageAreaFrame }
         return CGRect(
-            x: messageAreaFrame.origin.x,
+            x: cropX,
             y: messageAreaFrame.origin.y,
-            width: messageAreaFrame.width * 0.95,
+            width: cropWidth,
             height: cropHeight
         )
     }
