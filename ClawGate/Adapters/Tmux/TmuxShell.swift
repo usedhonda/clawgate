@@ -65,6 +65,23 @@ enum TmuxShell {
         return try run(arguments: ["send-keys", "-t", target, key])
     }
 
+    /// Resolve a tty path to a tmux session:window.pane target.
+    /// Returns nil if the tty is not found in any tmux pane.
+    static func resolveTarget(tty: String) -> String? {
+        guard let output = try? run(arguments: [
+            "list-panes", "-a", "-F", "#{pane_tty} #{session_name}:#{window_index}.#{pane_index}"
+        ]) else { return nil }
+
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            if String(parts[0]) == tty {
+                return String(parts[1])
+            }
+        }
+        return nil
+    }
+
     // MARK: - Private
 
     private static func run(arguments: [String]) throws -> String {

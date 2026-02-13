@@ -21,6 +21,7 @@ final class TmuxInboundWatcher {
     private let eventBus: EventBus
     private let logger: AppLogger
     private let configStore: ConfigStore
+    private let sessionsFileWatcher: SessionsFileWatcher
 
     // Progress timer — emits running session output periodically
     private var progressTimer: DispatchSourceTimer?
@@ -28,33 +29,61 @@ final class TmuxInboundWatcher {
     private var lastProgressSummary: [String: String] = [:]
     private let progressInterval: TimeInterval = 20
 
+    // Dedup: prevent duplicate state transitions from both sources within a short window
+    private var recentTransitions: [String: Date] = [:]  // "project:old->new" -> timestamp
+    private let dedupWindowSeconds: TimeInterval = 3.0
+    private let dedupLock = NSLock()
+
     init(ccClient: CCStatusBarClient, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
         self.ccClient = ccClient
         self.eventBus = eventBus
         self.logger = logger
         self.configStore = configStore
+        self.sessionsFileWatcher = SessionsFileWatcher(configStore: configStore, logger: logger)
     }
 
     func start() {
         ccClient.onStateChange = { [weak self] session, oldStatus, newStatus in
-            self?.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus)
+            self?.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus, source: "ws")
         }
+        sessionsFileWatcher.onStateChange = { [weak self] session, oldStatus, newStatus in
+            self?.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus, source: "file")
+        }
+        sessionsFileWatcher.start()
         startProgressTimer()
-        logger.log(.info, "TmuxInboundWatcher: started")
+        logger.log(.info, "TmuxInboundWatcher: started (ws + file watcher)")
     }
 
     func stop() {
         ccClient.onStateChange = nil
+        sessionsFileWatcher.onStateChange = nil
+        sessionsFileWatcher.stop()
         stopProgressTimer()
         logger.log(.info, "TmuxInboundWatcher: stopped")
     }
 
     private func handleStateChange(session: CCStatusBarClient.CCSession,
-                                   oldStatus: String, newStatus: String) {
-        logger.log(.info, "TmuxInboundWatcher: handleStateChange \(session.project) \(oldStatus) -> \(newStatus) waitingReason=\(session.waitingReason ?? "nil")")
+                                   oldStatus: String, newStatus: String,
+                                   source: String = "ws") {
+        // Dedup: skip if the same transition was processed recently from another source
+        let dedupKey = "\(session.project):\(oldStatus)->\(newStatus)"
+        dedupLock.lock()
+        let now = Date()
+        if let lastTime = recentTransitions[dedupKey],
+           now.timeIntervalSince(lastTime) < dedupWindowSeconds {
+            dedupLock.unlock()
+            debugLog("DEDUP skip \(dedupKey) source=\(source)")
+            return
+        }
+        recentTransitions[dedupKey] = now
+        // Prune old entries
+        recentTransitions = recentTransitions.filter { now.timeIntervalSince($0.value) < dedupWindowSeconds * 2 }
+        dedupLock.unlock()
+
+        logger.log(.info, "TmuxInboundWatcher: handleStateChange \(session.project) \(oldStatus) -> \(newStatus) source=\(source) waitingReason=\(session.waitingReason ?? "nil")")
         let scPath = "/tmp/clawgate-statechange.log"
         let scExisting = (try? String(contentsOfFile: scPath, encoding: .utf8)) ?? ""
-        let scLine = "\(Date()) handleStateChange \(session.project) \(oldStatus)->\(newStatus) mode=\(configStore.load().tmuxSessionModes[session.project] ?? "nil") waitingReason=\(session.waitingReason ?? "nil") tmux=\(session.tmuxTarget ?? "nil")\n"
+        let scLine = "\(Date()) handleStateChange \(session.project) \(oldStatus)->\(newStatus) source=\(source) mode=\(configStore.load().tmuxSessionModes[session.project] ?? "nil") waitingReason=\(session.waitingReason ?? "nil") tmux=\(session.tmuxTarget ?? "nil")\n"
         try? (scExisting + scLine).write(toFile: scPath, atomically: true, encoding: .utf8)
         // Check session mode — ignore sessions are skipped
         let config = configStore.load()
