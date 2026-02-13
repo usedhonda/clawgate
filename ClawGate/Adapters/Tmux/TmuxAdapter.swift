@@ -44,19 +44,26 @@ final class TmuxAdapter: AdapterProtocol {
             )
         }
 
-        // Check session mode — only autonomous can send
+        // Check session mode — only autonomous/auto can send
         let mode = sessionMode(for: project)
         guard mode == "autonomous" || mode == "auto" else {
-            let errorCode = mode == "observe" ? "session_read_only" : "session_not_allowed"
-            let errorMsg = mode == "observe"
-                ? "Session '\(project)' is in observe mode (read-only)"
-                : "Session '\(project)' is not enabled"
+            if mode == "observe" {
+                throw BridgeRuntimeError(
+                    code: "session_read_only",
+                    message: "Session '\(project)' is in observe mode (read-only)",
+                    retriable: false,
+                    failedStep: "resolve_target",
+                    details: "mode=\(mode)"
+                )
+            }
+            // ignore / unknown → treat as "not found" so Federation fallback can route to the correct host
+            logger.log(.info, "Session '\(project)' mode=\(mode) — not authoritative, returning session_not_found for federation routing")
             throw BridgeRuntimeError(
-                code: errorCode,
-                message: errorMsg,
-                retriable: false,
+                code: "session_not_found",
+                message: "Session '\(project)' is not authoritative on this host",
+                retriable: true,
                 failedStep: "resolve_target",
-                details: "mode=\(mode)"
+                details: "mode=\(mode), federation_eligible=true"
             )
         }
 
