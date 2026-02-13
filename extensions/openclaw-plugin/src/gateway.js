@@ -39,6 +39,9 @@ import {
   appendProgressTrail,
   getProgressTrail,
   clearProgressTrail,
+  setTaskGoal,
+  getTaskGoal,
+  clearTaskGoal,
 } from "./context-cache.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
@@ -371,24 +374,57 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
   const proj = project || "current";
   const m = mode || "observe";
   const k = eventKind || "update";
-  const header = `[Pairing Guidance] [CC ${proj}] Mode: ${m} | Event: ${k}`;
-  const parts = [header];
+  const parts = [];
 
   if (firstTime) {
     parts.push(
-      "Think as a practical pair programmer:",
-      "1) Summarize what changed and why it matters.",
-      "2) Call out one concrete risk or missing check if any.",
-      "3) Give next action in one short step (no long boilerplate).",
-      "4) If confidence is low, say what signal/log is missing.",
+      `[Pair Programming Role] [CC ${proj}] Mode: ${m}`,
+      "",
+      `You are the senior pair programmer reviewing Claude Code's work on ${proj}.`,
+      "Your job is NOT to summarize -- the user can read summaries themselves.",
+      "Your job IS to catch problems, assess quality, and steer direction.",
+      "",
+      "Review Checklist:",
+      "1. GOAL ALIGNMENT: Does the completion match the task goal? Flag drift.",
+      "2. SCOPE: Did CC touch more files than necessary? Flag scope creep.",
+      "3. RISK: Deleted code, changed APIs, missing error handling, untested paths?",
+      "4. ARCHITECTURE: Does the change fit the project's patterns (CLAUDE.md/SPEC.md)?",
+      "5. MISSING: Tests? Docs? Edge cases? Migration steps?",
+      "",
+      "Reply Format (for LINE -- be concise, 3-8 lines):",
+      "[Status] One-line verdict",
+      "- Key observation",
+      "- Risk or missing item (if any)",
+      "- Next step recommendation",
+      "",
+      "Status: OK / Concern / Problem",
+      "",
+      "Mode Behavior:",
+      "- AUTONOMOUS: After review, design the next task in <cc_task>.",
+      "- OBSERVE: Review only. Report to user. Never send tasks.",
+      "- AUTO: Quality gate. Only flag problems or drift.",
+      "",
+      "DO NOT: repeat commit messages, say \"CC completed...\", give generic praise, produce walls of text.",
+      "MUST: Always reply (never NO_REPLY).",
     );
   }
 
-  // Completion events MUST produce a LINE reply — never NO_REPLY
+  // Per-event guidance
   if (k === "completion") {
+    parts.push(`[Event: Completion] Compare task goal vs result. Review output.`);
+    if (m === "autonomous") {
+      parts.push("After review, design the next strategic task in <cc_task>.");
+    } else if (m === "observe") {
+      parts.push("Review and report to user. Do not send tasks.");
+    } else if (m === "auto") {
+      parts.push("Quality gate: only flag problems or drift.");
+    }
+    parts.push("MUST reply -- never NO_REPLY.");
+  } else if (k === "question") {
     parts.push(
-      "IMPORTANT: This is a completion event. You MUST reply with a brief summary (1-3 sentences) for LINE.",
-      "Do NOT use NO_REPLY. The user expects to see what CC accomplished.",
+      "[Event: Question] Evaluate the options.",
+      "If you can determine the right answer, use <cc_answer>.",
+      "If unsure, forward the question to the user with your recommendation.",
     );
   }
 
@@ -423,6 +459,7 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log 
     const result = await clawgateTmuxSend(apiUrl, project, prefixedTask, traceId);
     if (result?.ok) {
       log?.info?.(`clawgate: task sent to CC (${project}): "${taskText.slice(0, 80)}"`);
+      setTaskGoal(project, taskText);
       return { lineText, taskText };
     } else {
       const errMsg = result?.error || "unknown error";
@@ -990,6 +1027,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     );
   }
 
+  // Task goal (what Chi asked CC to do — enables goal vs result comparison)
+  const taskGoal = getTaskGoal(project);
+  if (taskGoal) {
+    contextParts.push(`[Task Goal]\n${taskGoal}`);
+  }
+  clearTaskGoal(project);
+
   if (dynamic && dynamic.envelope) {
     contextParts.push(`[Current State]\n${dynamic.envelope}`);
   }
@@ -1005,18 +1049,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion", firstTime: isFirstGuidance }));
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
-  let taskSummary;
-  if (mode === "auto") {
-    taskSummary = `[CC ${project}] [Auto]\n\nClaude Code output:\n\n${text}`;
-  } else if (mode === "observe") {
-    taskSummary = `[CC ${project}] [Observe]\n\nClaude Code completed a task:\n\n${text}`;
-  } else if (mode === "autonomous") {
-    taskSummary = `[CC ${project}] [Autonomous]\n\nClaude Code completed a task:\n\n${text}`;
-  } else {
-    taskSummary = `[CC ${project}]\n\nClaude Code completed a task:\n\n${text}`;
-  }
-
-  contextParts.push(taskSummary);
+  contextParts.push(`[CC ${project}] [${mode}] Completion Output:\n\n${text}`);
   const body = contextParts.join("\n\n---\n\n");
 
   const ctx = {

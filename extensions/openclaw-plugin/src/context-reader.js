@@ -15,7 +15,7 @@ import { execSync } from "node:child_process";
 import { join, basename } from "node:path";
 
 const MAX_STABLE_CHARS = 12000;
-const MAX_ENVELOPE_CHARS = 1500;
+const MAX_ENVELOPE_CHARS = 2500;
 const MAX_FILE_CHARS = 4000;
 const MAX_LOG_CHARS = 300;
 const CONTEXT_FILES = ["CLAUDE.md", "AGENTS.md", "README.md"];
@@ -81,6 +81,28 @@ function getGitInfo(projectPath) {
       result += `\nRecent commits:\n${log}`;
     }
     return result;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Get git diff --stat for the most recent commit.
+ * Shows which files changed and how many lines were added/removed.
+ * @param {string} projectPath
+ * @returns {string}
+ */
+function getGitDiffStat(projectPath) {
+  try {
+    const stat = execSync("git diff --stat HEAD~1 HEAD", {
+      cwd: projectPath,
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (!stat) return "";
+    // Cap at 500 chars to avoid blowing the envelope budget
+    return stat.length <= 500 ? stat : stat.slice(0, 500) + "\n... (truncated)";
   } catch {
     return "";
   }
@@ -283,6 +305,16 @@ export function buildDynamicEnvelope(projectPath) {
   if (gitInfo) {
     parts.push(gitInfo);
     totalChars += gitInfo.length;
+  }
+
+  // Git diff stat (what changed in the last commit)
+  if (totalChars < MAX_ENVELOPE_CHARS) {
+    const diffStat = getGitDiffStat(projectPath);
+    if (diffStat) {
+      const section = `Last commit diff:\n${diffStat}`;
+      parts.push(section);
+      totalChars += section.length;
+    }
   }
 
   // Recent work logs

@@ -33,11 +33,15 @@ const sentHash = new Map();
 /** @type {Map<string, { text: string, timestamp: number }>} */
 const progressSnapshots = new Map();
 
+// ── Task goal tracking (remembers what Chi asked CC to do) ────
+/** @type {Map<string, string>} project -> task goal text */
+const taskGoals = new Map();
+
 // ── Progress trail (accumulated for completion context) ──────────
 /** @type {Map<string, { entries: string[], timestamps: number[] }>} */
 const progressTrails = new Map();
-const MAX_TRAIL_ENTRIES = 10;
-const MAX_TRAIL_CHARS = 3000;
+const MAX_TRAIL_ENTRIES = 6;
+const MAX_TRAIL_CHARS = 2000;
 
 /**
  * Resolve and cache the working directory for a project via tmux.
@@ -266,6 +270,34 @@ export function getProgressTrail(project) {
  */
 export function clearProgressTrail(project) {
   progressTrails.delete(project);
+}
+
+/**
+ * Store the task goal that Chi sent to CC via <cc_task>.
+ * Used at completion time to compare goal vs result.
+ * @param {string} project
+ * @param {string} goalText
+ */
+export function setTaskGoal(project, goalText) {
+  if (!goalText?.trim()) return;
+  taskGoals.set(project, goalText.trim());
+}
+
+/**
+ * Get the current task goal for a project (if any).
+ * @param {string} project
+ * @returns {string|null}
+ */
+export function getTaskGoal(project) {
+  return taskGoals.get(project) || null;
+}
+
+/**
+ * Clear the task goal (e.g. after completion dispatch).
+ * @param {string} project
+ */
+export function clearTaskGoal(project) {
+  taskGoals.delete(project);
 }
 
 /**
