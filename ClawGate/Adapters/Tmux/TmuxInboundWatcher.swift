@@ -51,24 +51,66 @@ final class TmuxInboundWatcher {
 
     private func handleStateChange(session: CCStatusBarClient.CCSession,
                                    oldStatus: String, newStatus: String) {
+        logger.log(.info, "TmuxInboundWatcher: handleStateChange \(session.project) \(oldStatus) -> \(newStatus) waitingReason=\(session.waitingReason ?? "nil")")
+        let scPath = "/tmp/clawgate-statechange.log"
+        let scExisting = (try? String(contentsOfFile: scPath, encoding: .utf8)) ?? ""
+        let scLine = "\(Date()) handleStateChange \(session.project) \(oldStatus)->\(newStatus) mode=\(configStore.load().tmuxSessionModes[session.project] ?? "nil") waitingReason=\(session.waitingReason ?? "nil") tmux=\(session.tmuxTarget ?? "nil")\n"
+        try? (scExisting + scLine).write(toFile: scPath, atomically: true, encoding: .utf8)
         // Check session mode — ignore sessions are skipped
         let config = configStore.load()
         let mode = config.tmuxSessionModes[session.project] ?? "ignore"
 
+        // Bootstrap: synthetic state change from CCStatusBarClient startup.
+        // Always go through captureAndEmit (skip permission auto-approve which may be stale).
+        if oldStatus == "bootstrap" && newStatus == "waiting_input" {
+            debugLog("bootstrap for \(session.project) mode=\(mode) waitingReason=\(session.waitingReason ?? "nil")")
+            guard mode == "observe" || mode == "auto" || mode == "autonomous" else {
+                debugLog("bootstrap SKIP \(session.project) (mode=\(mode))")
+                return
+            }
+            BlockingWork.queue.async { [weak self] in
+                Thread.sleep(forTimeInterval: 0.2)
+                self?.captureAndEmit(session: session, mode: mode)
+            }
+            return
+        }
+
         // Permission prompt auto-approval (autonomous only)
         if newStatus == "waiting_input" && session.waitingReason == "permission_prompt" {
+            debugLog("permission_prompt detected for \(session.project) mode=\(mode)")
             guard mode == "autonomous" || mode == "auto" else { return }
             BlockingWork.queue.async { [weak self] in
-                self?.autoApprovePermission(session: session)
+                guard let self else { return }
+                Thread.sleep(forTimeInterval: 0.2)
+                // Try pane detection first — cc-status-bar sometimes reports
+                // AskUserQuestion as "permission_prompt".
+                if let target = session.tmuxTarget {
+                    do {
+                        let rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
+                        if let question = self.detectQuestion(from: rawOutput) {
+                            self.debugLog("permission_prompt -> actually question (\(question.options.count) opts)")
+                            self.autoAnswerQuestion(session: session, question: question, target: target)
+                            return
+                        }
+                    } catch {
+                        self.debugLog("permission_prompt capture failed: \(error)")
+                    }
+                }
+                // No question detected — real permission prompt, send "y"
+                self.debugLog("permission_prompt -> autoApprove (y)")
+                self.autoApprovePermission(session: session)
             }
             return
         }
 
         // Task completion or question: running -> waiting_input (but NOT permission prompt)
-        guard oldStatus == "running" && newStatus == "waiting_input" else { return }
+        guard oldStatus == "running" && newStatus == "waiting_input" else {
+            logger.log(.debug, "TmuxInboundWatcher: skipping \(session.project) (guard: oldStatus=\(oldStatus), newStatus=\(newStatus))")
+            return
+        }
 
         guard mode == "observe" || mode == "auto" || mode == "autonomous" else {
-            logger.log(.debug, "TmuxInboundWatcher: ignoring \(session.project) (mode=ignore)")
+            logger.log(.debug, "TmuxInboundWatcher: ignoring \(session.project) (mode=\(mode))")
             return
         }
 
@@ -155,8 +197,34 @@ final class TmuxInboundWatcher {
 
     // MARK: - Auto-Answer (auto mode)
 
+    /// Answer a single question step, then check for follow-up wizard steps.
+    /// Multi-step wizards (AskUserQuestion with tabs) keep the session in waiting_input
+    /// without triggering a state change, so we retry after each answer.
     private func autoAnswerQuestion(session: CCStatusBarClient.CCSession,
                                     question: DetectedQuestion, target: String) {
+        answerSingleQuestion(question: question, target: target, project: session.project)
+
+        // Multi-step wizard retry: after answering, re-check for next step.
+        // Max 10 steps to avoid infinite loops.
+        for step in 1...10 {
+            Thread.sleep(forTimeInterval: 1.5)
+            do {
+                let rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
+                if let nextQuestion = detectQuestion(from: rawOutput) {
+                    debugLog("wizard step \(step): \(nextQuestion.options.count) opts")
+                    answerSingleQuestion(question: nextQuestion, target: target, project: session.project)
+                } else {
+                    debugLog("wizard step \(step): no more questions")
+                    break
+                }
+            } catch {
+                debugLog("wizard step \(step): capture failed: \(error)")
+                break
+            }
+        }
+    }
+
+    private func answerSingleQuestion(question: DetectedQuestion, target: String, project: String) {
         let keywords = ["(recommended)", "don't ask", "always", "yes", "ok", "proceed", "approve"]
         let keyDelay: TimeInterval = 0.05
 
@@ -184,15 +252,26 @@ final class TmuxInboundWatcher {
                 }
             }
             try TmuxShell.sendSpecialKey(target: target, key: "Enter")
-            logger.log(.info, "TmuxInboundWatcher: auto-answered for \(session.project): "
+            debugLog("answered \(project): option[\(bestIndex)]=\(question.options[bestIndex])")
+            logger.log(.info, "TmuxInboundWatcher: auto-answered for \(project): "
                         + "option[\(bestIndex)]=\(question.options[bestIndex])")
         } catch {
             logger.log(.warning, "TmuxInboundWatcher: auto-answer failed: \(error)")
         }
     }
 
+    private func debugLog(_ line: String) {
+        let path = "/tmp/clawgate-captureAndEmit.log"
+        let existing = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        let entry = "\(Date()) \(line)\n"
+        try? (existing + entry).write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
     private func captureAndEmit(session: CCStatusBarClient.CCSession, mode: String) {
+        debugLog("START project=\(session.project) mode=\(mode) tmuxTarget=\(session.tmuxTarget ?? "nil")")
+
         guard let target = session.tmuxTarget else {
+            debugLog("BAIL: no tmux target")
             logger.log(.warning, "TmuxInboundWatcher: no tmux target for \(session.project)")
             return
         }
@@ -200,13 +279,16 @@ final class TmuxInboundWatcher {
         var rawOutput: String
         do {
             rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
+            debugLog("capturePane OK len=\(rawOutput.count)")
         } catch {
+            debugLog("capturePane FAILED: \(error)")
             logger.log(.warning, "TmuxInboundWatcher: capture-pane failed for \(target): \(error)")
             rawOutput = ""
         }
 
         // Try to detect AskUserQuestion menu
         if let question = detectQuestion(from: rawOutput) {
+            debugLog("question detected: \(question.options.count) options")
             // Auto mode: answer locally without sending to Chi
             if mode == "auto" {
                 autoAnswerQuestion(session: session, question: question, target: target)
@@ -236,8 +318,10 @@ final class TmuxInboundWatcher {
         }
 
         // Normal completion.
+        debugLog("no question detected, entering completion path")
         // If capture fails/empty at completion boundary, fallback to latest progress summary.
         var outputSummary = rawOutput.isEmpty ? "" : extractSummary(from: rawOutput)
+        debugLog("extractSummary len=\(outputSummary.count) empty=\(outputSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)")
         let captureState: String
         if !outputSummary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             captureState = "pane"
@@ -245,13 +329,20 @@ final class TmuxInboundWatcher {
                   !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             outputSummary = fallback
             captureState = "progress_fallback"
+        } else if mode == "auto" {
+            // Auto mode: emit even when capture is empty (bootstrap / idle at prompt).
+            // Chi will recognize idle state and send "continue".
+            outputSummary = "(idle at prompt — no recent output captured)"
+            captureState = "idle_bootstrap"
         } else {
+            debugLog("BAIL: empty capture, no fallback, mode=\(mode)")
             logger.log(.warning, "TmuxInboundWatcher: capture failed for \(session.project), skipping emit")
             lastProgressHash.removeValue(forKey: session.project)
             lastProgressSummary.removeValue(forKey: session.project)
             return
         }
 
+        debugLog("emitting completion: captureState=\(captureState) summaryLen=\(outputSummary.count)")
         let eventID = UUID().uuidString
         let payload: [String: String] = [
             "conversation": session.project,
@@ -265,7 +356,8 @@ final class TmuxInboundWatcher {
             "event_id": eventID,
         ]
 
-        _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
+        let event = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
+        debugLog("eventBus.append OK eventID=\(event.id)")
         logger.log(.info, "TmuxInboundWatcher: emitted completion event for \(session.project) (mode=\(mode))")
 
         // Clear progress snapshots after completion emission.

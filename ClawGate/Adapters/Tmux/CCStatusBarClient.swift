@@ -222,14 +222,29 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
             // Bootstrap: fire synthetic running→waiting_input for sessions already idle.
             // This kicks off auto-continue for sessions that were waiting before ClawGate started.
             lock.lock()
-            let waitingSessions = _sessions.values.filter { $0.status == "waiting_input" }
+            let allSessions = Array(_sessions.values)
             lock.unlock()
+            let waitingSessions = allSessions.filter { $0.status == "waiting_input" }
+            logger.log(.info, "CCStatusBarClient: bootstrap check: \(allSessions.count) total, \(waitingSessions.count) waiting_input")
+            // Debug: write to file for diagnostics
+            let dbg = "bootstrap: total=\(allSessions.count) waiting=\(waitingSessions.count) projects=\(allSessions.map(\.project))\n"
+            try? dbg.write(toFile: "/tmp/clawgate-bootstrap.log", atomically: true, encoding: .utf8)
+            var bootstrapLog = dbg
             for session in waitingSessions {
-                guard !bootstrappedSessions.contains(session.id) else { continue }
+                bootstrapLog += "candidate: \(session.project) id=\(session.id) tmux=\(session.tmuxTarget ?? "nil")\n"
+                guard !bootstrappedSessions.contains(session.id) else {
+                    bootstrapLog += "  skip (already done)\n"
+                    continue
+                }
                 bootstrappedSessions.insert(session.id)
-                logger.log(.info, "CCStatusBarClient: bootstrap \(session.project) (already waiting_input)")
-                onStateChange?(session, "running", "waiting_input")
+                let hasHandler = onStateChange != nil
+                bootstrapLog += "  firing (hasHandler=\(hasHandler)) waitingReason=\(session.waitingReason ?? "nil")\n"
+                // Use "bootstrap" as oldStatus so TmuxInboundWatcher can skip
+                // permission auto-approve (which may be stale at startup).
+                onStateChange?(session, "bootstrap", "waiting_input")
+                bootstrapLog += "  fired\n"
             }
+            try? bootstrapLog.write(toFile: "/tmp/clawgate-bootstrap.log", atomically: true, encoding: .utf8)
 
         case "session.updated":
             guard let sessionData = json["session"] as? [String: Any],

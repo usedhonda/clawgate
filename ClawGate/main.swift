@@ -176,8 +176,9 @@ final class AppRuntime {
                 self.logger.log(.info, "Auto-ignored detached session: \(session.project)")
             }
         }
-        ccStatusBarClient.connect()
+        // Start watcher BEFORE connecting — so onStateChange is set when sessions.list arrives.
         tmuxInboundWatcher.start()
+        ccStatusBarClient.connect()
     }
 
     private func persistOpsLogForMenu(_ event: BridgeEvent) {
