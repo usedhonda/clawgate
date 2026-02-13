@@ -116,6 +116,8 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
         eventSubscriptionID = eventBus.subscribe { [weak self] event in
             guard let self else { return }
             if event.payload["_from_federation"] == "1" { return }
+            // Skip forwarding our own federation_status events to prevent echo noise
+            if event.type == "federation_status" { return }
             let message = FederationEnvelope(
                 type: "event",
                 timestamp: FederationMessage.now(),
