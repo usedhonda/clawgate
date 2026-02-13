@@ -75,6 +75,12 @@ const sessionStatuses = new Map();
 /** @type {Set<string>} */
 const guidanceSentProjects = new Set();
 
+// ── Autonomous conversation round tracking ──────────────────────
+// Tracks how many completion->question rounds Chi has had with CC per project.
+// Reset on question events, incremented on completion when Chi sends <cc_task>.
+/** @type {Map<string, number>} project -> round count */
+const questionRoundMap = new Map();
+
 function eventTimestamp(event) {
   const raw = event?.observed_at ?? event?.observedAt;
   if (!raw) return Date.now();
@@ -414,9 +420,9 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
       "必ず返信すること（NO_REPLY 禁止）。",
       "",
       "モード別:",
-      "- AUTONOMOUS: レビュー後、次のタスクを <cc_task> で設計して送る。",
-      "- OBSERVE: レビューのみ。ユーザーに報告。タスクは送らない。",
       "- AUTO: 品質ゲート。問題なければ <cc_task>continue</cc_task> で続行。ブロッキング問題があればタスクを送らずユーザーに報告。",
+      "- AUTONOMOUS: 完了時はレビュー後、気になった点や疑問を <cc_task> で CC に質問（意思決定ではなく質問・深掘りのキャラ）。選択肢の質問はユーザーに LINE でアドバイス。",
+      "- OBSERVE: レビューしてユーザーに報告。選択肢の質問もLINEで推奨を伝える。CC には直接介入しない。",
     );
   }
 
@@ -424,7 +430,9 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
   if (k === "completion") {
     parts.push(`[完了イベント] タスクのゴールと結果を比較してレビュー。`);
     if (m === "autonomous") {
-      parts.push("レビュー後、次の戦略的タスクを <cc_task> で設計。");
+      parts.push("レビュー後、気になった点・疑問・確認事項があれば <cc_task> で CC に質問。");
+      parts.push("意思決定するのではなく、質問・深掘り・確認をするキャラ。");
+      parts.push("CC と数往復会話して納得したら、<cc_task> を含めずにユーザー向けの所感を LINE に送る（任意）。");
     } else if (m === "observe") {
       parts.push("レビューしてユーザーに報告。タスクは送らない。");
     } else if (m === "auto") {
@@ -434,11 +442,24 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
     }
     parts.push("必ず返信（NO_REPLY 禁止）。");
   } else if (k === "question") {
-    parts.push(
-      "[質問イベント] 選択肢を評価。",
-      "正解がわかるなら <cc_answer> で回答。",
-      "判断に迷うならユーザーに転送（自分の推奨も添えて）。",
-    );
+    if (m === "auto") {
+      parts.push(
+        "[質問イベント] 選択肢を評価。",
+        "正解がわかるなら <cc_answer> で回答。",
+        "判断に迷うならユーザーに転送（自分の推奨も添えて）。",
+      );
+    } else if (m === "autonomous") {
+      parts.push(
+        "[質問イベント] 選択肢を分析してユーザーに LINE でアドバイス。",
+        "<cc_answer> は使わない。ユーザーが判断する。",
+        "自分の推奨理由を添えること。",
+      );
+    } else if (m === "observe") {
+      parts.push(
+        "[質問イベント] 選択肢を分析してユーザーに LINE で推奨を伝える。",
+        "<cc_answer> は使わない。ユーザーが判断する。",
+      );
+    }
   }
 
   return parts.join("\n");
@@ -456,7 +477,7 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
  * @param {object} [params.log]
  * @returns {Promise<{lineText: string, taskText: string} | {error: Error, lineText: string} | null>}
  */
-async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log }) {
+async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log, mode }) {
   const taskMatch = replyText.match(/<cc_task>([\s\S]*?)<\/cc_task>/);
   if (!taskMatch) return null;
 
@@ -465,8 +486,9 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log 
 
   const lineText = replyText.replace(/<cc_task>[\s\S]*?<\/cc_task>/, "").trim();
 
-  // Prefix task with [OpenClaw Agent] so CC knows the origin
-  const prefixedTask = `[OpenClaw Agent] ${taskText}`;
+  // Prefix task with [OpenClaw Agent - {Mode}] so CC knows the origin and mode
+  const modeLabel = mode ? mode.charAt(0).toUpperCase() + mode.slice(1) : "Unknown";
+  const prefixedTask = `[OpenClaw Agent - ${modeLabel}] ${taskText}`;
 
   try {
     const result = await clawgateTmuxSend(apiUrl, project, prefixedTask, traceId);
@@ -745,8 +767,10 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
     // If there are task-capable projects, try to extract <cc_task> from AI reply
     if (taskCapableProjects.length > 0) {
+      const taskProject = taskCapableProjects[0];
+      const taskMode = sessionModes.get(taskProject) || "autonomous";
       const result = await tryExtractAndSendTask({
-        replyText: text, project: taskCapableProjects[0], apiUrl, traceId, log,
+        replyText: text, project: taskProject, apiUrl, traceId, log, mode: taskMode,
       });
       if (result) {
         if (result.error) {
@@ -862,6 +886,9 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   sessionModes.set(project, mode);
   sessionStatuses.set(project, "waiting_input");
 
+  // Reset autonomous conversation round counter (question = CC responded, not Chi's turn)
+  questionRoundMap.delete(project);
+
   // Track pending question
   const options = optionsRaw.split("\n").filter(Boolean);
   pendingQuestions.set(project, { questionText, questionId, options, selectedIndex });
@@ -874,7 +901,12 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     return `${marker} ${i + 1}. ${opt}`;
   }).join("\n");
 
-  const body = `[CC ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
+  let body;
+  if (mode === "auto") {
+    body = `[CC ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
+  } else {
+    body = `[CC ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[Analyze the options and send your recommendation to the user via LINE. Do NOT use <cc_answer>.]`;
+  }
   const isFirstGuidance = !guidanceSentProjects.has(project);
   const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question", firstTime: isFirstGuidance })}\n\n---\n\n${body}`;
   if (isFirstGuidance) guidanceSentProjects.add(project);
@@ -911,44 +943,31 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     recordPluginSend(text);
   };
 
-  // Deliver reply — parse <cc_answer> and route answer, or forward to LINE
+  // Deliver reply — parse <cc_answer> (auto mode only) and route answer, or forward to LINE
   const deliver = async (replyPayload) => {
     const replyText = extractReplyText(replyPayload, log, "tmux_question");
     if (!replyText.trim()) return;
 
-    // Try to extract <cc_answer> first
-    const answerResult = await tryExtractAndSendAnswer({ replyText, apiUrl, traceId, log });
-    if (answerResult) {
-      if (answerResult.error) {
-        const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
-        try { await sendLine(defaultConversation || project, msg); } catch (err) {
-          log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
-        }
-      } else if (answerResult.lineText) {
-        const normalized = normalizeLineReplyText(answerResult.lineText, { project, eventKind: "question" });
-        try { await sendLine(defaultConversation || project, normalized); } catch (err) {
-          log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
-        }
-      }
-      return;
-    }
-
-    // No <cc_answer> — try <cc_task> fallback (autonomous mode)
-    if (mode === "autonomous") {
-      const taskResult = await tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log });
-      if (taskResult) {
-        if (taskResult.error) {
-          const msg = `[Task send failed: ${taskResult.error.message || taskResult.error}]\n\n${taskResult.lineText}`;
-          try { await sendLine(defaultConversation || project, msg); } catch {}
-        } else if (taskResult.lineText) {
-          const normalized = normalizeLineReplyText(taskResult.lineText, { project, eventKind: "question" });
-          try { await sendLine(defaultConversation || project, normalized); } catch {}
+    // Auto mode only: try <cc_answer> to auto-select
+    if (mode === "auto") {
+      const answerResult = await tryExtractAndSendAnswer({ replyText, apiUrl, traceId, log });
+      if (answerResult) {
+        if (answerResult.error) {
+          const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
+          try { await sendLine(defaultConversation || project, msg); } catch (err) {
+            log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
+          }
+        } else if (answerResult.lineText) {
+          const normalized = normalizeLineReplyText(answerResult.lineText, { project, eventKind: "question" });
+          try { await sendLine(defaultConversation || project, normalized); } catch (err) {
+            log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
+          }
         }
         return;
       }
     }
 
-    // Default: forward to LINE
+    // Default: forward to LINE (observe, autonomous, auto fallback)
     const lineText = normalizeLineReplyText(replyText, { project, eventKind: "question" });
     log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${lineText.slice(0, 80)}"`);
     try {
@@ -1103,20 +1122,49 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     const replyText = extractReplyText(replyPayload, log, "tmux_completion");
     if (!replyText.trim()) return;
 
-    // Autonomous/auto mode: try to extract and send <cc_task>
-    if (mode === "autonomous" || mode === "auto") {
+    // Autonomous mode: try <cc_task> with round limiting (max 3 rounds)
+    if (mode === "autonomous") {
+      const rounds = questionRoundMap.get(project) || 0;
+      const MAX_ROUNDS = 3;
+
+      if (rounds < MAX_ROUNDS) {
+        const result = await tryExtractAndSendTask({
+          replyText, project, apiUrl, traceId, log, mode,
+        });
+        if (result) {
+          if (result.error) {
+            const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+            try { await sendLine(defaultConversation || project, msg); } catch (err) {
+              log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+            }
+          } else {
+            questionRoundMap.set(project, rounds + 1);
+            if (result.lineText) {
+              const normalized = normalizeLineReplyText(result.lineText, { project, eventKind: "completion" });
+              try { await sendLine(defaultConversation || project, normalized); } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
+              }
+            }
+          }
+          return;
+        }
+      }
+      // No <cc_task> or max rounds reached — reset counter, fall through to LINE
+      questionRoundMap.delete(project);
+    }
+
+    // Auto mode: try <cc_task> (no round limiting)
+    if (mode === "auto") {
       const result = await tryExtractAndSendTask({
-        replyText, project, apiUrl, traceId, log,
+        replyText, project, apiUrl, traceId, log, mode,
       });
       if (result) {
         if (result.error) {
-          // Task send failed — forward everything to LINE with error notice
           const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
           try { await sendLine(defaultConversation || project, msg); } catch (err) {
             log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
           }
         } else {
-          // Task sent successfully — send remaining text to LINE (if any)
           if (result.lineText) {
             const normalized = normalizeLineReplyText(result.lineText, { project, eventKind: "completion" });
             try { await sendLine(defaultConversation || project, normalized); } catch (err) {
