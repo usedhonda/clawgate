@@ -169,10 +169,20 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
                         statusIcon = "○"
                     }
                 }
-                let title = "  \(statusIcon) \(session.project) [\(mode)]"
-                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                let prefix = "  \(statusIcon) \(session.project) "
+                let modeText = "[\(mode)]"
+                let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+                let attr = NSMutableAttributedString(
+                    string: prefix,
+                    attributes: [.font: font, .foregroundColor: NSColor.controlTextColor]
+                )
+                attr.append(NSAttributedString(
+                    string: modeText,
+                    attributes: [.font: font, .foregroundColor: self.modeColor(mode)]
+                ))
+                let item = NSMenuItem(title: prefix + modeText, action: nil, keyEquivalent: "")
+                item.attributedTitle = attr
                 item.submenu = self.makeSessionModeSubmenu(project: session.project, currentMode: mode)
-                self.applyReadableTitle(to: item, text: title)
                 menu.insertItem(item, at: insertIdx)
                 self.sessionItems.append(item)
                 insertIdx += 1
@@ -188,10 +198,19 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
             item.target = self
             item.representedObject = "\(project)\t\(mode)"
             item.state = (mode == currentMode) ? .on : .off
-            applyReadableTitle(to: item, text: label)
+            applyReadableTitle(to: item, text: label, color: modeColor(mode))
             submenu.addItem(item)
         }
         return submenu
+    }
+
+    private func modeColor(_ mode: String) -> NSColor {
+        switch mode {
+        case "autonomous": return .systemRed
+        case "auto":       return .systemOrange
+        case "observe":    return .systemBlue
+        default:           return .labelColor
+        }
     }
 
     private func modeLabel(_ mode: String) -> String {
