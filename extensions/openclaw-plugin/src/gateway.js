@@ -383,52 +383,47 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
 
   if (firstTime) {
     parts.push(
-      `[Pair Programming Role] [CC ${proj}] Mode: ${m}`,
+      `[ペアプロ レビュー] [CC ${proj}] モード: ${m}`,
       "",
-      `You are the senior pair programmer reviewing Claude Code's work on ${proj}.`,
-      "Your job is NOT to summarize -- the user can read summaries themselves.",
-      "Your job IS to catch problems, assess quality, and steer direction.",
+      `CC（Claude Code）が ${proj} で作業した内容をレビューする役割。`,
+      "SOUL.md のキャラ・話し方・書式ルールをそのまま守って。レビューだからって崩さない。",
       "",
-      "Keep your natural speaking style and personality. Don't become a formal reviewer.",
-      "Use OK / Concern / Problem as your internal assessment, then express it your way.",
-      "Be thorough but readable. Cover all 5 checkpoints below -- at least one sentence each.",
-      "Aim for 3-8 lines. One-liner reviews are too shallow; walls of text are too much.",
+      "意識する観点（全部書く必要なし、気になった点だけ）:",
+      "- ゴール: 目的と結果が合ってるか",
+      "- スコープ: 余計なファイルまで触ってないか",
+      "- リスク: 削除、API変更、エラー処理漏れ、未テスト",
+      "- 設計: プロジェクトのパターンに合ってるか",
+      "- 漏れ: テスト、ドキュメント、エッジケース",
       "",
-      "Checkpoints (address each one explicitly):",
-      "1. GOAL ALIGNMENT: Does the completion match the task goal? Flag drift.",
-      "2. SCOPE: Did CC touch only the necessary files? Flag scope creep.",
-      "3. RISK: Deleted code, changed APIs, missing error handling, untested paths?",
-      "4. ARCHITECTURE: Does the change fit the project's patterns (CLAUDE.md/SPEC.md)?",
-      "5. MISSING: Tests? Docs? Edge cases? Migration steps?",
+      "問題なければ短くOKで。3〜8行くらい。",
+      "コミットメッセージの復唱、「CCが〜しました」的な要約、とりあえず褒める、は不要。",
+      "必ず返信すること（NO_REPLY 禁止）。",
       "",
-      "Mode Behavior:",
-      "- AUTONOMOUS: After review, design the next task in <cc_task>.",
-      "- OBSERVE: Review only. Report to user. Never send tasks.",
-      "- AUTO: Quality gate + auto-continue. After review, send <cc_task>continue</cc_task> unless you found a blocking problem.",
-      "",
-      "DO NOT: repeat commit messages, say \"CC completed...\", give generic praise, produce walls of text.",
-      "MUST: Always reply (never NO_REPLY).",
+      "モード別:",
+      "- AUTONOMOUS: レビュー後、次のタスクを <cc_task> で設計して送る。",
+      "- OBSERVE: レビューのみ。ユーザーに報告。タスクは送らない。",
+      "- AUTO: 品質ゲート。問題なければ <cc_task>continue</cc_task> で続行。ブロッキング問題があればタスクを送らずユーザーに報告。",
     );
   }
 
   // Per-event guidance
   if (k === "completion") {
-    parts.push(`[Event: Completion] Compare task goal vs result. Review output.`);
+    parts.push(`[完了イベント] タスクのゴールと結果を比較してレビュー。`);
     if (m === "autonomous") {
-      parts.push("After review, design the next strategic task in <cc_task>.");
+      parts.push("レビュー後、次の戦略的タスクを <cc_task> で設計。");
     } else if (m === "observe") {
-      parts.push("Review and report to user. Do not send tasks.");
+      parts.push("レビューしてユーザーに報告。タスクは送らない。");
     } else if (m === "auto") {
-      parts.push("Quality gate + auto-continue. Review the output, then:");
-      parts.push("- If OK or minor issues: send <cc_task>continue</cc_task> to keep CC working.");
-      parts.push("- If blocking problem found: do NOT send <cc_task>. Report to user via LINE only.");
+      parts.push("品質ゲート。レビュー後:");
+      parts.push("- 問題なし/軽微: <cc_task>continue</cc_task> で続行。");
+      parts.push("- ブロッキング問題あり: <cc_task> は送らない。ユーザーに LINE で報告。");
     }
-    parts.push("MUST reply -- never NO_REPLY.");
+    parts.push("必ず返信（NO_REPLY 禁止）。");
   } else if (k === "question") {
     parts.push(
-      "[Event: Question] Evaluate the options.",
-      "If you can determine the right answer, use <cc_answer>.",
-      "If unsure, forward the question to the user with your recommendation.",
+      "[質問イベント] 選択肢を評価。",
+      "正解がわかるなら <cc_answer> で回答。",
+      "判断に迷うならユーザーに転送（自分の推奨も添えて）。",
     );
   }
 
