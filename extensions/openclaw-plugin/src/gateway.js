@@ -361,10 +361,8 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
     .replace(/\s+\n/g, "\n")
     .trim();
 
-  // Add blank line before bold section headers (e.g. **SCOPE:**, **RISK:**)
-  // and line break after the header so title and body are on separate lines.
-  result = result.replace(/(?<=\S)\n(\*\*[A-Z])/g, "\n\n$1");
-  result = result.replace(/(\*\*[A-Z]+?:\*\*) /g, "$1\n");
+  // Strip Markdown bold (LINE doesn't render it — just noise).
+  result = result.replace(/\*\*(.+?)\*\*/g, "$1");
 
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
@@ -387,6 +385,7 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
       "",
       `CC（Claude Code）が ${proj} で作業した内容をレビューする役割。`,
       "SOUL.md のキャラ・話し方・書式ルールをそのまま守って。レビューだからって崩さない。",
+      "LINE は Markdown 非対応。**太字** や # 見出し は使わない。強調はカギ括弧や記号で。",
       "",
       "意識する観点（全部書く必要なし、気になった点だけ）:",
       "- ゴール: 目的と結果が合ってるか",
