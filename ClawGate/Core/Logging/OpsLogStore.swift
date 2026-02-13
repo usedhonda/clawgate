@@ -72,17 +72,19 @@ final class OpsLogStore {
     func recent(limit: Int, levelFilter: String? = nil, traceFilter: String? = nil) -> [OpsLogEntry] {
         let capped = max(1, min(limit, 200))
         let fileURL = Self.currentLogFileURL(in: logDirectory)
-        guard let data = fileManager.contents(atPath: fileURL.path),
-              let text = String(data: data, encoding: .utf8) else {
-            return []
-        }
-        let rows = text.split(separator: "\n")
+
+        // Read only the tail of the file to avoid loading hundreds of MB into memory.
+        // Each JSON line is ~200 bytes; read enough to cover filters that may skip rows.
+        let tailBytes = capped * 300 * 4  // generous buffer for filtered queries
+        let tail = Self.readTail(url: fileURL, maxBytes: tailBytes)
+        guard !tail.isEmpty else { return [] }
+
+        let rows = tail.split(separator: UInt8(ascii: "\n"))
         var entries: [OpsLogEntry] = []
-        entries.reserveCapacity(min(capped, rows.count))
+        entries.reserveCapacity(capped)
 
         for row in rows.reversed() {
-            guard let rowData = row.data(using: .utf8),
-                  let entry = try? decoder.decode(OpsLogEntry.self, from: rowData) else {
+            guard let entry = try? decoder.decode(OpsLogEntry.self, from: Data(row)) else {
                 continue
             }
             if let levelFilter, !levelFilter.isEmpty, entry.level.lowercased() != levelFilter.lowercased() {
@@ -96,6 +98,17 @@ final class OpsLogStore {
             if entries.count >= capped { break }
         }
         return entries
+    }
+
+    /// Read the last `maxBytes` from a file without loading the whole thing.
+    private static func readTail(url: URL, maxBytes: Int) -> Data {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        guard size > 0 else { return Data() }
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        try? handle.seek(toOffset: start)
+        return (try? handle.readToEnd()) ?? Data()
     }
 
     private static func resolveLogDirectory() -> URL {
