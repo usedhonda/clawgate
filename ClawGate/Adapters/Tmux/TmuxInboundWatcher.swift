@@ -275,21 +275,24 @@ final class TmuxInboundWatcher {
 
     /// Detect an AskUserQuestion menu from captured pane output.
     ///
-    /// Multi-layer detection (all conditions must be met):
+    /// Multi-layer detection:
     /// 1. Session is in `waiting_input` state (gate — already ensured by caller)
     /// 2. A line ending with `?` (the question text)
-    /// 3. Lines containing `❯` (U+276F, selected option) or `○` (unselected options)
+    /// 3. Option lines: `❯`/`●` (selected) + `○` (unselected), OR
+    ///    `❯`/`●` (selected) + numbered lines `N. text` (Claude Code format)
     ///
     /// Returns nil if no question pattern is detected.
     func detectQuestion(from output: String) -> DetectedQuestion? {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
 
-        // Scan from the end to find the menu region
-        // AskUserQuestion renders as:
-        //   ? Question text here?
-        //     ❯ Option 1 (selected)           or   ● Option 1 (selected)
-        //     ○ Option 2                            ○ Option 2
-        //     ○ Option 3                            ○ Option 3
+        // AskUserQuestion renders in two known formats:
+        //
+        // Format A (bullet markers):            Format B (numbered, Claude Code):
+        //   ? Question text?                      ? Question text?
+        //     ❯ Option 1 (selected)               ❯ 1. Option 1 (selected)
+        //     ○ Option 2                             2. Option 2
+        //     ○ Option 3                             3. Option 3
+        //                                          Enter to select · ↑/↓ · Esc
 
         // U+276F HEAVY RIGHT-POINTING ANGLE QUOTATION MARK ORNAMENT (❯)
         let selectorChar: Character = "\u{276F}"
@@ -300,21 +303,18 @@ final class TmuxInboundWatcher {
         var optionLines: [(index: Int, text: String, isSelected: Bool)] = []
         var questionLineIndex: Int? = nil
 
-        // Walk backwards from the end to find option lines, then the question
+        // --- Phase 1: Backward scan for marker-based options (❯/●/○) ---
         var i = lines.count - 1
         var foundOptions = false
 
         while i >= 0 {
             let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
 
-            // Check for option line (selected or unselected)
             let hasSelector = trimmed.contains(selectorChar) || trimmed.contains(bulletSelected)
             let hasBullet = trimmed.contains(bulletUnselected)
 
             if hasSelector || hasBullet {
-                // Extract option text: strip leading markers and whitespace
                 var optText = trimmed
-                // Remove leading selector/bullet characters and whitespace
                 for prefix in ["❯ ", "● ", "○ "] {
                     if optText.hasPrefix(prefix) {
                         optText = String(optText.dropFirst(prefix.count))
@@ -328,14 +328,12 @@ final class TmuxInboundWatcher {
                 continue
             }
 
-            // If we already found options and hit a non-option line, look for question
+            // Once we found marker options, scan upward for question line
             if foundOptions {
-                // Skip blank lines between question and options
                 if trimmed.isEmpty {
                     i -= 1
                     continue
                 }
-                // Check if this line looks like a question (supports ASCII and full-width question mark)
                 if trimmed.hasSuffix("?") || trimmed.hasSuffix("？") {
                     questionLineIndex = i
                 }
@@ -343,6 +341,25 @@ final class TmuxInboundWatcher {
             }
 
             i -= 1
+        }
+
+        // --- Phase 2: If only 1 option found (selected line only, no ○ markers),
+        //     scan forward from the ❯ line for numbered options (Claude Code format) ---
+        if optionLines.count == 1, let selOption = optionLines.first {
+            let numberedOptionRe = try! NSRegularExpression(pattern: #"^\d+\.\s+"#)
+
+            for j in (selOption.index + 1)..<lines.count {
+                let trimmed = lines[j].trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty { continue }
+                // Stop at footer line
+                if trimmed.hasPrefix("Enter to select") || trimmed.hasPrefix("Esc to cancel") { break }
+                // Detect numbered option line (e.g. "2. Option text")
+                let range = NSRange(trimmed.startIndex..., in: trimmed)
+                if numberedOptionRe.firstMatch(in: trimmed, range: range) != nil {
+                    optionLines.append((index: j, text: trimmed, isSelected: false))
+                }
+                // Skip description lines (non-numbered, non-empty)
+            }
         }
 
         // Validate: need at least 2 options and a question line
