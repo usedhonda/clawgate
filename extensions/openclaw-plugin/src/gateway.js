@@ -361,6 +361,10 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
     .replace(/\s+\n/g, "\n")
     .trim();
 
+  // Add blank line before bold section headers (e.g. **SCOPE:**, **RISK:**)
+  // so LINE messages are easier to read.
+  result = result.replace(/(?<=\S)\n(\*\*[A-Z])/g, "\n\n$1");
+
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
   if (project && !/^\[(CC|Claude Code)\b/.test(result)) {
