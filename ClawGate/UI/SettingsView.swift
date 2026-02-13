@@ -134,8 +134,14 @@ struct InlineSettingsView: View {
             card("Federation") {
                 Toggle("Enabled", isOn: $model.config.federationEnabled)
                 if model.config.federationEnabled {
+                    Toggle("Remote Access (0.0.0.0)", isOn: $model.config.remoteAccessEnabled)
+                    if !model.config.remoteAccessEnabled {
+                        Text("Remote Access is off — only local clients can connect")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                    }
                     statusRow(state: federationState)
-                    Text("Accepting clients on ws://0.0.0.0:8765/federation")
+                    Text("Accepting clients on ws://\(model.config.remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"):8765/federation")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
                         .lineLimit(2)
@@ -201,23 +207,16 @@ struct InlineSettingsView: View {
                             .font(.system(size: 11))
                     }
 
-                    Stepper("Federation Port: \(federationPortBinding.wrappedValue)",
-                            value: federationPortBinding, in: 1...65535)
-                    Text("URL: \(model.config.federationURL)")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                }
+                    HStack(spacing: 8) {
+                        Button("Refresh Hosts") {
+                            loadTailscalePeers()
+                        }
+                        .buttonStyle(.bordered)
 
-                HStack(spacing: 8) {
-                    Button("Refresh Hosts") {
-                        loadTailscalePeers()
+                        Text("Detected: \(tailscalePeers.count)")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
                     }
-                    .buttonStyle(.bordered)
-
-                    Text("Detected: \(tailscalePeers.count)")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
                 }
             }
 
@@ -281,22 +280,7 @@ struct InlineSettingsView: View {
             },
             set: { newHost in
                 let trimmed = newHost.trimmingCharacters(in: .whitespacesAndNewlines)
-                let (_, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
-                model.config.federationURL = trimmed.isEmpty ? "" : buildWSURL(host: trimmed, port: port, path: "/federation")
-            }
-        )
-    }
-
-    private var federationPortBinding: Binding<Int> {
-        Binding(
-            get: {
-                let (_, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
-                return port
-            },
-            set: { newPort in
-                let (host, _) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
-                guard !host.isEmpty else { return }
-                model.config.federationURL = buildWSURL(host: host, port: newPort, path: "/federation")
+                model.config.federationURL = trimmed.isEmpty ? "" : buildWSURL(host: trimmed, port: 8765, path: "/federation")
             }
         )
     }
