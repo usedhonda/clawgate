@@ -117,9 +117,12 @@ final class OpsLogStore {
             return URL(fileURLWithPath: env).appendingPathComponent("docs/log/ops", isDirectory: true)
         }
 
-        let fixed = URL(fileURLWithPath: "/Users/usedhonda/projects/ios/clawgate/docs/log/ops", isDirectory: true)
-        if FileManager.default.fileExists(atPath: "/Users/usedhonda/projects/ios/clawgate") {
-            return fixed
+        // Try project path relative to the running binary (ClawGate.app/Contents/MacOS/ClawGate → project root)
+        let bundle = Bundle.main.bundleURL                          // ClawGate.app
+        let projectCandidate = bundle.deletingLastPathComponent()   // parent dir of .app
+        let projectOps = projectCandidate.appendingPathComponent("docs/log/ops", isDirectory: true)
+        if FileManager.default.fileExists(atPath: projectCandidate.path) {
+            return projectOps
         }
 
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)

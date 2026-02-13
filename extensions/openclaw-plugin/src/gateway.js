@@ -199,6 +199,7 @@ function isUiChromeLine(line) {
   if (/^未読$/.test(s)) return true;
   if (/^ここから未読メッセージ$/.test(s)) return true;
   if (/^LINE$/.test(s)) return true;
+  // Owner's LINE display name — treated as noise in AX tree parsing
   if (/^Test User\b/.test(s)) return true;
   if (/^(午前|午後)\s*\d{1,2}:\d{2}$/.test(s)) return true;
   if (/^\d{1,2}:\d{2}$/.test(s)) return true;
