@@ -368,7 +368,7 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
   if (project && !/^\[(CC|Claude Code)\b/.test(result)) {
-    result = `[CC ${project}] ${result}`;
+    result = `[CC ${project}]\n${result}`;
   }
 
   return result;
