@@ -51,6 +51,8 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     private var isConnected = false
     private var shouldReconnect = true
     private var preferredWebSocketURL: String?
+    /// Sessions that have already received a synthetic bootstrap state change.
+    private var bootstrappedSessions: Set<String> = []
 
     init(logger: AppLogger) {
         self.logger = logger
@@ -216,6 +218,18 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
             lock.unlock()
             logger.log(.info, "CCStatusBarClient: received \(_sessions.count) attached sessions")
             onSessionsChanged?()
+
+            // Bootstrap: fire synthetic running→waiting_input for sessions already idle.
+            // This kicks off auto-continue for sessions that were waiting before ClawGate started.
+            lock.lock()
+            let waitingSessions = _sessions.values.filter { $0.status == "waiting_input" }
+            lock.unlock()
+            for session in waitingSessions {
+                guard !bootstrappedSessions.contains(session.id) else { continue }
+                bootstrappedSessions.insert(session.id)
+                logger.log(.info, "CCStatusBarClient: bootstrap \(session.project) (already waiting_input)")
+                onStateChange?(session, "running", "waiting_input")
+            }
 
         case "session.updated":
             guard let sessionData = json["session"] as? [String: Any],
