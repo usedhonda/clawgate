@@ -28,7 +28,18 @@ final class AppRuntime {
         configStore: configStore,
         statsCollector: statsCollector
     )
-    private lazy var server = BridgeServer(core: core, host: bindHost())
+    private lazy var federationServerInstance: FederationServer? = {
+        let cfg = configStore.load()
+        guard cfg.nodeRole == .server && cfg.federationEnabled else { return nil }
+        return FederationServer(eventBus: eventBus, configStore: configStore, core: core, logger: logger)
+    }()
+    private lazy var server = BridgeServer(
+        core: core,
+        host: bindHost(),
+        federationServer: federationServerInstance,
+        configStore: configStore,
+        logger: logger
+    )
     private lazy var federationClient = FederationClient(
         eventBus: eventBus,
         core: core,
@@ -101,7 +112,16 @@ final class AppRuntime {
         if config.tmuxEnabled {
             startTmuxSubsystem()
         }
-        federationClient.start()
+
+        // Federation: server mode starts FederationServer; client mode starts FederationClient
+        if config.nodeRole == .server && config.federationEnabled {
+            federationServerInstance?.start()
+            // Store reference in BridgeCore for command forwarding
+            core.federationServer = federationServerInstance
+            logger.log(.info, "FederationServer mode: accepting clients on ws://\(bindHost()):8765/federation")
+        } else if config.nodeRole == .client && config.federationEnabled {
+            federationClient.start()
+        }
     }
 
     private func requestPermissionPromptsIfNeeded() {
@@ -119,6 +139,7 @@ final class AppRuntime {
             inboundWatcher.stop()
         }
         tmuxInboundWatcher.stop()
+        federationServerInstance?.stop()
         federationClient.stop()
         ccStatusBarClient.onSessionDetached = nil
         ccStatusBarClient.disconnect()

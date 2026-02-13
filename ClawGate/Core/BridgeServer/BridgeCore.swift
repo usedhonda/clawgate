@@ -6,6 +6,9 @@ final class BridgeCore {
     let eventBus: EventBus
     let statsCollector: StatsCollector
 
+    /// Set by main.swift when running as federation server
+    var federationServer: FederationServer?
+
     private let registry: AdapterRegistry
     private let logger: AppLogger
     private let opsLogStore: OpsLogStore
@@ -169,6 +172,21 @@ final class BridgeCore {
             let content = APIResponse(ok: true, result: result, error: nil)
             return jsonResponse(status: .ok, body: encode(content), traceID: trace)
         } catch let err as BridgeRuntimeError {
+            // Federation fallback: if tmux session_not_found and we have a federation server with connected clients
+            if err.code == "session_not_found" || err.code == "tmux_target_missing" {
+                if let fedServer = federationServer, fedServer.hasConnectedClient() {
+                    do {
+                        let fedResult = try forwardToFederationClient(body: body, traceID: requestTrace, fedServer: fedServer)
+                        let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+                        writeOps(level: "info", event: "federation_forward_ok", traceID: requestTrace, stage: "federation", action: "forward_send", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
+                        return fedResult
+                    } catch {
+                        logger.log(.warning, "Federation forward failed: \(error)")
+                        // Fall through to return original error
+                    }
+                }
+            }
+
             let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
             writeOps(level: "error", event: "send_failed", traceID: requestTrace, stage: "bridge_server", action: "send_message", status: "failed", errorCode: err.code, errorMessage: err.message, latencyMs: latencyMs)
             return jsonResponse(
@@ -453,11 +471,13 @@ final class BridgeCore {
         }
 
         // Check 5: Port 8765 (we're already listening, so this is informational)
+        let portDetails = cfg.remoteAccessEnabled ? "0.0.0.0:8765 (remote access)" : "127.0.0.1:8765"
+        let federationSuffix = (cfg.nodeRole == .server && cfg.federationEnabled) ? " + ws:/federation" : ""
         checks.append(DoctorCheck(
             name: "server_port",
             status: "ok",
             message: "Server is listening on port 8765",
-            details: "127.0.0.1:8765"
+            details: portDetails + federationSuffix
         ))
 
         // Check 6: Screen Recording permission (for Vision OCR)
@@ -468,6 +488,24 @@ final class BridgeCore {
             message: screenOk ? "Screen recording permission granted" : "Screen recording not granted (OCR disabled)",
             details: screenOk ? nil : "System Settings > Privacy > Screen Recording"
         ))
+
+        // Check 7: Federation status
+        if cfg.nodeRole == .server && cfg.federationEnabled {
+            let clientCount = federationServer?.clientCount() ?? 0
+            checks.append(DoctorCheck(
+                name: "federation",
+                status: "ok",
+                message: "Federation server active (\(clientCount) client\(clientCount == 1 ? "" : "s") connected)",
+                details: "Accepting connections on /federation"
+            ))
+        } else if cfg.nodeRole == .client && cfg.federationEnabled {
+            checks.append(DoctorCheck(
+                name: "federation",
+                status: "ok",
+                message: "Federation client enabled",
+                details: "Connecting to \(cfg.federationURL)"
+            ))
+        }
 
         // Calculate summary
         let passed = checks.filter { $0.status == "ok" }.count
@@ -708,6 +746,35 @@ final class BridgeCore {
             status: .forbidden,
             body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
         )
+    }
+
+    /// Forward a /v1/send request to a federation client when local tmux session is not found
+    private func forwardToFederationClient(body: Data, traceID: String, fedServer: FederationServer) throws -> HTTPResult {
+        // Parse the request to find the project
+        let request = try jsonDecoder.decode(SendRequest.self, from: body)
+        let project = request.payload.conversationHint
+
+        let command = FederationCommandPayload(
+            id: UUID().uuidString,
+            method: "POST",
+            path: "/v1/send",
+            headers: ["Content-Type": "application/json", "X-Trace-ID": traceID],
+            body: String(data: body, encoding: .utf8)
+        )
+
+        logger.log(.info, "Forwarding /v1/send to federation client for project=\(project)")
+
+        // Wait synchronously (we're on BlockingWork.queue, not NIO event loop)
+        let response = try fedServer.sendCommand(forProject: project, command).wait()
+
+        // Convert federation response back to HTTPResult
+        var headers = HTTPHeaders()
+        for (key, value) in response.headers {
+            headers.add(name: key, value: value)
+        }
+        let responseBody = Data(response.body.utf8)
+        let status = HTTPResponseStatus(statusCode: response.status)
+        return HTTPResult(status: status, headers: headers, body: responseBody)
     }
 
     private func normalizedTraceID(_ traceID: String?) -> String {

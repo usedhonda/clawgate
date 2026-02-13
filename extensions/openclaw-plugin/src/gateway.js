@@ -789,7 +789,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
  * Dispatches the question + options to AI, which can answer via <cc_answer>.
  * @param {object} params
  */
-async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
+async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable = true }) {
   const runtime = getRuntime();
   const traceId = makeTraceId("tmux-question", event);
   const payload = event.payload ?? {};
@@ -854,6 +854,13 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options)`);
 
+  // Helper: send to LINE only when LINE is available
+  const sendLine = async (conv, text) => {
+    if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
+    await clawgateSend(apiUrl, conv, text, traceId);
+    recordPluginSend(text);
+  };
+
   // Deliver reply — parse <cc_answer> and route answer, or forward to LINE
   const deliver = async (replyPayload) => {
     const replyText = extractReplyText(replyPayload, log, "tmux_question");
@@ -864,18 +871,12 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     if (answerResult) {
       if (answerResult.error) {
         const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
-        try {
-          await clawgateSend(apiUrl, defaultConversation || project, msg, traceId);
-          recordPluginSend(msg);
-        } catch (err) {
+        try { await sendLine(defaultConversation || project, msg); } catch (err) {
           log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
         }
       } else if (answerResult.lineText) {
         const normalized = normalizeLineReplyText(answerResult.lineText, { project, eventKind: "question" });
-        try {
-          await clawgateSend(apiUrl, defaultConversation || project, normalized, traceId);
-          recordPluginSend(normalized);
-        } catch (err) {
+        try { await sendLine(defaultConversation || project, normalized); } catch (err) {
           log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
         }
       }
@@ -888,10 +889,10 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
       if (taskResult) {
         if (taskResult.error) {
           const msg = `[Task send failed: ${taskResult.error.message || taskResult.error}]\n\n${taskResult.lineText}`;
-          try { await clawgateSend(apiUrl, defaultConversation || project, msg, traceId); recordPluginSend(msg); } catch {}
+          try { await sendLine(defaultConversation || project, msg); } catch {}
         } else if (taskResult.lineText) {
           const normalized = normalizeLineReplyText(taskResult.lineText, { project, eventKind: "question" });
-          try { await clawgateSend(apiUrl, defaultConversation || project, normalized, traceId); recordPluginSend(normalized); } catch {}
+          try { await sendLine(defaultConversation || project, normalized); } catch {}
         }
         return;
       }
@@ -901,8 +902,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     const lineText = normalizeLineReplyText(replyText, { project, eventKind: "question" });
     log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${lineText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, lineText, traceId);
-      recordPluginSend(lineText);
+      await sendLine(defaultConversation || project, lineText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
     }
@@ -933,7 +933,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
  * Dispatches the completion summary to AI, which then reports to LINE.
  * @param {object} params
  */
-async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log }) {
+async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable = true }) {
   const runtime = getRuntime();
   const traceId = makeTraceId("tmux-completion", event);
   const payload = event.payload ?? {};
@@ -1044,6 +1044,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}): "${text.slice(0, 80)}"`);
 
+  // Helper: send to LINE only when LINE is available
+  const sendLine = async (conv, text) => {
+    if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
+    await clawgateSend(apiUrl, conv, text, traceId);
+    recordPluginSend(text);
+  };
+
   // Dispatch to AI — the AI will summarize and reply via LINE
   // In autonomous mode, parse <cc_task> tags and route tasks to Claude Code
   const deliver = async (replyPayload) => {
@@ -1059,20 +1066,14 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         if (result.error) {
           // Task send failed — forward everything to LINE with error notice
           const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
-          try {
-            await clawgateSend(apiUrl, defaultConversation || project, msg, traceId);
-            recordPluginSend(msg);
-          } catch (err) {
+          try { await sendLine(defaultConversation || project, msg); } catch (err) {
             log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
           }
         } else {
           // Task sent successfully — send remaining text to LINE (if any)
           if (result.lineText) {
             const normalized = normalizeLineReplyText(result.lineText, { project, eventKind: "completion" });
-            try {
-              await clawgateSend(apiUrl, defaultConversation || project, normalized, traceId);
-              recordPluginSend(normalized);
-            } catch (err) {
+            try { await sendLine(defaultConversation || project, normalized); } catch (err) {
               log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
             }
           }
@@ -1086,8 +1087,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     const lineText = normalizeLineReplyText(replyText, { project, eventKind: "completion" });
     log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${lineText.slice(0, 80)}"`);
     try {
-      await clawgateSend(apiUrl, defaultConversation || project, lineText, traceId);
-      recordPluginSend(lineText);
+      await sendLine(defaultConversation || project, lineText);
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send tmux result to LINE failed: ${err}`);
     }
@@ -1150,6 +1150,9 @@ export async function startAccount(ctx) {
     log?.warn?.(`clawgate: [${accountId}] doctor check failed: ${err}`);
   }
 
+  // Detect LINE availability: explicit override from config, or auto-detect from ClawGate
+  let lineAvailable = account.lineNotify !== undefined ? !!account.lineNotify : true;
+
   // Fetch ClawGate config — fill in any values not set in openclaw.json
   try {
     const remoteConfig = await clawgateConfig(apiUrl);
@@ -1162,7 +1165,12 @@ export async function startAccount(ctx) {
         pollIntervalMs = remoteConfig.line.pollIntervalSeconds * 1000;
         log?.info?.(`clawgate: [${accountId}] pollIntervalMs from ClawGate config: ${pollIntervalMs}`);
       }
+      // Auto-detect LINE availability when not explicitly overridden
+      if (account.lineNotify === undefined) {
+        lineAvailable = !!remoteConfig.line.enabled;
+      }
     }
+    log?.info?.(`clawgate: [${accountId}] lineAvailable=${lineAvailable}`);
   } catch (err) {
     log?.debug?.(`clawgate: [${accountId}] config fetch failed (using defaults): ${err}`);
   }
@@ -1233,7 +1241,7 @@ export async function startAccount(ctx) {
           // Handle tmux question events (AskUserQuestion)
           if (event.adapter === "tmux" && event.payload?.source === "question") {
             try {
-              await handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log });
+              await handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable });
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] handleTmuxQuestion failed: ${err}`);
               traceLog(log, "error", {
@@ -1250,7 +1258,7 @@ export async function startAccount(ctx) {
           // Handle tmux completion events separately
           if (event.adapter === "tmux" && event.payload?.source === "completion") {
             try {
-              await handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log });
+              await handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable });
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] handleTmuxCompletion failed: ${err}`);
               traceLog(log, "error", {

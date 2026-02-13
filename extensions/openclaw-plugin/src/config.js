@@ -44,6 +44,7 @@ export function resolveAccount(cfg, accountId) {
     pollIntervalMs: section.pollIntervalMs || DEFAULTS.pollIntervalMs,
     defaultConversation: section.defaultConversation || DEFAULTS.defaultConversation,
     token: section.token || "",
+    lineNotify: section.lineNotify,   // undefined = auto-detect from /v1/config; true/false = override
     config: section,
   };
 }

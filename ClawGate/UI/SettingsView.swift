@@ -45,8 +45,6 @@ struct InlineSettingsView: View {
     @State private var tailscalePeers: [TailscalePeer] = []
     @State private var tmuxState: ConnectivityState = .unknown
     @State private var federationState: ConnectivityState = .unknown
-    @State private var relayState: ConnectivityState = .unknown
-    @State private var relayActionInFlight = false
     @State private var probeTimer: Timer?
 
     var body: some View {
@@ -84,6 +82,8 @@ struct InlineSettingsView: View {
         .onChange(of: model.config.tmuxStatusBarURL) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.federationEnabled) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.federationURL) { _ in model.save(); refreshConnectivity() }
+        .onChange(of: model.config.federationToken) { _ in model.save() }
+        .onChange(of: model.config.remoteAccessEnabled) { _ in model.save() }
     }
 
     private var headerCard: some View {
@@ -128,6 +128,22 @@ struct InlineSettingsView: View {
                     }
                     Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
                             value: $model.config.linePollIntervalSeconds, in: 1...30)
+                }
+            }
+
+            card("Federation") {
+                Toggle("Enabled", isOn: $model.config.federationEnabled)
+                if model.config.federationEnabled {
+                    statusRow(state: federationState)
+                    Text("Accepting clients on ws://0.0.0.0:8765/federation")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                    fieldRow("Token") {
+                        SecureField("federation token", text: $model.config.federationToken)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11))
+                    }
                 }
             }
 
@@ -205,40 +221,6 @@ struct InlineSettingsView: View {
                 }
             }
 
-            card("Relay (Gateway)") {
-                statusRow(state: relayState)
-                Text("Local relay endpoint: http://127.0.0.1:9765/v1/health")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-                    .lineLimit(2)
-
-                HStack(spacing: 8) {
-                    Button("Start") {
-                        startRelay()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(relayActionInFlight)
-
-                    Button("Stop") {
-                        stopRelay()
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(relayActionInFlight)
-
-                    Button("Restart") {
-                        restartRelay()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(relayActionInFlight)
-                }
-
-                if relayActionInFlight {
-                    Text("Applying relay action...")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
-            }
-
             card("System") {
                 Toggle("Debug Logging", isOn: $model.config.debugLogging)
             }
@@ -294,12 +276,12 @@ struct InlineSettingsView: View {
     private var federationHostBinding: Binding<String> {
         Binding(
             get: {
-                let (host, _) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 9100)
+                let (host, _) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
                 return host
             },
             set: { newHost in
                 let trimmed = newHost.trimmingCharacters(in: .whitespacesAndNewlines)
-                let (_, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 9100)
+                let (_, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
                 model.config.federationURL = trimmed.isEmpty ? "" : buildWSURL(host: trimmed, port: port, path: "/federation")
             }
         )
@@ -308,11 +290,11 @@ struct InlineSettingsView: View {
     private var federationPortBinding: Binding<Int> {
         Binding(
             get: {
-                let (_, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 9100)
+                let (_, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
                 return port
             },
             set: { newPort in
-                let (host, _) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 9100)
+                let (host, _) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
                 guard !host.isEmpty else { return }
                 model.config.federationURL = buildWSURL(host: host, port: newPort, path: "/federation")
             }
@@ -377,15 +359,12 @@ struct InlineSettingsView: View {
             if force || !model.config.federationEnabled {
                 model.config.federationEnabled = true
             }
-            if force || model.config.federationURL.isEmpty {
-                let preferredHost = tailscalePeers.first(where: { $0.online && $0.hostname != localMachineName() })?.hostname
-                    ?? tailscalePeers.first(where: { $0.online })?.hostname
-                    ?? tailscalePeers.first?.hostname
-                    ?? "sshmacmini"
-                model.config.federationURL = buildWSURL(host: preferredHost, port: 8766, path: "/federation")
-            }
+            // Server mode: federationURL is not needed (we're the acceptor)
             if force || !model.config.tmuxEnabled {
                 model.config.tmuxEnabled = true
+            }
+            if force || !model.config.remoteAccessEnabled {
+                model.config.remoteAccessEnabled = true
             }
         case .client:
             if force || !model.config.tmuxEnabled {
@@ -402,7 +381,7 @@ struct InlineSettingsView: View {
                     ?? tailscalePeers.first(where: { $0.online })?.hostname
                     ?? tailscalePeers.first?.hostname
                     ?? "sshmacmini"
-                model.config.federationURL = buildWSURL(host: preferredHost, port: 9100, path: "/federation")
+                model.config.federationURL = buildWSURL(host: preferredHost, port: 8765, path: "/federation")
             }
         }
 
@@ -433,7 +412,6 @@ struct InlineSettingsView: View {
     private func refreshConnectivity() {
         probeTmux()
         probeFederation()
-        probeRelay()
     }
 
     private func probeTmux() {
@@ -453,11 +431,16 @@ struct InlineSettingsView: View {
     }
 
     private func probeFederation() {
-        guard model.config.nodeRole == .client, model.config.federationEnabled else {
+        guard model.config.federationEnabled else {
             federationState = .unknown
             return
         }
-        let (host, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 9100)
+        if model.config.nodeRole == .server {
+            // Server: we're the listener, always "online"
+            federationState = .online
+            return
+        }
+        let (host, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
         guard !host.isEmpty else {
             federationState = .unknown
             return
@@ -466,33 +449,6 @@ struct InlineSettingsView: View {
         probeTCP(host: host, port: port) { ok in
             federationState = ok ? .online : .offline
         }
-    }
-
-    private func probeRelay() {
-        guard model.config.nodeRole == .client else {
-            relayState = .unknown
-            return
-        }
-        relayState = .checking
-        guard let url = URL(string: "http://127.0.0.1:9765/v1/health") else {
-            relayState = .offline
-            return
-        }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 1.2
-        URLSession.shared.dataTask(with: request) { _, response, error in
-            DispatchQueue.main.async {
-                if error != nil {
-                    relayState = .offline
-                    return
-                }
-                if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
-                    relayState = .online
-                } else {
-                    relayState = .offline
-                }
-            }
-        }.resume()
     }
 
     private func probeTCP(host: String, port: Int, timeout: TimeInterval = 1.2, completion: @escaping (Bool) -> Void) {
@@ -529,53 +485,4 @@ struct InlineSettingsView: View {
         }
     }
 
-    private func startRelay() {
-        relayActionInFlight = true
-        relayState = .checking
-        runRelayScript(["./scripts/restart-hostb-relay.sh"]) { _ in
-            relayActionInFlight = false
-            refreshConnectivity()
-        }
-    }
-
-    private func restartRelay() {
-        relayActionInFlight = true
-        relayState = .checking
-        runRelayScript(["./scripts/restart-hostb-relay.sh"]) { _ in
-            relayActionInFlight = false
-            refreshConnectivity()
-        }
-    }
-
-    private func stopRelay() {
-        relayActionInFlight = true
-        relayState = .checking
-        runRelayScript(["./scripts/stop-hostb-relay.sh"]) { _ in
-            relayActionInFlight = false
-            refreshConnectivity()
-        }
-    }
-
-    private func runRelayScript(_ command: [String], completion: @escaping (Int32) -> Void) {
-        guard let executable = command.first else {
-            completion(-1)
-            return
-        }
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: executable)
-        task.arguments = Array(command.dropFirst())
-        task.currentDirectoryURL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-
-        task.terminationHandler = { process in
-            DispatchQueue.main.async {
-                completion(process.terminationStatus)
-            }
-        }
-
-        do {
-            try task.run()
-        } catch {
-            completion(-1)
-        }
-    }
 }
