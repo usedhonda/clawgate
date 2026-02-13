@@ -367,6 +367,9 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
   result = result.replace(/\*\*(.+?)\*\*/g, "$1");
   // Strip Markdown heading markers.
   result = result.replace(/^#{1,6}\s+/gm, "");
+  // Ensure blank line before known review section labels (SCOPE:, RISK:, etc.)
+  // so the output is readable even when AI forgets to add spacing.
+  result = result.replace(/(?<=\S)\n((?:GOAL|SCOPE|RISK|ARCHITECTURE|MISSING|SUMMARY|VERDICT):)/g, "\n\n$1");
 
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
@@ -391,11 +394,13 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
       "SOUL.md のキャラ・話し方・書式ルールをそのまま守って。レビューだからって崩さない。",
       "LINE は Markdown 非対応（太字・見出し・コードブロック全部ダメ）。",
       "",
-      "書式: 英語ラベル + 空行区切り。例:",
+      "書式: 英語ラベル + 空行区切り（各ラベルの前に必ず空行を入れる）。例:",
       "",
       "SCOPE: gateway.js のみ。問題なし。",
       "",
       "RISK: API の破壊的変更あり。エラー処理も漏れてる。",
+      "",
+      "↑このように SCOPE: と RISK: の間に空行。詰めて書かない。",
       "",
       "観点（気になったものだけ）:",
       "- GOAL: 目的と結果が合ってるか",
