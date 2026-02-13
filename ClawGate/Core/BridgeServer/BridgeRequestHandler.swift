@@ -12,7 +12,7 @@ enum BlockingWork {
     )
 }
 
-final class BridgeRequestHandler: ChannelInboundHandler {
+final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 

@@ -70,9 +70,15 @@ final class BridgeServer {
                 return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
             },
             upgradePipelineHandler: { channel, _ in
-                channel.pipeline.addHandler(
-                    FederationServerHandler(federationServer: federationServer, logger: logger)
-                )
+                // Remove BridgeRequestHandler before adding WebSocket handler —
+                // otherwise it receives WebSocket frames and crashes trying to decode as HTTP.
+                channel.pipeline.handler(type: BridgeRequestHandler.self).flatMap { handler in
+                    channel.pipeline.removeHandler(handler)
+                }.flatMap {
+                    channel.pipeline.addHandler(
+                        FederationServerHandler(federationServer: federationServer, logger: logger)
+                    )
+                }
             }
         )
 
@@ -80,11 +86,13 @@ final class BridgeServer {
             withServerUpgrade: (
                 upgraders: [upgrader] as [HTTPServerProtocolUpgrader],
                 completionHandler: { context in
-                    // WebSocket upgrade completed, HTTP handler removed automatically
+                    // Belt-and-suspenders: also remove BridgeRequestHandler here in case
+                    // the upgradePipelineHandler removal didn't take effect in time.
+                    context.pipeline.removeHandler(name: "bridge-request-handler", promise: nil)
                 }
             )
         ).flatMap {
-            channel.pipeline.addHandler(BridgeRequestHandler(core: core))
+            channel.pipeline.addHandler(BridgeRequestHandler(core: core), name: "bridge-request-handler")
         }
     }
 }
