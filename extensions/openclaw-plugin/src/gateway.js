@@ -399,7 +399,7 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
       "Mode Behavior:",
       "- AUTONOMOUS: After review, design the next task in <cc_task>.",
       "- OBSERVE: Review only. Report to user. Never send tasks.",
-      "- AUTO: Quality gate. Only flag problems or drift.",
+      "- AUTO: Quality gate + auto-continue. After review, send <cc_task>continue</cc_task> unless you found a blocking problem.",
       "",
       "DO NOT: repeat commit messages, say \"CC completed...\", give generic praise, produce walls of text.",
       "MUST: Always reply (never NO_REPLY).",
@@ -414,7 +414,9 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
     } else if (m === "observe") {
       parts.push("Review and report to user. Do not send tasks.");
     } else if (m === "auto") {
-      parts.push("Quality gate: only flag problems or drift.");
+      parts.push("Quality gate + auto-continue. Review the output, then:");
+      parts.push("- If OK or minor issues: send <cc_task>continue</cc_task> to keep CC working.");
+      parts.push("- If blocking problem found: do NOT send <cc_task>. Report to user via LINE only.");
     }
     parts.push("MUST reply -- never NO_REPLY.");
   } else if (k === "question") {
@@ -591,7 +593,7 @@ function buildRosterPrefix() {
   if (!roster) return "";
 
   // Check if any project is in autonomous mode
-  const hasTaskCapable = [...sessionModes.values()].some((m) => m === "autonomous");
+  const hasTaskCapable = [...sessionModes.values()].some((m) => m === "autonomous" || m === "auto");
   const taskHint = hasTaskCapable
     ? `\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to LINE.`
     : "";
@@ -1088,7 +1090,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     if (!replyText.trim()) return;
 
     // Autonomous/auto mode: try to extract and send <cc_task>
-    if (mode === "autonomous") {
+    if (mode === "autonomous" || mode === "auto") {
       const result = await tryExtractAndSendTask({
         replyText, project, apiUrl, traceId, log,
       });
