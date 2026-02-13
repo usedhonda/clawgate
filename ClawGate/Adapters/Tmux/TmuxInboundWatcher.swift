@@ -246,8 +246,10 @@ final class TmuxInboundWatcher {
             outputSummary = fallback
             captureState = "progress_fallback"
         } else {
-            outputSummary = "(capture failed)"
-            captureState = "failed"
+            logger.log(.warning, "TmuxInboundWatcher: capture failed for \(session.project), skipping emit")
+            lastProgressHash.removeValue(forKey: session.project)
+            lastProgressSummary.removeValue(forKey: session.project)
+            return
         }
 
         let eventID = UUID().uuidString

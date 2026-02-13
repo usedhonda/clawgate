@@ -181,10 +181,20 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
                     payload[key] = String(describing: value)
                 }
             }
-            payload["_from_federation"] = "1"
-            _ = eventBus.append(type: eventType, adapter: adapter, payload: payload)
             let project = payload["project"] ?? payload["conversation"] ?? "-"
             let source = payload["source"] ?? "-"
+
+            // Defense-in-depth: drop tmux events for locally-ignored sessions
+            if adapter == "tmux" {
+                let localMode = configStore.load().tmuxSessionModes[project] ?? "ignore"
+                if localMode == "ignore" {
+                    logger.log(.debug, "FederationClient: dropping ignored tmux event for \(project)")
+                    return
+                }
+            }
+
+            payload["_from_federation"] = "1"
+            _ = eventBus.append(type: eventType, adapter: adapter, payload: payload)
             logger.log(.info, "FederationClient received event: \(adapter).\(eventType) project=\(project) source=\(source)")
             return
         } else if type == "event" {

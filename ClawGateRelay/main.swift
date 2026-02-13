@@ -580,7 +580,7 @@ final class RelayTmuxRouter {
         do {
             rawOutput = try RelayTmuxShell.capturePane(target: target, lines: 50)
         } catch {
-            emitCompletion(session: session, mode: mode, target: target, text: "(capture failed)")
+            print("[relay] capture failed for \(session.project), skipping emit")
             return
         }
 
@@ -1276,9 +1276,11 @@ final class RelayWebSocketHandler: ChannelInboundHandler {
     typealias OutboundOut = WebSocketFrame
 
     private let state: RelayState
+    private let sessionModes: [String: String]
 
-    init(state: RelayState) {
+    init(state: RelayState, sessionModes: [String: String]) {
         self.state = state
+        self.sessionModes = sessionModes
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -1334,6 +1336,15 @@ final class RelayWebSocketHandler: ChannelInboundHandler {
            let adapter = eventObj["adapter"] as? String,
            let eventType = eventObj["type"] as? String,
            let payloadDict = eventObj["payload"] as? [String: String] {
+            // Defense-in-depth: drop tmux events for locally-ignored sessions
+            if adapter == "tmux" {
+                let project = payloadDict["project"] ?? ""
+                let localMode = sessionModes[project] ?? "ignore"
+                if localMode == "ignore" {
+                    print("[relay] dropping ignored tmux event for \(project)")
+                    return
+                }
+            }
             var marked = payloadDict
             marked["_from_federation"] = "1"
             state.eventBus.append(type: eventType, adapter: adapter, payload: marked)
@@ -1382,7 +1393,7 @@ let upgrader = NIOWebSocketServerUpgrader(
         return channel.eventLoop.makeSucceededFuture([:])
     },
     upgradePipelineHandler: { channel, _ in
-        return channel.pipeline.addHandler(RelayWebSocketHandler(state: state))
+        return channel.pipeline.addHandler(RelayWebSocketHandler(state: state, sessionModes: config.tmuxSessionModes))
     }
 )
 
