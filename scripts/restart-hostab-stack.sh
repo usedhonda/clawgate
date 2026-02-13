@@ -4,7 +4,7 @@ set -euo pipefail
 # Restart Host A + Host B stack in a fixed order.
 # 1) Sync repo to Host A (macmini)
 # 2) Restart Host A ClawGate + OpenClaw Gateway
-# 3) Restart Host B ClawGate + ClawGateRelay
+# 3) Restart Host B ClawGate
 # 4) Print health + doctor summary
 #
 # Usage:
@@ -86,24 +86,8 @@ fi
 echo "[local] Restart Host B ClawGate.app (canonical path)"
 ./scripts/restart-local-clawgate.sh
 
-if [[ "$SKIP_LOCAL_RELAY" != "true" ]]; then
-  echo "[local] Restart Host B ClawGateRelay"
-  EFFECTIVE_FED_TOKEN="${FEDERATION_TOKEN:-}"
-  if [[ -z "$EFFECTIVE_FED_TOKEN" ]]; then
-    EFFECTIVE_FED_TOKEN="$(ssh "$REMOTE_HOST" "defaults read com.clawgate.app clawgate.federationToken 2>/dev/null || defaults read ClawGate clawgate.federationToken 2>/dev/null || true" | tr -d '\r')"
-  fi
-  if [[ -n "$EFFECTIVE_FED_TOKEN" ]]; then
-    RELAY_TOKEN="$EFFECTIVE_FED_TOKEN" FEDERATION_TOKEN="$EFFECTIVE_FED_TOKEN" ./scripts/restart-hostb-relay.sh
-  else
-    ./scripts/restart-hostb-relay.sh
-  fi
-fi
-
 echo "[local] health:"
 curl -sS -m 3 http://127.0.0.1:8765/v1/health || true
-echo
-echo "[local] relay health:"
-curl -sS -m 3 http://127.0.0.1:9765/v1/health || true
 echo
 echo "[local] doctor:"
 curl -sS -m 3 http://127.0.0.1:8765/v1/doctor || true

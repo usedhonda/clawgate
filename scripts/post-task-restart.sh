@@ -8,7 +8,6 @@ REMOTE_HOST="macmini"
 PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
 SKIP_SYNC=false
 SKIP_REMOTE_BUILD=true
-SKIP_LOCAL_RELAY=false
 REQUIRE_HOSTA_LOCAL_SIGN=false
 
 while [[ $# -gt 0 ]]; do
@@ -22,7 +21,7 @@ while [[ $# -gt 0 ]]; do
     --skip-remote-build)
       SKIP_REMOTE_BUILD=true; shift ;;
     --skip-local-relay)
-      SKIP_LOCAL_RELAY=true; shift ;;
+      shift ;;  # deprecated: relay removed, kept for backward compat
     --require-hosta-local-sign)
       REQUIRE_HOSTA_LOCAL_SIGN=true; shift ;;
     *)
@@ -38,18 +37,14 @@ echo "Remote host : $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
 echo "Skip sync   : $SKIP_SYNC"
 echo "Skip build  : $SKIP_REMOTE_BUILD"
-echo "Skip relay  : $SKIP_LOCAL_RELAY"
 echo "Require HostA local sign: $REQUIRE_HOSTA_LOCAL_SIGN"
 
-STACK_ARGS=(--remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH")
+STACK_ARGS=(--remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" --skip-local-relay)
 if [[ "$SKIP_SYNC" == "true" ]]; then
   STACK_ARGS+=(--skip-sync)
 fi
 if [[ "$SKIP_REMOTE_BUILD" == "true" ]]; then
   STACK_ARGS+=(--skip-remote-build)
-fi
-if [[ "$SKIP_LOCAL_RELAY" == "true" ]]; then
-  STACK_ARGS+=(--skip-local-relay)
 fi
 
 if ! ./scripts/restart-hostab-stack.sh "${STACK_ARGS[@]}"; then
@@ -65,10 +60,6 @@ fi
 echo
 echo "[verify] Host B health"
 curl -fsS -m 3 http://127.0.0.1:8765/v1/health >/dev/null
-echo "ok"
-
-echo "[verify] Host B relay health"
-curl -fsS -m 3 http://127.0.0.1:9765/v1/health >/dev/null
 echo "ok"
 
 echo "[verify] Host A health"

@@ -59,6 +59,10 @@ ClawGate/
     EventBus/
       EventBus.swift                  # In-memory event ring buffer + SSE subscriptions
       RecentSendTracker.swift         # Echo suppression (8s temporal window)
+    Federation/
+      FederationProtocol.swift        # Shared message types (Envelope, Hello, Event, Command, Response)
+      FederationServer.swift          # Server-side: accepts WebSocket clients, routes events/commands
+      FederationClient.swift          # Client-side: connects to server, forwards events, handles commands
     Logging/
       AppLogger.swift                 # Leveled logger (debug/info/warning/error)
       StepLog.swift                   # Per-step operation log for send flows
@@ -774,3 +778,97 @@ updates and writes them to daily diary files.
 |-------|-------|------|
 | BodyForAgent | Real-time coordinate injection per message | Message arrives while moving |
 | Diary | Persistent location history | Session start, movement tracking |
+
+---
+
+## 14. Direct Federation
+
+ClawGate instances on different hosts communicate directly via WebSocket (Direct Federation). This replaces the earlier Relay proxy approach.
+
+### Architecture
+
+```
+Host B (Client)                              Host A (Server)
+┌──────────────────┐                         ┌──────────────────┐
+│ ClawGate.app     │                         │ ClawGate.app     │
+│ :8765            │                         │ :8765            │
+│                  │    WebSocket             │                  │
+│ TmuxInbound      │    /federation          │ FederationServer │
+│  Watcher -> EventBus -> FederationClient ------> EventBus    │
+│                  │                         │       |          │
+│                  │                         │       v          │
+│                  │                         │ OpenClaw Gateway  │
+│                  │                         │ polls /v1/poll    │
+│                  │                         │       |          │
+│                  │                         │       v          │
+│                  │                         │ AI -> LINE send  │
+└──────────────────┘                         └──────────────────┘
+```
+
+- **Host B (Client)**: TmuxInboundWatcher detects Claude Code completions -> EventBus -> FederationClient sends via WebSocket to Host A
+- **Host A (Server)**: FederationServer receives events -> EventBus -> OpenClaw Gateway polls /v1/poll -> AI dispatches -> LINE reply
+
+### Components
+
+#### FederationServer (Host A)
+
+Accepts incoming WebSocket connections on `/federation`. Manages connected clients and routes events/commands between them and the local EventBus.
+
+- **Client management**: Tracks connected clients by ID, maintains project-to-client routing table
+- **Event routing**: Subscribes to local EventBus and broadcasts events to all connected clients. Incoming client events are injected into local EventBus (marked with `_from_federation=1` to prevent echo)
+- **Command forwarding**: Routes HTTP-like commands to the appropriate client based on project routing. Returns responses via `EventLoopPromise`
+
+#### FederationClient (Host B)
+
+Connects to a remote FederationServer via WebSocket. Forwards local events and handles remote commands.
+
+- **Connection**: URLSession WebSocket to configured `federationURL` with optional Bearer token auth
+- **Auto-reconnect**: Exponential backoff (2^n seconds, capped at `federationReconnectMaxSeconds`)
+- **Event forwarding**: Subscribes to local EventBus and forwards non-federation events to server
+- **Command handling**: Receives HTTP-like commands from server, executes via `BridgeCore.handleFederationCommand()`, returns response
+
+#### FederationProtocol
+
+Shared message types for the WebSocket protocol:
+
+| Type | Struct | Description |
+|------|--------|-------------|
+| `FederationEnvelope<T>` | Generic | Wraps all messages: `{ type, timestamp, payload }` |
+| `FederationHelloPayload` | Hello | Client greeting: `{ version, capabilities }` |
+| `FederationEventPayload` | Event | Wraps a `BridgeEvent` for transmission |
+| `FederationCommandPayload` | Command | HTTP-like request: `{ id, method, path, headers, body }` |
+| `FederationResponsePayload` | Response | HTTP-like response: `{ id, status, headers, body }` |
+
+### WebSocket Protocol
+
+All messages are JSON text frames with the structure: `{ "type": "<type>", "timestamp": "<ISO8601>", "payload": {...} }`
+
+| Message Type | Direction | Description |
+|-------------|-----------|-------------|
+| `hello` | Client -> Server | Initial greeting with version and capabilities |
+| `welcome` | Server -> Client | Server acknowledgment with server version |
+| `event` | Bidirectional | EventBus event forwarded to the other side |
+| `command` | Server -> Client | HTTP-like request for client to execute locally |
+| `response` | Client -> Server | Response to a command |
+| `ping` | Bidirectional | Keep-alive ping |
+| `pong` | Bidirectional | Keep-alive pong |
+
+### Mode Resolution (Federation Events)
+
+When a federation-received tmux event arrives, the mode is resolved as follows:
+
+1. Check local `tmuxSessionModes` config for the project
+2. If local config has an explicit mode set -> use that (admin override)
+3. If local config has no entry (nil) -> trust the event's `mode` field (set by the sender)
+4. If effective mode is `"ignore"` -> drop the event silently
+
+This allows the server admin to override client modes when needed, while defaulting to trust the client's mode when no local override is configured.
+
+### Configuration
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `federationEnabled` | `false` | Enable federation client |
+| `federationURL` | `""` | WebSocket URL of the server (e.g., `ws://macmini:8765/federation`) |
+| `federationToken` | `""` | Bearer token for authentication |
+| `federationReconnectMaxSeconds` | `120` | Max reconnect backoff delay |
