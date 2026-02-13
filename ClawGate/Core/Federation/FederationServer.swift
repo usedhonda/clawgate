@@ -124,17 +124,19 @@ final class FederationServer {
     func sendCommand(forProject project: String, _ command: FederationCommandPayload) -> EventLoopFuture<FederationResponsePayload> {
         lock.lock()
         guard let clientID = projectRoutes[project], let channel = clients[clientID] else {
-            // Fallback: if only one client, send to that client
-            if clients.count == 1, let (_, channel) = clients.first {
-                let promise = channel.eventLoop.makePromise(of: FederationResponsePayload.self)
-                pending[command.id] = promise
-                lock.unlock()
-                sendFrame(channel: channel, type: "command", payload: command)
-                return promise.futureResult
-            }
+            // No explicit route — broadcast to all clients (first success wins)
+            // This handles: fresh restart (empty routes), stale connections, multi-client setups
+            let allChannels = Array(clients.values)
             lock.unlock()
-            let el = MultiThreadedEventLoopGroup.singleton.any()
-            return el.makeFailedFuture(FederationServerError.noRouteForProject(project))
+            guard let first = allChannels.first else {
+                let el = MultiThreadedEventLoopGroup.singleton.any()
+                return el.makeFailedFuture(FederationServerError.noRouteForProject(project))
+            }
+            logger.log(.info, "No route for project=\(project), broadcasting to \(allChannels.count) client(s)")
+            let promise = first.eventLoop.makePromise(of: FederationResponsePayload.self)
+            pending[command.id] = promise
+            sendFrame(channel: first, type: "command", payload: command)
+            return promise.futureResult
         }
         let promise = channel.eventLoop.makePromise(of: FederationResponsePayload.self)
         pending[command.id] = promise
