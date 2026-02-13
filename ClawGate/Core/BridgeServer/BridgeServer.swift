@@ -70,10 +70,13 @@ final class BridgeServer {
                 return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
             },
             upgradePipelineHandler: { channel, _ in
-                // Remove BridgeRequestHandler before adding WebSocket handler —
-                // otherwise it receives WebSocket frames and crashes trying to decode as HTTP.
-                channel.pipeline.handler(type: BridgeRequestHandler.self).flatMap { handler in
-                    channel.pipeline.removeHandler(handler)
+                // Remove BridgeRequestHandler by name before adding WebSocket handler.
+                // After WebSocket upgrade NIO removes the HTTP codec handlers but NOT
+                // custom handlers, so BridgeRequestHandler would receive WebSocket frames
+                // and crash trying to decode them as HTTP.
+                channel.pipeline.removeHandler(name: "bridge-request-handler").flatMapError { _ in
+                    // Handler may have been removed already; that's fine.
+                    channel.eventLoop.makeSucceededVoidFuture()
                 }.flatMap {
                     channel.pipeline.addHandler(
                         FederationServerHandler(federationServer: federationServer, logger: logger)
@@ -86,8 +89,8 @@ final class BridgeServer {
             withServerUpgrade: (
                 upgraders: [upgrader] as [HTTPServerProtocolUpgrader],
                 completionHandler: { context in
-                    // Belt-and-suspenders: also remove BridgeRequestHandler here in case
-                    // the upgradePipelineHandler removal didn't take effect in time.
+                    // Belt-and-suspenders: also try removal here in case
+                    // upgradePipelineHandler failed to remove it.
                     context.pipeline.removeHandler(name: "bridge-request-handler", promise: nil)
                 }
             )
