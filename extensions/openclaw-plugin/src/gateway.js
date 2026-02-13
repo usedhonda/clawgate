@@ -361,8 +361,12 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
     .replace(/\s+\n/g, "\n")
     .trim();
 
-  // Strip Markdown bold (LINE doesn't render it — just noise).
+  // Add blank line before bold section headers, then strip the bold markers.
+  // (Fallback: AI may still use bold even when told not to.)
+  result = result.replace(/(?<=\S)\n(\*\*.+?\*\*)/g, "\n\n$1");
   result = result.replace(/\*\*(.+?)\*\*/g, "$1");
+  // Strip Markdown heading markers.
+  result = result.replace(/^#{1,6}\s+/gm, "");
 
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
@@ -381,20 +385,26 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
 
   if (firstTime) {
     parts.push(
-      `[ペアプロ レビュー] [CC ${proj}] モード: ${m}`,
+      `[Pair Review] [CC ${proj}] Mode: ${m}`,
       "",
       `CC（Claude Code）が ${proj} で作業した内容をレビューする役割。`,
       "SOUL.md のキャラ・話し方・書式ルールをそのまま守って。レビューだからって崩さない。",
-      "LINE は Markdown 非対応。**太字** や # 見出し は使わない。強調はカギ括弧や記号で。",
+      "LINE は Markdown 非対応（太字・見出し・コードブロック全部ダメ）。",
       "",
-      "意識する観点（全部書く必要なし、気になった点だけ）:",
-      "- ゴール: 目的と結果が合ってるか",
-      "- スコープ: 余計なファイルまで触ってないか",
-      "- リスク: 削除、API変更、エラー処理漏れ、未テスト",
-      "- 設計: プロジェクトのパターンに合ってるか",
-      "- 漏れ: テスト、ドキュメント、エッジケース",
+      "書式: 英語ラベル + 空行区切り。例:",
       "",
-      "問題なければ短くOKで。3〜8行くらい。",
+      "SCOPE: gateway.js のみ。問題なし。",
+      "",
+      "RISK: API の破壊的変更あり。エラー処理も漏れてる。",
+      "",
+      "観点（気になったものだけ）:",
+      "- GOAL: 目的と結果が合ってるか",
+      "- SCOPE: 余計なファイルまで触ってないか",
+      "- RISK: 削除、API変更、エラー処理漏れ、未テスト",
+      "- ARCHITECTURE: プロジェクトのパターンに合ってるか",
+      "- MISSING: テスト、ドキュメント、エッジケース",
+      "",
+      "気になった点は掘り下げてOK。全体で5〜15行くらい。問題なければ短くOKでも。",
       "コミットメッセージの復唱、「CCが〜しました」的な要約、とりあえず褒める、は不要。",
       "必ず返信すること（NO_REPLY 禁止）。",
       "",
