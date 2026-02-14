@@ -9,6 +9,7 @@ struct QRCodeView: View {
     @State private var connectionURL: String?
     @State private var errorMessage: String?
     @State private var copied = false
+    @State private var isLoading = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -35,6 +36,12 @@ struct QRCodeView: View {
                             .foregroundColor(.orange)
                             .font(.caption)
                             .multilineTextAlignment(.center)
+                    } else if isLoading {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Fetching from server...")
+                            .foregroundColor(.secondary)
+                            .font(.caption)
                     } else {
                         Text("Loading...")
                             .foregroundColor(.secondary)
@@ -81,16 +88,77 @@ struct QRCodeView: View {
     // MARK: - Private Methods
 
     private func loadConnectionInfo() {
-        // Load Tailscale hostname
-        tailscaleHostname = getTailscaleHostname()
+        let defaults = UserDefaults.standard
+        let nodeRole = defaults.string(forKey: "clawgate.nodeRole") ?? "client"
+        let federationURL = defaults.string(forKey: "clawgate.federationURL") ?? ""
 
-        // Load OpenClaw config
+        if nodeRole == "client" && !federationURL.isEmpty {
+            loadFromServer(federationURL: federationURL)
+        } else {
+            loadFromLocal()
+        }
+    }
+
+    private func loadFromServer(federationURL: String) {
+        // Extract host:port from federation URL (e.g. "ws://host:8765/federation")
+        guard let wsURL = URL(string: federationURL),
+              let host = wsURL.host else {
+            errorMessage = "Invalid federation URL"
+            return
+        }
+        let bridgePort = wsURL.port ?? 8765
+
+        let defaults = UserDefaults.standard
+        let token = defaults.string(forKey: "clawgate.federationToken")
+            ?? defaults.string(forKey: "clawgate.remoteAccessToken") ?? ""
+
+        guard let url = URL(string: "http://\(host):\(bridgePort)/v1/openclaw-info") else {
+            errorMessage = "Could not build server URL"
+            return
+        }
+
+        isLoading = true
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        if !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                isLoading = false
+                if let error {
+                    errorMessage = "Server error: \(error.localizedDescription)"
+                    return
+                }
+                guard let data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let ok = json["ok"] as? Bool, ok,
+                      let remoteHost = json["host"] as? String,
+                      let remoteToken = json["token"] as? String else {
+                    errorMessage = "Invalid response from server"
+                    return
+                }
+                let remotePort = json["port"] as? Int ?? 18789
+
+                tailscaleHostname = remoteHost
+                openClawToken = remoteToken
+                openClawPort = remotePort
+                buildConnectionURL()
+            }
+        }.resume()
+    }
+
+    private func loadFromLocal() {
+        tailscaleHostname = getTailscaleHostname()
         if let config = getOpenClawConfig() {
             openClawToken = config.token
             openClawPort = config.port
         }
+        buildConnectionURL()
+    }
 
-        // Build URL or set error
+    private func buildConnectionURL() {
         if let host = tailscaleHostname, let token = openClawToken {
             var components = URLComponents()
             components.scheme = "openclaw"

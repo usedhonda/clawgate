@@ -26,6 +26,7 @@ import {
   clawgateTmuxSend,
   setClawgateAuthToken,
 } from "./client.js";
+import { setActiveProject } from "./shared-state.js";
 import {
   getProjectContext,
   getProjectRoster,
@@ -359,7 +360,11 @@ function extractReplyText(replyPayload, log, context = "reply") {
   return "";
 }
 
-function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}) {
+function sessionLabel(sessionType) {
+  return sessionType === "codex" ? "Codex" : "CC";
+}
+
+function normalizeLineReplyText(text, { project = "", sessionType = "claude_code", eventKind = "reply" } = {}) {
   const trimmed = `${text || ""}`.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   if (!trimmed) return "";
 
@@ -380,24 +385,28 @@ function normalizeLineReplyText(text, { project = "", eventKind = "reply" } = {}
 
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
-  if (project && !/^\[(CC|Claude Code)\b/.test(result)) {
-    result = `[CC ${project}]\n${result}`;
+  // Strip any existing [CC/Codex ...] prefix (Chi may have added one) before re-adding
+  // to ensure consistent formatting.
+  if (project) {
+    result = result.replace(/^\[(CC|Codex) [^\]]*\]\n?/, "").trim();
+    result = `[${sessionLabel(sessionType)} ${project}]\n${result}`;
   }
 
   return result;
 }
 
-function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTime = false } = {}) {
+function buildPairingGuidance({ project = "", mode = "", eventKind = "", sessionType = "claude_code", firstTime = false } = {}) {
   const proj = project || "current";
   const m = mode || "observe";
   const k = eventKind || "update";
+  const label = sessionLabel(sessionType);
   const parts = [];
 
   if (firstTime) {
     parts.push(
-      `[Pair Review] [CC ${proj}] Mode: ${m}`,
+      `[Pair Review] [${label} ${proj}] Mode: ${m}`,
       "",
-      `CC（Claude Code）が ${proj} で作業した内容をレビューする役割。`,
+      `${label}（${sessionType === "codex" ? "Codex" : "Claude Code"}）が ${proj} で作業した内容をレビューする役割。`,
       "SOUL.md のキャラ・話し方・書式ルールをそのまま守って。レビューだからって崩さない。",
       "LINE は Markdown 非対応（太字・見出し・コードブロック全部ダメ）。",
       "",
@@ -461,6 +470,7 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", firstTi
         "<cc_answer> は使わない。ユーザーが判断する。",
       );
     }
+    parts.push("必ず返信（NO_REPLY 禁止）。");
   }
 
   return parts.join("\n");
@@ -794,7 +804,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       }
     }
 
-    const lineText = normalizeLineReplyText(text);
+    const lineText = normalizeLineReplyText(text, { project: event.payload?.project || "" });
     log?.info?.(`clawgate: [${accountId}] sending reply to "${conversation}": "${lineText.slice(0, 80)}"`);
     traceLog(log, "info", {
       trace_id: traceId,
@@ -875,7 +885,9 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   const selectedIndex = parseInt(payload.question_selected || "0", 10);
   const questionId = payload.question_id || String(Date.now());
   const mode = payload.mode || sessionModes.get(project) || "ignore";
+  const sessionType = payload.session_type || "claude_code";
   const tmuxTarget = payload.tmux_target || "";
+  const label = sessionLabel(sessionType);
 
   // Guard: ignore-mode sessions must not be dispatched (defense against federation leaks)
   if (mode === "ignore") {
@@ -904,12 +916,12 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   let body;
   if (mode === "auto") {
-    body = `[CC ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
+    body = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
   } else {
-    body = `[CC ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[Analyze the options and send your recommendation to the user via LINE. Do NOT use <cc_answer>.]`;
+    body = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[Analyze the options and send your recommendation to the user via LINE. Do NOT use <cc_answer>.]`;
   }
   const isFirstGuidance = !guidanceSentProjects.has(project);
-  const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question", firstTime: isFirstGuidance })}\n\n---\n\n${body}`;
+  const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question", sessionType, firstTime: isFirstGuidance })}\n\n---\n\n${body}`;
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
   const ctx = {
@@ -940,7 +952,10 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   // Helper: send to LINE only when LINE is available
   const sendLine = async (conv, text) => {
     if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
-    await clawgateSend(apiUrl, conv, text, traceId);
+    const result = await clawgateSend(apiUrl, conv, text, traceId);
+    if (!result?.ok) {
+      log?.warn?.(`clawgate: sendLine failed (question): ${JSON.stringify(result?.error || result)}`);
+    }
     recordPluginSend(text);
   };
 
@@ -959,7 +974,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
             log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
           }
         } else if (answerResult.lineText) {
-          const normalized = normalizeLineReplyText(answerResult.lineText, { project, eventKind: "question" });
+          const normalized = normalizeLineReplyText(answerResult.lineText, { project, sessionType, eventKind: "question" });
           try { await sendLine(defaultConversation || project, normalized); } catch (err) {
             log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
           }
@@ -969,7 +984,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     }
 
     // Default: forward to LINE (observe, autonomous, auto fallback)
-    const lineText = normalizeLineReplyText(replyText, { project, eventKind: "question" });
+    const lineText = normalizeLineReplyText(replyText, { project, sessionType, eventKind: "question" });
     log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);
@@ -977,6 +992,9 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
       log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
     }
   };
+
+  // Register project context for outbound.sendText prefix fallback
+  setActiveProject(defaultConversation || project, project, sessionType);
 
   try {
     const dispatch = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
@@ -1011,6 +1029,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   const project = payload.project || payload.conversation || "unknown";
   const text = payload.text || "(no output captured)";
   const mode = payload.mode || sessionModes.get(project) || "ignore";
+  const sessionType = payload.session_type || "claude_code";
   const tmuxTarget = payload.tmux_target || "";
 
   // Guard: ignore-mode sessions must not be dispatched (defense against federation leaks)
@@ -1079,10 +1098,10 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   clearProgressTrail(project);
 
   const isFirstGuidance = !guidanceSentProjects.has(project);
-  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion", firstTime: isFirstGuidance }));
+  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion", sessionType, firstTime: isFirstGuidance }));
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
-  contextParts.push(`[CC ${project}] [${mode}] Completion Output:\n\n${text}`);
+  contextParts.push(`[${sessionLabel(sessionType)} ${project}] [${mode}] Completion Output:\n\n${text}`);
   const body = contextParts.join("\n\n---\n\n");
 
   const ctx = {
@@ -1113,7 +1132,10 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Helper: send to LINE only when LINE is available
   const sendLine = async (conv, text) => {
     if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
-    await clawgateSend(apiUrl, conv, text, traceId);
+    const result = await clawgateSend(apiUrl, conv, text, traceId);
+    if (!result?.ok) {
+      log?.warn?.(`clawgate: sendLine failed (completion): ${JSON.stringify(result?.error || result)}`);
+    }
     recordPluginSend(text);
   };
 
@@ -1141,7 +1163,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           } else {
             questionRoundMap.set(project, rounds + 1);
             if (result.lineText) {
-              const normalized = normalizeLineReplyText(result.lineText, { project, eventKind: "completion" });
+              const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
               try { await sendLine(defaultConversation || project, normalized); } catch (err) {
                 log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
               }
@@ -1167,7 +1189,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           }
         } else {
           if (result.lineText) {
-            const normalized = normalizeLineReplyText(result.lineText, { project, eventKind: "completion" });
+            const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
             try { await sendLine(defaultConversation || project, normalized); } catch (err) {
               log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
             }
@@ -1179,7 +1201,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     }
 
     // Default: forward all to LINE
-    const lineText = normalizeLineReplyText(replyText, { project, eventKind: "completion" });
+    const lineText = normalizeLineReplyText(replyText, { project, sessionType, eventKind: "completion" });
     log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);
@@ -1187,6 +1209,9 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       log?.error?.(`clawgate: [${accountId}] send tmux result to LINE failed: ${err}`);
     }
   };
+
+  // Register project context for outbound.sendText prefix fallback
+  setActiveProject(defaultConversation || project, project, sessionType);
 
   try {
     const dispatch = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;

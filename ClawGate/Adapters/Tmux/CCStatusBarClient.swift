@@ -5,17 +5,19 @@ import Foundation
 /// Tracks Claude Code session state and notifies on status changes.
 final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
-    /// A Claude Code session reported by cc-status-bar.
+    /// A Claude Code or Codex session reported by cc-status-bar.
     struct CCSession {
         let id: String
         let project: String
         var status: String              // "running" | "waiting_input" | "stopped"
+        let sessionType: String         // "claude_code" | "codex"
         let tmuxSession: String?
         let tmuxWindow: String?
         let tmuxPane: String?
-        let isAttached: Bool            // tmux session is currently attached
+        let isAttached: Bool            // tmux session is currently attached (informational only)
         let attentionLevel: Int         // 0=green, 1=yellow, 2=red
         let waitingReason: String?      // "permission_prompt" | "stop" | nil
+        var paneCapture: String?        // pane output from cc-status-bar
 
         var tmuxTarget: String? {
             guard let session = tmuxSession else { return nil }
@@ -32,8 +34,8 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     /// Callback: (session, oldStatus, newStatus)
     var onStateChange: ((CCSession, String, String) -> Void)?
 
-    /// Callback: session detached (for auto-ignore). (session)
-    var onSessionDetached: ((CCSession) -> Void)?
+    /// Callback: fired when session.progress arrives with pane_capture
+    var onProgress: ((CCSession) -> Void)?
 
     /// Callback: fired when the sessions dictionary is updated (for UI refresh)
     var onSessionsChanged: (() -> Void)?
@@ -84,7 +86,7 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
         lock.lock()
         defer { lock.unlock() }
         return _sessions.values.first {
-            $0.project == project && $0.isAttached
+            $0.project == project
         }
     }
 
@@ -92,7 +94,6 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
         lock.lock()
         defer { lock.unlock() }
         return _sessions.values
-            .filter { $0.isAttached }
             .sorted { $0.project < $1.project }
     }
 
@@ -197,6 +198,17 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    private func logRawMessage(type: String, json: [String: Any]) {
+        let sessionData = json["session"] as? [String: Any]
+        let id = sessionData?["id"] as? String ?? "-"
+        let project = sessionData?["project"] as? String ?? "-"
+        let status = sessionData?["status"] as? String ?? "-"
+        let line = "\(Date()) type=\(type) id=\(id) project=\(project) status=\(status)\n"
+        let path = "/tmp/clawgate-ccsb-raw.log"
+        let existing = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+        try? (existing + line).write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
     private func handleMessage(_ text: String) {
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -204,19 +216,35 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
             return
         }
 
+        logRawMessage(type: type, json: json)
+
         switch type {
         case "sessions.list":
-            // Initial full session list — only include attached sessions
+            // Initial full session list
             guard let sessions = json["sessions"] as? [[String: Any]] else { return }
             lock.lock()
+            let oldSessions = _sessions
             _sessions.removeAll()
             for s in sessions {
-                if let session = parseSession(s), session.isAttached {
+                if let session = parseSession(s) {
                     _sessions[session.id] = session
                 }
             }
+            let newSessions = _sessions
             lock.unlock()
-            logger.log(.info, "CCStatusBarClient: received \(_sessions.count) attached sessions")
+            logger.log(.info, "CCStatusBarClient: received \(newSessions.count) sessions")
+
+            // Detect status changes by project name (handles session ID changes across reconnects)
+            var diffFiredProjects: Set<String> = []
+            for (_, newSession) in newSessions {
+                if let oldSession = oldSessions.values.first(where: { $0.project == newSession.project }),
+                   oldSession.status != newSession.status {
+                    logger.log(.info, "CCStatusBarClient: \(newSession.project) status \(oldSession.status) -> \(newSession.status) (via sessions.list diff)")
+                    onStateChange?(newSession, oldSession.status, newSession.status)
+                    diffFiredProjects.insert(newSession.project)
+                }
+            }
+
             onSessionsChanged?()
 
             // Bootstrap: fire synthetic running→waiting_input for sessions already idle.
@@ -236,6 +264,12 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
                     bootstrapLog += "  skip (already done)\n"
                     continue
                 }
+                // Skip projects already fired by diff detection to prevent duplicate onStateChange
+                guard !diffFiredProjects.contains(session.project) else {
+                    bootstrappedSessions.insert(session.id)
+                    bootstrapLog += "  skip (already fired by diff)\n"
+                    continue
+                }
                 bootstrappedSessions.insert(session.id)
                 let hasHandler = onStateChange != nil
                 bootstrapLog += "  firing (hasHandler=\(hasHandler)) waitingReason=\(session.waitingReason ?? "nil")\n"
@@ -250,36 +284,53 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
             guard let sessionData = json["session"] as? [String: Any],
                   let session = parseSession(sessionData) else { return }
 
-            if session.isAttached {
-                lock.lock()
-                let oldStatus = _sessions[session.id]?.status ?? "unknown"
-                _sessions[session.id] = session
-                lock.unlock()
+            lock.lock()
+            let oldStatus = _sessions[session.id]?.status ?? "unknown"
+            _sessions[session.id] = session
+            lock.unlock()
 
-                if oldStatus != session.status {
-                    logger.log(.info, "CCStatusBarClient: \(session.project) status \(oldStatus) -> \(session.status)")
-                    onStateChange?(session, oldStatus, session.status)
-                }
-            } else {
-                // Detached: remove from sessions and notify
-                lock.lock()
-                let removed = _sessions.removeValue(forKey: session.id)
-                lock.unlock()
-                if removed != nil {
-                    logger.log(.info, "CCStatusBarClient: \(session.project) detached, removing")
-                    onSessionDetached?(session)
-                }
+            if oldStatus != session.status {
+                logger.log(.info, "CCStatusBarClient: \(session.project) status \(oldStatus) -> \(session.status)")
+                onStateChange?(session, oldStatus, session.status)
             }
             onSessionsChanged?()
 
-        case "session.added":
+        case "session.progress":
             guard let sessionData = json["session"] as? [String: Any],
-                  let session = parseSession(sessionData),
-                  session.isAttached else { return }
+                  let session = parseSession(sessionData) else { return }
+
+            // Detect status changes from progress events (fallback for missing session.updated)
             lock.lock()
+            let oldProgressStatus = _sessions[session.id]?.status
             _sessions[session.id] = session
             lock.unlock()
-            logger.log(.info, "CCStatusBarClient: session added: \(session.project)")
+
+            if let old = oldProgressStatus, old != session.status {
+                logger.log(.info, "CCStatusBarClient: \(session.project) status \(old) -> \(session.status) (via progress)")
+                onStateChange?(session, old, session.status)
+            }
+
+            onProgress?(session)
+
+        case "session.added":
+            guard let sessionData = json["session"] as? [String: Any],
+                  let session = parseSession(sessionData) else { return }
+
+            lock.lock()
+            // Check if existing session for same project had different status
+            let existingForProject = _sessions.values.first {
+                $0.project == session.project && $0.id != session.id
+            }
+            _sessions[session.id] = session
+            lock.unlock()
+
+            logger.log(.info, "CCStatusBarClient: session added: \(session.project) (id=\(session.id))")
+
+            if let existing = existingForProject, existing.status != session.status {
+                logger.log(.info, "CCStatusBarClient: \(session.project) status \(existing.status) -> \(session.status) (via added, project match)")
+                onStateChange?(session, existing.status, session.status)
+            }
+
             onSessionsChanged?()
 
         case "session.removed":
@@ -299,9 +350,8 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     private func parseSession(_ dict: [String: Any]) -> CCSession? {
-        // Only accept claude_code sessions (skip codex, etc.)
-        let sessionType = dict["type"] as? String ?? ""
-        guard sessionType == "claude_code" else { return nil }
+        let sessionType = dict["type"] as? String ?? "claude_code"
+        guard sessionType == "claude_code" || sessionType == "codex" else { return nil }
 
         guard let id = dict["id"] as? String,
               let project = dict["project"] as? String else { return nil }
@@ -312,12 +362,14 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
             id: id,
             project: project,
             status: dict["status"] as? String ?? "unknown",
+            sessionType: sessionType,
             tmuxSession: tmux?["session"] as? String,
             tmuxWindow: (tmux?["window"]).flatMap { "\($0)" },
             tmuxPane: (tmux?["pane"]).flatMap { "\($0)" },
-            isAttached: tmux?["is_attached"] as? Bool ?? false,
+            isAttached: tmux?["is_attached"] as? Bool ?? true,
             attentionLevel: dict["attention_level"] as? Int ?? 0,
-            waitingReason: dict["waiting_reason"] as? String
+            waitingReason: dict["waiting_reason"] as? String,
+            paneCapture: dict["pane_capture"] as? String
         )
     }
 }

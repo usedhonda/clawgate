@@ -188,7 +188,8 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
 
             // Mode resolution: local config overrides, then trust the server's event mode
             if adapter == "tmux" {
-                let localMode = configStore.load().tmuxSessionModes[project]  // nil = not configured
+                let sessionType = payload["session_type"] ?? "claude_code"
+                let localMode = configStore.load().tmuxSessionModes[AppConfig.modeKey(sessionType: sessionType, project: project)]  // nil = not configured
                 let eventMode = payload["mode"] ?? "ignore"
                 let effectiveMode = localMode ?? eventMode  // local config wins if set, otherwise trust remote
                 if effectiveMode == "ignore" {

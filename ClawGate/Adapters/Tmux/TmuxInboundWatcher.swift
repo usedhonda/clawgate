@@ -21,43 +21,38 @@ final class TmuxInboundWatcher {
     private let eventBus: EventBus
     private let logger: AppLogger
     private let configStore: ConfigStore
-    private let sessionsFileWatcher: SessionsFileWatcher
 
-    // Progress timer — emits running session output periodically
+    // Progress timer — fallback emits running session output periodically (60s, cc-status-bar sends at 20s)
     private var progressTimer: DispatchSourceTimer?
     private var lastProgressHash: [String: Int] = [:]
     private var lastProgressSummary: [String: String] = [:]
-    private let progressInterval: TimeInterval = 20
+    private let progressInterval: TimeInterval = 60
 
-    // Dedup: prevent duplicate state transitions from both sources within a short window
-    private var recentTransitions: [String: Date] = [:]  // "project:old->new" -> timestamp
-    private let dedupWindowSeconds: TimeInterval = 3.0
-    private let dedupLock = NSLock()
+    // State change dedup — prevent duplicate onStateChange fires from multiple CCStatusBarClient paths
+    private var lastStateChangeTime: [String: Date] = [:]
+    private let stateChangeDedupInterval: TimeInterval = 5.0
 
     init(ccClient: CCStatusBarClient, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
         self.ccClient = ccClient
         self.eventBus = eventBus
         self.logger = logger
         self.configStore = configStore
-        self.sessionsFileWatcher = SessionsFileWatcher(configStore: configStore, logger: logger)
     }
 
     func start() {
         ccClient.onStateChange = { [weak self] session, oldStatus, newStatus in
             self?.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus, source: "ws")
         }
-        sessionsFileWatcher.onStateChange = { [weak self] session, oldStatus, newStatus in
-            self?.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus, source: "file")
+        ccClient.onProgress = { [weak self] session in
+            self?.handleProgress(session: session)
         }
-        sessionsFileWatcher.start()
         startProgressTimer()
-        logger.log(.info, "TmuxInboundWatcher: started (ws + file watcher)")
+        logger.log(.info, "TmuxInboundWatcher: started (ws only)")
     }
 
     func stop() {
         ccClient.onStateChange = nil
-        sessionsFileWatcher.onStateChange = nil
-        sessionsFileWatcher.stop()
+        ccClient.onProgress = nil
         stopProgressTimer()
         logger.log(.info, "TmuxInboundWatcher: stopped")
     }
@@ -65,29 +60,25 @@ final class TmuxInboundWatcher {
     private func handleStateChange(session: CCStatusBarClient.CCSession,
                                    oldStatus: String, newStatus: String,
                                    source: String = "ws") {
-        // Dedup: skip if the same transition was processed recently from another source
-        let dedupKey = "\(session.project):\(oldStatus)->\(newStatus)"
-        dedupLock.lock()
+        // Time-based dedup: suppress duplicate fires for the same project+status within 5 seconds
         let now = Date()
-        if let lastTime = recentTransitions[dedupKey],
-           now.timeIntervalSince(lastTime) < dedupWindowSeconds {
-            dedupLock.unlock()
-            debugLog("DEDUP skip \(dedupKey) source=\(source)")
+        let dedupKey = "\(session.project):\(newStatus)"
+        if let lastFire = lastStateChangeTime[dedupKey],
+           now.timeIntervalSince(lastFire) < stateChangeDedupInterval {
+            logger.log(.debug, "TmuxInboundWatcher: dedup skip \(session.project) \(oldStatus)->\(newStatus)")
             return
         }
-        recentTransitions[dedupKey] = now
-        // Prune old entries
-        recentTransitions = recentTransitions.filter { now.timeIntervalSince($0.value) < dedupWindowSeconds * 2 }
-        dedupLock.unlock()
+        lastStateChangeTime[dedupKey] = now
 
         logger.log(.info, "TmuxInboundWatcher: handleStateChange \(session.project) \(oldStatus) -> \(newStatus) source=\(source) waitingReason=\(session.waitingReason ?? "nil")")
         let scPath = "/tmp/clawgate-statechange.log"
         let scExisting = (try? String(contentsOfFile: scPath, encoding: .utf8)) ?? ""
-        let scLine = "\(Date()) handleStateChange \(session.project) \(oldStatus)->\(newStatus) source=\(source) mode=\(configStore.load().tmuxSessionModes[session.project] ?? "nil") waitingReason=\(session.waitingReason ?? "nil") tmux=\(session.tmuxTarget ?? "nil")\n"
+        let modeKey = AppConfig.modeKey(sessionType: session.sessionType, project: session.project)
+        let scLine = "\(Date()) handleStateChange \(session.project) \(oldStatus)->\(newStatus) source=\(source) mode=\(configStore.load().tmuxSessionModes[modeKey] ?? "nil") waitingReason=\(session.waitingReason ?? "nil") tmux=\(session.tmuxTarget ?? "nil")\n"
         try? (scExisting + scLine).write(toFile: scPath, atomically: true, encoding: .utf8)
         // Check session mode — ignore sessions are skipped
         let config = configStore.load()
-        let mode = config.tmuxSessionModes[session.project] ?? "ignore"
+        let mode = config.tmuxSessionModes[modeKey] ?? "ignore"
 
         // Bootstrap: synthetic state change from CCStatusBarClient startup.
         // Always go through captureAndEmit (skip permission auto-approve which may be stale).
@@ -186,7 +177,8 @@ final class TmuxInboundWatcher {
         for session in sessions {
             guard session.status == "running" else { continue }
 
-            let mode = config.tmuxSessionModes[session.project] ?? "ignore"
+            let modeKey = AppConfig.modeKey(sessionType: session.sessionType, project: session.project)
+            let mode = config.tmuxSessionModes[modeKey] ?? "ignore"
             guard mode != "ignore" else { continue }
 
             guard let target = session.tmuxTarget else { continue }
@@ -211,9 +203,10 @@ final class TmuxInboundWatcher {
                     "source": "progress",
                     "project": session.project,
                     "tmux_target": target,
-                    "sender": "claude_code",
+                    "sender": session.sessionType == "codex" ? "codex" : "claude_code",
                     "mode": mode,
                     "event_id": eventID,
+                    "session_type": session.sessionType,
                 ]
 
                 _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
@@ -296,6 +289,49 @@ final class TmuxInboundWatcher {
         try? (existing + entry).write(toFile: path, atomically: true, encoding: .utf8)
     }
 
+    /// Handle progress events from cc-status-bar WS (session.progress with pane_capture)
+    private func handleProgress(session: CCStatusBarClient.CCSession) {
+        let config = configStore.load()
+        let mode = config.tmuxSessionModes[AppConfig.modeKey(sessionType: session.sessionType, project: session.project)] ?? "ignore"
+        guard mode != "ignore" else { return }
+        guard session.status == "running" else { return }
+        guard let target = session.tmuxTarget else { return }
+
+        // Use pane_capture from WS if available
+        let rawOutput: String
+        if let capture = session.paneCapture, !capture.isEmpty {
+            rawOutput = capture
+        } else {
+            return  // No capture from cc-status-bar, skip
+        }
+
+        let hash = rawOutput.hashValue
+        if let lastHash = lastProgressHash[session.project], lastHash == hash {
+            return // No change
+        }
+        lastProgressHash[session.project] = hash
+
+        let summary = extractSummary(from: rawOutput)
+        if !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lastProgressSummary[session.project] = summary
+        }
+        let eventID = UUID().uuidString
+        let payload: [String: String] = [
+            "conversation": session.project,
+            "text": summary,
+            "source": "progress",
+            "project": session.project,
+            "tmux_target": target,
+            "sender": session.sessionType == "codex" ? "codex" : "claude_code",
+            "mode": mode,
+            "event_id": eventID,
+            "session_type": session.sessionType,
+        ]
+
+        _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
+        logger.log(.debug, "TmuxInboundWatcher: emitted ws-progress for \(session.project)")
+    }
+
     private func captureAndEmit(session: CCStatusBarClient.CCSession, mode: String) {
         debugLog("START project=\(session.project) mode=\(mode) tmuxTarget=\(session.tmuxTarget ?? "nil")")
 
@@ -306,13 +342,19 @@ final class TmuxInboundWatcher {
         }
 
         var rawOutput: String
-        do {
-            rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
-            debugLog("capturePane OK len=\(rawOutput.count)")
-        } catch {
-            debugLog("capturePane FAILED: \(error)")
-            logger.log(.warning, "TmuxInboundWatcher: capture-pane failed for \(target): \(error)")
-            rawOutput = ""
+        if let capture = session.paneCapture, !capture.isEmpty {
+            rawOutput = capture
+            debugLog("using pane_capture from ws len=\(rawOutput.count)")
+        } else {
+            // Fallback: direct capture for older cc-status-bar
+            do {
+                rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
+                debugLog("capturePane OK len=\(rawOutput.count)")
+            } catch {
+                debugLog("capturePane FAILED: \(error)")
+                logger.log(.warning, "TmuxInboundWatcher: capture-pane failed for \(target): \(error)")
+                rawOutput = ""
+            }
         }
 
         // Try to detect AskUserQuestion menu
@@ -332,9 +374,10 @@ final class TmuxInboundWatcher {
                 "source": "question",
                 "project": session.project,
                 "tmux_target": target,
-                "sender": "claude_code",
+                "sender": session.sessionType == "codex" ? "codex" : "claude_code",
                 "mode": mode,
                 "event_id": eventID,
+                "session_type": session.sessionType,
                 "question_text": question.questionText,
                 "question_options": question.options.joined(separator: "\n"),
                 "question_selected": String(question.selectedIndex),
@@ -379,10 +422,11 @@ final class TmuxInboundWatcher {
             "source": "completion",
             "project": session.project,
             "tmux_target": target,
-            "sender": "claude_code",
+            "sender": session.sessionType == "codex" ? "codex" : "claude_code",
             "mode": mode,
             "capture": captureState,
             "event_id": eventID,
+            "session_type": session.sessionType,
         ]
 
         let event = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)

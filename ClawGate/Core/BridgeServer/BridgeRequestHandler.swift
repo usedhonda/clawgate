@@ -28,6 +28,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/conversations"),
         (.GET, "/v1/axdump"),
         (.GET, "/v1/doctor"),
+        (.GET, "/v1/openclaw-info"),
         (.GET, "/v1/events"),
         (.POST, "/v1/debug/inject"),
     ]
@@ -97,6 +98,12 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         // Optional auth (enabled only in remote access mode)
         if let authResult = core.checkAuthorization(headers: head.headers) {
             writeResponse(context: context, result: authResult)
+            return
+        }
+
+        // Non-blocking: openclaw-info reads local files only
+        if head.method == .GET && path == "/v1/openclaw-info" {
+            writeResponse(context: context, result: core.openclawInfo())
             return
         }
 

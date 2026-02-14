@@ -16,16 +16,18 @@ final class TmuxAdapter: AdapterProtocol {
         self.logger = logger
     }
 
-    /// Returns the mode for a project: "ignore", "observe", "auto", or "autonomous".
-    private func sessionMode(for project: String) -> String {
+    /// Returns the mode for a session: "ignore", "observe", "auto", or "autonomous".
+    private func sessionMode(for session: CCStatusBarClient.CCSession) -> String {
         let modes = configStore.load().tmuxSessionModes
-        return modes[project] ?? "ignore"
+        return modes[AppConfig.modeKey(sessionType: session.sessionType, project: session.project)] ?? "ignore"
     }
 
     /// Returns sessions that have a mode set (observe or autonomous).
     private func activeSessions() -> [CCStatusBarClient.CCSession] {
         let modes = configStore.load().tmuxSessionModes
-        return ccClient.allSessions().filter { modes[$0.project] != nil }
+        return ccClient.allSessions().filter {
+            modes[AppConfig.modeKey(sessionType: $0.sessionType, project: $0.project)] != nil
+        }
     }
 
     func sendMessage(payload: SendPayload) throws -> (SendResult, [StepLog]) {
@@ -44,8 +46,19 @@ final class TmuxAdapter: AdapterProtocol {
             )
         }
 
+        // Resolve session first so we can use its sessionType for composite key lookup
+        guard let session = ccClient.session(forProject: project) else {
+            throw BridgeRuntimeError(
+                code: "session_not_found",
+                message: "No Claude Code session found for project '\(project)'",
+                retriable: true,
+                failedStep: "resolve_target",
+                details: "Available: \(ccClient.allSessions().map(\.project).joined(separator: ", "))"
+            )
+        }
+
         // Check session mode — only autonomous/auto can send
-        let mode = sessionMode(for: project)
+        let mode = sessionMode(for: session)
         guard mode == "autonomous" || mode == "auto" else {
             if mode == "observe" {
                 throw BridgeRuntimeError(
@@ -64,16 +77,6 @@ final class TmuxAdapter: AdapterProtocol {
                 retriable: true,
                 failedStep: "resolve_target",
                 details: "mode=\(mode), federation_eligible=true"
-            )
-        }
-
-        guard let session = ccClient.session(forProject: project) else {
-            throw BridgeRuntimeError(
-                code: "session_not_found",
-                message: "No Claude Code session found for project '\(project)'",
-                retriable: true,
-                failedStep: "resolve_target",
-                details: "Available: \(ccClient.allSessions().map(\.project).joined(separator: ", "))"
             )
         }
 
@@ -151,7 +154,8 @@ final class TmuxAdapter: AdapterProtocol {
 
         // hasInputField = true only if any autonomous session is waiting_input
         let hasReady = filtered.contains {
-            $0.status == "waiting_input" && (modes[$0.project] == "autonomous" || modes[$0.project] == "auto")
+            let key = AppConfig.modeKey(sessionType: $0.sessionType, project: $0.project)
+            return $0.status == "waiting_input" && (modes[key] == "autonomous" || modes[key] == "auto")
         }
 
         return ConversationContext(

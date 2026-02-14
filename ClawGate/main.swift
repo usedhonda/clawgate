@@ -141,7 +141,6 @@ final class AppRuntime {
         tmuxInboundWatcher.stop()
         federationServerInstance?.stop()
         federationClient.stop()
-        ccStatusBarClient.onSessionDetached = nil
         ccStatusBarClient.disconnect()
         server.stop()
         logger.log(.info, "ClawGate stopped")
@@ -165,16 +164,6 @@ final class AppRuntime {
         ccStatusBarClient.onSessionsChanged = { [weak self] in
             guard let self else { return }
             self.menuBarDelegate?.refreshSessionsMenu(sessions: self.ccStatusBarClient.allSessions())
-        }
-        ccStatusBarClient.onSessionDetached = { [weak self] session in
-            guard let self else { return }
-            var config = self.configStore.load()
-            let currentMode = config.tmuxSessionModes[session.project] ?? "ignore"
-            if currentMode != "ignore" {
-                config.tmuxSessionModes[session.project] = "ignore"
-                self.configStore.save(config)
-                self.logger.log(.info, "Auto-ignored detached session: \(session.project)")
-            }
         }
         // Start watcher BEFORE connecting — so onStateChange is set when sessions.list arrives.
         tmuxInboundWatcher.start()

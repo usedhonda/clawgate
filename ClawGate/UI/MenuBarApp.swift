@@ -11,6 +11,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
     private var sessionItems: [NSMenuItem] = []
     private var sessionsEndSeparatorItem: NSMenuItem?
 
+    private var codexHeaderItem: NSMenuItem?
+    private var codexSessionItems: [NSMenuItem] = []
+
     private var logItems: [NSMenuItem] = []
     private var logsEndSeparatorItem: NSMenuItem?
 
@@ -64,7 +67,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         sessionsEndSeparatorItem = sessionsEnd
 
         // 3) QR
-        let qrCodeItem = NSMenuItem(title: "Show QR Code...", action: #selector(openQRCodeWindow), keyEquivalent: "r")
+        let qrCodeItem = NSMenuItem(title: "Show QR Code for [VibeTerm]", action: #selector(openQRCodeWindow), keyEquivalent: "r")
         qrCodeItem.target = self
         menu.addItem(qrCodeItem)
 
@@ -139,64 +142,100 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
             self.updateStatusIcon()
 
+            // Remove old CC session items
             for item in self.sessionItems {
                 menu.removeItem(item)
             }
             self.sessionItems.removeAll()
 
+            // Remove old Codex items (header + session rows)
+            for item in self.codexSessionItems {
+                menu.removeItem(item)
+            }
+            self.codexSessionItems.removeAll()
+            if let header = self.codexHeaderItem {
+                menu.removeItem(header)
+                self.codexHeaderItem = nil
+            }
+
             guard let endIdx = menu.items.firstIndex(of: endSep) else { return }
+
+            let ccSessions = sessions.filter { $0.sessionType == "claude_code" }
+            let codexSessions = sessions.filter { $0.sessionType == "codex" }
+            let modes = self.runtime.configStore.load().tmuxSessionModes
+
+            // --- CC section ---
             var insertIdx = endIdx
-            if sessions.isEmpty {
+            if ccSessions.isEmpty {
                 let item = self.makeReadableInfoItem("  No active sessions")
                 menu.insertItem(item, at: insertIdx)
                 self.sessionItems = [item]
-                return
+                insertIdx += 1
+            } else {
+                for session in ccSessions {
+                    let item = self.makeSessionMenuItem(session: session, modes: modes)
+                    menu.insertItem(item, at: insertIdx)
+                    self.sessionItems.append(item)
+                    insertIdx += 1
+                }
             }
 
-            let modes = self.runtime.configStore.load().tmuxSessionModes
-            for session in sessions {
-                let mode = modes[session.project] ?? "ignore"
-                let statusIcon: String
-                if mode == "ignore" {
-                    statusIcon = "○"
-                } else {
-                    switch session.status {
-                    case "running":
-                        statusIcon = "▶"
-                    case "waiting_input":
-                        statusIcon = "●"
-                    default:
-                        statusIcon = "○"
-                    }
-                }
-                let prefix = "  \(statusIcon) \(session.project) "
-                let modeText = "[\(mode)]"
-                let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
-                let attr = NSMutableAttributedString(
-                    string: prefix,
-                    attributes: [.font: font, .foregroundColor: NSColor.controlTextColor]
-                )
-                attr.append(NSAttributedString(
-                    string: modeText,
-                    attributes: [.font: font, .foregroundColor: self.modeColor(mode)]
-                ))
-                let item = NSMenuItem(title: prefix + modeText, action: nil, keyEquivalent: "")
-                item.attributedTitle = attr
-                item.submenu = self.makeSessionModeSubmenu(project: session.project, currentMode: mode)
-                menu.insertItem(item, at: insertIdx)
-                self.sessionItems.append(item)
+            // --- Codex section (only if sessions exist) ---
+            if !codexSessions.isEmpty {
+                let header = self.makeReadableInfoItem("Codex Sessions")
+                menu.insertItem(header, at: insertIdx)
+                self.codexHeaderItem = header
                 insertIdx += 1
+
+                for session in codexSessions {
+                    let item = self.makeSessionMenuItem(session: session, modes: modes)
+                    menu.insertItem(item, at: insertIdx)
+                    self.codexSessionItems.append(item)
+                    insertIdx += 1
+                }
             }
         }
     }
 
-    private func makeSessionModeSubmenu(project: String, currentMode: String) -> NSMenu {
+    private func makeSessionMenuItem(session: CCStatusBarClient.CCSession, modes: [String: String]) -> NSMenuItem {
+        let mode = modes[AppConfig.modeKey(sessionType: session.sessionType, project: session.project)] ?? "ignore"
+        let statusIcon: String
+        if mode == "ignore" {
+            statusIcon = "○"
+        } else {
+            switch session.status {
+            case "running":
+                statusIcon = "▶"
+            case "waiting_input":
+                statusIcon = "●"
+            default:
+                statusIcon = "○"
+            }
+        }
+        let prefix = "  \(statusIcon) \(session.project) "
+        let modeText = "[\(mode)]"
+        let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .medium)
+        let attr = NSMutableAttributedString(
+            string: prefix,
+            attributes: [.font: font, .foregroundColor: NSColor.controlTextColor]
+        )
+        attr.append(NSAttributedString(
+            string: modeText,
+            attributes: [.font: font, .foregroundColor: modeColor(mode)]
+        ))
+        let item = NSMenuItem(title: prefix + modeText, action: nil, keyEquivalent: "")
+        item.attributedTitle = attr
+        item.submenu = makeSessionModeSubmenu(sessionType: session.sessionType, project: session.project, currentMode: mode)
+        return item
+    }
+
+    private func makeSessionModeSubmenu(sessionType: String, project: String, currentMode: String) -> NSMenu {
         let submenu = NSMenu(title: project)
         for mode in modeOrder {
             let label = "  \(modeLabel(mode))"
             let item = NSMenuItem(title: label, action: #selector(setSessionMode(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = "\(project)\t\(mode)"
+            item.representedObject = "\(sessionType)\t\(project)\t\(mode)"
             item.state = (mode == currentMode) ? .on : .off
             applyReadableTitle(to: item, text: label, color: modeColor(mode))
             submenu.addItem(item)
@@ -225,16 +264,18 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
     @objc private func setSessionMode(_ sender: NSMenuItem) {
         guard let raw = sender.representedObject as? String else { return }
-        let parts = raw.split(separator: "\t", maxSplits: 1).map(String.init)
-        guard parts.count == 2 else { return }
-        let project = parts[0]
-        let next = parts[1]
+        let parts = raw.split(separator: "\t", maxSplits: 2).map(String.init)
+        guard parts.count == 3 else { return }
+        let sessionType = parts[0]
+        let project = parts[1]
+        let next = parts[2]
+        let key = AppConfig.modeKey(sessionType: sessionType, project: project)
 
         var config = runtime.configStore.load()
         if next == "ignore" {
-            config.tmuxSessionModes.removeValue(forKey: project)
+            config.tmuxSessionModes.removeValue(forKey: key)
         } else {
-            config.tmuxSessionModes[project] = next
+            config.tmuxSessionModes[key] = next
         }
         runtime.configStore.save(config)
         updateStatusIcon()

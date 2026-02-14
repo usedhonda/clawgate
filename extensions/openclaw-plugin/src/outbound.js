@@ -4,6 +4,14 @@
 
 import { resolveAccount } from "./config.js";
 import { clawgateSend, setClawgateAuthToken } from "./client.js";
+import { getActiveProject } from "./shared-state.js";
+
+function ensurePrefix(text, project, sessionType) {
+  if (!project) return text;
+  const stripped = text.replace(/^\[(CC|Codex) [^\]]*\]\n?/, "").trim();
+  const label = sessionType === "codex" ? "Codex" : "CC";
+  return `[${label} ${project}]\n${stripped}`;
+}
 
 export const outbound = {
   deliveryMode: "direct",
@@ -47,7 +55,9 @@ export const outbound = {
     const conversationHint = (to === "default" || to.includes(":"))
       ? (account.defaultConversation || to)
       : to;
-    const result = await clawgateSend(account.apiUrl, conversationHint, text);
+    const { project, sessionType } = getActiveProject(conversationHint);
+    const finalText = project ? ensurePrefix(text, project, sessionType) : text;
+    const result = await clawgateSend(account.apiUrl, conversationHint, finalText);
 
     if (!result.ok) {
       throw new Error(`clawgate send failed: ${result.error?.message ?? JSON.stringify(result)}`);

@@ -36,8 +36,14 @@ struct AppConfig: Codable {
     var federationToken: String
     var federationReconnectMaxSeconds: Int
 
+    /// Build a composite key for tmuxSessionModes: "cc:project" or "codex:project".
+    static func modeKey(sessionType: String, project: String) -> String {
+        let prefix = sessionType == "codex" ? "codex" : "cc"
+        return "\(prefix):\(project)"
+    }
+
     static let `default` = AppConfig(
-        nodeRole: .server,
+        nodeRole: .client,
         debugLogging: false,
         includeMessageBodyInLogs: false,
         lineEnabled: true,
@@ -234,6 +240,27 @@ final class ConfigStore {
                 }
             }
             defaults.removeObject(forKey: Keys.legacyTmuxAllowedSessions)
+        }
+
+        // Migrate bare project keys to "cc:project" composite keys
+        if let json = defaults.string(forKey: Keys.tmuxSessionModes),
+           let data = json.data(using: .utf8),
+           let dict = try? JSONDecoder().decode([String: String].self, from: data) {
+            let needsMigration = dict.keys.contains(where: { !$0.contains(":") })
+            if needsMigration {
+                var migrated: [String: String] = [:]
+                for (key, value) in dict {
+                    if key.contains(":") {
+                        migrated[key] = value
+                    } else {
+                        migrated["cc:\(key)"] = value
+                    }
+                }
+                if let encoded = try? JSONEncoder().encode(migrated),
+                   let str = String(data: encoded, encoding: .utf8) {
+                    defaults.set(str, forKey: Keys.tmuxSessionModes)
+                }
+            }
         }
     }
 }
