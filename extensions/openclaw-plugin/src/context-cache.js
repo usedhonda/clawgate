@@ -208,6 +208,60 @@ function isProgressNoiseLine(line) {
 }
 
 /**
+ * Filter UI noise from raw pane output while preserving structure.
+ * Unlike extractMeaningfulProgress (which keeps only 3 lines),
+ * this preserves all meaningful lines.
+ * @param {string} text
+ * @returns {string}
+ */
+export function filterPaneNoise(text) {
+  if (!text) return "";
+  return text.split("\n")
+    .filter(l => !isProgressNoiseLine(l))
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
+ * Remove trail entries whose content appears in referenceText.
+ * Returns cleaned trail string, or null if nothing remains.
+ * @param {string} trail
+ * @param {string} referenceText
+ * @returns {string|null}
+ */
+export function deduplicateTrailAgainst(trail, referenceText) {
+  if (!trail || !referenceText) return trail;
+  const refLines = new Set(
+    referenceText.split("\n").map(l => l.trim()).filter(Boolean)
+  );
+  const entries = trail.split("\n---\n");
+  const kept = entries.filter(entry => {
+    const lines = entry.split("\n").map(l => l.trim()).filter(Boolean);
+    if (lines.length === 0) return false;
+    // Drop entry if >50% of its lines appear in reference
+    const matchCount = lines.filter(l => refLines.has(l)).length;
+    return matchCount / lines.length < 0.5;
+  });
+  return kept.length > 0 ? kept.join("\n---\n") : null;
+}
+
+/**
+ * Cap text to maxChars. strategy: "tail" keeps end, "head" keeps start.
+ * @param {string} text
+ * @param {number} maxChars
+ * @param {"tail"|"head"} [strategy="tail"]
+ * @returns {string}
+ */
+export function capText(text, maxChars, strategy = "tail") {
+  if (!text || text.length <= maxChars) return text;
+  if (strategy === "tail") {
+    return "...(truncated)\n" + text.slice(-maxChars);
+  }
+  return text.slice(0, maxChars) + "\n...(truncated)";
+}
+
+/**
  * Extract meaningful lines from tmux progress text, stripping UI chrome.
  * @param {string} text
  * @returns {string}

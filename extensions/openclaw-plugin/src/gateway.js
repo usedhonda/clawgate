@@ -26,7 +26,7 @@ import {
   clawgateTmuxSend,
   setClawgateAuthToken,
 } from "./client.js";
-import { setActiveProject } from "./shared-state.js";
+import { setActiveProject, clearActiveProject } from "./shared-state.js";
 import {
   getProjectContext,
   getProjectRoster,
@@ -43,6 +43,9 @@ import {
   setTaskGoal,
   getTaskGoal,
   clearTaskGoal,
+  filterPaneNoise,
+  deduplicateTrailAgainst,
+  capText,
 } from "./context-cache.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
@@ -754,6 +757,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     log?.warn?.(`clawgate: recordInboundSession failed: ${err}`);
   }
 
+  // Clear active project so outbound.sendText doesn't leak tmux prefixes into LINE replies
+  clearActiveProject(defaultConversation || conversation);
+
   // Find task-capable projects (autonomous or auto) for potential task routing from LINE replies
   const taskCapableProjects = [...sessionModes.entries()]
     .filter(([, m]) => m === "autonomous")
@@ -908,26 +914,90 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
 
+  // Invalidate context cache (files may have changed while CC was working)
+  invalidateProject(project);
+
+  // --- Context layers (parallel to handleTmuxCompletion) ---
+  const stable = getStableContext(project, tmuxTarget);
+  const dynamic = getDynamicEnvelope(project, tmuxTarget);
+
+  const contextParts = [];
+
+  // Stable project context
+  if (stable && stable.isNew && stable.context) {
+    contextParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
+    if (_ccKnowledge) {
+      contextParts.push(_ccKnowledge);
+    }
+  } else if (stable && stable.hash) {
+    contextParts.push(
+      `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
+    );
+  }
+
+  // Task goal (what Chi asked CC to do — helps Chi understand what the question is about)
+  // Note: DON'T clearTaskGoal here — question doesn't end the task
+  const taskGoal = getTaskGoal(project);
+  if (taskGoal) {
+    contextParts.push(`[Task Goal]\n${taskGoal}`);
+  }
+
+  // Dynamic envelope (git state)
+  if (dynamic && dynamic.envelope) {
+    contextParts.push(`[Current State]\n${dynamic.envelope}`);
+  }
+
+  // Pane context (output above the question — may contain plan content)
+  // Filter noise and cap before trail so we can dedup trail against it
+  const MAX_QUESTION_CONTEXT_CHARS = 3000;
+  let questionContext = filterPaneNoise(payload.question_context || "");
+  if (questionContext) {
+    questionContext = capText(questionContext, MAX_QUESTION_CONTEXT_CHARS, "tail");
+    contextParts.push(`[Screen Context (above question)]\n${questionContext}`);
+  }
+
+  // Progress trail (what CC did so far — helps Chi understand the question in context)
+  // Note: DON'T clearProgressTrail — question doesn't end the task
+  // Deduplicate against questionContext to avoid repeating the same content
+  const trail = getProgressTrail(project);
+  if (trail && questionContext) {
+    const deduped = deduplicateTrailAgainst(trail, questionContext);
+    if (deduped) contextParts.push(`[Execution Progress Trail]\n${deduped}`);
+  } else if (trail) {
+    contextParts.push(`[Execution Progress Trail]\n${trail}`);
+  }
+
+  // Pairing guidance
+  const isFirstGuidance = !guidanceSentProjects.has(project);
+  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "question", sessionType, firstTime: isFirstGuidance }));
+  if (isFirstGuidance) guidanceSentProjects.add(project);
+
   // Format numbered options for Chi
   const numberedOptions = options.map((opt, i) => {
     const marker = i === selectedIndex ? ">>>" : "   ";
     return `${marker} ${i + 1}. ${opt}`;
   }).join("\n");
 
-  let body;
+  // Question body
+  let questionBody;
   if (mode === "auto") {
-    body = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
+    questionBody = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
   } else {
-    body = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[Analyze the options and send your recommendation to the user via LINE. Do NOT use <cc_answer>.]`;
+    questionBody = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[Analyze the options and send your recommendation to the user via LINE. Do NOT use <cc_answer>.]`;
   }
-  const isFirstGuidance = !guidanceSentProjects.has(project);
-  const guidedBody = `${buildPairingGuidance({ project, mode, eventKind: "question", sessionType, firstTime: isFirstGuidance })}\n\n---\n\n${body}`;
-  if (isFirstGuidance) guidanceSentProjects.add(project);
+  contextParts.push(questionBody);
+
+  // Apply total message cap (tail-priority: question body at the end is most important)
+  const MAX_TOTAL_BODY_CHARS = 16000;
+  let body = contextParts.join("\n\n---\n\n");
+  if (body.length > MAX_TOTAL_BODY_CHARS) {
+    body = capText(body, MAX_TOTAL_BODY_CHARS, "tail");
+  }
 
   const ctx = {
-    Body: guidedBody,
-    RawBody: guidedBody,
-    CommandBody: guidedBody,
+    Body: body,
+    RawBody: body,
+    CommandBody: body,
     From: `tmux:${project}`,
     To: `clawgate:${accountId}`,
     SessionKey: `clawgate:${accountId}:tmux:${project}`,
@@ -1008,6 +1078,10 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
           onError: (err) => log?.error?.(`clawgate: question dispatch error: ${err}`),
         },
       });
+      // Mark stable context as sent after successful dispatch
+      if (stable && stable.isNew && stable.hash) {
+        markContextSent(project, stable.hash);
+      }
     } else {
       log?.error?.("clawgate: dispatchReplyWithBufferedBlockDispatcher not found on runtime");
     }
@@ -1041,6 +1115,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Guard: skip useless capture-failed completions — no point dispatching to AI
   if (text === "(capture failed)" || text === "(no output captured)") {
     log?.warn?.(`clawgate: [${accountId}] skipping completion dispatch for "${project}" — ${text}`);
+    return;
+  }
+
+  // Guard: bootstrap completions are session-discovery snapshots (e.g. Codex welcome screen)
+  // — not actual task completions. Update state but don't dispatch to AI.
+  const capture = payload.capture || "";
+  if (capture === "idle_bootstrap") {
+    log?.info?.(`clawgate: [${accountId}] skipping bootstrap completion for "${project}" (capture=idle_bootstrap)`);
+    sessionModes.set(project, mode);
+    sessionStatuses.set(project, "waiting_input");
     return;
   }
 
@@ -1090,10 +1174,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     contextParts.push(`[Current State]\n${dynamic.envelope}`);
   }
 
+  // Filter noise from completion text (CC UI chrome: bars, spinners, etc.)
+  const cleanedText = filterPaneNoise(text);
+  const displayText = cleanedText || text; // fallback if everything was noise
+
   // Include accumulated progress trail (what CC did between progress events)
+  // Deduplicate against completion text to avoid repeating the same content
   const trail = getProgressTrail(project);
   if (trail) {
-    contextParts.push(`[Execution Progress Trail]\n${trail}`);
+    const deduped = deduplicateTrailAgainst(trail, displayText);
+    if (deduped) contextParts.push(`[Execution Progress Trail]\n${deduped}`);
   }
   clearProgressTrail(project);
 
@@ -1101,8 +1191,24 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion", sessionType, firstTime: isFirstGuidance }));
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
-  contextParts.push(`[${sessionLabel(sessionType)} ${project}] [${mode}] Completion Output:\n\n${text}`);
-  const body = contextParts.join("\n\n---\n\n");
+  // Append metadata notes so Chi understands information gaps
+  const hasGoal = !!taskGoal;
+  const hasUncommitted = dynamic?.envelope?.includes("Uncommitted changes:");
+  const hasTrail = !!trail;
+  const metaNotes = [
+    !hasGoal ? "(No task goal registered — user-initiated or goal unknown)" : null,
+    !hasUncommitted && !hasTrail ? "(No file changes or progress trail detected)" : null,
+  ].filter(Boolean).join("\n");
+  const metaSection = metaNotes ? `\n\n[Note: ${metaNotes}]` : "";
+
+  contextParts.push(`[${sessionLabel(sessionType)} ${project}] [${mode}] Completion Output:\n\n${displayText}${metaSection}`);
+
+  // Apply total message cap (tail-priority: completion output at the end is most important)
+  const MAX_TOTAL_BODY_CHARS = 16000;
+  let body = contextParts.join("\n\n---\n\n");
+  if (body.length > MAX_TOTAL_BODY_CHARS) {
+    body = capText(body, MAX_TOTAL_BODY_CHARS, "tail");
+  }
 
   const ctx = {
     Body: body,

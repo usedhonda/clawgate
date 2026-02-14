@@ -109,6 +109,46 @@ function getGitDiffStat(projectPath) {
 }
 
 /**
+ * Get uncommitted changes (staged + unstaged) vs HEAD.
+ * @param {string} projectPath
+ * @returns {string}
+ */
+function getGitUncommittedStat(projectPath) {
+  try {
+    const stat = execSync("git diff --stat HEAD", {
+      cwd: projectPath,
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (!stat) return "";
+    return stat.length <= 500 ? stat : stat.slice(0, 500) + "\n... (truncated)";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Get working tree status (short format).
+ * @param {string} projectPath
+ * @returns {string}
+ */
+function getGitStatus(projectPath) {
+  try {
+    const status = execSync("git status --short", {
+      cwd: projectPath,
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (!status) return "";
+    return status.length <= 500 ? status : status.slice(0, 500) + "\n... (truncated)";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Get the latest work log entries from docs/log/claude/.
  * @param {string} projectPath
  * @param {number} [count=2]
@@ -312,6 +352,26 @@ export function buildDynamicEnvelope(projectPath) {
     const diffStat = getGitDiffStat(projectPath);
     if (diffStat) {
       const section = `Last commit diff:\n${diffStat}`;
+      parts.push(section);
+      totalChars += section.length;
+    }
+  }
+
+  // Uncommitted changes (staged + unstaged vs HEAD)
+  if (totalChars < MAX_ENVELOPE_CHARS) {
+    const uncommitted = getGitUncommittedStat(projectPath);
+    if (uncommitted) {
+      const section = `Uncommitted changes:\n${uncommitted}`;
+      parts.push(section);
+      totalChars += section.length;
+    }
+  }
+
+  // Working tree status
+  if (totalChars < MAX_ENVELOPE_CHARS) {
+    const status = getGitStatus(projectPath);
+    if (status) {
+      const section = `Working tree:\n${status}`;
       parts.push(section);
       totalChars += section.length;
     }
