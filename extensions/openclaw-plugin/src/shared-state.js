@@ -39,3 +39,14 @@ export function getActiveProject(conversation) {
   }
   return { project: entry.project, sessionType: entry.sessionType };
 }
+
+/**
+ * Clear the active project for a conversation.
+ * Called by gateway.js before dispatching LINE inbound messages
+ * to prevent tmux prefixes from leaking into regular replies.
+ * @param {string} conversation
+ */
+export function clearActiveProject(conversation) {
+  if (!conversation) return;
+  activeDispatchProjects.delete(conversation);
+}

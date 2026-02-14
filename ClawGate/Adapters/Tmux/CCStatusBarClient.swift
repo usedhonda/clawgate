@@ -16,8 +16,11 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
         let tmuxPane: String?
         let isAttached: Bool            // tmux session is currently attached (informational only)
         let attentionLevel: Int         // 0=green, 1=yellow, 2=red
-        let waitingReason: String?      // "permission_prompt" | "stop" | nil
+        let waitingReason: String?      // "permission_prompt" | "askUserQuestion" | "stop" | nil
         var paneCapture: String?        // pane output from cc-status-bar
+        let questionText: String?       // AskUserQuestion: question text (from cc-status-bar)
+        let questionOptions: [String]?  // AskUserQuestion: option labels
+        let questionSelected: Int?      // AskUserQuestion: currently selected index
 
         var tmuxTarget: String? {
             guard let session = tmuxSession else { return nil }
@@ -369,7 +372,10 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
             isAttached: tmux?["is_attached"] as? Bool ?? true,
             attentionLevel: dict["attention_level"] as? Int ?? 0,
             waitingReason: dict["waiting_reason"] as? String,
-            paneCapture: dict["pane_capture"] as? String
+            paneCapture: dict["pane_capture"] as? String,
+            questionText: dict["question_text"] as? String,
+            questionOptions: dict["question_options"] as? [String],
+            questionSelected: dict["question_selected"] as? Int
         )
     }
 }

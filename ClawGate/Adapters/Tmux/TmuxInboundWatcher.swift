@@ -95,28 +95,79 @@ final class TmuxInboundWatcher {
             return
         }
 
-        // Permission prompt auto-approval (autonomous only)
+        // AskUserQuestion — cc-status-bar sends structured question data with waitingReason="askUserQuestion"
+        if newStatus == "waiting_input" && session.waitingReason == "askUserQuestion" {
+            debugLog("askUserQuestion detected for \(session.project) mode=\(mode)")
+            guard mode == "autonomous" || mode == "auto" || mode == "observe" else { return }
+            // Build DetectedQuestion from structured WS data (no pane capture needed)
+            if let text = session.questionText, let options = session.questionOptions, options.count >= 2 {
+                let question = DetectedQuestion(
+                    questionText: text,
+                    options: options,
+                    selectedIndex: session.questionSelected ?? 0,
+                    questionID: "\(Int(Date().timeIntervalSince1970 * 1000))"
+                )
+                if mode == "auto" {
+                    BlockingWork.queue.async { [weak self] in
+                        self?.autoAnswerQuestion(session: session, question: question,
+                                                 target: session.tmuxTarget ?? "")
+                    }
+                } else {
+                    // observe / autonomous -> emit to Chi with pane context
+                    var questionContext: String? = nil
+                    if let capture = session.paneCapture, !capture.isEmpty {
+                        questionContext = extractQuestionContext(from: capture, questionText: text)
+                    } else if let target = session.tmuxTarget {
+                        if let raw = try? TmuxShell.capturePane(target: target, lines: 50) {
+                            questionContext = extractQuestionContext(from: raw, questionText: text)
+                        }
+                    }
+                    emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
+                }
+            } else {
+                // Structured data missing — fall through to captureAndEmit as fallback
+                debugLog("askUserQuestion but no structured data, falling back to captureAndEmit")
+                BlockingWork.queue.async { [weak self] in
+                    Thread.sleep(forTimeInterval: 0.2)
+                    self?.captureAndEmit(session: session, mode: mode)
+                }
+            }
+            return
+        }
+
+        // Permission prompt handling — older cc-status-bar may still report AskUserQuestion
+        // as "permission_prompt", so we detect questions first and route accordingly.
         if newStatus == "waiting_input" && session.waitingReason == "permission_prompt" {
             debugLog("permission_prompt detected for \(session.project) mode=\(mode)")
-            guard mode == "autonomous" || mode == "auto" else { return }
+            guard mode == "autonomous" || mode == "auto" || mode == "observe" else { return }
             BlockingWork.queue.async { [weak self] in
                 guard let self else { return }
                 Thread.sleep(forTimeInterval: 0.2)
-                // Try pane detection first — cc-status-bar sometimes reports
-                // AskUserQuestion as "permission_prompt".
-                if let target = session.tmuxTarget {
-                    do {
-                        let rawOutput = try TmuxShell.capturePane(target: target, lines: 50)
-                        if let question = self.detectQuestion(from: rawOutput) {
-                            self.debugLog("permission_prompt -> actually question (\(question.options.count) opts)")
-                            self.autoAnswerQuestion(session: session, question: question, target: target)
-                            return
-                        }
-                    } catch {
-                        self.debugLog("permission_prompt capture failed: \(error)")
-                    }
+                // Get pane output (ws pane_capture -> direct capture fallback)
+                var rawOutput: String?
+                if let capture = session.paneCapture, !capture.isEmpty {
+                    rawOutput = capture
+                } else if let target = session.tmuxTarget {
+                    rawOutput = try? TmuxShell.capturePane(target: target, lines: 50)
                 }
-                // No question detected — real permission prompt, send "y"
+                // Check if this is actually an AskUserQuestion
+                if let output = rawOutput, let question = self.detectQuestion(from: output) {
+                    self.debugLog("permission_prompt -> actually question (\(question.options.count) opts)")
+                    if mode == "auto" {
+                        self.autoAnswerQuestion(session: session, question: question,
+                                                target: session.tmuxTarget ?? "")
+                    } else {
+                        // observe / autonomous -> emit to Chi with pane context
+                        let questionContext = self.extractQuestionContext(from: output, questionText: question.questionText)
+                        self.emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
+                    }
+                    return
+                }
+                // Real permission prompt
+                if mode == "observe" {
+                    self.debugLog("permission_prompt -> observe mode, skip auto-approve")
+                    return
+                }
                 self.debugLog("permission_prompt -> autoApprove (y)")
                 self.autoApprovePermission(session: session)
             }
@@ -151,6 +202,52 @@ final class TmuxInboundWatcher {
         } catch {
             logger.log(.warning, "TmuxInboundWatcher: auto-approve failed: \(error)")
         }
+    }
+
+    /// Extract the pane content above the question line as context for Chi.
+    /// Returns nil if no meaningful context is found.
+    private func extractQuestionContext(from output: String, questionText: String) -> String? {
+        let lines = output.components(separatedBy: "\n")
+        let trimmedQ = questionText.trimmingCharacters(in: .whitespaces)
+        // Bottom-up search for the question line
+        var questionLineIndex: Int? = nil
+        for i in stride(from: lines.count - 1, through: 0, by: -1) {
+            let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.contains(trimmedQ) || trimmed.hasSuffix(trimmedQ) {
+                questionLineIndex = i
+                break
+            }
+        }
+        guard let qIdx = questionLineIndex, qIdx > 0 else { return nil }
+        let context = Array(lines[0..<qIdx])
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard context.count > 10 else { return nil }
+        return context
+    }
+
+    /// Emit a question event to the EventBus so Chi can receive it.
+    /// Used from both the permission_prompt branch and captureAndEmit.
+    private func emitQuestionEvent(session: CCStatusBarClient.CCSession, question: DetectedQuestion, mode: String, context: String? = nil) {
+        let eventID = UUID().uuidString
+        let payload: [String: String] = [
+            "conversation": session.project,
+            "text": question.questionText,
+            "source": "question",
+            "project": session.project,
+            "tmux_target": session.tmuxTarget ?? "",
+            "sender": session.sessionType == "codex" ? "codex" : "claude_code",
+            "mode": mode,
+            "event_id": eventID,
+            "session_type": session.sessionType,
+            "question_text": question.questionText,
+            "question_options": question.options.joined(separator: "\n"),
+            "question_selected": String(question.selectedIndex),
+            "question_id": question.questionID,
+            "question_context": context ?? "",
+        ]
+        _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
+        logger.log(.info, "TmuxInboundWatcher: emitted question event for \(session.project) (\(question.options.count) options, context=\(context != nil ? "\(context!.count)ch" : "nil"))")
     }
 
     // MARK: - Progress Timer
@@ -366,26 +463,9 @@ final class TmuxInboundWatcher {
                 return
             }
 
-            // observe/autonomous: send to Chi via EventBus
-            let eventID = UUID().uuidString
-            let payload: [String: String] = [
-                "conversation": session.project,
-                "text": question.questionText,
-                "source": "question",
-                "project": session.project,
-                "tmux_target": target,
-                "sender": session.sessionType == "codex" ? "codex" : "claude_code",
-                "mode": mode,
-                "event_id": eventID,
-                "session_type": session.sessionType,
-                "question_text": question.questionText,
-                "question_options": question.options.joined(separator: "\n"),
-                "question_selected": String(question.selectedIndex),
-                "question_id": question.questionID,
-            ]
-
-            _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
-            logger.log(.info, "TmuxInboundWatcher: emitted question event for \(session.project) (\(question.options.count) options)")
+            // observe/autonomous: send to Chi via EventBus with pane context
+            let questionContext = extractQuestionContext(from: rawOutput, questionText: question.questionText)
+            emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
             return
         }
 

@@ -43,3 +43,47 @@ I'll select the recommended option for the auth method.
 - Single project directory at a time
 - Cannot access other tmux sessions' files
 - Needs explicit instructions for ambiguous tasks
+
+## Development Workflow
+
+### CC's Typical Flow
+CC works in iterative cycles:
+1. Read/explore code to understand the codebase
+2. Plan the implementation (may use Plan Mode for complex tasks)
+3. Implement changes (edit files, run commands)
+4. Test (run tests, verify behavior)
+5. Deploy (if applicable via project scripts)
+
+### Plan Mode
+CC sometimes enters Plan Mode for complex tasks:
+- Drafts a detailed implementation plan with file changes, approach, and rationale
+- Presents the plan and asks "Ready to proceed?" or similar approval question
+- The plan content appears in the pane context ABOVE the question
+
+When you see a plan approval question:
+- The question_context field contains the plan — read it carefully
+- Evaluate: scope, risks, approach
+- AUTO: approve unless the plan has clear issues
+- AUTONOMOUS/OBSERVE: summarize the plan and assessment for the user on LINE
+
+### Common Question Types
+
+| Pattern | Meaning | What to Check |
+|---|---|---|
+| "Ready to proceed?" / "Should I proceed?" | Plan mode approval | Read question_context for the plan content |
+| "Which approach/option?" | Design decision | Context shows options and trade-offs |
+| "Do you want me to edit/create X?" | File modification | Is the file relevant to the task? |
+| "Should I delete/reset X?" | Destructive action | Extra caution — verify with user |
+| Multiple sequential questions | Multi-step wizard | Answer each step, CC auto-advances |
+
+### Permission Prompts vs Questions
+- Permission prompts (tool use): Auto-approved in auto mode. CC asking to run bash, edit files, etc.
+- AskUserQuestion (decision needed): CC genuinely needs input. These are forwarded to you.
+
+### Understanding Question Context
+When a question event includes question_context, it contains the terminal output ABOVE the question.
+This is essential for understanding:
+- What CC was working on when it asked
+- Plan content for approval questions
+- Error output that prompted a clarification question
+Always read question_context before answering or advising on a question.
