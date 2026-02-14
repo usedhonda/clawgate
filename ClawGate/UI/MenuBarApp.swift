@@ -107,13 +107,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
         let content = NSHostingView(rootView: view)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 460),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         window.isReleasedWhenClosed = false
-        window.title = "OpenClaw Connection"
+        window.title = "VibeTerm"
         window.center()
         window.contentView = content
         window.makeKeyAndOrderFront(nil)

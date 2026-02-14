@@ -1,7 +1,7 @@
 import SwiftUI
 import CoreImage.CIFilterBuiltins
 
-/// SwiftUI view for displaying OpenClaw connection QR code
+/// SwiftUI view for displaying VibeTerm connection QR code
 struct QRCodeView: View {
     @State private var tailscaleHostname: String?
     @State private var openClawToken: String?
@@ -11,21 +11,36 @@ struct QRCodeView: View {
     @State private var copied = false
     @State private var isLoading = false
 
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("OpenClaw Connection")
-                .font(.headline)
+    private static let appStoreURL = URL(string: "https://apps.apple.com/jp/app/vibeterm/id6758266443")!
 
-            // QR Code
+    var body: some View {
+        VStack(spacing: 12) {
+            // Header — clickable to App Store
+            Link(destination: Self.appStoreURL) {
+                HStack(spacing: 6) {
+                    Image(systemName: "iphone")
+                        .font(.system(size: 16))
+                    Text("Connect VibeTerm")
+                        .font(.headline)
+                }
+            }
+            .padding(.top, 4)
+
+            // QR Code — clickable to App Store
             if let url = connectionURL, let qrImage = generateQRCode(from: url) {
-                Image(nsImage: qrImage)
-                    .interpolation(.none)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 200, height: 200)
-                    .padding()
-                    .background(Color.white)
-                    .cornerRadius(8)
+                Link(destination: Self.appStoreURL) {
+                    Image(nsImage: qrImage)
+                        .interpolation(.none)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 200, height: 200)
+                        .padding()
+                        .background(Color.white)
+                        .cornerRadius(8)
+                }
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             } else {
                 VStack(spacing: 8) {
                     Image(systemName: "qrcode")
@@ -72,14 +87,18 @@ struct QRCodeView: View {
             .buttonStyle(.borderedProminent)
             .disabled(connectionURL == nil)
 
-            Text("Scan with OpenClaw app")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            Spacer()
+            // Footer — clickable to App Store
+            Link(destination: Self.appStoreURL) {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.down.app")
+                        .font(.caption2)
+                    Text("Get VibeTerm on App Store")
+                        .font(.caption)
+                }
+            }
         }
         .padding()
-        .frame(width: 360, height: 420)
+        .frame(width: 320, height: 460)
         .onAppear {
             loadConnectionInfo()
         }
