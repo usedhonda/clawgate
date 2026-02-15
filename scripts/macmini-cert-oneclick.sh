@@ -16,7 +16,6 @@ if [ -z "${KEYCHAIN_PASSWORD:-}" ]; then
   fi
 fi
 CERT_NAME="ClawGate Dev"
-KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "ERROR: macOS only" >&2
@@ -45,7 +44,7 @@ echo "[3/7] Verify identity"
 security find-identity -v -p codesigning | grep "$CERT_NAME"
 
 echo "[4/7] Local sign and restart"
-KEYCHAIN_PASSWORD="$KEYCHAIN_PASSWORD" ./scripts/macmini-local-sign-and-restart.sh --keychain-password "$KEYCHAIN_PASSWORD"
+./scripts/macmini-local-sign-and-restart.sh --keychain-password "$KEYCHAIN_PASSWORD"
 
 echo "[5/7] Restart OpenClaw gateway"
 launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
