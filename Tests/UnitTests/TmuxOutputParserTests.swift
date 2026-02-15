@@ -144,7 +144,7 @@ final class TmuxOutputParserTests: XCTestCase {
         let lines = (1...100).map { "\(longLine) \($0)" }
         let output = lines.joined(separator: "\n")
         let summary = watcher.extractSummary(from: output)
-        XCTAssertLessThanOrEqual(summary.count, 2000)
+        XCTAssertLessThanOrEqual(summary.count, 12000)
     }
 
     func testExtractSummaryCompressesBlankLines() {

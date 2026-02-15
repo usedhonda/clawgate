@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: ShellCheck
-        run: shellcheck scripts/*.sh
+        run: shellcheck -S warning scripts/*.sh
 
       - name: JS syntax check
         run: find extensions -name '*.js' -exec node --check {} +

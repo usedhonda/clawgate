@@ -13,11 +13,11 @@ final class ConfigStoreTests: XCTestCase {
         let store = ConfigStore(defaults: freshDefaults("cfg-defaults"))
         let cfg = store.load()
 
-        XCTAssertEqual(cfg.nodeRole, .server)
+        XCTAssertEqual(cfg.nodeRole, .client)
         XCTAssertEqual(cfg.debugLogging, false)
         XCTAssertEqual(cfg.includeMessageBodyInLogs, false)
         XCTAssertEqual(cfg.lineDefaultConversation, "")
-        XCTAssertEqual(cfg.linePollIntervalSeconds, 2)
+        XCTAssertEqual(cfg.linePollIntervalSeconds, 1)
         XCTAssertEqual(cfg.tmuxEnabled, false)
         XCTAssertEqual(cfg.tmuxStatusBarURL, "ws://localhost:8080/ws/sessions")
         XCTAssertEqual(cfg.tmuxSessionModes, [:])

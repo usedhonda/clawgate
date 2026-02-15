@@ -314,6 +314,9 @@ final class BridgeCoreTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "clawgate.tests.core")!
         defaults.removePersistentDomain(forName: "clawgate.tests.core")
         let cfg = ConfigStore(defaults: defaults)
+        var appCfg = cfg.load()
+        appCfg.nodeRole = .server
+        cfg.save(appCfg)
 
         let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
         return BridgeCore(
