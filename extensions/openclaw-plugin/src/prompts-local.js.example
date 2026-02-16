@@ -1,0 +1,33 @@
+/**
+ * Personal prompt overrides — deep-merged over src/prompts.js defaults.
+ *
+ * Copy this file to prompts-local.js and customize.
+ * Only the keys you specify here will override the defaults.
+ * All other keys keep the English defaults from prompts.js.
+ *
+ * Available top-level keys:
+ *   firstTime     — array of lines (first-time guidance per project)
+ *   completion    — { header, autonomous, observe, auto, noReply }
+ *   question      — { auto, autonomous, observe, noReply }
+ *   questionBody  — { auto, default } (template strings with placeholders)
+ *   rosterFooter  — { taskHint, answerHint }
+ *
+ * Placeholders in templates: {label}, {project}, {mode}, {sessionTypeName},
+ *   {questionText}, {numberedOptions}
+ *
+ * See prompts.js for the full structure and all available keys.
+ */
+
+export default {
+  // Example: override just the completion header
+  // completion: {
+  //   header: "[Completion] Review the result vs the goal.",
+  // },
+
+  // Example: override first-time guidance entirely
+  // firstTime: [
+  //   "[Pair Review] [{label} {project}] Mode: {mode}",
+  //   "",
+  //   "Your custom guidance here...",
+  // ],
+};

@@ -13,7 +13,7 @@
  *   5. Repeat until abortSignal fires
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveAccount } from "./config.js";
@@ -27,6 +27,7 @@ import {
   setClawgateAuthToken,
 } from "./client.js";
 import { setActiveProject, clearActiveProject } from "./shared-state.js";
+import defaultPrompts from "./prompts.js";
 import {
   getProjectContext,
   getProjectRoster,
@@ -68,6 +69,60 @@ try {
 } catch {
   // Not critical — knowledge file missing just means less context
 }
+
+// ── Prompt loading with local overlay ─────────────────────────────
+let _prompts = defaultPrompts;
+let _promptsLoaded = false;
+
+async function loadPrompts(log) {
+  if (_promptsLoaded) return;
+  _promptsLoaded = true;
+  try {
+    const localUrl = new URL("./prompts-local.js", import.meta.url);
+    const localPath = fileURLToPath(localUrl);
+    if (!existsSync(localPath)) return;
+    const localModule = await import(localUrl.href);
+    if (localModule.default) {
+      _prompts = deepMerge(defaultPrompts, localModule.default);
+      log?.info?.("clawgate: loaded prompts-local.js overlay");
+    }
+  } catch (err) {
+    log?.warn?.(`clawgate: failed to load prompts-local.js: ${err.message || err}`);
+  }
+}
+
+function deepMerge(base, overlay) {
+  if (!overlay || typeof overlay !== "object" || Array.isArray(overlay)) return overlay ?? base;
+  if (typeof base !== "object" || Array.isArray(base)) return overlay;
+  const result = { ...base };
+  for (const key of Object.keys(overlay)) {
+    if (
+      key in result &&
+      typeof result[key] === "object" && !Array.isArray(result[key]) &&
+      typeof overlay[key] === "object" && !Array.isArray(overlay[key])
+    ) {
+      result[key] = deepMerge(result[key], overlay[key]);
+    } else {
+      result[key] = overlay[key];
+    }
+  }
+  return result;
+}
+
+function fillTemplate(str, vars) {
+  let result = str;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replaceAll(`{${key}}`, value);
+  }
+  return result;
+}
+
+function fillTemplateLines(lines, vars) {
+  return lines.map((l) => fillTemplate(l, vars));
+}
+
+// ── Configurable display name filter (replaces hardcoded "Test User") ──
+let _filterDisplayName = "";
 
 // ── Session state tracking (for roster) ──────────────────────────
 /** @type {Map<string, string>} project -> mode */
@@ -203,8 +258,8 @@ function isUiChromeLine(line) {
   if (/^未読$/.test(s)) return true;
   if (/^ここから未読メッセージ$/.test(s)) return true;
   if (/^LINE$/.test(s)) return true;
-  // Owner's LINE display name — treated as noise in AX tree parsing
-  if (/^Test User\b/.test(s)) return true;
+  // Owner's display name — treated as noise in AX tree parsing (configurable via filterDisplayName)
+  if (_filterDisplayName && s.startsWith(_filterDisplayName) && (s.length === _filterDisplayName.length || /\W/.test(s[_filterDisplayName.length]))) return true;
   if (/^(午前|午後)\s*\d{1,2}:\d{2}$/.test(s)) return true;
   if (/^\d{1,2}:\d{2}$/.test(s)) return true;
   if (/^\d+$/.test(s)) return true;
@@ -403,77 +458,28 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", session
   const m = mode || "observe";
   const k = eventKind || "update";
   const label = sessionLabel(sessionType);
+  const sessionTypeName = sessionType === "codex" ? "Codex" : "Claude Code";
+  const vars = { label, project: proj, mode: m, sessionTypeName };
   const parts = [];
 
   if (firstTime) {
-    parts.push(
-      `[Pair Review] [${label} ${proj}] Mode: ${m}`,
-      "",
-      `${label}（${sessionType === "codex" ? "Codex" : "Claude Code"}）が ${proj} で作業した内容をレビューする役割。`,
-      "SOUL.md のキャラ・話し方・書式ルールをそのまま守って。レビューだからって崩さない。",
-      "LINE は Markdown 非対応（太字・見出し・コードブロック全部ダメ）。",
-      "",
-      "書式: 英語ラベル + 空行区切り（各ラベルの前に必ず空行を入れる）。例:",
-      "",
-      "SCOPE: gateway.js のみ。問題なし。",
-      "",
-      "RISK: API の破壊的変更あり。エラー処理も漏れてる。",
-      "",
-      "↑このように SCOPE: と RISK: の間に空行。詰めて書かない。",
-      "",
-      "観点（気になったものだけ）:",
-      "- GOAL: 目的と結果が合ってるか",
-      "- SCOPE: 余計なファイルまで触ってないか",
-      "- RISK: 削除、API変更、エラー処理漏れ、未テスト",
-      "- ARCHITECTURE: プロジェクトのパターンに合ってるか",
-      "- MISSING: テスト、ドキュメント、エッジケース",
-      "",
-      "気になった点は掘り下げてOK。全体で5〜15行くらい。問題なければ短くOKでも。",
-      "コミットメッセージの復唱、「CCが〜しました」的な要約、とりあえず褒める、は不要。",
-      "必ず返信すること（NO_REPLY 禁止）。",
-      "",
-      "モード別:",
-      "- AUTO: 品質ゲート。問題なければ <cc_task>continue</cc_task> で続行。ブロッキング問題があればタスクを送らずユーザーに報告。",
-      "- AUTONOMOUS: 完了時はレビュー後、気になった点や疑問を <cc_task> で CC に質問（意思決定ではなく質問・深掘りのキャラ）。選択肢の質問はユーザーに LINE でアドバイス。",
-      "- OBSERVE: レビューしてユーザーに報告。選択肢の質問もLINEで推奨を伝える。CC には直接介入しない。",
-    );
+    parts.push(...fillTemplateLines(_prompts.firstTime, vars));
   }
 
   // Per-event guidance
   if (k === "completion") {
-    parts.push(`[完了イベント] タスクのゴールと結果を比較してレビュー。`);
-    if (m === "autonomous") {
-      parts.push("レビュー後、気になった点・疑問・確認事項があれば <cc_task> で CC に質問。");
-      parts.push("意思決定するのではなく、質問・深掘り・確認をするキャラ。");
-      parts.push("CC と数往復会話して納得したら、<cc_task> を含めずにユーザー向けの所感を LINE に送る（任意）。");
-    } else if (m === "observe") {
-      parts.push("レビューしてユーザーに報告。タスクは送らない。");
-    } else if (m === "auto") {
-      parts.push("品質ゲート。レビュー後:");
-      parts.push("- 問題なし/軽微: <cc_task>continue</cc_task> で続行。");
-      parts.push("- ブロッキング問題あり: <cc_task> は送らない。ユーザーに LINE で報告。");
+    parts.push(fillTemplate(_prompts.completion.header, vars));
+    const modeLines = _prompts.completion[m];
+    if (modeLines) {
+      parts.push(...(Array.isArray(modeLines) ? fillTemplateLines(modeLines, vars) : [fillTemplate(modeLines, vars)]));
     }
-    parts.push("必ず返信（NO_REPLY 禁止）。");
+    parts.push(_prompts.completion.noReply);
   } else if (k === "question") {
-    if (m === "auto") {
-      parts.push(
-        "[質問イベント] 選択肢を評価。",
-        "正解がわかるなら <cc_answer> で回答。",
-        "判断に迷うならユーザーに転送（自分の推奨も添えて）。",
-      );
-    } else if (m === "autonomous") {
-      parts.push(
-        "[質問イベント] 選択肢を分析してユーザーに LINE でアドバイス。",
-        "<cc_answer> は使わない。ユーザーが判断する。",
-        "自分の推奨理由を添えること。",
-      );
-    } else if (m === "observe") {
-      parts.push(
-        "[質問イベント] 選択肢を分析してユーザーに LINE で推奨を伝える。",
-        "<cc_answer> は使わない。ユーザーが判断する。",
-      );
+    const modeLines = _prompts.question[m];
+    if (modeLines) {
+      parts.push(...(Array.isArray(modeLines) ? fillTemplateLines(modeLines, vars) : [fillTemplate(modeLines, vars)]));
     }
-    parts.push("必ず返信（NO_REPLY 禁止）。");
+    parts.push(_prompts.question.noReply);
   }
 
   return parts.join("\n");
@@ -504,21 +510,38 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log,
   const modeLabel = mode ? mode.charAt(0).toUpperCase() + mode.slice(1) : "Unknown";
   const prefixedTask = `[OpenClaw Agent - ${modeLabel}] ${taskText}`;
 
-  try {
-    const result = await clawgateTmuxSend(apiUrl, project, prefixedTask, traceId);
-    if (result?.ok) {
-      log?.info?.(`clawgate: task sent to CC (${project}): "${taskText.slice(0, 80)}"`);
-      setTaskGoal(project, taskText);
-      return { lineText, taskText };
-    } else {
-      const errMsg = result?.error || "unknown error";
+  const MAX_RETRIES = 10;
+  const RETRY_DELAY_MS = 3000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await clawgateTmuxSend(apiUrl, project, prefixedTask, traceId);
+      if (result?.ok) {
+        log?.info?.(`clawgate: task sent to CC (${project}): "${taskText.slice(0, 80)}"`);
+        setTaskGoal(project, taskText);
+        return { lineText, taskText };
+      }
+
+      // Retry on session_busy (CC is in AskUserQuestion, permission prompt, or running)
+      const err = result?.error;
+      if (err?.retriable && err?.code === "session_busy" && attempt < MAX_RETRIES) {
+        log?.info?.(`clawgate: CC busy (${err.message || err.details || ""}), retry ${attempt + 1}/${MAX_RETRIES} in ${RETRY_DELAY_MS / 1000}s`);
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        continue;
+      }
+
+      const errMsg = err?.message || err?.code || "unknown error";
       log?.error?.(`clawgate: failed to send task to CC (${project}): ${errMsg}`);
       return { error: new Error(errMsg), lineText: replyText };
+    } catch (err) {
+      log?.error?.(`clawgate: failed to send task to CC (${project}): ${err}`);
+      return { error: err, lineText: replyText };
     }
-  } catch (err) {
-    log?.error?.(`clawgate: failed to send task to CC (${project}): ${err}`);
-    return { error: err, lineText: replyText };
   }
+
+  // Should not reach here, but safety fallback
+  log?.error?.(`clawgate: exhausted retries sending task to CC (${project})`);
+  return { error: new Error("max retries exceeded (session_busy)"), lineText: replyText };
 }
 
 /**
@@ -644,15 +667,11 @@ function buildRosterPrefix() {
 
   // Check if any project is in autonomous mode
   const hasTaskCapable = [...sessionModes.values()].some((m) => m === "autonomous" || m === "auto");
-  const taskHint = hasTaskCapable
-    ? `\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to LINE.`
-    : "";
+  const taskHint = hasTaskCapable ? _prompts.rosterFooter.taskHint : "";
 
   // Check for pending questions
   const hasQuestions = pendingQuestions.size > 0;
-  const answerHint = hasQuestions
-    ? `\nTo answer a pending question, include <cc_answer project="name">{option number}</cc_answer> in your reply.`
-    : "";
+  const answerHint = hasQuestions ? _prompts.rosterFooter.answerHint : "";
 
   const sessionCount = sessionModes.size;
   return `[Active Claude Code Projects: ${sessionCount} session${sessionCount !== 1 ? "s" : ""}]\n${roster}${taskHint}${answerHint}`;
@@ -979,12 +998,8 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   }).join("\n");
 
   // Question body
-  let questionBody;
-  if (mode === "auto") {
-    questionBody = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[To answer, include <cc_answer project="${project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]`;
-  } else {
-    questionBody = `[${label} ${project}] Claude Code is asking a question:\n\n${questionText}\n\nOptions:\n${numberedOptions}\n\n[Analyze the options and send your recommendation to the user via LINE. Do NOT use <cc_answer>.]`;
-  }
+  const qbTemplate = mode === "auto" ? _prompts.questionBody.auto : _prompts.questionBody.default;
+  const questionBody = fillTemplate(qbTemplate, { label, project, questionText, numberedOptions });
   contextParts.push(questionBody);
 
   // Apply total message cap (tail-priority: question body at the end is most important)
@@ -1357,6 +1372,12 @@ export async function startAccount(ctx) {
   setClawgateAuthToken(account.token || "");
   let pollIntervalMs = account.pollIntervalMs || 3000;
   let defaultConversation = account.defaultConversation || "";
+
+  // Load prompt overlay (once)
+  await loadPrompts(log);
+
+  // Set configurable display name filter (replaces hardcoded "Test User")
+  _filterDisplayName = account.config?.filterDisplayName || "";
 
   log?.info?.(`clawgate: [${accountId}] starting gateway (apiUrl=${apiUrl}, poll=${pollIntervalMs}ms, defaultConv="${defaultConversation}")`);
 

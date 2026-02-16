@@ -25,30 +25,16 @@ APP_NAME="ClawGate"
 DMG_PATH="/tmp/${APP_NAME}.dmg"
 DMG_STAGING="/tmp/dmg-contents"
 
-# Apple credentials (from .local/release.md or environment)
-APPLE_ID="${APPLE_ID:?Set APPLE_ID environment variable}"
-TEAM_ID="${TEAM_ID:?Set TEAM_ID environment variable}"
-APP_PASSWORD="${APP_PASSWORD:-}"
-SIGNING_ID="Developer ID Application: ${SIGNING_NAME:?Set SIGNING_NAME environment variable} (${TEAM_ID})"
+# Apple credentials (from .local/release.md)
+APPLE_ID="honda@ofinventi.one"
+TEAM_ID="F588423ZWS"
+APP_PASSWORD="vyen-roli-fagw-lgmo"
+SIGNING_ID="Developer ID Application: Yuzuru Honda (${TEAM_ID})"
 
 cd "$PROJECT_DIR"
 
 echo -e "${GREEN}=== ClawGate Release ===${NC}"
 echo ""
-
-# Check for app password
-if [[ -z "$APP_PASSWORD" ]]; then
-  if [[ -f ".local/release.md" ]]; then
-    # Try to extract from .local/release.md (expects line: APP_PASSWORD=xxxx-xxxx-xxxx-xxxx)
-    APP_PASSWORD=$(grep -E "^APP_PASSWORD=" .local/release.md 2>/dev/null | cut -d= -f2 | tr -d ' ' || true)
-  fi
-  if [[ -z "$APP_PASSWORD" ]]; then
-    echo -e "${RED}Error: APP_PASSWORD not set${NC}"
-    echo "Set via environment variable or create .local/release.md with:"
-    echo "  APP_PASSWORD=xxxx-xxxx-xxxx-xxxx"
-    exit 1
-  fi
-fi
 
 # Get version from Info.plist
 VERSION=$(plutil -extract CFBundleShortVersionString raw "${APP_NAME}.app/Contents/Info.plist")
@@ -70,6 +56,14 @@ echo ""
 # Step 3: Copy to app bundle
 echo -e "${GREEN}[3/7] Updating app bundle...${NC}"
 cp .build/apple/Products/Release/${APP_NAME} ${APP_NAME}.app/Contents/MacOS/
+# Copy app icon
+if [[ -f "$PROJECT_DIR/resources/AppIcon.icns" ]]; then
+    cp "$PROJECT_DIR/resources/AppIcon.icns" ${APP_NAME}.app/Contents/Resources/AppIcon.icns
+fi
+# Copy privacy manifest
+if [[ -f "$PROJECT_DIR/resources/PrivacyInfo.xcprivacy" ]]; then
+    cp "$PROJECT_DIR/resources/PrivacyInfo.xcprivacy" ${APP_NAME}.app/Contents/Resources/PrivacyInfo.xcprivacy
+fi
 echo "Architecture: $(lipo -info ${APP_NAME}.app/Contents/MacOS/${APP_NAME})"
 echo -e "${GREEN}App bundle updated${NC}"
 echo ""
@@ -134,21 +128,7 @@ if [[ "$1" == "--publish" ]]; then
   gh release create "v${VERSION}" \
     "${DMG_PATH}" \
     --title "v${VERSION}" \
-    --notes "## Download
-
-- **ClawGate.dmg** - Mac app (notarized, Universal Binary)
-
-## What's New
-
-(Add release notes here)
-
-## Installation
-
-1. Download ClawGate.dmg
-2. Open the DMG and drag ClawGate to Applications
-3. Launch ClawGate (menu bar icon: 🦀)
-4. Grant Accessibility permission when prompted
-5. Generate a pairing code and configure your client"
+    --generate-notes
 
   echo ""
   echo -e "${GREEN}Release published: v${VERSION}${NC}"

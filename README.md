@@ -4,6 +4,28 @@
 
 A macOS menubar app that bridges local AI agents to native applications via Accessibility (AX) UI automation.
 
+## Installation
+
+### Download
+
+Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/clawgate/releases/latest).
+
+### Install
+
+1. Open `ClawGate.dmg` and drag **ClawGate** to **Applications**
+2. Launch ClawGate from Applications (it runs as a menu bar app)
+3. Grant **Accessibility** permission when prompted (System Settings > Privacy & Security > Accessibility)
+4. Grant **Screen Recording** permission (System Settings > Privacy & Security > Screen Recording)
+5. Verify it's running:
+   ```bash
+   curl -s http://127.0.0.1:8765/v1/health | python3 -m json.tool
+   ```
+
+### Requirements
+
+- macOS 13+ (Ventura or later)
+- [LINE Desktop for Mac](https://apps.apple.com/app/line/id539883307) (for LINE adapter)
+
 ## What is ClawGate?
 
 ClawGate is a lightweight macOS menubar-resident application that exposes a localhost-only HTTP API, allowing AI agents (such as [OpenClaw](https://github.com/usedhonda/openclaw_general)) to interact with native macOS apps that have no official API. It uses the macOS Accessibility framework to read UI state, send messages, detect inbound activity, and navigate application windows.

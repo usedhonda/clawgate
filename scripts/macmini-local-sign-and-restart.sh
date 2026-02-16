@@ -43,6 +43,10 @@ security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD"
 echo "[4/6] Build"
 swift build
 cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
+# Copy app icon
+if [[ -f "$PROJECT_PATH/resources/AppIcon.icns" ]]; then
+  cp "$PROJECT_PATH/resources/AppIcon.icns" ClawGate.app/Contents/Resources/AppIcon.icns
+fi
 
 echo "[5/6] Sign with $CERT_NAME"
 codesign --force --deep --options runtime \

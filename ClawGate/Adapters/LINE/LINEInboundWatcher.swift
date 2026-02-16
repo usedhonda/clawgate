@@ -624,6 +624,10 @@ final class LINEInboundWatcher {
     }
 
     private func collectPixelSignal(chatList: AXUIElement, nodes: [AXNode], windowFrame: CGRect, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
+        guard !recentSendTracker.isSending else {
+            logger.log(.debug, "LINEInboundWatcher: pixel signal skipped (sending)")
+            return nil
+        }
         guard let chatListFrame = AXQuery.copyFrameAttribute(chatList) else { return nil }
         guard windowFrame.width > 10, windowFrame.height > 10 else { return nil }
 

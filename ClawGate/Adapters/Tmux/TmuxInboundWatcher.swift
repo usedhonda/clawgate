@@ -164,6 +164,17 @@ final class TmuxInboundWatcher {
                     return
                 }
                 // Real permission prompt
+                // Codex has no askUserQuestion — all interactive prompts
+                // (Plan mode, etc.) come through permission_prompt.
+                // For observe/autonomous: emit to Chi so she can decide.
+                if session.sessionType == "codex" {
+                    if mode == "observe" || mode == "autonomous" {
+                        self.debugLog("permission_prompt -> codex \(mode), emitting to Chi")
+                        self.captureAndEmit(session: session, mode: mode)
+                        return
+                    }
+                    // auto mode falls through to autoApprove below
+                }
                 if mode == "observe" {
                     self.debugLog("permission_prompt -> observe mode, skip auto-approve")
                     return
@@ -245,6 +256,7 @@ final class TmuxInboundWatcher {
             "question_selected": String(question.selectedIndex),
             "question_id": question.questionID,
             "question_context": context ?? "",
+            "attention_level": "\(session.attentionLevel)",
         ]
         _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
         logger.log(.info, "TmuxInboundWatcher: emitted question event for \(session.project) (\(question.options.count) options, context=\(context != nil ? "\(context!.count)ch" : "nil"))")
@@ -304,6 +316,7 @@ final class TmuxInboundWatcher {
                     "mode": mode,
                     "event_id": eventID,
                     "session_type": session.sessionType,
+                    "attention_level": "\(session.attentionLevel)",
                 ]
 
                 _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
@@ -423,6 +436,7 @@ final class TmuxInboundWatcher {
             "mode": mode,
             "event_id": eventID,
             "session_type": session.sessionType,
+            "attention_level": "\(session.attentionLevel)",
         ]
 
         _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
@@ -507,6 +521,7 @@ final class TmuxInboundWatcher {
             "capture": captureState,
             "event_id": eventID,
             "session_type": session.sessionType,
+            "attention_level": "\(session.attentionLevel)",
         ]
 
         let event = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)

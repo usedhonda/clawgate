@@ -61,6 +61,14 @@ sleep 1
 
 # Copy binary
 cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
+# Copy app icon
+if [[ -f "$PROJECT_DIR/resources/AppIcon.icns" ]]; then
+    cp "$PROJECT_DIR/resources/AppIcon.icns" ClawGate.app/Contents/Resources/AppIcon.icns
+fi
+# Copy privacy manifest
+if [[ -f "$PROJECT_DIR/resources/PrivacyInfo.xcprivacy" ]]; then
+    cp "$PROJECT_DIR/resources/PrivacyInfo.xcprivacy" ClawGate.app/Contents/Resources/PrivacyInfo.xcprivacy
+fi
 ok "Binary copied"
 
 # Sign with stable cert (not ad-hoc)

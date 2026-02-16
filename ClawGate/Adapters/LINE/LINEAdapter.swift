@@ -236,6 +236,11 @@ final class LINEAdapter: AdapterProtocol {
         } // end if !canSkipNavigation
 
         // Stage 2+3: Focus input -> setValue -> verify
+        // Suppress OCR polling while text is in the input field to prevent
+        // the watcher from picking up our own outgoing text as inbound.
+        recentSendTracker.beginSending()
+        defer { recentSendTracker.endSending() }
+
         _ = try step("input_message", logger: stepLogger) {
             let windowFrameNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
             let candidate = SelectorResolver.resolve(
@@ -265,8 +270,8 @@ final class LINEAdapter: AdapterProtocol {
                 )
             }
 
-            // Poll to verify value was set
-            _ = AXActions.poll(intervalMs: 20, timeoutMs: 200) {
+            // Poll to verify value was set (short timeout to minimize OCR exposure window)
+            _ = AXActions.poll(intervalMs: 20, timeoutMs: 50) {
                 let currentValue = AXQuery.copyStringAttribute(input.node.element, attribute: kAXValueAttribute as String)
                 return currentValue == payload.text
             }
@@ -285,7 +290,6 @@ final class LINEAdapter: AdapterProtocol {
             ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)
             if let input = inputCandidate {
                 AXActions.setFocused(input.node.element)
-                usleep(20_000)
             }
             AXActions.sendEnter(pid: pid)
             return true

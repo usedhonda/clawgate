@@ -108,6 +108,26 @@ final class TmuxAdapter: AdapterProtocol {
         stepLogger.record(step: "check_status", start: start2, success: true,
                           details: "status=waiting_input")
 
+        // Step 2b: For text messages (not menu select), verify CC prompt marker is visible.
+        // AskUserQuestion / permission dialogs hide the ❯ prompt — sending text would break the UI.
+        let isMenuSelect = payload.text.range(of: #"^__cc_select:(\d+)$"#, options: .regularExpression) != nil
+        if !isMenuSelect {
+            let start2b = Date()
+            if !hasPromptMarker(target: target) {
+                stepLogger.record(step: "check_prompt", start: start2b, success: false,
+                                  details: "No prompt marker found — likely AskUserQuestion or permission dialog")
+                throw BridgeRuntimeError(
+                    code: "session_busy",
+                    message: "Claude Code session '\(project)' is showing a selection UI or permission prompt",
+                    retriable: true,
+                    failedStep: "check_prompt",
+                    details: "Session is waiting_input but prompt marker (❯) not found"
+                )
+            }
+            stepLogger.record(step: "check_prompt", start: start2b, success: true,
+                              details: "Prompt marker found")
+        }
+
         // Step 3: Send keys (or menu selection)
         let start3 = Date()
 
@@ -194,6 +214,38 @@ final class TmuxAdapter: AdapterProtocol {
             messageCount: messages.count,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
+    }
+
+    /// Check if the CC prompt marker (❯ U+276F) is visible in the pane output.
+    /// Returns true if the marker is found on the last non-empty line above the status bar separator.
+    /// Falls back to true (assume idle) if pane cannot be read.
+    private func hasPromptMarker(target: String) -> Bool {
+        guard let output = try? TmuxShell.capturePane(target: target, lines: 30) else {
+            return true // Can't read pane — assume idle to avoid blocking
+        }
+
+        // Strip ANSI escape sequences
+        let stripped = output.replacingOccurrences(
+            of: "\u{1B}\\[[0-9;]*[a-zA-Z]|\u{1B}\\][^\u{07}]*\u{07}",
+            with: "",
+            options: .regularExpression
+        )
+
+        let lines = stripped.components(separatedBy: "\n")
+
+        // Scan top-to-bottom: find last non-empty line before the status bar separator (───)
+        var lastContent = ""
+        for line in lines {
+            if line.range(of: #"^[-─━]{3,}"#, options: .regularExpression) != nil {
+                break
+            }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty {
+                lastContent = line
+            }
+        }
+
+        return lastContent.contains("\u{276F}")
     }
 
     /// Navigate an AskUserQuestion menu and select an option by index.

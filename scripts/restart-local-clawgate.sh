@@ -63,6 +63,10 @@ if [[ "$SKIP_SYNC" != "true" ]]; then
     exit 1
   fi
   cp "$BUILD_BIN" "$APP_BIN"
+  # Copy app icon
+  if [[ -f "$PROJECT_PATH/resources/AppIcon.icns" ]]; then
+    cp "$PROJECT_PATH/resources/AppIcon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
+  fi
 else
   echo "[2/4] Skip sync (by option)"
 fi

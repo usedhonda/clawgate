@@ -22,3 +22,11 @@ ClawGate.app/
 AGENTS.md
 CLAUDE.md
 docs/
+# CC persona (auto-generated)
+.persona.md
+
+# Cdx persona (auto-generated)
+.codex/config.toml
+
+# Personal prompt overlay (not distributed)
+extensions/openclaw-plugin/src/prompts-local.js
