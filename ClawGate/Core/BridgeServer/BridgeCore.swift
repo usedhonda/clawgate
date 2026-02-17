@@ -527,13 +527,13 @@ final class BridgeCore {
             details: axTrusted ? nil : "System Settings > Privacy & Security > Accessibility"
         ))
 
-        // Check 3: LINE running
+        // Check 3: Messenger (LINE adapter) running
         let lineRunning = lineEnabled && (NSRunningApplication.runningApplications(withBundleIdentifier: "jp.naver.line.mac").first != nil)
         checks.append(DoctorCheck(
             name: "line_running",
             status: lineEnabled ? (lineRunning ? "ok" : "warning") : "ok",
-            message: lineEnabled ? (lineRunning ? "LINE is running" : "LINE is not running") : "LINE checks disabled (client role or LINE disabled)",
-            details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : "Enable LINE in Settings when needed"
+            message: lineEnabled ? (lineRunning ? "Messenger app (LINE) is running" : "Messenger app (LINE) is not running") : "Messenger checks disabled (client role or messenger disabled)",
+            details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : "Enable Messenger (LINE) in Settings when needed"
         ))
 
         // Check 4: LINE window accessible (only if LINE is running and AX is trusted)
@@ -544,8 +544,8 @@ final class BridgeCore {
             checks.append(DoctorCheck(
                 name: "line_window_accessible",
                 status: lineEnabled ? "warning" : "ok",
-                message: "LINE window check skipped",
-                details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE is not running") : "nodeRole=client or lineEnabled=false"
+                message: "Messenger window check skipped (LINE adapter)",
+                details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE app is not running") : "nodeRole=client or lineEnabled=false"
             ))
         }
 
@@ -668,7 +668,7 @@ final class BridgeCore {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "warning",
-                message: "LINE is not running",
+                message: "Messenger app (LINE) is not running",
                 details: nil
             )
         }
@@ -678,7 +678,7 @@ final class BridgeCore {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "warning",
-                message: "LINE window not accessible (bring it to foreground)",
+                message: "Messenger window (LINE) not accessible (bring it to foreground)",
                 details: "Qt limitation: AX tree unavailable in background"
             )
         }
@@ -699,14 +699,14 @@ final class BridgeCore {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "ok",
-                message: "LINE window is accessible (input field present)",
+                message: "Messenger window (LINE) is accessible (input field present)",
                 details: "Node count: \(nodes.count)"
             )
         } else {
             return DoctorCheck(
                 name: "line_window_accessible",
                 status: "ok",
-                message: "LINE window is accessible (sidebar view)",
+                message: "Messenger window (LINE) is accessible (sidebar view)",
                 details: "Node count: \(nodes.count), open a chat to see the input field"
             )
         }

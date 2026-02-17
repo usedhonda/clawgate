@@ -299,7 +299,7 @@ struct InlineSettingsView: View {
                     .lineLimit(1)
             }
 
-            card("LINE") {
+            card("Messenger (LINE)") {
                 Toggle("Enabled", isOn: $model.config.lineEnabled)
                 if model.config.lineEnabled {
                     fieldRow("Conversation") {
@@ -618,7 +618,7 @@ struct InlineSettingsView: View {
                 lines.append("OpenClaw gateway is not running on this machine.")
             }
             if !lineReady {
-                lines.append("LINE app is not running.")
+                lines.append("Messenger app (LINE) is not running.")
             }
             lines.append("Start both, then select Server again.")
             return (false, lines.joined(separator: "\n"))

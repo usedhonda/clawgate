@@ -10,7 +10,7 @@ A macOS menu bar app that lets an AI agent (OpenClaw) monitor, review, and inter
 ```
 Claude Code (tmux) <--WS--> cc-status-bar <--WS--> ClawGate <--HTTP--> OpenClaw Gateway <--> AI
                                                        |                                     |
-                                                   EventBus                            User (LINE/etc)
+                                                   EventBus                         User (Messenger app)
                                                    HTTP API
 ```
 
@@ -53,7 +53,7 @@ Each tmux project can be assigned one of four session modes. Set them in the men
 | Mode | Monitoring | AI -> CC Send | Use Case |
 |------|-----------|---------------|----------|
 | **ignore** | Off | Off | Default. ClawGate does nothing for this project |
-| **observe** | On | Off | AI reviews and reports to the user only (via LINE, etc.) |
+| **observe** | On | Off | AI reviews and reports to the user only (via messenger app, etc.) |
 | **auto** | On | Yes (auto-continue) | Quality gate. AI reviews; if OK, sends continue. No deep questions |
 | **autonomous** | On | Yes (questions) | AI actively reviews, asks clarifying questions to CC, drills deeper |
 
@@ -195,10 +195,10 @@ swift build
 
 | Permission | Required For | How to Grant |
 |------------|-------------|--------------|
-| Accessibility | All AX endpoints, tmux adapter, LINE adapter | System Settings > Privacy & Security > Accessibility |
-| Screen Recording | Vision OCR (LINE inbound text extraction) | System Settings > Privacy & Security > Screen Recording |
+| Accessibility | All AX endpoints, tmux adapter, messenger adapter (LINE) | System Settings > Privacy & Security > Accessibility |
+| Screen Recording | Vision OCR (messenger inbound text extraction for LINE adapter) | System Settings > Privacy & Security > Screen Recording |
 
-## Advanced: LINE Integration
+## Advanced: Messenger Integration (LINE Adapter)
 
 > **This section is for users running ClawGate on a host with LINE Desktop installed (typically Host A in a 2-host setup).**
 
@@ -209,7 +209,7 @@ swift build
 
 ### How It Works
 
-ClawGate automates LINE Desktop via the macOS Accessibility framework:
+The built-in messenger adapter currently targets LINE Desktop via the macOS Accessibility framework:
 
 - **Send**: Opens conversations by name, types and sends messages via AX actions
 - **Receive**: Hybrid inbound detection combining notification banner monitoring, AX structure analysis, and pixel diff
@@ -224,7 +224,7 @@ To expose ClawGate's API to other hosts (e.g., for Federation):
 3. ClawGate binds to `0.0.0.0:8765` instead of `127.0.0.1`
 4. All requests require `Authorization: Bearer <token>`
 
-### LINE Recovery
+### Messenger Recovery (LINE Adapter)
 
 ```bash
 # Regular recovery (Host A)
@@ -236,14 +236,15 @@ KEYCHAIN_PASSWORD='your-password' ./scripts/macmini-local-sign-and-restart.sh
 
 ## Advanced: Federation (2-Host Setup)
 
-Federation connects two ClawGate instances over WebSocket, enabling a workstation (Host B) to relay events through a server (Host A) that has LINE and OpenClaw Gateway.
+Federation connects two ClawGate instances over WebSocket, enabling a workstation (Host B) to relay events through a server (Host A) that has a messenger adapter (LINE) and OpenClaw Gateway.
 
 ```
 Host A (macmini)                 Host B (workstation)
 +-----------------------+        +-----------------------+
 | ClawGate (server)     |<--WS-->| ClawGate (client)     |
-| - LINE adapter        | /fed   | - tmux adapter        |
-| - Federation server   |  eration| - Federation client   |
+| - Messenger adapter   | /federation | - tmux adapter    |
+|   (LINE)              |             | - Federation client |
+| - Federation server   |             |                     |
 | - OpenClaw Gateway    |        | - CC / Codex sessions |
 +-----------------------+        +-----------------------+
 ```
@@ -295,11 +296,11 @@ ClawGate stores all configuration in UserDefaults, readable via `GET /v1/config`
 | `tmux.statusBarUrl` | String | `ws://localhost:8080/ws/sessions` | cc-status-bar WebSocket URL |
 | `tmux.sessionModes` | Dict | `{}` | Per-project mode map (e.g., `{"cc:myproject": "autonomous"}`) |
 
-### LINE
+### Messenger Adapter (LINE)
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `line.default_conversation` | String | `""` | Default LINE chat name |
+| `line.default_conversation` | String | `""` | Default chat name for LINE adapter |
 | `line.poll_interval_seconds` | Int | `2` | Polling interval (seconds) |
 | `line.detection_mode` | String | `"hybrid"` | `"legacy"` or `"hybrid"` |
 | `line.fusion_threshold` | Int | `60` | Detection score threshold (1-100) |
@@ -320,7 +321,7 @@ ClawGate/
   main.swift                              # App entry point
   Adapters/
     LINE/
-      LINEAdapter.swift                   # LINE AX automation (send, read)
+      LINEAdapter.swift                   # Messenger AX automation (LINE adapter)
       LINEInboundWatcher.swift            # AX polling for inbound detection
       NotificationBannerWatcher.swift     # Event-driven banner detection
       Detection/                          # Multi-signal fusion engine

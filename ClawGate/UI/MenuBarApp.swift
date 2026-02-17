@@ -261,9 +261,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         case "tmux_gateway_deliver":
             return "ACK \(project)"
         case "line_send_ok":
-            return "LINE OK"
+            return "MSG OUT OK"
         case "line_send_start":
-            return "LINE SEND"
+            return "MSG SEND"
         case "send_failed":
             let parts = parseKeyValueMessage(entry.message)
             let code = parts["error_code"] ?? "unknown"
