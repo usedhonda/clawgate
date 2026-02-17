@@ -345,6 +345,7 @@ scripts/
   smoke-test.sh                           # Quick validation (5 tests)
   integration-test.sh                     # Full API test suite
   release.sh                              # Universal build + notarize + manifest (+ optional publish)
+  release-usual.sh                        # Canonical release entrypoint (loads .local/secrets/release.env)
   support-diagnostics.sh                  # Support bundle generator (health/doctor/log/process)
   setup-cert.sh                           # Self-signed certificate setup
   post-task-restart.sh                    # Full deploy to Host A + Host B
@@ -355,6 +356,7 @@ extensions/
 ## Release (Maintainers)
 
 `scripts/release.sh` uses env-based credentials only.
+Use `scripts/release-usual.sh` as the canonical entrypoint so credentials are loaded consistently.
 
 Required environment variables:
 
@@ -367,10 +369,10 @@ Commands:
 
 ```bash
 # Build + sign + notarize + staple + spctl + manifest
-./scripts/release.sh
+./scripts/release-usual.sh
 
 # Same as above, then publish GitHub release
-./scripts/release.sh --publish --notes-file docs/release/release-notes.md
+./scripts/release-usual.sh --publish --notes-file docs/release/release-notes.md
 ```
 
 Release notes template:
