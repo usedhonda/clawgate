@@ -689,14 +689,22 @@ swift test
 ```
 
 ### Release pipeline (`scripts/release.sh`)
+Required env contract:
+- `APPLE_ID`
+- `APPLE_TEAM_ID`
+- `APPLE_ID_PASSWORD`
+- `SIGNING_ID`
+
 1. `swift test`
 2. Universal binary build
 3. App bundle update
 4. Code signing (Developer ID)
 5. DMG creation (`hdiutil`)
-6. Notarization (`xcrun notarytool`)
-7. Stapling (`xcrun stapler`)
-8. Optional: GitHub Release (`--publish`)
+6. DMG payload equivalence check (app binary hash)
+7. Notarization (`xcrun notarytool`)
+8. Stapling (`xcrun stapler`) + Gatekeeper assess (`spctl --assess`)
+9. Release manifest JSON generation (`ClawGate-release-manifest.json`)
+10. Optional: GitHub Release (`--publish --notes-file ...`)
 
 ### CI
 

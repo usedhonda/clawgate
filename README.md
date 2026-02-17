@@ -344,11 +344,39 @@ scripts/
   dev-deploy.sh                           # Build + sign + deploy + smoke test
   smoke-test.sh                           # Quick validation (5 tests)
   integration-test.sh                     # Full API test suite
-  release.sh                              # Universal binary + DMG + notarize
+  release.sh                              # Universal build + notarize + manifest (+ optional publish)
+  support-diagnostics.sh                  # Support bundle generator (health/doctor/log/process)
   setup-cert.sh                           # Self-signed certificate setup
   post-task-restart.sh                    # Full deploy to Host A + Host B
 extensions/
   openclaw-plugin/                        # OpenClaw channel plugin (JS/ESM)
+```
+
+## Release (Maintainers)
+
+`scripts/release.sh` uses env-based credentials only.
+
+Required environment variables:
+
+- `APPLE_ID`
+- `APPLE_TEAM_ID`
+- `APPLE_ID_PASSWORD`
+- `SIGNING_ID`
+
+Commands:
+
+```bash
+# Build + sign + notarize + staple + spctl + manifest
+./scripts/release.sh
+
+# Same as above, then publish GitHub release
+./scripts/release.sh --publish --notes-file docs/release/release-notes.md
+```
+
+Release notes template:
+
+```text
+docs/release/release-notes-template.md
 ```
 
 ## See Also

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/usedhonda/clawgate/docs/release-manifest.schema.json",
+  "title": "ClawGate Release Manifest",
+  "type": "object",
+  "required": [
+    "app",
+    "dmg",
+    "notarization",
+    "source",
+    "created_at"
+  ],
+  "properties": {
+    "app": {
+      "type": "object",
+      "required": [
+        "name",
+        "version",
+        "bundle",
+        "binary_arch",
+        "binary_sha256",
+        "signing_authority",
+        "entitlements_sha256"
+      ],
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "bundle": { "type": "string" },
+        "binary_arch": { "type": "string" },
+        "binary_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "signing_authority": { "type": "string" },
+        "entitlements_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "dmg": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "notarization": {
+      "type": "object",
+      "required": ["submission_id", "status", "result_json"],
+      "properties": {
+        "submission_id": { "type": "string" },
+        "status": { "type": "string" },
+        "result_json": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "source": {
+      "type": "object",
+      "required": ["git_sha", "git_ref"],
+      "properties": {
+        "git_sha": { "type": "string" },
+        "git_ref": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "additionalProperties": false
+}
