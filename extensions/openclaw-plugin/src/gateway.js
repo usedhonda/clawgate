@@ -26,6 +26,7 @@ import {
   clawgateSend,
   clawgatePoll,
   clawgateTmuxSend,
+  clawgateTmuxRead,
   setClawgateAuthToken,
 } from "./client.js";
 import { setActiveProject, getActiveProject, clearActiveProject } from "./shared-state.js";
@@ -40,6 +41,7 @@ import {
   registerProjectPath,
   resolveProjectPath,
   setProgressSnapshot,
+  getProgressSnapshot,
   appendProgressTrail,
   getProgressTrail,
   clearProgressTrail,
@@ -322,6 +324,11 @@ const guidanceSentProjects = new Set();
 const questionRoundMap = new Map();
 /** @type {Map<string, { active: boolean }>} project -> autonomous loop state */
 const autonomousLoopState = new Map();
+// ── Review-done suppression ─────────────────────────────────────
+// After LGTM terminates the review loop, mark the project as "review-done".
+// Completion events are skipped until a new task is sent or a question arrives.
+/** @type {Set<string>} */
+const reviewDoneProjects = new Set();
 const AUTONOMOUS_RISK_PATTERNS = [
   /blocking/i,
   /regression/i,
@@ -807,6 +814,43 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", session
   return parts.join("\n");
 }
 
+// ── Task failure message enrichment ───────────────────────────
+
+/**
+ * Build an enriched task failure message that includes progress context.
+ * Includes: error message, progress trail (last 20 lines), last snapshot (last 10 lines), and line text.
+ * @param {string} errorMsg — the error description
+ * @param {string} lineText — AI reply text minus the <cc_task> tag
+ * @param {string} project — target project name
+ * @returns {string}
+ */
+function buildTaskFailureMessage(errorMsg, lineText, project) {
+  const MAX_TRAIL_LINES = 20;
+  const MAX_SNAPSHOT_LINES = 10;
+  const parts = [`[Task send failed: ${errorMsg}]`];
+
+  const trail = getProgressTrail(project);
+  if (trail) {
+    const lines = trail.split("\n");
+    const tail = lines.length > MAX_TRAIL_LINES
+      ? lines.slice(-MAX_TRAIL_LINES).join("\n")
+      : trail;
+    parts.push(`[Progress Trail (last ${Math.min(lines.length, MAX_TRAIL_LINES)} lines)]\n${tail}`);
+  }
+
+  const snapshot = getProgressSnapshot(project);
+  if (snapshot?.text) {
+    const sLines = snapshot.text.split("\n");
+    const sTail = sLines.length > MAX_SNAPSHOT_LINES
+      ? sLines.slice(-MAX_SNAPSHOT_LINES).join("\n")
+      : snapshot.text;
+    parts.push(`[Last Snapshot]\n${sTail}`);
+  }
+
+  if (lineText) parts.push(lineText);
+  return parts.join("\n\n");
+}
+
 // ── Autonomous task chaining ──────────────────────────────────
 
 /**
@@ -847,6 +891,12 @@ async function tryExtractAndSendTask({
     return { error: err, errorCode: "session_read_only", lineText, taskText, targetProject };
   }
 
+  // LGTM termination: intercept before sending to CC — don't pollute the session with "LGTM" tasks
+  const LOOP_TERMINATE = /^(lgtm|done|approved|no issues|looks good(?: to me)?|ship it)[!?.]*$/i;
+  if (LOOP_TERMINATE.test(taskText)) {
+    return { lineText, taskText, targetProject, terminated: true };
+  }
+
   // Prefix task with [OpenClaw Agent - {Mode}] so CC knows the origin and mode
   const sourceMode = `${mode || ""}`.trim() || targetMode;
   const modeLabel = sourceMode ? sourceMode.charAt(0).toUpperCase() + sourceMode.slice(1) : "Unknown";
@@ -862,6 +912,9 @@ async function tryExtractAndSendTask({
       if (result?.ok) {
         log?.info?.(`clawgate: task sent to CC (${targetProject}): "${taskText.slice(0, 80)}"`);
         setTaskGoal(targetProject, taskText);
+        if (reviewDoneProjects.delete(targetProject)) {
+          log?.info?.(`clawgate: review-done CLEARED for "${targetProject}" — new task sent, completions resumed`);
+        }
         return { lineText, taskText, targetProject };
       }
 
@@ -895,6 +948,48 @@ async function tryExtractAndSendTask({
     taskText,
     targetProject,
   };
+}
+
+/**
+ * Extract <cc_read project="..."/> from AI reply and read tmux pane content.
+ * Returns null if no read tag found.
+ * Self-closing or body form: <cc_read project="game01"/> or <cc_read project="game01"></cc_read>
+ * @param {object} params
+ * @param {string} params.replyText — full AI reply text
+ * @param {string} params.apiUrl
+ * @param {string} [params.traceId]
+ * @param {object} [params.log]
+ * @returns {Promise<{lineText: string, paneContent: string, project: string} | {error: Error, lineText: string} | null>}
+ */
+async function tryExtractAndReadPane({ replyText, apiUrl, traceId, log }) {
+  const readMatch = replyText.match(/<cc_read\s+project="([^"]+)"\s*\/?>(?:<\/cc_read>)?/i);
+  if (!readMatch) return null;
+
+  const project = readMatch[1].trim();
+  const lineText = replyText
+    .replace(/<cc_read\s+project="[^"]+"\s*\/?>(?:<\/cc_read>)?/i, "")
+    .trim();
+
+  if (!project) {
+    return { error: new Error("project name is missing in <cc_read>"), lineText };
+  }
+
+  try {
+    const result = await clawgateTmuxRead(apiUrl, project, 80, traceId);
+    if (!result?.ok) {
+      const errMsg = result?.error?.message || "failed to read pane";
+      log?.error?.(`clawgate: cc_read failed for "${project}": ${errMsg}`);
+      return { error: new Error(errMsg), lineText, project };
+    }
+
+    const messages = result.result?.messages || [];
+    const paneContent = messages.map((m) => m.text).join("\n");
+    log?.info?.(`clawgate: cc_read OK for "${project}" (${messages.length} lines)`);
+    return { lineText, paneContent, project };
+  } catch (err) {
+    log?.error?.(`clawgate: cc_read exception for "${project}": ${err}`);
+    return { error: err, lineText, project };
+  }
 }
 
 /**
@@ -1026,8 +1121,11 @@ function buildRosterPrefix() {
   const hasQuestions = pendingQuestions.size > 0;
   const answerHint = hasQuestions ? _prompts.rosterFooter.answerHint : "";
 
+  // Read hint is always available when sessions exist
+  const readHint = _prompts.rosterFooter.readHint || "";
+
   const sessionCount = sessionModes.size;
-  return `[Active Claude Code Projects: ${sessionCount} session${sessionCount !== 1 ? "s" : ""}]\n${roster}${taskHint}${answerHint}`;
+  return `[Active Claude Code Projects: ${sessionCount} session${sessionCount !== 1 ? "s" : ""}]\n${roster}${taskHint}${answerHint}${readHint}`;
 }
 
 /**
@@ -1154,6 +1252,23 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       return;
     }
 
+    // Try to extract <cc_read> — on-demand pane reading for Chi
+    const readResult = await tryExtractAndReadPane({ replyText: text, apiUrl, traceId, log });
+    if (readResult) {
+      if (readResult.error) {
+        const msg = `[Pane read failed: ${readResult.error.message || readResult.error}]${readResult.lineText ? "\n\n" + readResult.lineText : ""}`;
+        try { await clawgateSend(apiUrl, conversation, msg, traceId); recordPluginSend(msg); } catch {}
+      } else {
+        const header = `[Pane: ${readResult.project}]`;
+        const content = readResult.paneContent || "(empty)";
+        const msg = readResult.lineText
+          ? `${readResult.lineText}\n\n${header}\n${content}`
+          : `${header}\n${content}`;
+        try { await clawgateSend(apiUrl, conversation, msg, traceId); recordPluginSend(msg); } catch {}
+      }
+      return;
+    }
+
     // Try to extract <cc_task> from AI reply.
     // Default target is sourceTaskProject, but explicit cross-session
     // route is allowed via <cc_task project="target-project">.
@@ -1167,6 +1282,16 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       resolveMode: (targetProject) => sessionModes.get(targetProject) || "ignore",
     });
     if (result) {
+      // LGTM termination from inbound — forward lineText to LINE, set review-done
+      if (result.terminated) {
+        const proj = result.targetProject || sourceTaskProject || "unknown";
+        reviewDoneProjects.add(proj);
+        log?.info?.(`clawgate: [${accountId}] review-done SET for "${proj}" — LGTM via inbound`);
+        if (result.lineText) {
+          try { await clawgateSend(apiUrl, conversation, result.lineText, traceId); recordPluginSend(result.lineText); } catch {}
+        }
+        return;
+      }
       if (result.error) {
         const shouldNotify = shouldNotifyTaskSendError({
           project: result.targetProject || sourceTaskProject || "unknown",
@@ -1174,7 +1299,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           taskText: result.taskText || "",
         });
         if (shouldNotify) {
-          const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+          const msg = buildTaskFailureMessage(result.error.message || String(result.error), result.lineText, result.targetProject || sourceTaskProject || "unknown");
           try {
             await clawgateSend(apiUrl, conversation, msg, traceId);
             recordPluginSend(msg);
@@ -1290,6 +1415,10 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   sessionModes.set(project, mode);
   sessionStatuses.set(project, "waiting_input");
   if (mode !== "autonomous") setAutonomousLoopActive(project, false);
+  // Question event means CC is actively working — clear review-done suppression
+  if (reviewDoneProjects.delete(project)) {
+    log?.info?.(`clawgate: [${accountId}] review-done CLEARED for "${project}" — question event received`);
+  }
 
   // Reset autonomous conversation round counter (question = CC responded, not Chi's turn)
   questionRoundMap.delete(project);
@@ -1514,6 +1643,15 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     return;
   }
 
+  // Guard: review-done — LGTM closed the review loop, suppress completions until next task
+  if (reviewDoneProjects.has(project)) {
+    log?.debug?.(`clawgate: [${accountId}] skipping completion for "${project}" — review-done (awaiting next task)`);
+    // Still update session state so roster stays accurate
+    sessionModes.set(project, mode);
+    sessionStatuses.set(project, "waiting_input");
+    return;
+  }
+
   // Guard: skip useless capture-failed completions — no point dispatching to AI
   if (text === "(capture failed)" || text === "(no output captured)") {
     log?.warn?.(`clawgate: [${accountId}] skipping completion dispatch for "${project}" — ${text}`);
@@ -1665,10 +1803,27 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     let replyText = extractReplyText(replyPayload, log, "tmux_completion");
     if (!replyText.trim()) return;
 
+    // Try <cc_read> — on-demand pane reading (any mode)
+    const readResult = await tryExtractAndReadPane({ replyText, apiUrl, traceId, log });
+    if (readResult) {
+      if (readResult.error) {
+        const msg = `[Pane read failed: ${readResult.error.message || readResult.error}]${readResult.lineText ? "\n\n" + readResult.lineText : ""}`;
+        try { await sendLine(defaultConversation || project, msg); } catch {}
+      } else {
+        const header = `[Pane: ${readResult.project}]`;
+        const content = readResult.paneContent || "(empty)";
+        const msg = readResult.lineText
+          ? `${readResult.lineText}\n\n${header}\n${content}`
+          : `${header}\n${content}`;
+        try { await sendLine(defaultConversation || project, msg); } catch {}
+      }
+      return;
+    }
+
     // Autonomous mode: try <cc_task> with round limiting
     if (mode === "autonomous") {
       const rounds = questionRoundMap.get(project) || 0;
-      const MAX_ROUNDS = 5;
+      const MAX_ROUNDS = 3;
       const loopWasActive = isAutonomousLoopActive(project);
 
       if (rounds < MAX_ROUNDS) {
@@ -1676,6 +1831,28 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           replyText, project, apiUrl, traceId, log, mode,
         });
         if (result) {
+          // LGTM termination: tryExtractAndSendTask intercepted before sending to CC
+          if (result.terminated) {
+            log?.info?.(`clawgate: [${accountId}] autonomous loop terminated by LGTM signal (project=${project}, round=${rounds + 1})`);
+            questionRoundMap.delete(project);
+            setAutonomousLoopActive(project, false);
+            reviewDoneProjects.add(project);
+            log?.info?.(`clawgate: [${accountId}] review-done SET for "${project}" — completions suppressed until next task`);
+            logAutonomousLineEvent(log, {
+              accountId,
+              project,
+              reason: "lgtm",
+              status: "sent",
+              detail: `round=${rounds + 1}/${MAX_ROUNDS} signal=${result.taskText.trim()}`,
+            });
+            // Forward the review summary (lineText) to LINE
+            if (result.lineText) {
+              const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
+              try { await sendLine(defaultConversation || project, normalized); } catch {}
+            }
+            return;
+          }
+
           if (result.error) {
             const shouldNotify = shouldNotifyTaskSendError({
               project: result.targetProject || project,
@@ -1683,7 +1860,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
               taskText: result.taskText || "",
             });
             if (shouldNotify) {
-              const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+              const msg = buildTaskFailureMessage(result.error.message || String(result.error), result.lineText, result.targetProject || project);
               try { await sendLine(defaultConversation || project, msg); } catch (err) {
                 log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
                 logAutonomousLineEvent(log, {
@@ -1762,6 +1939,8 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       // No <cc_task> or max rounds reached — reset counter, strip tags, fall through to LINE
       questionRoundMap.delete(project);
       setAutonomousLoopActive(project, false);
+      reviewDoneProjects.add(project);
+      log?.info?.(`clawgate: [${accountId}] review-done SET for "${project}" — max rounds reached or no cc_task, completions suppressed`);
       // Strip any <cc_task> tags so they don't leak raw into LINE
       replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
     }
@@ -1772,6 +1951,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         replyText, project, apiUrl, traceId, log, mode,
       });
       if (result) {
+        // LGTM termination in auto mode — forward lineText, set review-done
+        if (result.terminated) {
+          reviewDoneProjects.add(result.targetProject || project);
+          log?.info?.(`clawgate: [${accountId}] review-done SET for "${result.targetProject || project}" — LGTM in auto mode`);
+          if (result.lineText) {
+            const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
+            try { await sendLine(defaultConversation || project, normalized); } catch {}
+          }
+          return;
+        }
         if (result.error) {
           const shouldNotify = shouldNotifyTaskSendError({
             project: result.targetProject || project,
@@ -1779,7 +1968,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             taskText: result.taskText || "",
           });
           if (shouldNotify) {
-            const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+            const msg = buildTaskFailureMessage(result.error.message || String(result.error), result.lineText, result.targetProject || project);
             try { await sendLine(defaultConversation || project, msg); } catch (err) {
               log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
             }

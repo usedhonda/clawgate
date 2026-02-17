@@ -175,6 +175,19 @@ export async function clawgateTmuxConversations(apiUrl, limit = 50) {
 }
 
 /**
+ * GET /v1/messages?adapter=tmux&conversation=PROJECT — read tmux pane content for a specific project.
+ * @param {string} apiUrl
+ * @param {string} project — project name to read
+ * @param {number} [limit=50] — number of lines to capture
+ * @param {string} [traceId]
+ * @returns {Promise<object>}
+ */
+export async function clawgateTmuxRead(apiUrl, project, limit = 50, traceId = "") {
+  const params = `adapter=tmux&conversation=${encodeURIComponent(project)}&limit=${limit}`;
+  return request(apiUrl, `/v1/messages?${params}`, { traceId });
+}
+
+/**
  * Resolve the working directory of a tmux pane.
  * @param {string} tmuxTarget — tmux target pane (e.g. "clawgate:0.0")
  * @returns {string|null} — absolute path or null on failure

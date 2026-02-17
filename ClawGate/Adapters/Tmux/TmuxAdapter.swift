@@ -206,6 +206,35 @@ final class TmuxAdapter: AdapterProtocol {
         )
     }
 
+    /// Capture pane output for a specific project by name.
+    /// Searches all known sessions (not just active/configured ones) so Chi can inspect any tmux pane.
+    func getMessages(limit: Int, forProject project: String) throws -> MessageList {
+        let candidates = ccClient.sessions(forProject: project)
+        guard let session = candidates.first, let target = session.tmuxTarget else {
+            throw BridgeRuntimeError(
+                code: "session_not_found",
+                message: "No tmux session found for project '\(project)'",
+                retriable: false,
+                failedStep: "resolve_target",
+                details: "Available: \(ccClient.allSessions().map(\.project).joined(separator: ", "))"
+            )
+        }
+
+        let output = try TmuxShell.capturePane(target: target, lines: limit)
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        let messages = lines.enumerated().map { i, line in
+            VisibleMessage(text: String(line), sender: "other", yOrder: i)
+        }
+
+        return MessageList(
+            adapter: name,
+            conversationName: session.project,
+            messages: Array(messages.suffix(limit)),
+            messageCount: messages.count,
+            timestamp: ISO8601DateFormatter().string(from: Date())
+        )
+    }
+
     /// Check if the CC prompt marker (❯ U+276F) is visible in the pane output.
     /// Returns true if the marker is found on the last non-empty line above the status bar separator.
     /// Falls back to true (assume idle) if pane cannot be read.

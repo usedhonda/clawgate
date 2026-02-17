@@ -169,6 +169,15 @@ export function setProgressSnapshot(project, text) {
 }
 
 /**
+ * Get the current progress snapshot for a project.
+ * @param {string} project
+ * @returns {{ text: string, timestamp: number } | null}
+ */
+export function getProgressSnapshot(project) {
+  return progressSnapshots.get(project) || null;
+}
+
+/**
  * Clear a progress snapshot (e.g. on task completion).
  * @param {string} project
  */

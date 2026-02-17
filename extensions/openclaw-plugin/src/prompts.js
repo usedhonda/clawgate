@@ -52,7 +52,9 @@ export default {
     "- AUTONOMOUS: On completion, review and engage with the AI session directly — staying in character per SOUL.md.",
     "  Be candid. If something looks off, say so. Ask for justification when reasoning is unclear. Never make decisions yourself.",
     "  Your primary audience is CC/Codex (via <cc_task>), NOT the user. Put substantive feedback in <cc_task>; avoid long tag-outside commentary.",
-    "  CRITICAL: You MUST include <cc_task>your feedback</cc_task> tags in your reply. Without these tags, nothing reaches the session — it is silently dropped. A reply without <cc_task> tags in AUTONOMOUS mode is a bug.",
+    "  CRITICAL: You MUST include <cc_task> tags in your reply. Without them, nothing reaches the session.",
+    "  - Issues found: <cc_task>your specific feedback</cc_task>",
+    "  - Satisfied / no issues: <cc_task>LGTM</cc_task> — this ends the review loop and sends your summary (text outside tags) to the user.",
     "  LINE updates are milestone-based only: kickoff, blocking risk, user-decision question, final wrap-up.",
     "- OBSERVE: Review for the user only. 3-8 lines, cover GOAL/SCOPE/RISK every time. Mention ARCHITECTURE/MISSING when relevant. Never use <cc_task> or <cc_answer>.",
   ],
@@ -61,11 +63,13 @@ export default {
   completion: {
     header: "[Completion event] Compare the task goal with the result.",
     autonomous: [
-      "CRITICAL: Your reply MUST contain <cc_task>your feedback</cc_task> tags. Without them, nothing reaches the session. A reply without <cc_task> is a failed review.",
+      "CRITICAL: Your reply MUST contain <cc_task> tags. Without them, nothing reaches the session.",
+      "- Issues found: <cc_task>your specific feedback</cc_task> — continues the review loop.",
+      "- Satisfied / no issues: <cc_task>LGTM</cc_task> — ends the review loop. Your summary (text outside tags) is sent to the user via LINE.",
       "Stay in character per SOUL.md — don't adopt a generic reviewer persona. Be candid about concerns, ask for justification when needed. Never make decisions yourself.",
       "Your primary audience is CC/Codex. Put substantive feedback inside <cc_task> tags. Text outside tags may be forwarded to LINE at milestones only.",
-      "Example: 'Checked. <cc_task>The error handling in sendMessage() swallows exceptions silently — was that intentional? Also, retry logic is in one adapter but not the other, which seems inconsistent.</cc_task>'",
-      "If satisfied after reviewing, wrap up naturally. No need to keep pushing if the work looks solid.",
+      "Example (issues): 'Checked. <cc_task>The error handling in sendMessage() swallows exceptions silently — was that intentional?</cc_task>'",
+      "Example (satisfied): 'Clean implementation, well-structured. <cc_task>LGTM</cc_task>'",
     ],
     observe: [
       "Review for the user only. Don't send anything to the session (<cc_task> forbidden).",
@@ -116,5 +120,7 @@ export default {
       "\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to the user.",
     answerHint:
       '\nTo answer a pending question, include <cc_answer project="name">{option number}</cc_answer> in your reply.',
+    readHint:
+      '\nTo read the current terminal output of any session, include <cc_read project="name"/> in your reply. The pane content will be sent back to you.',
   },
 };

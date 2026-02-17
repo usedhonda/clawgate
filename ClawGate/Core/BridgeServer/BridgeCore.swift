@@ -362,7 +362,7 @@ final class BridgeCore {
         }
     }
 
-    func messages(adapter adapterName: String, limit: Int) -> HTTPResult {
+    func messages(adapter adapterName: String, limit: Int, conversation: String? = nil) -> HTTPResult {
         if let denied = rejectLineOnClient(adapterName: adapterName) {
             return denied
         }
@@ -376,7 +376,16 @@ final class BridgeCore {
                     details: adapterName
                 )
             }
-            var result = try adapter.getMessages(limit: limit)
+            var result: MessageList
+            if adapterName == "tmux",
+               let conversation = conversation?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !conversation.isEmpty,
+               let tmux = adapter as? TmuxAdapter
+            {
+                result = try tmux.getMessages(limit: limit, forProject: conversation)
+            } else {
+                result = try adapter.getMessages(limit: limit)
+            }
             if adapterName == "tmux", result.messages.isEmpty {
                 result = buildTmuxMessageListFromEventBus(limit: limit)
             }

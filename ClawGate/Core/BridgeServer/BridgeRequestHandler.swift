@@ -164,7 +164,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
                 let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
                 let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
-                result = core.messages(adapter: adapter, limit: limit)
+                let conversation = components?.queryItems?.first(where: { $0.name == "conversation" })?.value
+                result = core.messages(adapter: adapter, limit: limit, conversation: conversation)
             } else if method == .GET && path == "/v1/conversations" {
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
                 let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
