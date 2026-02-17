@@ -18,6 +18,15 @@ final class SettingsModel: ObservableObject {
 }
 
 struct InlineSettingsView: View {
+    let embedInScroll: Bool
+    let onOpenQRCode: (() -> Void)?
+
+    init(model: SettingsModel, embedInScroll: Bool = true, onOpenQRCode: (() -> Void)? = nil) {
+        self.model = model
+        self.embedInScroll = embedInScroll
+        self.onOpenQRCode = onOpenQRCode
+    }
+
     private enum ConnectivityState {
         case unknown
         case checking
@@ -121,6 +130,28 @@ struct InlineSettingsView: View {
         }
     }
 
+    private struct HoverInteractiveControlModifier: ViewModifier {
+        let cornerRadius: CGFloat
+        @State private var isHovered = false
+
+        func body(content: Content) -> some View {
+            content
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(UITheme.accent.opacity(isHovered ? 0.55 : 0), lineWidth: 1)
+                )
+                .background(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(UITheme.accent.opacity(isHovered ? 0.12 : 0))
+                )
+                .onHover { hovering in
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        isHovered = hovering
+                    }
+                }
+        }
+    }
+
     @ObservedObject var model: SettingsModel
     @State private var tailscalePeers: [TailscalePeer] = []
     @State private var tmuxState: ConnectivityState = .unknown
@@ -130,17 +161,27 @@ struct InlineSettingsView: View {
     @State private var showServerRoleBlockedAlert = false
     @State private var serverRoleBlockedMessage = ""
 
-    var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: UITheme.sectionSpacing) {
-                headerCard
-                if model.config.nodeRole == .server {
-                    serverSection
-                } else {
-                    clientSection
-                }
+    private var contentView: some View {
+        VStack(alignment: .leading, spacing: UITheme.sectionSpacing) {
+            headerCard
+            if model.config.nodeRole == .server {
+                serverSection
+            } else {
+                clientSection
             }
-            .padding(UITheme.panelPadding)
+        }
+        .padding(UITheme.panelPadding)
+    }
+
+    var body: some View {
+        Group {
+            if embedInScroll {
+                ScrollView(showsIndicators: false) {
+                    contentView
+                }
+            } else {
+                contentView
+            }
         }
         .toggleStyle(.switch)
         .controlSize(.regular)
@@ -205,6 +246,7 @@ struct InlineSettingsView: View {
                     applyRecommended(force: true)
                 }
                 .buttonStyle(GlassButtonStyle(prominent: true))
+                .modifier(HoverInteractiveControlModifier(cornerRadius: 9))
 
                 Text("Tailscale LAN defaults")
                     .font(UITheme.bodyFont)
@@ -267,6 +309,8 @@ struct InlineSettingsView: View {
                 }
                 Toggle("Debug Logging", isOn: $model.config.debugLogging)
             }
+
+            utilitiesSection
         }
     }
 
@@ -309,6 +353,7 @@ struct InlineSettingsView: View {
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .modifier(InputChromeModifier())
+                            .modifier(HoverInteractiveControlModifier(cornerRadius: 8))
                         }
                     }
 
@@ -323,6 +368,7 @@ struct InlineSettingsView: View {
                             loadTailscalePeers()
                         }
                         .buttonStyle(GlassButtonStyle(prominent: false))
+                        .modifier(HoverInteractiveControlModifier(cornerRadius: 9))
 
                         Text("Detected: \(tailscalePeers.count)")
                             .font(UITheme.bodyFont)
@@ -336,6 +382,21 @@ struct InlineSettingsView: View {
                     Toggle("Launch at Login", isOn: launchAtLoginBinding)
                 }
                 Toggle("Debug Logging", isOn: $model.config.debugLogging)
+            }
+
+            utilitiesSection
+        }
+    }
+
+    @ViewBuilder
+    private var utilitiesSection: some View {
+        if let onOpenQRCode {
+            card("Utilities") {
+                Button("Show QR Code for [VibeTerm]") {
+                    onOpenQRCode()
+                }
+                .buttonStyle(GlassButtonStyle(prominent: false))
+                .modifier(HoverInteractiveControlModifier(cornerRadius: 9))
             }
         }
     }

@@ -14,8 +14,10 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { join, dirname, isAbsolute } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { resolveAccount } from "./config.js";
 import {
   clawgateHealth,
@@ -70,25 +72,204 @@ try {
   // Not critical — knowledge file missing just means less context
 }
 
-// ── Prompt loading with local overlay ─────────────────────────────
+// ── Prompt loading with layered overlays ───────────────────────────
+const DEFAULT_PRIVATE_PROMPTS_PATH = join(homedir(), ".clawgate", "prompts-private.js");
+const PROMPT_PROFILE_VERSION = "2026-02-17.observe-quality-v1";
+const OBSERVE_REQUIRED_TOKENS = ["goal", "scope", "risk", "3-8"];
+const AUTONOMOUS_REQUIRED_TOKENS = ["<cc_task>"];
 let _prompts = defaultPrompts;
 let _promptsLoaded = false;
+let _promptLoadSignature = "";
+let _promptMeta = {
+  version: PROMPT_PROFILE_VERSION,
+  hash: "",
+  layers: ["core:prompts.js"],
+  validationEnabled: true,
+  privateOverlayPath: "",
+};
 
-async function loadPrompts(log) {
-  if (_promptsLoaded) return;
-  _promptsLoaded = true;
-  try {
-    const localUrl = new URL("./prompts-local.js", import.meta.url);
-    const localPath = fileURLToPath(localUrl);
-    if (!existsSync(localPath)) return;
-    const localModule = await import(localUrl.href);
-    if (localModule.default) {
-      _prompts = deepMerge(defaultPrompts, localModule.default);
-      log?.info?.("clawgate: loaded prompts-local.js overlay");
-    }
-  } catch (err) {
-    log?.warn?.(`clawgate: failed to load prompts-local.js: ${err.message || err}`);
+function normalizeOverlayPath(rawPath) {
+  const candidate = `${rawPath || ""}`.trim();
+  if (!candidate) return "";
+  if (candidate.startsWith("~/")) {
+    return join(homedir(), candidate.slice(2));
   }
+  if (isAbsolute(candidate)) return candidate;
+  return join(process.cwd(), candidate);
+}
+
+function resolvePromptOptions(accountConfig = {}) {
+  const promptConfig = accountConfig?.prompts && typeof accountConfig.prompts === "object"
+    ? accountConfig.prompts
+    : {};
+  const privateOverlayPath = normalizeOverlayPath(
+    promptConfig.privateOverlayPath || process.env.CLAWGATE_PROMPTS_PRIVATE_PATH || DEFAULT_PRIVATE_PROMPTS_PATH
+  );
+  return {
+    enableValidation: promptConfig.enableValidation !== false,
+    enableRepoLocalOverlay: promptConfig.enableRepoLocalOverlay !== false,
+    privateOverlayPath,
+  };
+}
+
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function promptHash(prompts) {
+  return createHash("sha256").update(stableStringify(prompts)).digest("hex").slice(0, 16);
+}
+
+function asPromptLines(value) {
+  if (Array.isArray(value)) return value.filter((item) => typeof item === "string");
+  if (typeof value === "string") return [value];
+  return [];
+}
+
+function linesIncludeTokens(lines, tokens) {
+  const text = asPromptLines(lines).join("\n").toLowerCase();
+  return tokens.every((token) => text.includes(token.toLowerCase()));
+}
+
+function validatePromptShape(prompts) {
+  const errors = [];
+  if (!Array.isArray(prompts?.firstTime) || prompts.firstTime.length === 0) {
+    errors.push("firstTime must be a non-empty array");
+  }
+  if (typeof prompts?.completion?.header !== "string" || !prompts.completion.header.trim()) {
+    errors.push("completion.header must be a non-empty string");
+  }
+  if (asPromptLines(prompts?.completion?.autonomous).length === 0) {
+    errors.push("completion.autonomous must be a non-empty string/array");
+  }
+  if (asPromptLines(prompts?.completion?.observe).length === 0) {
+    errors.push("completion.observe must be a non-empty string/array");
+  }
+  if (asPromptLines(prompts?.completion?.auto).length === 0) {
+    errors.push("completion.auto must be a non-empty string/array");
+  }
+  if (typeof prompts?.completion?.noReply !== "string" || !prompts.completion.noReply.trim()) {
+    errors.push("completion.noReply must be a non-empty string");
+  }
+  if (asPromptLines(prompts?.question?.auto).length === 0) {
+    errors.push("question.auto must be a non-empty string/array");
+  }
+  if (asPromptLines(prompts?.question?.autonomous).length === 0) {
+    errors.push("question.autonomous must be a non-empty string/array");
+  }
+  if (asPromptLines(prompts?.question?.observe).length === 0) {
+    errors.push("question.observe must be a non-empty string/array");
+  }
+  if (typeof prompts?.question?.noReply !== "string" || !prompts.question.noReply.trim()) {
+    errors.push("question.noReply must be a non-empty string");
+  }
+  if (typeof prompts?.questionBody?.auto !== "string" || !prompts.questionBody.auto.trim()) {
+    errors.push("questionBody.auto must be a non-empty string");
+  }
+  if (typeof prompts?.questionBody?.default !== "string" || !prompts.questionBody.default.trim()) {
+    errors.push("questionBody.default must be a non-empty string");
+  }
+  return errors;
+}
+
+function enforceCriticalPromptContracts(prompts) {
+  const repaired = [];
+  if (!linesIncludeTokens(prompts?.completion?.observe, OBSERVE_REQUIRED_TOKENS)) {
+    prompts.completion.observe = structuredClone(defaultPrompts.completion.observe);
+    repaired.push("completion.observe");
+  }
+  if (!linesIncludeTokens(prompts?.completion?.autonomous, AUTONOMOUS_REQUIRED_TOKENS)) {
+    prompts.completion.autonomous = structuredClone(defaultPrompts.completion.autonomous);
+    repaired.push("completion.autonomous");
+  }
+  return repaired;
+}
+
+async function tryLoadOverlayFromPath(filePath, label, log) {
+  if (!filePath || !existsSync(filePath)) return null;
+  try {
+    const moduleUrl = `${pathToFileURL(filePath).href}?v=${Date.now()}`;
+    const mod = await import(moduleUrl);
+    if (!mod?.default || typeof mod.default !== "object") {
+      log?.warn?.(`clawgate: prompt overlay "${label}" has no default object export`);
+      return null;
+    }
+    return mod.default;
+  } catch (err) {
+    log?.warn?.(`clawgate: failed to load prompt overlay "${label}": ${err.message || err}`);
+    return null;
+  }
+}
+
+async function loadPrompts(log, options = {}) {
+  const resolved = {
+    enableValidation: options.enableValidation !== false,
+    enableRepoLocalOverlay: options.enableRepoLocalOverlay !== false,
+    privateOverlayPath: normalizeOverlayPath(options.privateOverlayPath || DEFAULT_PRIVATE_PROMPTS_PATH),
+  };
+  const signature = stableStringify(resolved);
+  if (_promptsLoaded) {
+    if (_promptLoadSignature && _promptLoadSignature !== signature) {
+      log?.warn?.("clawgate: prompts already loaded; ignoring different prompt options from another account");
+    }
+    return;
+  }
+
+  _promptsLoaded = true;
+  _promptLoadSignature = signature;
+
+  let merged = structuredClone(defaultPrompts);
+  const layers = ["core:prompts.js"];
+
+  if (resolved.enableRepoLocalOverlay) {
+    const localPath = fileURLToPath(new URL("./prompts-local.js", import.meta.url));
+    const localOverlay = await tryLoadOverlayFromPath(localPath, "repo:prompts-local.js", log);
+    if (localOverlay) {
+      merged = deepMerge(merged, localOverlay);
+      layers.push("repo:prompts-local.js");
+    }
+  }
+
+  const privateOverlay = await tryLoadOverlayFromPath(
+    resolved.privateOverlayPath,
+    `home:${resolved.privateOverlayPath}`,
+    log
+  );
+  if (privateOverlay) {
+    merged = deepMerge(merged, privateOverlay);
+    layers.push("home:prompts-private.js");
+  }
+
+  if (resolved.enableValidation) {
+    const errors = validatePromptShape(merged);
+    if (errors.length > 0) {
+      log?.error?.(`clawgate: prompt validation failed: ${errors.join("; ")} — using core prompts`);
+      merged = structuredClone(defaultPrompts);
+      layers.push("fallback:core");
+    }
+  }
+
+  const repaired = enforceCriticalPromptContracts(merged);
+  if (repaired.length > 0) {
+    log?.warn?.(`clawgate: restored protected prompt sections from core: ${repaired.join(", ")}`);
+  }
+
+  _prompts = merged;
+  _promptMeta = {
+    version: PROMPT_PROFILE_VERSION,
+    hash: promptHash(_prompts),
+    layers,
+    validationEnabled: resolved.enableValidation,
+    privateOverlayPath: resolved.privateOverlayPath,
+  };
+  log?.info?.(`clawgate: prompts loaded version=${_promptMeta.version} hash=${_promptMeta.hash} layers=${layers.join(" -> ")}`);
 }
 
 function deepMerge(base, overlay) {
@@ -139,6 +320,94 @@ const guidanceSentProjects = new Set();
 // Reset on question events, incremented on completion when Chi sends <cc_task>.
 /** @type {Map<string, number>} project -> round count */
 const questionRoundMap = new Map();
+/** @type {Map<string, { active: boolean }>} project -> autonomous loop state */
+const autonomousLoopState = new Map();
+const AUTONOMOUS_RISK_PATTERNS = [
+  /blocking/i,
+  /regression/i,
+  /breaking api/i,
+  /data loss/i,
+  /security/i,
+  /crash/i,
+  /fatal/i,
+  /untested/i,
+  /missing error handling/i,
+  /重大/u,
+  /危険/u,
+  /破壊/u,
+  /壊/u,
+];
+
+function joinSections(parts) {
+  return (parts || []).filter(Boolean).join("\n\n---\n\n");
+}
+
+function buildPrioritizedBody({ requiredParts = [], optionalParts = [], maxChars = 16000, log, scope = "" }) {
+  const required = joinSections(requiredParts);
+  if (!required) {
+    return capText(joinSections(optionalParts), maxChars, "tail");
+  }
+
+  if (required.length >= maxChars) {
+    log?.warn?.(`clawgate: ${scope} required context exceeded ${maxChars} chars; truncating required segment`);
+    return capText(required, maxChars, "tail");
+  }
+
+  const separator = "\n\n---\n\n";
+  const optionalBudget = Math.max(0, maxChars - required.length - separator.length);
+  let optional = joinSections(optionalParts);
+  if (optionalBudget <= 0) return required;
+  if (optional && optional.length > optionalBudget) {
+    optional = capText(optional, optionalBudget, "tail");
+  }
+  return optional ? `${optional}${separator}${required}` : required;
+}
+
+function summarizeForLine(text, maxChars = 220) {
+  const normalized = `${text || ""}`.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars - 3)}...`;
+}
+
+function hasAutonomousRiskSignal(...chunks) {
+  const text = chunks
+    .map((chunk) => `${chunk || ""}`.trim())
+    .filter(Boolean)
+    .join("\n");
+  if (!text) return false;
+  return AUTONOMOUS_RISK_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function setAutonomousLoopActive(project, active) {
+  if (!project) return;
+  if (!active) {
+    autonomousLoopState.delete(project);
+    return;
+  }
+  autonomousLoopState.set(project, { active: true });
+}
+
+function isAutonomousLoopActive(project) {
+  return autonomousLoopState.get(project)?.active === true;
+}
+
+function autonomousMilestoneLine({ reason, round, maxRounds, taskText, lineText }) {
+  if (reason === "risk") {
+    const riskSummary = summarizeForLine(lineText || taskText || "");
+    return `Autonomous review found a potential risk at round ${round}/${maxRounds}.\n${riskSummary || "I flagged this in-session and will send final status after verification."}`;
+  }
+  if (reason === "kickoff") {
+    return `Autonomous review loop started (${round}/${maxRounds}). I'm discussing details directly in-session and will send a final summary when it closes.`;
+  }
+  return "";
+}
+
+function logAutonomousLineEvent(log, { accountId, project, reason, status, detail = "" }) {
+  const promptHash = _promptMeta.hash || "unknown";
+  const suffix = detail ? ` ${detail}` : "";
+  log?.info?.(`clawgate: [${accountId}] autonomous_line reason=${reason} status=${status} project=${project} prompt=${promptHash}${suffix}`);
+}
 
 function eventTimestamp(event) {
   const raw = event?.observed_at ?? event?.observedAt;
@@ -925,6 +1194,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   // Track session state
   sessionModes.set(project, mode);
   sessionStatuses.set(project, "waiting_input");
+  if (mode !== "autonomous") setAutonomousLoopActive(project, false);
 
   // Reset autonomous conversation round counter (question = CC responded, not Chi's turn)
   questionRoundMap.delete(project);
@@ -942,16 +1212,16 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   const stable = getStableContext(project, tmuxTarget);
   const dynamic = getDynamicEnvelope(project, tmuxTarget);
 
-  const contextParts = [];
+  const optionalParts = [];
 
   // Stable project context
   if (stable && stable.isNew && stable.context) {
-    contextParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
+    optionalParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
     if (_ccKnowledge) {
-      contextParts.push(_ccKnowledge);
+      optionalParts.push(_ccKnowledge);
     }
   } else if (stable && stable.hash) {
-    contextParts.push(
+    optionalParts.push(
       `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
     );
   }
@@ -960,12 +1230,12 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   // Note: DON'T clearTaskGoal here — question doesn't end the task
   const taskGoal = getTaskGoal(project);
   if (taskGoal) {
-    contextParts.push(`[Task Goal]\n${taskGoal}`);
+    optionalParts.push(`[Task Goal]\n${taskGoal}`);
   }
 
   // Dynamic envelope (git state)
   if (dynamic && dynamic.envelope) {
-    contextParts.push(`[Current State]\n${dynamic.envelope}`);
+    optionalParts.push(`[Current State]\n${dynamic.envelope}`);
   }
 
   // Pane context (output above the question — may contain plan content)
@@ -974,7 +1244,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   let questionContext = filterPaneNoise(payload.question_context || "");
   if (questionContext) {
     questionContext = capText(questionContext, MAX_QUESTION_CONTEXT_CHARS, "tail");
-    contextParts.push(`[Screen Context (above question)]\n${questionContext}`);
+    optionalParts.push(`[Screen Context (above question)]\n${questionContext}`);
   }
 
   // Progress trail (what CC did so far — helps Chi understand the question in context)
@@ -983,14 +1253,14 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   const trail = getProgressTrail(project);
   if (trail && questionContext) {
     const deduped = deduplicateTrailAgainst(trail, questionContext);
-    if (deduped) contextParts.push(`[Execution Progress Trail]\n${deduped}`);
+    if (deduped) optionalParts.push(`[Execution Progress Trail]\n${deduped}`);
   } else if (trail) {
-    contextParts.push(`[Execution Progress Trail]\n${trail}`);
+    optionalParts.push(`[Execution Progress Trail]\n${trail}`);
   }
 
   // Pairing guidance
   const isFirstGuidance = !guidanceSentProjects.has(project);
-  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "question", sessionType, firstTime: isFirstGuidance }));
+  const guidance = buildPairingGuidance({ project, mode, eventKind: "question", sessionType, firstTime: isFirstGuidance });
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
   // Format numbered options for Chi
@@ -1002,14 +1272,17 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   // Question body
   const qbTemplate = mode === "auto" ? _prompts.questionBody.auto : _prompts.questionBody.default;
   const questionBody = fillTemplate(qbTemplate, { label, project, questionText, numberedOptions });
-  contextParts.push(questionBody);
+  const requiredParts = [guidance, questionBody];
 
-  // Apply total message cap (tail-priority: question body at the end is most important)
+  // Apply total message cap with guidance preservation (trim optional context first)
   const MAX_TOTAL_BODY_CHARS = 16000;
-  let body = contextParts.join("\n\n---\n\n");
-  if (body.length > MAX_TOTAL_BODY_CHARS) {
-    body = capText(body, MAX_TOTAL_BODY_CHARS, "tail");
-  }
+  const body = buildPrioritizedBody({
+    requiredParts,
+    optionalParts,
+    maxChars: MAX_TOTAL_BODY_CHARS,
+    log,
+    scope: "tmux-question",
+  });
 
   const ctx = {
     Body: body,
@@ -1034,7 +1307,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     _tmuxMode: mode,
   };
 
-  log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options)`);
+  log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options, prompt=${_promptMeta.hash})`);
 
   // Helper: send to LINE only when LINE is available
   const sendLine = async (conv, text) => {
@@ -1075,8 +1348,25 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);
+      if (mode === "autonomous") {
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "question",
+          status: "sent",
+        });
+      }
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
+      if (mode === "autonomous") {
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "question",
+          status: "failed",
+          detail: String(err),
+        });
+      }
     }
   };
 
@@ -1148,6 +1438,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Track session state for roster
   sessionModes.set(project, mode);
   sessionStatuses.set(project, "waiting_input");
+  if (mode !== "autonomous") setAutonomousLoopActive(project, false);
 
   // Clear any pending question (completion means question was answered or session moved on)
   pendingQuestions.delete(project);
@@ -1167,15 +1458,15 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   const stable = getStableContext(project, tmuxTarget);
   const dynamic = getDynamicEnvelope(project, tmuxTarget);
 
-  const contextParts = [];
+  const optionalParts = [];
 
   if (stable && stable.isNew && stable.context) {
-    contextParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
+    optionalParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
     if (_ccKnowledge) {
-      contextParts.push(_ccKnowledge);
+      optionalParts.push(_ccKnowledge);
     }
   } else if (stable && stable.hash) {
-    contextParts.push(
+    optionalParts.push(
       `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
     );
   }
@@ -1183,12 +1474,12 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Task goal (what Chi asked CC to do — enables goal vs result comparison)
   const taskGoal = getTaskGoal(project);
   if (taskGoal) {
-    contextParts.push(`[Task Goal]\n${taskGoal}`);
+    optionalParts.push(`[Task Goal]\n${taskGoal}`);
   }
   clearTaskGoal(project);
 
   if (dynamic && dynamic.envelope) {
-    contextParts.push(`[Current State]\n${dynamic.envelope}`);
+    optionalParts.push(`[Current State]\n${dynamic.envelope}`);
   }
 
   // Filter noise from completion text (CC UI chrome: bars, spinners, etc.)
@@ -1200,12 +1491,12 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   const trail = getProgressTrail(project);
   if (trail) {
     const deduped = deduplicateTrailAgainst(trail, displayText);
-    if (deduped) contextParts.push(`[Execution Progress Trail]\n${deduped}`);
+    if (deduped) optionalParts.push(`[Execution Progress Trail]\n${deduped}`);
   }
   clearProgressTrail(project);
 
   const isFirstGuidance = !guidanceSentProjects.has(project);
-  contextParts.push(buildPairingGuidance({ project, mode, eventKind: "completion", sessionType, firstTime: isFirstGuidance }));
+  const guidance = buildPairingGuidance({ project, mode, eventKind: "completion", sessionType, firstTime: isFirstGuidance });
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
   // Append metadata notes so Chi understands information gaps
@@ -1218,14 +1509,18 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   ].filter(Boolean).join("\n");
   const metaSection = metaNotes ? `\n\n[Note: ${metaNotes}]` : "";
 
-  contextParts.push(`[${sessionLabel(sessionType)} ${project}] [${mode}] Completion Output:\n\n${displayText}${metaSection}`);
+  const completionOutput = `[${sessionLabel(sessionType)} ${project}] [${mode}] Completion Output:\n\n${displayText}${metaSection}`;
+  const requiredParts = [guidance, completionOutput];
 
-  // Apply total message cap (tail-priority: completion output at the end is most important)
+  // Apply total message cap with guidance preservation (trim optional context first)
   const MAX_TOTAL_BODY_CHARS = 16000;
-  let body = contextParts.join("\n\n---\n\n");
-  if (body.length > MAX_TOTAL_BODY_CHARS) {
-    body = capText(body, MAX_TOTAL_BODY_CHARS, "tail");
-  }
+  const body = buildPrioritizedBody({
+    requiredParts,
+    optionalParts,
+    maxChars: MAX_TOTAL_BODY_CHARS,
+    log,
+    scope: "tmux-completion",
+  });
 
   const ctx = {
     Body: body,
@@ -1250,7 +1545,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     _tmuxMode: mode,
   };
 
-  log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}): "${text.slice(0, 80)}"`);
+  log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}, prompt=${_promptMeta.hash}): "${text.slice(0, 80)}"`);
 
   // Helper: send to LINE only when LINE is available
   const sendLine = async (conv, text) => {
@@ -1265,13 +1560,14 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Dispatch to AI — the AI will summarize and reply via LINE
   // In autonomous mode, parse <cc_task> tags and route tasks to Claude Code
   const deliver = async (replyPayload) => {
-    const replyText = extractReplyText(replyPayload, log, "tmux_completion");
+    let replyText = extractReplyText(replyPayload, log, "tmux_completion");
     if (!replyText.trim()) return;
 
     // Autonomous mode: try <cc_task> with round limiting
     if (mode === "autonomous") {
       const rounds = questionRoundMap.get(project) || 0;
       const MAX_ROUNDS = 5;
+      const loopWasActive = isAutonomousLoopActive(project);
 
       if (rounds < MAX_ROUNDS) {
         const result = await tryExtractAndSendTask({
@@ -1282,17 +1578,73 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
             try { await sendLine(defaultConversation || project, msg); } catch (err) {
               log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+              logAutonomousLineEvent(log, {
+                accountId,
+                project,
+                reason: "routing_error",
+                status: "failed",
+                detail: String(err),
+              });
             }
+            logAutonomousLineEvent(log, {
+              accountId,
+              project,
+              reason: "routing_error",
+              status: "sent",
+            });
           } else {
-            questionRoundMap.set(project, rounds + 1);
-            // Autonomous: suppress LINE during CC dialogue. Only send final impressions (no <cc_task>).
-            log?.info?.(`clawgate: [${accountId}] autonomous round ${rounds + 1}/${MAX_ROUNDS} — LINE suppressed (task sent to CC)`);
+            const nextRound = rounds + 1;
+            questionRoundMap.set(project, nextRound);
+            setAutonomousLoopActive(project, true);
+
+            const riskDetected = hasAutonomousRiskSignal(result.taskText, result.lineText);
+            const shouldKickoff = !loopWasActive;
+            const reason = riskDetected ? "risk" : (shouldKickoff ? "kickoff" : "suppressed");
+
+            if (reason === "suppressed") {
+              logAutonomousLineEvent(log, {
+                accountId,
+                project,
+                reason,
+                status: "suppressed",
+                detail: `round=${nextRound}/${MAX_ROUNDS}`,
+              });
+            } else {
+              const milestone = autonomousMilestoneLine({
+                reason,
+                round: nextRound,
+                maxRounds: MAX_ROUNDS,
+                taskText: result.taskText,
+                lineText: result.lineText,
+              });
+              const normalizedMilestone = normalizeLineReplyText(milestone, { project, sessionType, eventKind: "completion" });
+              try {
+                await sendLine(defaultConversation || project, normalizedMilestone);
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project,
+                  reason,
+                  status: "sent",
+                  detail: `round=${nextRound}/${MAX_ROUNDS}`,
+                });
+              } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] autonomous milestone send failed: ${err}`);
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project,
+                  reason,
+                  status: "failed",
+                  detail: String(err),
+                });
+              }
+            }
           }
           return;
         }
       }
       // No <cc_task> or max rounds reached — reset counter, strip tags, fall through to LINE
       questionRoundMap.delete(project);
+      setAutonomousLoopActive(project, false);
       // Strip any <cc_task> tags so they don't leak raw into LINE
       replyText = replyText.replace(/<cc_task>[\s\S]*?<\/cc_task>/g, "").trim();
     }
@@ -1326,8 +1678,25 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);
+      if (mode === "autonomous") {
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "final",
+          status: "sent",
+        });
+      }
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send tmux result to LINE failed: ${err}`);
+      if (mode === "autonomous") {
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "final",
+          status: "failed",
+          detail: String(err),
+        });
+      }
     }
   };
 
@@ -1373,8 +1742,12 @@ export async function startAccount(ctx) {
   let pollIntervalMs = account.pollIntervalMs || 3000;
   let defaultConversation = account.defaultConversation || "";
 
-  // Load prompt overlay (once)
-  await loadPrompts(log);
+  // Load prompt profiles (core + optional overlays) once
+  const promptOptions = resolvePromptOptions(account.config);
+  await loadPrompts(log, promptOptions);
+  log?.info?.(
+    `clawgate: [${accountId}] prompt profile version=${_promptMeta.version} hash=${_promptMeta.hash} validation=${_promptMeta.validationEnabled} layers=${_promptMeta.layers.join(" -> ")}`
+  );
 
   // Set configurable display name filter (replaces hardcoded "Test User")
   _filterDisplayName = account.config?.filterDisplayName || "";

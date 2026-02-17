@@ -5,6 +5,11 @@
  *   channels.clawgate.<accountId> = {
  *     apiUrl: "http://127.0.0.1:8765"      // required
  *     token: "optional-bearer-token"        // optional (remote mode)
+ *     prompts: {                             // optional prompt profile controls
+ *       enableValidation: true,
+ *       enableRepoLocalOverlay: true,
+ *       privateOverlayPath: "~/.clawgate/prompts-private.js"
+ *     }
  *     // All below are optional — ClawGate Settings UI manages these via GET /v1/config
  *     // enabled: true,
  *     // pollIntervalMs: 3000,

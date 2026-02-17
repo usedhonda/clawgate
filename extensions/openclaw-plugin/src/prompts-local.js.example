@@ -1,9 +1,19 @@
 /**
- * Personal prompt overrides — deep-merged over src/prompts.js defaults.
+ * Repo-local prompt overrides — deep-merged over src/prompts.js defaults.
  *
- * Copy this file to prompts-local.js and customize.
+ * Copy this file to prompts-local.js only when you intentionally want
+ * machine-local overrides inside the repo directory.
+ *
+ * Recommended for private/personal style:
+ *   ~/.clawgate/prompts-private.js
+ *
  * Only the keys you specify here will override the defaults.
  * All other keys keep the English defaults from prompts.js.
+ *
+ * NOTE:
+ * - completion.observe and completion.autonomous include protected contracts.
+ * - If an override removes required contract markers, the gateway restores
+ *   those sections from core prompts.js.
  *
  * Available top-level keys:
  *   firstTime     — array of lines (first-time guidance per project)
@@ -19,12 +29,12 @@
  */
 
 export default {
-  // Example: override just the completion header
+  // Example: override just the completion header.
   // completion: {
   //   header: "[Completion] Review the result vs the goal.",
   // },
 
-  // Example: override first-time guidance entirely
+  // Example: override first-time guidance entirely.
   // firstTime: [
   //   "[Pair Review] [{label} {project}] Mode: {mode}",
   //   "",

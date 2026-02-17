@@ -30,3 +30,4 @@ docs/
 
 # Personal prompt overlay (not distributed)
 extensions/openclaw-plugin/src/prompts-local.js
+extensions/openclaw-plugin/src/prompts-private.js

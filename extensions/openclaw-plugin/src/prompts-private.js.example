@@ -1,0 +1,19 @@
+/**
+ * Private prompt overrides (recommended).
+ *
+ * Place this file at:
+ *   ~/.clawgate/prompts-private.js
+ *
+ * Then gateway.js loads it automatically (or via
+ * channels.clawgate.<accountId>.prompts.privateOverlayPath).
+ *
+ * Use this for personal tone/wording only.
+ * Quality-critical contracts remain protected by core prompts.js.
+ */
+
+export default {
+  // Example: adjust tone wording without replacing core contracts.
+  // completion: {
+  //   header: "[Completion event] Check goal vs result, then review carefully.",
+  // },
+};
