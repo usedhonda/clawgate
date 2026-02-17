@@ -15,6 +15,8 @@ final class MainPanelModel: ObservableObject {
 }
 
 struct MainPanelView: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     @ObservedObject var settingsModel: SettingsModel
     @ObservedObject var panelModel: MainPanelModel
 
@@ -25,7 +27,7 @@ struct MainPanelView: View {
     let onOpenQRCode: () -> Void
     let onQuit: () -> Void
 
-    private let bodyFont = Font.system(size: 13, weight: .medium, design: .monospaced)
+    private let bodyFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
     private let titleFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
 
     private struct HoverInteractiveRowModifier: ViewModifier {
@@ -67,7 +69,7 @@ struct MainPanelView: View {
                     ForEach(panelModel.logs) { row in
                         Text("  \(row.text)")
                             .font(bodyFont)
-                            .foregroundStyle(Color(nsColor: row.color))
+                            .foregroundStyle(readableSemanticColor(from: row.color))
                             .lineLimit(1)
                     }
                 }
@@ -140,7 +142,7 @@ struct MainPanelView: View {
                     .lineLimit(1)
                 Text("[\(currentMode)]")
                     .font(bodyFont)
-                    .foregroundStyle(Color(nsColor: modeColor(currentMode)))
+                    .foregroundStyle(readableSemanticColor(from: modeColor(currentMode)))
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
@@ -172,5 +174,47 @@ struct MainPanelView: View {
         default:
             return "○"
         }
+    }
+
+    private func readableSemanticColor(from color: NSColor) -> Color {
+        guard let rgb = color.usingColorSpace(.deviceRGB) else {
+            return Color(nsColor: color)
+        }
+        var red = rgb.redComponent
+        var green = rgb.greenComponent
+        var blue = rgb.blueComponent
+        let alpha = max(rgb.alphaComponent, 0.94)
+        let luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
+
+        if colorScheme == .light {
+            let maxLuminance: CGFloat = 0.42
+            if luminance > maxLuminance {
+                let scale = maxLuminance / max(luminance, 0.001)
+                red *= scale
+                green *= scale
+                blue *= scale
+            }
+            if let label = NSColor.labelColor.usingColorSpace(.deviceRGB) {
+                let blend: CGFloat = 0.16
+                red = (red * (1.0 - blend)) + (label.redComponent * blend)
+                green = (green * (1.0 - blend)) + (label.greenComponent * blend)
+                blue = (blue * (1.0 - blend)) + (label.blueComponent * blend)
+            }
+        } else {
+            let minLuminance: CGFloat = 0.60
+            if luminance < minLuminance {
+                let lift = min((minLuminance - luminance) / max(1.0 - luminance, 0.001), 1.0)
+                red = red + (1.0 - red) * lift * 0.55
+                green = green + (1.0 - green) * lift * 0.55
+                blue = blue + (1.0 - blue) * lift * 0.55
+            }
+        }
+
+        return Color(nsColor: NSColor(
+            calibratedRed: red,
+            green: green,
+            blue: blue,
+            alpha: alpha
+        ))
     }
 }

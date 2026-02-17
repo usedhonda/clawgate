@@ -20,6 +20,7 @@ final class SettingsModel: ObservableObject {
 struct InlineSettingsView: View {
     let embedInScroll: Bool
     let onOpenQRCode: (() -> Void)?
+    private var isEmbeddedPanelStyle: Bool { !embedInScroll }
 
     init(model: SettingsModel, embedInScroll: Bool = true, onOpenQRCode: (() -> Void)? = nil) {
         self.model = model
@@ -54,7 +55,7 @@ struct InlineSettingsView: View {
 
     private enum UITheme {
         static let baseFontSize: CGFloat = 13
-        static let bodyFont = Font.system(size: baseFontSize, weight: .medium, design: .monospaced)
+        static let bodyFont = Font.system(size: baseFontSize, weight: .semibold, design: .monospaced)
         static let titleFont = Font.system(size: baseFontSize, weight: .semibold, design: .monospaced)
 
         static let panelWidth: CGFloat = 430
@@ -86,27 +87,40 @@ struct InlineSettingsView: View {
 
     private struct GlassButtonStyle: ButtonStyle {
         let prominent: Bool
+        let embedded: Bool
 
         func makeBody(configuration: Configuration) -> some View {
             configuration.label
                 .font(UITheme.titleFont)
-                .foregroundStyle(prominent ? Color.white : UITheme.primaryText)
+                .foregroundStyle(prominent && !embedded ? Color.white : UITheme.primaryText)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
                 .background(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(
-                            prominent
-                            ? UITheme.accent.opacity(configuration.isPressed ? 0.72 : 0.9)
-                            : UITheme.buttonFill.opacity(configuration.isPressed ? 0.72 : 0.9)
+                            embedded
+                            ? Color.primary.opacity(
+                                prominent
+                                ? (configuration.isPressed ? 0.18 : 0.12)
+                                : (configuration.isPressed ? 0.12 : 0.08)
+                              )
+                            : (
+                                prominent
+                                ? UITheme.accent.opacity(configuration.isPressed ? 0.72 : 0.9)
+                                : UITheme.buttonFill.opacity(configuration.isPressed ? 0.72 : 0.9)
+                              )
                         )
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .stroke(
-                            prominent
-                            ? Color.white.opacity(0.22)
-                            : UITheme.buttonStroke.opacity(configuration.isPressed ? 0.7 : 1.0),
+                            embedded
+                            ? Color.primary.opacity(configuration.isPressed ? 0.28 : 0.18)
+                            : (
+                                prominent
+                                ? Color.white.opacity(0.22)
+                                : UITheme.buttonStroke.opacity(configuration.isPressed ? 0.7 : 1.0)
+                              ),
                             lineWidth: 1
                         )
                 )
@@ -114,6 +128,8 @@ struct InlineSettingsView: View {
     }
 
     private struct InputChromeModifier: ViewModifier {
+        let embedded: Bool
+
         func body(content: Content) -> some View {
             content
                 .font(UITheme.bodyFont)
@@ -121,28 +137,38 @@ struct InlineSettingsView: View {
                 .padding(.vertical, 7)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(UITheme.inputFill)
+                        .fill(embedded ? Color.primary.opacity(0.06) : UITheme.inputFill)
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(UITheme.inputStroke, lineWidth: 1)
+                        .stroke(embedded ? Color.primary.opacity(0.14) : UITheme.inputStroke, lineWidth: 1)
                 )
         }
     }
 
     private struct HoverInteractiveControlModifier: ViewModifier {
         let cornerRadius: CGFloat
+        let embedded: Bool
         @State private var isHovered = false
 
         func body(content: Content) -> some View {
             content
                 .overlay(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(UITheme.accent.opacity(isHovered ? 0.55 : 0), lineWidth: 1)
+                        .stroke(
+                            embedded
+                            ? Color.primary.opacity(isHovered ? 0.22 : 0)
+                            : UITheme.accent.opacity(isHovered ? 0.55 : 0),
+                            lineWidth: 1
+                        )
                 )
                 .background(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(UITheme.accent.opacity(isHovered ? 0.12 : 0))
+                        .fill(
+                            embedded
+                            ? Color.primary.opacity(isHovered ? 0.08 : 0)
+                            : UITheme.accent.opacity(isHovered ? 0.12 : 0)
+                        )
                 )
                 .onHover { hovering in
                     withAnimation(.easeOut(duration: 0.12)) {
@@ -160,6 +186,12 @@ struct InlineSettingsView: View {
     @State private var suppressNodeRoleChange = false
     @State private var showServerRoleBlockedAlert = false
     @State private var serverRoleBlockedMessage = ""
+    private var secondaryTextColor: Color {
+        isEmbeddedPanelStyle ? Color.primary.opacity(0.88) : UITheme.secondaryText
+    }
+    private var tertiaryTextColor: Color {
+        isEmbeddedPanelStyle ? Color.primary.opacity(0.76) : UITheme.tertiaryText
+    }
 
     private var contentView: some View {
         VStack(alignment: .leading, spacing: UITheme.sectionSpacing) {
@@ -170,7 +202,7 @@ struct InlineSettingsView: View {
                 clientSection
             }
         }
-        .padding(UITheme.panelPadding)
+        .padding(embedInScroll ? UITheme.panelPadding : 0)
     }
 
     var body: some View {
@@ -185,8 +217,9 @@ struct InlineSettingsView: View {
         }
         .toggleStyle(.switch)
         .controlSize(.regular)
-        .tint(UITheme.accent)
-        .frame(width: UITheme.panelWidth)
+        .tint(isEmbeddedPanelStyle ? Color.primary : UITheme.accent)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(width: embedInScroll ? UITheme.panelWidth : nil, alignment: .leading)
         .font(UITheme.bodyFont)
         .onAppear {
             loadTailscalePeers()
@@ -245,12 +278,12 @@ struct InlineSettingsView: View {
                 Button("Apply Recommended") {
                     applyRecommended(force: true)
                 }
-                .buttonStyle(GlassButtonStyle(prominent: true))
-                .modifier(HoverInteractiveControlModifier(cornerRadius: 9))
+                .buttonStyle(GlassButtonStyle(prominent: true, embedded: isEmbeddedPanelStyle))
+                .modifier(HoverInteractiveControlModifier(cornerRadius: 9, embedded: isEmbeddedPanelStyle))
 
                 Text("Tailscale LAN defaults")
                     .font(UITheme.bodyFont)
-                    .foregroundStyle(UITheme.tertiaryText)
+                    .foregroundStyle(tertiaryTextColor)
             }
         }
     }
@@ -262,7 +295,7 @@ struct InlineSettingsView: View {
                 statusRow(state: tmuxState)
                 Text("Feed: \(model.config.tmuxStatusBarURL)")
                     .font(UITheme.bodyFont)
-                    .foregroundStyle(UITheme.tertiaryText)
+                    .foregroundStyle(tertiaryTextColor)
                     .lineLimit(1)
             }
 
@@ -272,12 +305,12 @@ struct InlineSettingsView: View {
                     fieldRow("Conversation") {
                         TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
                             .textFieldStyle(.plain)
-                            .modifier(InputChromeModifier())
+                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
                     }
                     Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
                             value: $model.config.linePollIntervalSeconds, in: 1...30)
                     .font(UITheme.bodyFont)
-                    .foregroundStyle(UITheme.secondaryText)
+                    .foregroundStyle(secondaryTextColor)
                 }
             }
 
@@ -293,12 +326,12 @@ struct InlineSettingsView: View {
                     statusRow(state: federationState)
                     Text("Accepting clients on ws://\(model.config.remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"):8765/federation")
                         .font(UITheme.bodyFont)
-                        .foregroundStyle(UITheme.tertiaryText)
+                        .foregroundStyle(tertiaryTextColor)
                         .lineLimit(2)
                     fieldRow("Token") {
                         SecureField("federation token", text: $model.config.federationToken)
                             .textFieldStyle(.plain)
-                            .modifier(InputChromeModifier())
+                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
                     }
                 }
             }
@@ -321,7 +354,7 @@ struct InlineSettingsView: View {
                 statusRow(state: tmuxState)
                 Text("Feed: \(model.config.tmuxStatusBarURL)")
                     .font(UITheme.bodyFont)
-                    .foregroundStyle(UITheme.tertiaryText)
+                    .foregroundStyle(tertiaryTextColor)
                     .lineLimit(1)
             }
 
@@ -349,30 +382,30 @@ struct InlineSettingsView: View {
                                 Spacer(minLength: 0)
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(UITheme.secondaryText)
+                                    .foregroundStyle(secondaryTextColor)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .modifier(InputChromeModifier())
-                            .modifier(HoverInteractiveControlModifier(cornerRadius: 8))
+                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
+                            .modifier(HoverInteractiveControlModifier(cornerRadius: 8, embedded: isEmbeddedPanelStyle))
                         }
                     }
 
                     if federationPeerSelectionBinding.wrappedValue.isEmpty {
                         TextField("server.tailnet.ts.net", text: federationHostBinding)
                             .textFieldStyle(.plain)
-                            .modifier(InputChromeModifier())
+                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
                     }
 
                     HStack(spacing: 8) {
                         Button("Refresh Hosts") {
                             loadTailscalePeers()
                         }
-                        .buttonStyle(GlassButtonStyle(prominent: false))
-                        .modifier(HoverInteractiveControlModifier(cornerRadius: 9))
+                        .buttonStyle(GlassButtonStyle(prominent: false, embedded: isEmbeddedPanelStyle))
+                        .modifier(HoverInteractiveControlModifier(cornerRadius: 9, embedded: isEmbeddedPanelStyle))
 
                         Text("Detected: \(tailscalePeers.count)")
                             .font(UITheme.bodyFont)
-                            .foregroundStyle(UITheme.tertiaryText)
+                            .foregroundStyle(tertiaryTextColor)
                     }
                 }
             }
@@ -395,8 +428,8 @@ struct InlineSettingsView: View {
                 Button("Show QR Code for [VibeTerm]") {
                     onOpenQRCode()
                 }
-                .buttonStyle(GlassButtonStyle(prominent: false))
-                .modifier(HoverInteractiveControlModifier(cornerRadius: 9))
+                .buttonStyle(GlassButtonStyle(prominent: false, embedded: isEmbeddedPanelStyle))
+                .modifier(HoverInteractiveControlModifier(cornerRadius: 9, embedded: isEmbeddedPanelStyle))
             }
         }
     }
@@ -422,7 +455,8 @@ struct InlineSettingsView: View {
     }
 
     private func card<Content: View>(_ title: String, subtitle: String? = nil, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: UITheme.cardSpacing) {
+        let cardShape = RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
+        return VStack(alignment: .leading, spacing: UITheme.cardSpacing) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
                     .font(UITheme.titleFont)
@@ -430,7 +464,7 @@ struct InlineSettingsView: View {
                 if let subtitle {
                     Text(subtitle)
                         .font(UITheme.bodyFont)
-                        .foregroundStyle(UITheme.secondaryText)
+                        .foregroundStyle(secondaryTextColor)
                         .lineLimit(1)
                 }
             }
@@ -438,25 +472,39 @@ struct InlineSettingsView: View {
         }
         .padding(UITheme.cardPadding)
         .background(
-            RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
+            cardShape
                 .fill(
-                    LinearGradient(
-                        colors: [UITheme.cardTop, UITheme.cardBottom],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
+                    isEmbeddedPanelStyle
+                    ? Color.primary.opacity(0.05)
+                    : Color.clear
+                )
+                .overlay(
+                    cardShape.fill(
+                        LinearGradient(
+                            colors: [UITheme.cardTop, UITheme.cardBottom],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
                     )
+                    .opacity(isEmbeddedPanelStyle ? 0 : 1)
                 )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
-                .stroke(UITheme.cardStroke, lineWidth: 1)
+            cardShape
+                .stroke(
+                    isEmbeddedPanelStyle ? Color.primary.opacity(0.12) : UITheme.cardStroke,
+                    lineWidth: 1
+                )
         )
         .overlay(
-            RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
+            cardShape
                 .inset(by: 0.5)
-                .stroke(UITheme.cardInnerStroke, lineWidth: 0.5)
+                .stroke(
+                    isEmbeddedPanelStyle ? Color.clear : UITheme.cardInnerStroke,
+                    lineWidth: 0.5
+                )
         )
-        .shadow(color: UITheme.cardShadow, radius: 8, x: 0, y: 3)
+        .shadow(color: isEmbeddedPanelStyle ? Color.clear : UITheme.cardShadow, radius: 8, x: 0, y: 3)
     }
 
     private func statusRow(state: ConnectivityState) -> some View {
@@ -472,11 +520,11 @@ struct InlineSettingsView: View {
         .padding(.vertical, 6)
         .background(
             Capsule(style: .continuous)
-                .fill(UITheme.chipFill)
+                .fill(isEmbeddedPanelStyle ? Color.primary.opacity(0.07) : UITheme.chipFill)
         )
         .overlay(
             Capsule(style: .continuous)
-                .stroke(UITheme.chipStroke, lineWidth: 1)
+                .stroke(isEmbeddedPanelStyle ? Color.primary.opacity(0.14) : UITheme.chipStroke, lineWidth: 1)
         )
         .overlay(
             Capsule(style: .continuous)
@@ -488,7 +536,7 @@ struct InlineSettingsView: View {
         HStack(alignment: .center, spacing: 8) {
             Text(title)
                 .font(UITheme.titleFont)
-                .foregroundStyle(UITheme.secondaryText)
+                .foregroundStyle(secondaryTextColor)
                 .frame(width: 84, alignment: .leading)
             content()
         }
