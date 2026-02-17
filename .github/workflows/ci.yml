@@ -11,6 +11,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  leak-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Leak guard
+        run: bash scripts/security-leak-check.sh --all
+
   swift-test:
     runs-on: macos-15
     timeout-minutes: 10

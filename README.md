@@ -167,6 +167,9 @@ cd clawgate
 # Build
 swift build
 
+# Optional: install pre-commit leak guard
+./scripts/setup-git-hooks.sh
+
 # Set up signing certificate (one-time)
 ./scripts/setup-cert.sh
 
@@ -346,6 +349,8 @@ scripts/
   integration-test.sh                     # Full API test suite
   release.sh                              # Universal build + notarize + manifest (+ optional publish)
   release-usual.sh                        # Canonical release entrypoint (loads .local/secrets/release.env)
+  security-leak-check.sh                  # Secret/persona leak guard (staged or full scan)
+  setup-git-hooks.sh                      # Install local pre-commit leak guard hook
   support-diagnostics.sh                  # Support bundle generator (health/doctor/log/process)
   setup-cert.sh                           # Self-signed certificate setup
   post-task-restart.sh                    # Full deploy to Host A + Host B
