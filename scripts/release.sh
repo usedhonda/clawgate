@@ -204,7 +204,8 @@ codesign --force --deep --options runtime \
   --sign "$SIGNING_ID" \
   "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
-SIGN_AUTHORITY="$(codesign -dv --verbose=4 "$APP_BUNDLE" 2>&1 | awk -F= '/^Authority=/{print $2; exit}')"
+SIGN_INFO="$(codesign -dv --verbose=4 "$APP_BUNDLE" 2>&1)"
+SIGN_AUTHORITY="$(awk -F= '/^Authority=/{print $2; exit}' <<< "$SIGN_INFO")"
 if [[ -z "$SIGN_AUTHORITY" ]]; then
   SIGN_AUTHORITY="$SIGNING_ID"
 fi
