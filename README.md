@@ -1,8 +1,23 @@
 # ClawGate
 
 [![CI](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml/badge.svg)](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A macOS menubar app that bridges local AI agents to native applications via Accessibility (AX) UI automation.
+A macOS menu bar app that lets an AI agent (OpenClaw) monitor, review, and interact with your Claude Code / Codex sessions in real time.
+
+## How It Works
+
+```
+Claude Code (tmux) <--WS--> cc-status-bar <--WS--> ClawGate <--HTTP--> OpenClaw Gateway <--> AI
+                                                       |                                     |
+                                                   EventBus                            User (LINE/etc)
+                                                   HTTP API
+```
+
+1. **cc-status-bar** connects to Claude Code / Codex tmux sessions and streams state changes over WebSocket
+2. **ClawGate** receives those events, buffers them in an EventBus (ring buffer, 1000 events), and exposes them via HTTP API (`/v1/poll`, `/v1/events` SSE)
+3. **OpenClaw plugin** polls ClawGate for events, sends task completions and questions to an AI for review
+4. The AI responds with `<cc_task>` tags that ClawGate sends back to Claude Code / Codex via tmux
 
 ## Installation
 
@@ -15,257 +30,328 @@ Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/claw
 1. Open `ClawGate.dmg` and drag **ClawGate** to **Applications**
 2. Launch ClawGate from Applications (it runs as a menu bar app)
 3. Grant **Accessibility** permission when prompted (System Settings > Privacy & Security > Accessibility)
-4. Grant **Screen Recording** permission (System Settings > Privacy & Security > Screen Recording)
-5. Verify it's running:
+4. Install [cc-status-bar](https://github.com/nicobailon/cc-status-bar) and start it:
+   ```bash
+   cc-status-bar
+   ```
+5. Verify ClawGate is running:
    ```bash
    curl -s http://127.0.0.1:8765/v1/health | python3 -m json.tool
+   # Full diagnostics
+   curl -s http://127.0.0.1:8765/v1/doctor | python3 -m json.tool
    ```
 
 ### Requirements
 
 - macOS 13+ (Ventura or later)
-- [LINE Desktop for Mac](https://apps.apple.com/app/line/id539883307) (for LINE adapter)
+- [cc-status-bar](https://github.com/nicobailon/cc-status-bar) (provides Claude Code / Codex session state via WebSocket)
 
-## What is ClawGate?
+## Session Modes
 
-ClawGate is a lightweight macOS menubar-resident application that exposes a localhost-only HTTP API, allowing AI agents (such as [OpenClaw](https://github.com/usedhonda/openclaw_general)) to interact with native macOS apps that have no official API. It uses the macOS Accessibility framework to read UI state, send messages, detect inbound activity, and navigate application windows.
+Each tmux project can be assigned one of four session modes. Set them in the menu bar: **ClawGate icon > Sessions > (project) > Mode**.
 
-The first supported target is **LINE Desktop for Mac** (Qt-based), with full send/receive automation including hybrid inbound message detection. ClawGate also includes a **tmux adapter** for sending tasks to Claude Code sessions and monitoring their progress.
+| Mode | Monitoring | AI -> CC Send | Use Case |
+|------|-----------|---------------|----------|
+| **ignore** | Off | Off | Default. ClawGate does nothing for this project |
+| **observe** | On | Off | AI reviews and reports to the user only (via LINE, etc.) |
+| **auto** | On | Yes (auto-continue) | Quality gate. AI reviews; if OK, sends continue. No deep questions |
+| **autonomous** | On | Yes (questions) | AI actively reviews, asks clarifying questions to CC, drills deeper |
 
-ClawGate is designed for privacy-first, single-user operation. It binds to `127.0.0.1` by default with no authentication required. Optional remote mode is available via settings (`0.0.0.0` bind + Bearer token).
+- Mode changes take effect immediately (stored in UserDefaults, no restart needed)
+- Modes are per-project: `cc:project-name` or `codex:project-name` as keys
 
-## Key Features
+## OpenClaw Integration
 
-- **LINE Send/Receive** -- Open conversations by name, send messages, read visible chat history
-- **Hybrid Inbound Detection** -- Multi-signal fusion engine combining AX structure analysis, pixel diff, and notification banner monitoring for reliable message detection
-- **Notification Banner Watcher** -- Event-driven detection via macOS notification center AX observer (no OCR needed for sender/message extraction)
-- **Echo Suppression** -- Temporal-window-based filtering to distinguish self-sent messages from true inbound messages
-- **Tmux / Claude Code Adapter** -- Monitor Claude Code sessions via cc-status-bar WebSocket, send tasks, auto-approve permissions, detect questions
-- **4-Stage Session Modes** -- Per-project control: ignore, observe, auto, autonomous
-- **OpenClaw Integration** -- Channel plugin for the OpenClaw AI gateway ecosystem
-- **Privacy-First** -- Localhost by default, optional remote mode with token, no cloud relay dependency
+ClawGate includes an [OpenClaw](https://github.com/usedhonda/openclaw_general) channel plugin that connects the event stream to an AI reviewer.
 
-## Architecture
+### Plugin Setup
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  macOS Menu Bar (NSStatusItem)                          │
-│  ┌─────────────────┐  ┌──────────────────────────────┐  │
-│  │ SettingsView     │  │ Sessions Submenu (Tmux)      │  │
-│  └─────────────────┘  └──────────────────────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│  BridgeServer (SwiftNIO HTTP/1.1 on 127.0.0.1:8765 by default) │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │ BridgeCore: routing, validation, adapter dispatch │   │
-│  │ EventBus: ring buffer (1000) + SSE streaming      │   │
-│  │ ConfigStore: UserDefaults-backed configuration     │   │
-│  └──────────────────────────────────────────────────┘   │
-├─────────────────────────────────────────────────────────┤
-│  Adapters                                               │
-│  ┌────────────────────┐  ┌───────────────────────────┐  │
-│  │ LINEAdapter        │  │ TmuxAdapter               │  │
-│  │ - AX send/read     │  │ - CCStatusBarClient (WS)  │  │
-│  │ - Vision OCR       │  │ - TmuxShell (CLI)         │  │
-│  └────────────────────┘  └───────────────────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│  Inbound Detection                                      │
-│  ┌──────────────────┐ ┌────────────┐ ┌───────────────┐  │
-│  │ NotificationBanner│ │ LINEInbound│ │ TmuxInbound   │  │
-│  │ Watcher (primary) │ │ Watcher    │ │ Watcher       │  │
-│  └──────────────────┘ └────────────┘ └───────────────┘  │
-├─────────────────────────────────────────────────────────┤
-│  Automation Layer                                       │
-│  AXQuery / AXActions / AXDump / SelectorResolver        │
-│  VisionOCR / RetryPolicy / GeometryHint                 │
-└─────────────────────────────────────────────────────────┘
-```
-
-## Requirements
-
-- **macOS 12+** (Monterey or later)
-- **Swift 5.9+** (SwiftPM, swift-nio 2.67+)
-- **LINE Desktop for Mac** (for LINE adapter)
-- **cc-status-bar** (for tmux adapter -- provides session state via WebSocket)
-- **Xcode** (for `swift test`; `swift build` works with CommandLineTools only)
-
-## Permissions
-
-| Permission | Required For | How to Grant |
-|------------|-------------|--------------|
-| Accessibility | All AX endpoints (send, context, messages, conversations, axdump, doctor) | System Settings > Privacy & Security > Accessibility |
-| Screen Recording | Vision OCR for inbound message text extraction | System Settings > Privacy & Security > Screen Recording |
-
-## Quick Start
-
-1. **Clone and build**:
-   ```bash
-   git clone https://github.com/usedhonda/clawgate.git
-   cd clawgate
-   swift build
-   ```
-
-2. **Set up signing certificate** (one-time):
-   ```bash
-   ./scripts/setup-cert.sh
-   ```
-
-   For remote Intel host (macmini) non-interactive setup:
-   ```bash
-   KEYCHAIN_PASSWORD='your-login-password' ./scripts/setup-cert-macmini.sh --remote-host macmini
-   ```
-
-3. **Deploy**:
-   ```bash
-   ./scripts/dev-deploy.sh
-   ```
-
-4. **Grant Accessibility permission** in System Settings when prompted.
-
-5. **Verify**:
-   ```bash
-   curl -s http://127.0.0.1:8765/v1/doctor | jq .
-   ```
-
-## LINE Stability Runbook (Host A + Host B)
-
-Use this when LINE delivery/reply stops:
+The plugin lives in `extensions/openclaw-plugin/` and should be symlinked or copied to the OpenClaw extensions directory:
 
 ```bash
-# LINE_CORE (Host A only): regular recovery
-./scripts/line-fast-recover.sh --remote-host macmini
-
-# Host A local GUI session (only when signature needs repair)
-KEYCHAIN_PASSWORD='your-login-password' ./scripts/macmini-local-sign-and-restart.sh
-
-# FEDERATION_EXT (optional): verify Host B relay route separately
-./scripts/federation-verify.sh
+# Copy plugin to OpenClaw
+cp -r extensions/openclaw-plugin/ ~/.openclaw/extensions/clawgate/
+# Or symlink
+ln -s "$(pwd)/extensions/openclaw-plugin" ~/.openclaw/extensions/clawgate
 ```
 
-Notes:
-- `line-fast-recover.sh` now requires `doctor` checks to be healthy for:
-  - `app_signature` (`ClawGate Dev`)
-  - `accessibility_permission`
-  - `screen_recording_permission`
-- Do not run `tccutil reset` in normal operation. Use reset only as a last resort.
-- Reference notes for colocated LINE behavior: `docs/line-core-reference-notes.md`.
+### Configuration
+
+The plugin reads ClawGate's config via `/v1/openclaw-info`. Key settings in the OpenClaw account config:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `apiUrl` | `http://127.0.0.1:8765` | ClawGate HTTP API base URL |
+| `pollIntervalMs` | `3000` | Event polling interval in milliseconds |
+
+### Prompt Customization
+
+The plugin uses two prompt files:
+
+| File | Purpose | Git Tracked |
+|------|---------|-------------|
+| `prompts.js` | Default review prompts (English, channel-agnostic) | Yes |
+| `prompts-local.js` | Personal overrides (your language, channel-specific) | No (.gitignore) |
+
+`prompts-local.js` is loaded first and merged over `prompts.js`. Use it for locale-specific prompts or personal workflow preferences.
+
+### How `<cc_task>` and `<cc_answer>` Work
+
+When the AI reviewer wants to interact with a Claude Code / Codex session, it embeds special XML tags in its response:
+
+```xml
+<!-- Send a task/message to Claude Code -->
+<cc_task>Review the error handling in auth.ts</cc_task>
+
+<!-- Auto-select an option in an AskUserQuestion menu (0-based index) -->
+<cc_answer project="myproject">0</cc_answer>
+```
+
+ClawGate extracts these tags and dispatches them:
+- `<cc_task>` content is sent to the tmux pane via `/v1/send`, prefixed with `[OpenClaw Agent - {Mode}]`
+- `<cc_answer>` sends a `__cc_select:{index}` command to auto-select options
+
+## Writing CLAUDE.md Rules
+
+To get the most out of ClawGate + OpenClaw, add rules to your project's `CLAUDE.md` that tell Claude Code how to handle AI reviewer messages:
+
+```markdown
+## OpenClaw Agent Integration
+
+Messages with `[OpenClaw Agent - {Mode}]` prefix are from your AI pair
+reviewer, authorized via ClawGate session mode settings.
+
+| Prefix | Reviewer Role | Your Response |
+|--------|--------------|---------------|
+| `[OpenClaw Agent - Auto]` | Quality gate (no judgment) | Work autonomously. Don't ask reviewer questions |
+| `[OpenClaw Agent - Autonomous]` | Code reviewer (asks questions) | Answer their questions, continue working |
+| `[OpenClaw Agent - Observe]` | Silent observer | Reviewer doesn't talk to you; ignore |
+```
+
+### Tips
+
+- In **auto** mode, the reviewer checks task completions and auto-continues if things look good. Claude Code should treat `[OpenClaw Agent - Auto]` messages as directives and keep working
+- In **autonomous** mode, the reviewer may ask "Why this approach?" or "What about edge case X?". Claude Code should answer concisely and continue
+- Don't reference context window usage or token counts in responses to the reviewer -- it's noise
 
 ## API Overview
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/v1/health` | Health check (returns version) |
-| GET | `/v1/doctor` | System diagnostics (AX permission, LINE status, etc.) |
-| GET | `/v1/config` | Current configuration (general, LINE, tmux settings) |
-| GET | `/v1/poll[?since=N]` | Poll buffered events (long-polling compatible) |
-| GET | `/v1/events` | SSE stream of real-time events |
-| GET | `/v1/context[?adapter=line]` | Current conversation context |
-| GET | `/v1/messages[?adapter=line&limit=50]` | Visible messages in active chat |
-| GET | `/v1/conversations[?adapter=line&limit=50]` | Conversation list with unread status |
-| GET | `/v1/axdump[?adapter=line]` | Raw AX tree dump (debugging) |
-| POST | `/v1/send` | Send a message via adapter |
+| GET | `/v1/health` | Liveness check (returns version) |
+| GET | `/v1/doctor` | System diagnostics (AX, adapters, federation) |
+| GET | `/v1/config` | Current configuration |
+| GET | `/v1/poll[?since=N]` | Cursor-based event polling |
+| GET | `/v1/events` | SSE event stream (supports `Last-Event-ID` replay) |
+| GET | `/v1/context[?adapter=tmux]` | Current conversation context |
+| GET | `/v1/messages[?adapter=tmux&limit=50]` | Recent messages |
+| GET | `/v1/conversations[?adapter=tmux&limit=50]` | Session/conversation list |
+| GET | `/v1/stats` | Day stats and history |
+| GET | `/v1/openclaw-info` | OpenClaw gateway config |
+| GET | `/v1/axdump[?adapter=line]` | Raw AX tree dump (debug) |
+| POST | `/v1/send` | Send a message/task via adapter |
 
-All endpoints return JSON. In local mode no authentication is required. In remote mode, `Authorization: Bearer <token>` is required.
+All endpoints return JSON (`{"ok": true, "result": {...}}` or `{"ok": false, "error": {...}}`).
+Local mode requires no authentication. Remote mode requires `Authorization: Bearer <token>`.
 POST requests with an `Origin` header are rejected (CSRF protection).
 
 See [SPEC.md](SPEC.md) for full API documentation.
 
-## Build & Deploy
+## Building from Source
 
 ```bash
-# Full pipeline: build + deploy + plugin sync + smoke test (preferred)
+# Clone
+git clone https://github.com/usedhonda/clawgate.git
+cd clawgate
+
+# Build
+swift build
+
+# Set up signing certificate (one-time)
+./scripts/setup-cert.sh
+
+# Deploy locally (build + sign + launch + smoke test)
 ./scripts/dev-deploy.sh
 
-# ClawGate only (skip OpenClaw plugin sync)
-./scripts/dev-deploy.sh --skip-plugin
-
-# Deploy without smoke test
-./scripts/dev-deploy.sh --skip-test
+# Grant Accessibility permission when prompted
 
 # Smoke test (5 tests, ~5s)
 ./scripts/smoke-test.sh
 
 # Full integration test suite
 ./scripts/integration-test.sh
-
-# Release build (universal binary + DMG + notarize)
-./scripts/release.sh
-
-# Remote relay (Phase 3 foundation)
-swift run ClawGateRelay \
-  --host 0.0.0.0 \
-  --port 8765 \
-  --federation-port 8766 \
-  --token YOUR_GATEWAY_TOKEN \
-  --federation-token YOUR_FEDERATION_TOKEN \
-  --cc-status-url ws://localhost:8080/ws/sessions \
-  --tmux-mode project-a=autonomous \
-  --tmux-mode project-b=observe
-
-# Host A ClawGate federation URL
-# ws://<HOST_B_IP>:8766/federation
 ```
 
-## Configuration
+### Requirements
 
-ClawGate stores configuration in UserDefaults, accessible via `GET /v1/config`:
+- macOS 12+ (Monterey or later)
+- Swift 5.9+ (swift-nio 2.67+)
+- Xcode or Command Line Tools
 
-| Group | Keys | Description |
-|-------|------|-------------|
-| **General** | `nodeRole`, `debugLogging`, `includeMessageBodyInLogs` | Node role (`server`/`client`) and logging |
-| **LINE** | `defaultConversation`, `pollIntervalSeconds`, `detectionMode`, `fusionThreshold`, signal enables | Detection and polling settings |
-| **Tmux** | `enabled`, `statusBarUrl`, `sessionModes` | Claude Code session monitoring |
+## Permissions
 
-See [SPEC.md](SPEC.md) for the full configuration schema.
+| Permission | Required For | How to Grant |
+|------------|-------------|--------------|
+| Accessibility | All AX endpoints, tmux adapter, LINE adapter | System Settings > Privacy & Security > Accessibility |
+| Screen Recording | Vision OCR (LINE inbound text extraction) | System Settings > Privacy & Security > Screen Recording |
+
+## Advanced: LINE Integration
+
+> **This section is for users running ClawGate on a host with LINE Desktop installed (typically Host A in a 2-host setup).**
+
+### Prerequisites
+
+- [LINE Desktop for Mac](https://apps.apple.com/app/line/id539883307) (Qt-based)
+- **Screen Recording** permission (for Vision OCR)
+
+### How It Works
+
+ClawGate automates LINE Desktop via the macOS Accessibility framework:
+
+- **Send**: Opens conversations by name, types and sends messages via AX actions
+- **Receive**: Hybrid inbound detection combining notification banner monitoring, AX structure analysis, and pixel diff
+- **Echo Suppression**: Temporal-window filtering to distinguish self-sent messages from inbound
+
+### Server Mode (Remote Access)
+
+To expose ClawGate's API to other hosts (e.g., for Federation):
+
+1. Enable remote access in Settings (`remoteAccessEnabled = true`)
+2. Set a Bearer token (`remoteAccessToken`)
+3. ClawGate binds to `0.0.0.0:8765` instead of `127.0.0.1`
+4. All requests require `Authorization: Bearer <token>`
+
+### LINE Recovery
+
+```bash
+# Regular recovery (Host A)
+./scripts/line-fast-recover.sh --remote-host macmini
+
+# Re-sign binary (when TCC permission is lost)
+KEYCHAIN_PASSWORD='your-password' ./scripts/macmini-local-sign-and-restart.sh
+```
+
+## Advanced: Federation (2-Host Setup)
+
+Federation connects two ClawGate instances over WebSocket, enabling a workstation (Host B) to relay events through a server (Host A) that has LINE and OpenClaw Gateway.
+
+```
+Host A (macmini)                 Host B (workstation)
++-----------------------+        +-----------------------+
+| ClawGate (server)     |<--WS-->| ClawGate (client)     |
+| - LINE adapter        | /fed   | - tmux adapter        |
+| - Federation server   |  eration| - Federation client   |
+| - OpenClaw Gateway    |        | - CC / Codex sessions |
++-----------------------+        +-----------------------+
+```
+
+### Configuration
+
+**Host A** (server):
+| Key | Value |
+|-----|-------|
+| `nodeRole` | `server` |
+| `remoteAccessEnabled` | `true` |
+| `remoteAccessToken` | `<token>` |
+
+**Host B** (client):
+| Key | Value |
+|-----|-------|
+| `nodeRole` | `client` |
+| `federationEnabled` | `true` |
+| `federationURL` | `ws://macmini:8765/federation` |
+| `federationToken` | `<token>` |
+
+### Mode Resolution
+
+When a federation event arrives at Host A, the mode is resolved as:
+
+1. **Server's local config** for that project (if set) -- highest priority
+2. **Event's mode field** sent by the client -- used if server has no config
+3. **`ignore`** -- fallback default
+
+## Configuration Reference
+
+ClawGate stores all configuration in UserDefaults, readable via `GET /v1/config`.
+
+### General
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `nodeRole` | String | `"standalone"` | `standalone`, `server`, or `client` |
+| `debugLogging` | Bool | `false` | Verbose logging |
+| `includeMessageBodyInLogs` | Bool | `false` | Include message text in logs |
+| `remoteAccessEnabled` | Bool | `false` | Bind to `0.0.0.0` instead of `127.0.0.1` |
+| `remoteAccessToken` | String | `""` | Bearer token for remote access |
+
+### Tmux
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `tmux.enabled` | Bool | `false` | Enable tmux adapter |
+| `tmux.statusBarUrl` | String | `ws://localhost:8080/ws/sessions` | cc-status-bar WebSocket URL |
+| `tmux.sessionModes` | Dict | `{}` | Per-project mode map (e.g., `{"cc:myproject": "autonomous"}`) |
+
+### LINE
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `line.default_conversation` | String | `""` | Default LINE chat name |
+| `line.poll_interval_seconds` | Int | `2` | Polling interval (seconds) |
+| `line.detection_mode` | String | `"hybrid"` | `"legacy"` or `"hybrid"` |
+| `line.fusion_threshold` | Int | `60` | Detection score threshold (1-100) |
+
+### Federation
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `federationEnabled` | Bool | `false` | Enable federation client |
+| `federationURL` | String | `""` | Server WebSocket URL |
+| `federationToken` | String | `""` | Bearer auth token |
+| `federationReconnectMaxSeconds` | Int | `120` | Max reconnect backoff (seconds) |
 
 ## Project Structure
 
 ```
 ClawGate/
-  main.swift                              # App entry point, NSApplication setup
-ClawGateRelay/
-  main.swift                              # Remote relay HTTP + federation WebSocket server
+  main.swift                              # App entry point
   Adapters/
-    AdapterProtocol.swift                 # AdapterProtocol + AdapterRegistry
     LINE/
       LINEAdapter.swift                   # LINE AX automation (send, read)
       LINEInboundWatcher.swift            # AX polling for inbound detection
       NotificationBannerWatcher.swift     # Event-driven banner detection
-      LineSelectors.swift                 # Selector definitions for LINE UI
-      Detection/
-        LineDetectionTypes.swift          # Signal/Decision types
-        LineDetectionFusionEngine.swift   # Multi-signal fusion scoring
+      Detection/                          # Multi-signal fusion engine
     Tmux/
-      TmuxAdapter.swift                   # Claude Code task dispatch
+      TmuxAdapter.swift                   # Claude Code/Codex task dispatch
       TmuxInboundWatcher.swift            # State transition detection
       CCStatusBarClient.swift             # WebSocket client for cc-status-bar
       TmuxShell.swift                     # tmux CLI wrapper
   Automation/
     AX/                                   # AXUIElement query, actions, dump
     Selectors/                            # Multi-layer UI element scoring
-    Retry/                                # Exponential backoff
     Vision/                               # VisionOCR (screen capture + text)
   Core/
-    BridgeServer/                         # NIO HTTP server, routing, models
+    BridgeServer/                         # SwiftNIO HTTP server + routing
     Config/                               # UserDefaults-backed ConfigStore
-    EventBus/                             # Ring buffer + SSE + RecentSendTracker
-    Logging/                              # AppLogger + StepLog
+    EventBus/                             # Ring buffer + SSE + polling
+    Federation/                           # WebSocket federation (server + client)
+    Logging/                              # AppLogger
   UI/                                     # MenuBarApp, SettingsView
+ClawGateRelay/                            # DEPRECATED (replaced by Direct Federation)
 Tests/
-  UnitTests/                              # 8 test files
+  UnitTests/                              # Unit tests
 scripts/
-  dev-deploy.sh                           # Build + deploy + smoke test
+  dev-deploy.sh                           # Build + sign + deploy + smoke test
   smoke-test.sh                           # Quick validation (5 tests)
   integration-test.sh                     # Full API test suite
-  release.sh                              # Universal build + DMG + notarize
+  release.sh                              # Universal binary + DMG + notarize
   setup-cert.sh                           # Self-signed certificate setup
+  post-task-restart.sh                    # Full deploy to Host A + Host B
 extensions/
   openclaw-plugin/                        # OpenClaw channel plugin (JS/ESM)
-  vibeterm-telemetry/                     # Location telemetry plugin (JS/ESM)
 ```
 
 ## See Also
 
-- [SPEC.md](SPEC.md) -- Full technical specification (API, threading, events, selectors)
-- [docs/architecture.md](docs/architecture.md) -- Architecture overview
-- [docs/troubleshooting.md](docs/troubleshooting.md) -- Known issues and fixes
-- [AGENTS.md](AGENTS.md) -- Product requirements and design goals
+- [SPEC.md](SPEC.md) -- Full API specification (endpoints, threading, events, selectors)
+- [SPEC-messaging.md](docs/SPEC-messaging.md) -- Messaging protocol and federation spec

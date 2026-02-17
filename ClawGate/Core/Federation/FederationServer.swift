@@ -9,7 +9,7 @@ final class FederationServer {
     private let lock = NSLock()
     private var clients: [String: Channel] = [:]           // clientID → Channel
     private var projectRoutes: [String: String] = [:]      // project → clientID
-    private var pending: [String: EventLoopPromise<FederationResponsePayload>] = [:]
+    private var pending: [String: (promise: EventLoopPromise<FederationResponsePayload>, clientID: String)] = [:]
 
     let eventBus: EventBus
     private let configStore: ConfigStore
@@ -40,7 +40,7 @@ final class FederationServer {
         let channels = clients.values
         clients.removeAll()
         projectRoutes.removeAll()
-        let failures = pending.values
+        let failures = pending.values.map { $0.promise }
         pending.removeAll()
         lock.unlock()
         for channel in channels {
@@ -67,10 +67,16 @@ final class FederationServer {
         clients.removeValue(forKey: clientID)
         // Remove project routes pointing to this client
         projectRoutes = projectRoutes.filter { $0.value != clientID }
-        // Fail pending commands for this client
-        let clientPending = pending.filter { _ in true }  // We don't track which client owns which pending
+        // Fail pending commands that were sent to this client
+        let orphaned = pending.filter { $0.value.clientID == clientID }
+        for key in orphaned.keys {
+            pending.removeValue(forKey: key)
+        }
         lock.unlock()
-        logger.log(.info, "FederationServer: client disconnected: \(clientID)")
+        for (_, entry) in orphaned {
+            entry.promise.fail(FederationServerError.clientDisconnected)
+        }
+        logger.log(.info, "FederationServer: client disconnected: \(clientID) (failed \(orphaned.count) pending command(s))")
         emitStatus(state: "client_disconnected", detail: "clientID=\(clientID) total=\(clientCount())")
     }
 
@@ -127,20 +133,21 @@ final class FederationServer {
         guard let clientID = projectRoutes[project], let channel = clients[clientID] else {
             // No explicit route — broadcast to all clients (first success wins)
             // This handles: fresh restart (empty routes), stale connections, multi-client setups
+            let allClientIDs = Array(clients.keys)
             let allChannels = Array(clients.values)
             lock.unlock()
-            guard let first = allChannels.first else {
+            guard let first = allChannels.first, let firstClientID = allClientIDs.first else {
                 let el = MultiThreadedEventLoopGroup.singleton.any()
                 return el.makeFailedFuture(FederationServerError.noRouteForProject(project))
             }
             logger.log(.info, "No route for project=\(project), broadcasting to \(allChannels.count) client(s)")
             let promise = first.eventLoop.makePromise(of: FederationResponsePayload.self)
-            pending[command.id] = promise
+            pending[command.id] = (promise: promise, clientID: firstClientID)
             sendFrame(channel: first, type: "command", payload: command)
             return promise.futureResult
         }
         let promise = channel.eventLoop.makePromise(of: FederationResponsePayload.self)
-        pending[command.id] = promise
+        pending[command.id] = (promise: promise, clientID: clientID)
         lock.unlock()
         sendFrame(channel: channel, type: "command", payload: command)
         return promise.futureResult
@@ -150,9 +157,9 @@ final class FederationServer {
 
     func completeCommand(_ response: FederationResponsePayload) {
         lock.lock()
-        let promise = pending.removeValue(forKey: response.id)
+        let entry = pending.removeValue(forKey: response.id)
         lock.unlock()
-        promise?.succeed(response)
+        entry?.promise.succeed(response)
     }
 
     // MARK: - Broadcast local events to all clients
@@ -211,11 +218,15 @@ final class FederationServer {
 enum FederationServerError: Error, CustomStringConvertible {
     case noRouteForProject(String)
     case shutdownInProgress
+    case commandTimeout
+    case clientDisconnected
 
     var description: String {
         switch self {
         case .noRouteForProject(let project): return "No federation client route for project: \(project)"
         case .shutdownInProgress: return "Federation server is shutting down"
+        case .commandTimeout: return "Federation command timed out (15s)"
+        case .clientDisconnected: return "Federation client disconnected while command was pending"
         }
     }
 }

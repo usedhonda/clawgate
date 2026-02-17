@@ -88,9 +88,14 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     func session(forProject project: String) -> CCSession? {
         lock.lock()
         defer { lock.unlock() }
-        return _sessions.values.first {
-            $0.project == project
-        }
+        return _sessions.values.first { $0.project == project }
+    }
+
+    /// Returns all sessions matching a project name (may include both CC and Codex).
+    func sessions(forProject project: String) -> [CCSession] {
+        lock.lock()
+        defer { lock.unlock() }
+        return _sessions.values.filter { $0.project == project }
     }
 
     func allSessions() -> [CCSession] {

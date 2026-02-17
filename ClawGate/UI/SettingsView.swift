@@ -1,6 +1,7 @@
 import SwiftUI
 import Network
 import Foundation
+import ServiceManagement
 
 final class SettingsModel: ObservableObject {
     private let configStore: ConfigStore
@@ -154,6 +155,9 @@ struct InlineSettingsView: View {
             }
 
             card("System") {
+                if #available(macOS 13.0, *) {
+                    Toggle("Launch at Login", isOn: launchAtLoginBinding)
+                }
                 Toggle("Debug Logging", isOn: $model.config.debugLogging)
             }
         }
@@ -221,9 +225,32 @@ struct InlineSettingsView: View {
             }
 
             card("System") {
+                if #available(macOS 13.0, *) {
+                    Toggle("Launch at Login", isOn: launchAtLoginBinding)
+                }
                 Toggle("Debug Logging", isOn: $model.config.debugLogging)
             }
         }
+    }
+
+    @available(macOS 13.0, *)
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: {
+                SMAppService.mainApp.status == .enabled
+            },
+            set: { newValue in
+                do {
+                    if newValue {
+                        try SMAppService.mainApp.register()
+                    } else {
+                        try SMAppService.mainApp.unregister()
+                    }
+                } catch {
+                    print("[ERROR] Launch at login \(newValue ? "register" : "unregister") failed: \(error)")
+                }
+            }
+        )
     }
 
     private func card<Content: View>(_ title: String, subtitle: String? = nil, @ViewBuilder content: () -> Content) -> some View {

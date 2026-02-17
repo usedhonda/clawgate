@@ -202,6 +202,29 @@ final class BridgeCore {
                 return denied
             }
 
+            // Pre-flight: if tmux + federation connected + no local authoritative mode,
+            // skip TmuxAdapter entirely and forward to federation client directly.
+            // This avoids the throw-catch round-trip for sessions that live on the remote host.
+            if request.adapter == "tmux",
+               let fedServer = federationServer, fedServer.hasConnectedClient() {
+                let project = request.payload.conversationHint
+                let modes = configStore.load().tmuxSessionModes
+                // Check both session types — a project may be CC-only, Codex-only, or both
+                let ccMode = modes[AppConfig.modeKey(sessionType: "claude_code", project: project)]
+                let codexMode = modes[AppConfig.modeKey(sessionType: "codex", project: project)]
+                let hasLocalAuthoritative = [ccMode, codexMode].contains(where: { $0 == "autonomous" || $0 == "auto" })
+                if !hasLocalAuthoritative {
+                    do {
+                        let fedResult = try forwardToFederationClient(body: body, traceID: trace, fedServer: fedServer)
+                        let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+                        writeOps(level: "info", event: "federation_preflight_forward_ok", traceID: trace, stage: "federation", action: "forward_send", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
+                        return fedResult
+                    } catch {
+                        logger.log(.warning, "Pre-flight federation forward failed: \(error), falling through to local adapter")
+                    }
+                }
+            }
+
             guard let adapter = registry.adapter(for: request.adapter) else {
                 throw BridgeRuntimeError(
                     code: "adapter_not_found",
@@ -806,7 +829,8 @@ final class BridgeCore {
         )
     }
 
-    /// Forward a /v1/send request to a federation client when local tmux session is not found
+    /// Forward a /v1/send request to a federation client when local tmux session is not found.
+    /// Uses a 15-second timeout to prevent indefinite blocking when the client disconnects.
     private func forwardToFederationClient(body: Data, traceID: String, fedServer: FederationServer) throws -> HTTPResult {
         // Parse the request to find the project
         let request = try jsonDecoder.decode(SendRequest.self, from: body)
@@ -822,8 +846,21 @@ final class BridgeCore {
 
         logger.log(.info, "Forwarding /v1/send to federation client for project=\(project)")
 
-        // Wait synchronously (we're on BlockingWork.queue, not NIO event loop)
-        let response = try fedServer.sendCommand(forProject: project, command).wait()
+        // Wait synchronously with timeout (we're on BlockingWork.queue, not NIO event loop)
+        let semaphore = DispatchSemaphore(value: 0)
+        var federationResult: Result<FederationResponsePayload, Error>?
+
+        fedServer.sendCommand(forProject: project, command).whenComplete { result in
+            federationResult = result
+            semaphore.signal()
+        }
+
+        let timeoutResult = semaphore.wait(timeout: .now() + 15)
+        guard timeoutResult == .success, let result = federationResult else {
+            throw FederationServerError.commandTimeout
+        }
+
+        let response = try result.get()
 
         // Convert federation response back to HTTPResult
         var headers = HTTPHeaders()

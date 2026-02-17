@@ -22,7 +22,10 @@ enum TmuxShell {
         var output = try run(arguments: ["send-keys", "-t", target, "-l", text])
 
         // Send Enter separately (not literal)
+        // Small delay before Enter: Codex CLI needs time to process pasted text
+        // before accepting Enter. CC (readline-based) doesn't need this but it's harmless.
         if enter {
+            Thread.sleep(forTimeInterval: 0.15)
             let enterOutput = try run(arguments: ["send-keys", "-t", target, "Enter"])
             output += enterOutput
         }

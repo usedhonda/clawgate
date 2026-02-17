@@ -57,8 +57,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
 
         menu.addItem(NSMenuItem.separator())
 
-        // 2) Claude Code sessions (direct list, no submenu)
-        menu.addItem(makeReadableInfoItem("Claude Code Sessions"))
+        // 2) Tmux sessions (Codex first, then CC)
+        menu.addItem(makeReadableInfoItem("Codex Sessions"))
         let noSessions = makeReadableInfoItem("  No active sessions")
         menu.addItem(noSessions)
         sessionItems = [noSessions]
@@ -164,33 +164,33 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate 
             let codexSessions = sessions.filter { $0.sessionType == "codex" }
             let modes = self.runtime.configStore.load().tmuxSessionModes
 
-            // --- CC section ---
+            // --- Codex section (top, under static "Codex Sessions" header) ---
             var insertIdx = endIdx
-            if ccSessions.isEmpty {
+            if codexSessions.isEmpty {
                 let item = self.makeReadableInfoItem("  No active sessions")
                 menu.insertItem(item, at: insertIdx)
-                self.sessionItems = [item]
+                self.codexSessionItems = [item]
                 insertIdx += 1
             } else {
-                for session in ccSessions {
-                    let item = self.makeSessionMenuItem(session: session, modes: modes)
-                    menu.insertItem(item, at: insertIdx)
-                    self.sessionItems.append(item)
-                    insertIdx += 1
-                }
-            }
-
-            // --- Codex section (only if sessions exist) ---
-            if !codexSessions.isEmpty {
-                let header = self.makeReadableInfoItem("Codex Sessions")
-                menu.insertItem(header, at: insertIdx)
-                self.codexHeaderItem = header
-                insertIdx += 1
-
                 for session in codexSessions {
                     let item = self.makeSessionMenuItem(session: session, modes: modes)
                     menu.insertItem(item, at: insertIdx)
                     self.codexSessionItems.append(item)
+                    insertIdx += 1
+                }
+            }
+
+            // --- CC section (below Codex) ---
+            if !ccSessions.isEmpty {
+                let header = self.makeReadableInfoItem("Claude Code Sessions")
+                menu.insertItem(header, at: insertIdx)
+                self.codexHeaderItem = header
+                insertIdx += 1
+
+                for session in ccSessions {
+                    let item = self.makeSessionMenuItem(session: session, modes: modes)
+                    menu.insertItem(item, at: insertIdx)
+                    self.sessionItems.append(item)
                     insertIdx += 1
                 }
             }

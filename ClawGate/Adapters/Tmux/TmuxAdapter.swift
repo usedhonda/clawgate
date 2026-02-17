@@ -46,8 +46,10 @@ final class TmuxAdapter: AdapterProtocol {
             )
         }
 
-        // Resolve session first so we can use its sessionType for composite key lookup
-        guard let session = ccClient.session(forProject: project) else {
+        // Resolve session: pick the one with an authoritative mode (autonomous/auto).
+        // A project may have both CC and Codex sessions; only the configured one should be used.
+        let candidates = ccClient.sessions(forProject: project)
+        guard !candidates.isEmpty else {
             throw BridgeRuntimeError(
                 code: "session_not_found",
                 message: "No Claude Code session found for project '\(project)'",
@@ -57,26 +59,34 @@ final class TmuxAdapter: AdapterProtocol {
             )
         }
 
-        // Check session mode — only autonomous/auto can send
-        let mode = sessionMode(for: session)
-        guard mode == "autonomous" || mode == "auto" else {
-            if mode == "observe" {
+        // Find the session whose mode allows sending (autonomous or auto)
+        let sessionWithMode: (session: CCStatusBarClient.CCSession, mode: String)? = candidates.lazy.compactMap { [self] candidate in
+            let m = sessionMode(for: candidate)
+            return (m == "autonomous" || m == "auto") ? (candidate, m) : nil
+        }.first
+
+        guard let (session, _) = sessionWithMode else {
+            // No authoritative session found — check for observe or all-ignore
+            let modes = candidates.map { candidate -> (type: String, mode: String) in
+                (type: candidate.sessionType, mode: self.sessionMode(for: candidate))
+            }
+            if let obs = modes.first(where: { $0.mode == "observe" }) {
                 throw BridgeRuntimeError(
                     code: "session_read_only",
                     message: "Session '\(project)' is in observe mode (read-only)",
                     retriable: false,
                     failedStep: "resolve_target",
-                    details: "mode=\(mode)"
+                    details: "sessionType=\(obs.type)"
                 )
             }
-            // ignore / unknown → treat as "not found" so Federation fallback can route to the correct host
-            logger.log(.info, "Session '\(project)' mode=\(mode) — not authoritative, returning session_not_found for federation routing")
+            let modeDesc = modes.map { "\($0.type)=\($0.mode)" }.joined(separator: ", ")
+            logger.log(.info, "Session '\(project)' not authoritative on this host (\(modeDesc))")
             throw BridgeRuntimeError(
                 code: "session_not_found",
                 message: "Session '\(project)' is not authoritative on this host",
                 retriable: true,
                 failedStep: "resolve_target",
-                details: "mode=\(mode), federation_eligible=true"
+                details: "\(modeDesc) allKeys=\(configStore.load().tmuxSessionModes.keys.sorted().joined(separator: ","))"
             )
         }
 
@@ -107,26 +117,6 @@ final class TmuxAdapter: AdapterProtocol {
         }
         stepLogger.record(step: "check_status", start: start2, success: true,
                           details: "status=waiting_input")
-
-        // Step 2b: For text messages (not menu select), verify CC prompt marker is visible.
-        // AskUserQuestion / permission dialogs hide the ❯ prompt — sending text would break the UI.
-        let isMenuSelect = payload.text.range(of: #"^__cc_select:(\d+)$"#, options: .regularExpression) != nil
-        if !isMenuSelect {
-            let start2b = Date()
-            if !hasPromptMarker(target: target) {
-                stepLogger.record(step: "check_prompt", start: start2b, success: false,
-                                  details: "No prompt marker found — likely AskUserQuestion or permission dialog")
-                throw BridgeRuntimeError(
-                    code: "session_busy",
-                    message: "Claude Code session '\(project)' is showing a selection UI or permission prompt",
-                    retriable: true,
-                    failedStep: "check_prompt",
-                    details: "Session is waiting_input but prompt marker (❯) not found"
-                )
-            }
-            stepLogger.record(step: "check_prompt", start: start2b, success: true,
-                              details: "Prompt marker found")
-        }
 
         // Step 3: Send keys (or menu selection)
         let start3 = Date()
