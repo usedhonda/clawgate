@@ -2,6 +2,7 @@ import SwiftUI
 import Network
 import Foundation
 import ServiceManagement
+import AppKit
 
 final class SettingsModel: ObservableObject {
     private let configStore: ConfigStore
@@ -42,15 +43,96 @@ struct InlineSettingsView: View {
         }
     }
 
+    private enum UITheme {
+        static let baseFontSize: CGFloat = 13
+        static let bodyFont = Font.system(size: baseFontSize, weight: .medium, design: .monospaced)
+        static let titleFont = Font.system(size: baseFontSize, weight: .semibold, design: .monospaced)
+
+        static let panelWidth: CGFloat = 430
+        static let sectionSpacing: CGFloat = 12
+        static let panelPadding: CGFloat = 12
+        static let cardPadding: CGFloat = 12
+        static let cardSpacing: CGFloat = 9
+        static let cardRadius: CGFloat = 14
+
+        static let accent = Color(red: 0.15, green: 0.44, blue: 0.95)
+        static let primaryText = Color.primary
+        static let secondaryText = Color.primary.opacity(0.78)
+        static let tertiaryText = Color.primary.opacity(0.62)
+
+        static let cardTop = Color.white.opacity(0.78)
+        static let cardBottom = Color.white.opacity(0.6)
+        static let cardStroke = Color.white.opacity(0.82)
+        static let cardInnerStroke = Color.black.opacity(0.1)
+        static let cardShadow = Color.black.opacity(0.1)
+
+        static let chipFill = Color.white.opacity(0.84)
+        static let chipStroke = Color.black.opacity(0.12)
+        static let inputFill = Color.white.opacity(0.9)
+        static let inputStroke = Color.black.opacity(0.14)
+
+        static let buttonFill = Color.white.opacity(0.88)
+        static let buttonStroke = Color.black.opacity(0.14)
+    }
+
+    private struct GlassButtonStyle: ButtonStyle {
+        let prominent: Bool
+
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .font(UITheme.titleFont)
+                .foregroundStyle(prominent ? Color.white : UITheme.primaryText)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(
+                            prominent
+                            ? UITheme.accent.opacity(configuration.isPressed ? 0.72 : 0.9)
+                            : UITheme.buttonFill.opacity(configuration.isPressed ? 0.72 : 0.9)
+                        )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(
+                            prominent
+                            ? Color.white.opacity(0.22)
+                            : UITheme.buttonStroke.opacity(configuration.isPressed ? 0.7 : 1.0),
+                            lineWidth: 1
+                        )
+                )
+        }
+    }
+
+    private struct InputChromeModifier: ViewModifier {
+        func body(content: Content) -> some View {
+            content
+                .font(UITheme.bodyFont)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(UITheme.inputFill)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(UITheme.inputStroke, lineWidth: 1)
+                )
+        }
+    }
+
     @ObservedObject var model: SettingsModel
     @State private var tailscalePeers: [TailscalePeer] = []
     @State private var tmuxState: ConnectivityState = .unknown
     @State private var federationState: ConnectivityState = .unknown
     @State private var probeTimer: Timer?
+    @State private var suppressNodeRoleChange = false
+    @State private var showServerRoleBlockedAlert = false
+    @State private var serverRoleBlockedMessage = ""
 
     var body: some View {
         ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: UITheme.sectionSpacing) {
                 headerCard
                 if model.config.nodeRole == .server {
                     serverSection
@@ -58,11 +140,13 @@ struct InlineSettingsView: View {
                     clientSection
                 }
             }
-            .padding(12)
+            .padding(UITheme.panelPadding)
         }
         .toggleStyle(.switch)
         .controlSize(.regular)
-        .frame(width: 430)
+        .tint(UITheme.accent)
+        .frame(width: UITheme.panelWidth)
+        .font(UITheme.bodyFont)
         .onAppear {
             loadTailscalePeers()
             refreshConnectivity()
@@ -71,7 +155,23 @@ struct InlineSettingsView: View {
         .onDisappear {
             stopProbeTimer()
         }
-        .onChange(of: model.config.nodeRole) { _ in
+        .onChange(of: model.config.nodeRole) { newRole in
+            if suppressNodeRoleChange {
+                suppressNodeRoleChange = false
+                return
+            }
+            if newRole == .server {
+                let check = evaluateServerRolePrerequisites()
+                if !check.ok {
+                    suppressNodeRoleChange = true
+                    model.config.nodeRole = .client
+                    applyRecommendedIfNeeded()
+                    model.save()
+                    serverRoleBlockedMessage = check.message
+                    showServerRoleBlockedAlert = true
+                    return
+                }
+            }
             applyRecommendedIfNeeded()
             model.save()
         }
@@ -85,6 +185,11 @@ struct InlineSettingsView: View {
         .onChange(of: model.config.federationURL) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.federationToken) { _ in model.save() }
         .onChange(of: model.config.remoteAccessEnabled) { _ in model.save() }
+        .alert("Cannot enable Server role", isPresented: $showServerRoleBlockedAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(serverRoleBlockedMessage)
+        }
     }
 
     private var headerCard: some View {
@@ -99,11 +204,11 @@ struct InlineSettingsView: View {
                 Button("Apply Recommended") {
                     applyRecommended(force: true)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(GlassButtonStyle(prominent: true))
 
                 Text("Tailscale LAN defaults")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+                    .font(UITheme.bodyFont)
+                    .foregroundStyle(UITheme.tertiaryText)
             }
         }
     }
@@ -114,8 +219,8 @@ struct InlineSettingsView: View {
                 Toggle("Enabled", isOn: $model.config.tmuxEnabled)
                 statusRow(state: tmuxState)
                 Text("Feed: \(model.config.tmuxStatusBarURL)")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+                    .font(UITheme.bodyFont)
+                    .foregroundStyle(UITheme.tertiaryText)
                     .lineLimit(1)
             }
 
@@ -124,11 +229,13 @@ struct InlineSettingsView: View {
                 if model.config.lineEnabled {
                     fieldRow("Conversation") {
                         TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11))
+                            .textFieldStyle(.plain)
+                            .modifier(InputChromeModifier())
                     }
                     Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
                             value: $model.config.linePollIntervalSeconds, in: 1...30)
+                    .font(UITheme.bodyFont)
+                    .foregroundStyle(UITheme.secondaryText)
                 }
             }
 
@@ -138,18 +245,18 @@ struct InlineSettingsView: View {
                     Toggle("Remote Access (0.0.0.0)", isOn: $model.config.remoteAccessEnabled)
                     if !model.config.remoteAccessEnabled {
                         Text("Remote Access is off — only local clients can connect")
-                            .font(.system(size: 10))
-                            .foregroundColor(.orange)
+                            .font(UITheme.bodyFont)
+                            .foregroundStyle(.orange)
                     }
                     statusRow(state: federationState)
                     Text("Accepting clients on ws://\(model.config.remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"):8765/federation")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                        .font(UITheme.bodyFont)
+                        .foregroundStyle(UITheme.tertiaryText)
                         .lineLimit(2)
                     fieldRow("Token") {
                         SecureField("federation token", text: $model.config.federationToken)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11))
+                            .textFieldStyle(.plain)
+                            .modifier(InputChromeModifier())
                     }
                 }
             }
@@ -169,8 +276,8 @@ struct InlineSettingsView: View {
                 Toggle("Enabled", isOn: $model.config.tmuxEnabled)
                 statusRow(state: tmuxState)
                 Text("Feed: \(model.config.tmuxStatusBarURL)")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+                    .font(UITheme.bodyFont)
+                    .foregroundStyle(UITheme.tertiaryText)
                     .lineLimit(1)
             }
 
@@ -192,34 +299,34 @@ struct InlineSettingsView: View {
                         } label: {
                             HStack(spacing: 6) {
                                 Text(selectedServerLabel())
+                                    .font(UITheme.bodyFont)
+                                    .foregroundStyle(UITheme.primaryText)
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(UITheme.secondaryText)
                             }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .cornerRadius(6)
+                            .modifier(InputChromeModifier())
                         }
                     }
 
                     if federationPeerSelectionBinding.wrappedValue.isEmpty {
                         TextField("server.tailnet.ts.net", text: federationHostBinding)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 11))
+                            .textFieldStyle(.plain)
+                            .modifier(InputChromeModifier())
                     }
 
                     HStack(spacing: 8) {
                         Button("Refresh Hosts") {
                             loadTailscalePeers()
                         }
-                        .buttonStyle(.bordered)
+                        .buttonStyle(GlassButtonStyle(prominent: false))
 
                         Text("Detected: \(tailscalePeers.count)")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
+                            .font(UITheme.bodyFont)
+                            .foregroundStyle(UITheme.tertiaryText)
                     }
                 }
             }
@@ -254,47 +361,74 @@ struct InlineSettingsView: View {
     }
 
     private func card<Content: View>(_ title: String, subtitle: String? = nil, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: UITheme.cardSpacing) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(UITheme.titleFont)
+                    .foregroundStyle(UITheme.primaryText)
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
+                        .font(UITheme.bodyFont)
+                        .foregroundStyle(UITheme.secondaryText)
                         .lineLimit(1)
                 }
             }
             content()
         }
-        .padding(10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.45), lineWidth: 0.8)
+        .padding(UITheme.cardPadding)
+        .background(
+            RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [UITheme.cardTop, UITheme.cardBottom],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         )
+        .overlay(
+            RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
+                .stroke(UITheme.cardStroke, lineWidth: 1)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
+                .inset(by: 0.5)
+                .stroke(UITheme.cardInnerStroke, lineWidth: 0.5)
+        )
+        .shadow(color: UITheme.cardShadow, radius: 8, x: 0, y: 3)
     }
 
     private func statusRow(state: ConnectivityState) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Circle()
                 .fill(state.color)
                 .frame(width: 8, height: 8)
             Text(state.text)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.secondary)
+                .font(UITheme.titleFont)
+                .foregroundStyle(UITheme.primaryText)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(Color.white.opacity(0.5), in: Capsule())
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            Capsule(style: .continuous)
+                .fill(UITheme.chipFill)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(UITheme.chipStroke, lineWidth: 1)
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(state.color.opacity(0.22), lineWidth: 1)
+        )
     }
 
     private func fieldRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: 8) {
             Text(title)
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .frame(width: 80, alignment: .leading)
+                .font(UITheme.titleFont)
+                .foregroundStyle(UITheme.secondaryText)
+                .frame(width: 84, alignment: .leading)
             content()
         }
     }
@@ -355,6 +489,47 @@ struct InlineSettingsView: View {
             return peerShortLabel(peer)
         }
         return selected
+    }
+
+    private func evaluateServerRolePrerequisites() -> (ok: Bool, message: String) {
+        let openClawReady: Bool
+        if let gateway = readOpenClawGatewayConfig() {
+            openClawReady = probeTCPBlocking(host: "127.0.0.1", port: gateway.port, timeout: 0.8)
+        } else {
+            openClawReady = false
+        }
+
+        let lineReady = NSRunningApplication
+            .runningApplications(withBundleIdentifier: "jp.naver.line.mac")
+            .first != nil
+
+        guard openClawReady && lineReady else {
+            var lines: [String] = []
+            if !openClawReady {
+                lines.append("OpenClaw gateway is not running on this machine.")
+            }
+            if !lineReady {
+                lines.append("LINE app is not running.")
+            }
+            lines.append("Start both, then select Server again.")
+            return (false, lines.joined(separator: "\n"))
+        }
+        return (true, "")
+    }
+
+    private func readOpenClawGatewayConfig() -> (port: Int, token: String)? {
+        let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
+        guard let data = FileManager.default.contents(atPath: configPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let gateway = json["gateway"] as? [String: Any],
+              let auth = gateway["auth"] as? [String: Any],
+              let token = auth["token"] as? String,
+              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        let port = gateway["port"] as? Int ?? 18789
+        guard (1...65535).contains(port) else { return nil }
+        return (port: port, token: token)
     }
 
     private func applyRecommended(force: Bool = false) {
@@ -494,6 +669,44 @@ struct InlineSettingsView: View {
         queue.asyncAfter(deadline: .now() + timeout) {
             finish(false)
         }
+    }
+
+    private func probeTCPBlocking(host: String, port: Int, timeout: TimeInterval) -> Bool {
+        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
+            return false
+        }
+
+        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
+        let queue = DispatchQueue(label: "clawgate.settings.server-gate.probe", qos: .utility)
+        let semaphore = DispatchSemaphore(value: 0)
+        var result = false
+        var done = false
+
+        func finish(_ ok: Bool) {
+            if done { return }
+            done = true
+            result = ok
+            conn.cancel()
+            semaphore.signal()
+        }
+
+        conn.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                finish(true)
+            case .failed, .cancelled:
+                finish(false)
+            default:
+                break
+            }
+        }
+
+        conn.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + timeout) {
+            finish(false)
+        }
+        _ = semaphore.wait(timeout: .now() + timeout + 0.2)
+        return result
     }
 
 }
