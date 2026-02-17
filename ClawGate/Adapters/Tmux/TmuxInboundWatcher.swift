@@ -32,6 +32,14 @@ final class TmuxInboundWatcher {
     private var lastStateChangeTime: [String: Date] = [:]
     private let stateChangeDedupInterval: TimeInterval = 5.0
 
+    // Completion emit dedup — suppress duplicate completion events with identical payload shortly after emit.
+    private struct CompletionEmitState {
+        let fingerprint: Int
+        let emittedAt: Date
+    }
+    private var lastCompletionEmitState: [String: CompletionEmitState] = [:]
+    private let completionEmitDedupInterval: TimeInterval = 8.0
+
     init(ccClient: CCStatusBarClient, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
         self.ccClient = ccClient
         self.eventBus = eventBus
@@ -509,6 +517,24 @@ final class TmuxInboundWatcher {
         }
 
         debugLog("emitting completion: captureState=\(captureState) summaryLen=\(outputSummary.count)")
+
+        let normalizedForDedup = outputSummary
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let dedupFingerprint = "\(mode)|\(captureState)|\(String(normalizedForDedup.prefix(2000)))".hashValue
+        let now = Date()
+        if let last = lastCompletionEmitState[session.project],
+           last.fingerprint == dedupFingerprint,
+           now.timeIntervalSince(last.emittedAt) < completionEmitDedupInterval {
+            debugLog("completion dedup skip project=\(session.project)")
+            logger.log(.debug, "TmuxInboundWatcher: completion dedup skip for \(session.project)")
+            return
+        }
+        lastCompletionEmitState[session.project] = CompletionEmitState(
+            fingerprint: dedupFingerprint,
+            emittedAt: now
+        )
+
         let eventID = UUID().uuidString
         let payload: [String: String] = [
             "conversation": session.project,

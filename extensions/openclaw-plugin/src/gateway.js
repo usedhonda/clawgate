@@ -28,7 +28,7 @@ import {
   clawgateTmuxSend,
   setClawgateAuthToken,
 } from "./client.js";
-import { setActiveProject, clearActiveProject } from "./shared-state.js";
+import { setActiveProject, getActiveProject, clearActiveProject } from "./shared-state.js";
 import defaultPrompts from "./prompts.js";
 import {
   getProjectContext,
@@ -416,6 +416,59 @@ function eventTimestamp(event) {
   return Number.isNaN(parsed) ? Date.now() : parsed;
 }
 
+// ── Completion / task-send loop guards ─────────────────────────
+const COMPLETION_DISPATCH_DEDUP_WINDOW_MS = 30_000;
+const TASK_SEND_ERROR_NOTIFY_WINDOW_MS = 60_000;
+/** @type {Map<string, number>} */
+const recentCompletionDispatches = new Map();
+/** @type {Map<string, number>} */
+const recentTaskSendErrors = new Map();
+
+function normalizeFingerprintText(text, max = 800) {
+  const normalized = `${text || ""}`.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  if (normalized.length <= max) return normalized;
+  return normalized.slice(0, max);
+}
+
+function hashFingerprint(text) {
+  return createHash("sha1").update(text).digest("hex");
+}
+
+function shouldSkipCompletionDispatch({ project, mode, sessionType, text }) {
+  const now = Date.now();
+  for (const [k, ts] of recentCompletionDispatches) {
+    if (now - ts > COMPLETION_DISPATCH_DEDUP_WINDOW_MS) recentCompletionDispatches.delete(k);
+  }
+
+  const normalized = normalizeFingerprintText(text, 1200);
+  const keyMaterial = `${project}::${mode}::${sessionType}::${normalized}`;
+  const key = hashFingerprint(keyMaterial);
+  const last = recentCompletionDispatches.get(key);
+  if (last && now - last <= COMPLETION_DISPATCH_DEDUP_WINDOW_MS) {
+    return true;
+  }
+  recentCompletionDispatches.set(key, now);
+  return false;
+}
+
+function shouldNotifyTaskSendError({ project, errorCode, taskText }) {
+  const now = Date.now();
+  for (const [k, ts] of recentTaskSendErrors) {
+    if (now - ts > TASK_SEND_ERROR_NOTIFY_WINDOW_MS) recentTaskSendErrors.delete(k);
+  }
+
+  const normalizedTask = normalizeFingerprintText(taskText, 240);
+  const keyMaterial = `${project || "unknown"}::${errorCode || "unknown"}::${normalizedTask}`;
+  const key = hashFingerprint(keyMaterial);
+  const last = recentTaskSendErrors.get(key);
+  if (last && now - last <= TASK_SEND_ERROR_NOTIFY_WINDOW_MS) {
+    return false;
+  }
+  recentTaskSendErrors.set(key, now);
+  return true;
+}
+
 // ── Plugin-level echo suppression ──────────────────────────────
 // ClawGate's RecentSendTracker uses an 8-second window which is too short
 // for AI replies (typically 10-30s). We maintain a secondary tracker here.
@@ -761,34 +814,55 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", session
  * Returns null if no task tag found.
  * @param {object} params
  * @param {string} params.replyText — full AI reply text
- * @param {string} params.project — target tmux project
+ * @param {string} params.project — source tmux project (defaults target unless tag overrides)
  * @param {string} params.apiUrl
  * @param {object} [params.log]
  * @returns {Promise<{lineText: string, taskText: string} | {error: Error, lineText: string} | null>}
  */
-async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log, mode }) {
-  const taskMatch = replyText.match(/<cc_task>([\s\S]*?)<\/cc_task>/);
+async function tryExtractAndSendTask({
+  replyText, project, apiUrl, traceId, log, mode,
+  resolveMode = (targetProject) => sessionModes.get(targetProject) || "ignore",
+}) {
+  const taskMatch = replyText.match(/<cc_task(?:\s+project="([^"]+)")?>([\s\S]*?)<\/cc_task>/i);
   if (!taskMatch) return null;
 
-  const taskText = taskMatch[1].trim();
+  const explicitTarget = `${taskMatch[1] || ""}`.trim();
+  const taskText = `${taskMatch[2] || ""}`.trim();
   if (!taskText) return null;
 
-  const lineText = replyText.replace(/<cc_task>[\s\S]*?<\/cc_task>/, "").trim();
+  const lineText = replyText
+    .replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/i, "")
+    .trim();
+
+  const sourceProject = `${project || ""}`.trim();
+  const targetProject = explicitTarget || sourceProject;
+  if (!targetProject) {
+    const err = new Error("target project is missing (use <cc_task project=\"...\">)");
+    return { error: err, errorCode: "target_project_missing", lineText, taskText, targetProject: "" };
+  }
+
+  const targetMode = `${resolveMode(targetProject) || "ignore"}`.toLowerCase();
+  if (targetMode !== "autonomous" && targetMode !== "auto") {
+    const err = new Error(`Session '${targetProject}' is in ${targetMode} mode (task send disabled)`);
+    return { error: err, errorCode: "session_read_only", lineText, taskText, targetProject };
+  }
 
   // Prefix task with [OpenClaw Agent - {Mode}] so CC knows the origin and mode
-  const modeLabel = mode ? mode.charAt(0).toUpperCase() + mode.slice(1) : "Unknown";
+  const sourceMode = `${mode || ""}`.trim() || targetMode;
+  const modeLabel = sourceMode ? sourceMode.charAt(0).toUpperCase() + sourceMode.slice(1) : "Unknown";
   const prefixedTask = `[OpenClaw Agent - ${modeLabel}] ${taskText}`;
 
-  const MAX_RETRIES = 10;
+  // 2 tries total (initial + one retry), 6s total window.
+  const MAX_RETRIES = 1;
   const RETRY_DELAY_MS = 3000;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const result = await clawgateTmuxSend(apiUrl, project, prefixedTask, traceId);
+      const result = await clawgateTmuxSend(apiUrl, targetProject, prefixedTask, traceId);
       if (result?.ok) {
-        log?.info?.(`clawgate: task sent to CC (${project}): "${taskText.slice(0, 80)}"`);
-        setTaskGoal(project, taskText);
-        return { lineText, taskText };
+        log?.info?.(`clawgate: task sent to CC (${targetProject}): "${taskText.slice(0, 80)}"`);
+        setTaskGoal(targetProject, taskText);
+        return { lineText, taskText, targetProject };
       }
 
       // Retry on transient errors (session_busy = CC running, session_not_found = federation reconnecting)
@@ -800,19 +874,27 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log,
         continue;
       }
 
+      const errCode = err?.code || "unknown_error";
       const errMsg = err?.message || err?.code || "unknown error";
-      log?.error?.(`clawgate: failed to send task to CC (${project}): ${errMsg} — task: ${taskText.slice(0, 200)}`);
+      log?.error?.(`clawgate: failed to send task to CC (${targetProject}): ${errMsg} — task: ${taskText.slice(0, 200)}`);
       // Don't pollute LINE with internal routing errors — send clean review text only
-      return { error: new Error(errMsg), lineText };
+      return { error: new Error(errMsg), errorCode: errCode, lineText, taskText, targetProject };
     } catch (err) {
-      log?.error?.(`clawgate: failed to send task to CC (${project}): ${err} — task: ${taskText.slice(0, 200)}`);
-      return { error: err, lineText };
+      const errCode = err?.name || "send_exception";
+      log?.error?.(`clawgate: failed to send task to CC (${targetProject}): ${err} — task: ${taskText.slice(0, 200)}`);
+      return { error: err, errorCode: errCode, lineText, taskText, targetProject };
     }
   }
 
   // Exhausted retries — CC stayed unavailable for the entire retry window
-  log?.error?.(`clawgate: exhausted ${MAX_RETRIES} retries sending task to CC (${project}) — task: ${taskText.slice(0, 200)}`);
-  return { error: new Error("max retries exceeded"), lineText };
+  log?.error?.(`clawgate: exhausted ${MAX_RETRIES + 1} tries sending task to CC (${targetProject}) — task: ${taskText.slice(0, 200)}`);
+  return {
+    error: new Error("max retries exceeded"),
+    errorCode: "max_retries_exceeded",
+    lineText,
+    taskText,
+    targetProject,
+  };
 }
 
 /**
@@ -1047,13 +1129,13 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     log?.warn?.(`clawgate: recordInboundSession failed: ${err}`);
   }
 
-  // Clear active project so outbound.sendText doesn't leak tmux prefixes into LINE replies
-  clearActiveProject(defaultConversation || conversation);
+  const conversationKey = defaultConversation || conversation;
+  const activeProject = getActiveProject(conversationKey);
+  const sourceTaskProject = `${activeProject?.project || ""}`.trim();
+  const sourceTaskMode = sourceTaskProject ? (sessionModes.get(sourceTaskProject) || "ignore") : "ignore";
 
-  // Find task-capable projects (autonomous or auto) for potential task routing from LINE replies
-  const taskCapableProjects = [...sessionModes.entries()]
-    .filter(([, m]) => m === "autonomous")
-    .map(([p]) => p);
+  // Clear active project so outbound.sendText doesn't leak tmux prefixes into messenger replies.
+  clearActiveProject(conversationKey);
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
   const deliver = async (payload) => {
@@ -1072,15 +1154,26 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       return;
     }
 
-    // If there are task-capable projects, try to extract <cc_task> from AI reply
-    if (taskCapableProjects.length > 0) {
-      const taskProject = taskCapableProjects[0];
-      const taskMode = sessionModes.get(taskProject) || "autonomous";
-      const result = await tryExtractAndSendTask({
-        replyText: text, project: taskProject, apiUrl, traceId, log, mode: taskMode,
-      });
-      if (result) {
-        if (result.error) {
+    // Try to extract <cc_task> from AI reply.
+    // Default target is sourceTaskProject, but explicit cross-session
+    // route is allowed via <cc_task project="target-project">.
+    const result = await tryExtractAndSendTask({
+      replyText: text,
+      project: sourceTaskProject,
+      apiUrl,
+      traceId,
+      log,
+      mode: sourceTaskMode,
+      resolveMode: (targetProject) => sessionModes.get(targetProject) || "ignore",
+    });
+    if (result) {
+      if (result.error) {
+        const shouldNotify = shouldNotifyTaskSendError({
+          project: result.targetProject || sourceTaskProject || "unknown",
+          errorCode: result.errorCode || "unknown_error",
+          taskText: result.taskText || "",
+        });
+        if (shouldNotify) {
           const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
           try {
             await clawgateSend(apiUrl, conversation, msg, traceId);
@@ -1088,16 +1181,18 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           } catch (err) {
             log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
           }
-        } else if (result.lineText) {
-          try {
-            await clawgateSend(apiUrl, conversation, result.lineText, traceId);
-            recordPluginSend(result.lineText);
-          } catch (err) {
-            log?.error?.(`clawgate: [${accountId}] send line reply failed: ${err}`);
-          }
+        } else {
+          log?.info?.(`clawgate: [${accountId}] task send error notice suppressed (project=${result.targetProject || sourceTaskProject || "unknown"}, code=${result.errorCode || "unknown_error"})`);
         }
-        return;
+      } else if (result.lineText) {
+        try {
+          await clawgateSend(apiUrl, conversation, result.lineText, traceId);
+          recordPluginSend(result.lineText);
+        } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send line reply failed: ${err}`);
+        }
       }
+      return;
     }
 
     const lineText = normalizeLineReplyText(text, { project: event.payload?.project || "" });
@@ -1435,6 +1530,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     return;
   }
 
+  if (shouldSkipCompletionDispatch({ project, mode, sessionType, text })) {
+    sessionModes.set(project, mode);
+    sessionStatuses.set(project, "waiting_input");
+    log?.info?.(`clawgate: [${accountId}] completion_dedup_skipped project=${project} mode=${mode}`);
+    return;
+  }
+
   // Track session state for roster
   sessionModes.set(project, mode);
   sessionStatuses.set(project, "waiting_input");
@@ -1575,23 +1677,38 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         });
         if (result) {
           if (result.error) {
-            const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
-            try { await sendLine(defaultConversation || project, msg); } catch (err) {
-              log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+            const shouldNotify = shouldNotifyTaskSendError({
+              project: result.targetProject || project,
+              errorCode: result.errorCode || "unknown_error",
+              taskText: result.taskText || "",
+            });
+            if (shouldNotify) {
+              const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+              try { await sendLine(defaultConversation || project, msg); } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project,
+                  reason: "routing_error",
+                  status: "failed",
+                  detail: String(err),
+                });
+              }
               logAutonomousLineEvent(log, {
                 accountId,
                 project,
                 reason: "routing_error",
-                status: "failed",
-                detail: String(err),
+                status: "sent",
+              });
+            } else {
+              logAutonomousLineEvent(log, {
+                accountId,
+                project,
+                reason: "routing_error",
+                status: "suppressed",
+                detail: result.errorCode || "unknown_error",
               });
             }
-            logAutonomousLineEvent(log, {
-              accountId,
-              project,
-              reason: "routing_error",
-              status: "sent",
-            });
           } else {
             const nextRound = rounds + 1;
             questionRoundMap.set(project, nextRound);
@@ -1646,7 +1763,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       questionRoundMap.delete(project);
       setAutonomousLoopActive(project, false);
       // Strip any <cc_task> tags so they don't leak raw into LINE
-      replyText = replyText.replace(/<cc_task>[\s\S]*?<\/cc_task>/g, "").trim();
+      replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
     }
 
     // Auto mode: try <cc_task> (no round limiting)
@@ -1656,9 +1773,18 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       });
       if (result) {
         if (result.error) {
-          const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
-          try { await sendLine(defaultConversation || project, msg); } catch (err) {
-            log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+          const shouldNotify = shouldNotifyTaskSendError({
+            project: result.targetProject || project,
+            errorCode: result.errorCode || "unknown_error",
+            taskText: result.taskText || "",
+          });
+          if (shouldNotify) {
+            const msg = `[Task send failed: ${result.error.message || result.error}]\n\n${result.lineText}`;
+            try { await sendLine(defaultConversation || project, msg); } catch (err) {
+              log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+            }
+          } else {
+            log?.info?.(`clawgate: [${accountId}] task send error notice suppressed (project=${result.targetProject || project}, code=${result.errorCode || "unknown_error"})`);
           }
         } else {
           if (result.lineText) {
