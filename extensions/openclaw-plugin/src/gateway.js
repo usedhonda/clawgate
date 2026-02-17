@@ -522,26 +522,28 @@ async function tryExtractAndSendTask({ replyText, project, apiUrl, traceId, log,
         return { lineText, taskText };
       }
 
-      // Retry on session_busy (CC is in AskUserQuestion, permission prompt, or running)
+      // Retry on transient errors (session_busy = CC running, session_not_found = federation reconnecting)
       const err = result?.error;
-      if (err?.retriable && err?.code === "session_busy" && attempt < MAX_RETRIES) {
-        log?.info?.(`clawgate: CC busy (${err.message || err.details || ""}), retry ${attempt + 1}/${MAX_RETRIES} in ${RETRY_DELAY_MS / 1000}s`);
+      const retriableCodes = ["session_busy", "session_not_found"];
+      if (err?.retriable && retriableCodes.includes(err?.code) && attempt < MAX_RETRIES) {
+        log?.info?.(`clawgate: CC unavailable [${err.code}] (${err.message || err.details || ""}), retry ${attempt + 1}/${MAX_RETRIES} in ${RETRY_DELAY_MS / 1000}s`);
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
         continue;
       }
 
       const errMsg = err?.message || err?.code || "unknown error";
-      log?.error?.(`clawgate: failed to send task to CC (${project}): ${errMsg}`);
-      return { error: new Error(errMsg), lineText: replyText };
+      log?.error?.(`clawgate: failed to send task to CC (${project}): ${errMsg} — task: ${taskText.slice(0, 200)}`);
+      // Don't pollute LINE with internal routing errors — send clean review text only
+      return { error: new Error(errMsg), lineText };
     } catch (err) {
-      log?.error?.(`clawgate: failed to send task to CC (${project}): ${err}`);
-      return { error: err, lineText: replyText };
+      log?.error?.(`clawgate: failed to send task to CC (${project}): ${err} — task: ${taskText.slice(0, 200)}`);
+      return { error: err, lineText };
     }
   }
 
-  // Should not reach here, but safety fallback
-  log?.error?.(`clawgate: exhausted retries sending task to CC (${project})`);
-  return { error: new Error("max retries exceeded (session_busy)"), lineText: replyText };
+  // Exhausted retries — CC stayed unavailable for the entire retry window
+  log?.error?.(`clawgate: exhausted ${MAX_RETRIES} retries sending task to CC (${project}) — task: ${taskText.slice(0, 200)}`);
+  return { error: new Error("max retries exceeded"), lineText };
 }
 
 /**
@@ -1266,10 +1268,10 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     const replyText = extractReplyText(replyPayload, log, "tmux_completion");
     if (!replyText.trim()) return;
 
-    // Autonomous mode: try <cc_task> with round limiting (max 3 rounds)
+    // Autonomous mode: try <cc_task> with round limiting
     if (mode === "autonomous") {
       const rounds = questionRoundMap.get(project) || 0;
-      const MAX_ROUNDS = 3;
+      const MAX_ROUNDS = 5;
 
       if (rounds < MAX_ROUNDS) {
         const result = await tryExtractAndSendTask({
@@ -1283,18 +1285,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             }
           } else {
             questionRoundMap.set(project, rounds + 1);
-            if (result.lineText) {
-              const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
-              try { await sendLine(defaultConversation || project, normalized); } catch (err) {
-                log?.error?.(`clawgate: [${accountId}] send line text to LINE failed: ${err}`);
-              }
-            }
+            // Autonomous: suppress LINE during CC dialogue. Only send final impressions (no <cc_task>).
+            log?.info?.(`clawgate: [${accountId}] autonomous round ${rounds + 1}/${MAX_ROUNDS} — LINE suppressed (task sent to CC)`);
           }
           return;
         }
       }
-      // No <cc_task> or max rounds reached — reset counter, fall through to LINE
+      // No <cc_task> or max rounds reached — reset counter, strip tags, fall through to LINE
       questionRoundMap.delete(project);
+      // Strip any <cc_task> tags so they don't leak raw into LINE
+      replyText = replyText.replace(/<cc_task>[\s\S]*?<\/cc_task>/g, "").trim();
     }
 
     // Auto mode: try <cc_task> (no round limiting)
