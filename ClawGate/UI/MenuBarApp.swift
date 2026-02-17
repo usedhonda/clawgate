@@ -3,7 +3,6 @@ import SwiftUI
 
 final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var qrCodeWindow: NSWindow?
     private var mainPopover: NSPopover?
     private var mainPanelHost: NSHostingController<MainPanelView>?
     private var refreshTimer: Timer?
@@ -58,9 +57,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             onSetSessionMode: { [weak self] sessionType, project, mode in
                 self?.setSessionMode(sessionType: sessionType, project: project, next: mode)
             },
-            onOpenQRCode: { [weak self] in
-                self?.openQRCodeFromMainPopover()
-            },
             onQuit: { [weak self] in
                 self?.quit()
             },
@@ -114,38 +110,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         }
         runtime.configStore.save(config)
         refreshSessionsMenu(sessions: runtime.allCCSessions())
-    }
-
-    @objc private func openQRCodeWindow() {
-        if let w = qrCodeWindow, w.isVisible {
-            w.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-
-        let view = QRCodeView()
-        let content = NSHostingView(rootView: view)
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 460),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        window.isReleasedWhenClosed = false
-        window.title = "VibeTerm"
-        window.center()
-        window.contentView = content
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        qrCodeWindow = window
-    }
-
-    private func openQRCodeFromMainPopover() {
-        mainPopover?.performClose(nil)
-        DispatchQueue.main.async { [weak self] in
-            self?.openQRCodeWindow()
-        }
     }
 
     private func updateStatusIcon() {

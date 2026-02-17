@@ -33,7 +33,6 @@ struct MainPanelView: View {
     let modeLabel: (String) -> String
     let modeColor: (String) -> NSColor
     let onSetSessionMode: (String, String, String) -> Void
-    let onOpenQRCode: () -> Void
     let onQuit: () -> Void
     let logLimit: Int
 
@@ -142,27 +141,18 @@ struct MainPanelView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     sectionTitle("VibeTerm")
 
-                    Button(action: onOpenQRCode) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "qrcode")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text("Show QR Code")
-                                .font(titleFont)
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Color.secondary)
-                        }
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 8)
-                        .contentShape(Rectangle())
-                        .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
-                    }
-                    .buttonStyle(.plain)
-
-                    Text("Open QR for iOS pairing and VibeTerm setup.")
+                    Text("Connect VibeTerm to OpenClaw on iPhone and keep your coding flow alive away from desk.")
                         .font(bodyFont)
                         .foregroundStyle(Color.secondary)
+
+                    HStack(spacing: 8) {
+                        vibetermPill("OpenClaw-linked", icon: "bolt.horizontal.circle")
+                        vibetermPill("Mobile Handoff", icon: "arrow.triangle.2.circlepath")
+                        vibetermPill("Remote Control", icon: "network")
+                    }
+
+                    QRCodeView()
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -228,6 +218,26 @@ struct MainPanelView: View {
         Text(text)
             .font(titleFont)
             .foregroundStyle(Color.primary)
+    }
+
+    private func vibetermPill(_ text: String, icon: String) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+            Text(text)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        }
+        .foregroundStyle(Color.primary.opacity(0.82))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(
+            Capsule(style: .continuous)
+                .fill(Color.primary.opacity(0.08))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+        )
     }
 
     private func statusIcon(session: CCStatusBarClient.CCSession, mode: String) -> String {
