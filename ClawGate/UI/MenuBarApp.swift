@@ -1,11 +1,14 @@
 import AppKit
 import SwiftUI
 
-final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
+final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var mainPopover: NSPopover?
     private var mainPanelHost: NSHostingController<MainPanelView>?
     private var refreshTimer: Timer?
+    private var localMouseMonitor: Any?
+    private var globalMouseMonitor: Any?
+    private var appDeactivateObserver: NSObjectProtocol?
     private let mainPanelLogLimit = 30
 
     private let modeOrder: [String] = ["ignore", "observe", "auto", "autonomous"]
@@ -24,11 +27,19 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
+    deinit {
+        removeOutsideClickMonitors()
+        if let observer = appDeactivateObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
         configureStatusButton()
         configureMainPopover()
+        observeAppDeactivation()
 
         runtime.startServer()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
@@ -64,8 +75,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         )
         let host = NSHostingController(rootView: view)
         let popover = NSPopover()
-        popover.behavior = .transient
+        popover.behavior = .applicationDefined
         popover.animates = true
+        popover.delegate = self
         popover.contentSize = NSSize(width: 520, height: 780)
         popover.contentViewController = host
         mainPanelHost = host
@@ -76,7 +88,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         guard let popover = mainPopover, let button = statusItem?.button else { return }
 
         if popover.isShown {
-            popover.performClose(sender)
+            closeMainPopover(sender)
             return
         }
 
@@ -84,6 +96,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+        installOutsideClickMonitors()
     }
 
     /// Called by AppRuntime after CCStatusBarClient updates sessions.
@@ -343,11 +356,15 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() {
-        mainPopover?.performClose(nil)
+        closeMainPopover(nil)
         refreshTimer?.invalidate()
         refreshTimer = nil
         runtime.stopServer()
         NSApplication.shared.terminate(nil)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        removeOutsideClickMonitors()
     }
 
     private func startRefreshTimer() {
@@ -356,5 +373,75 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             self?.refreshStatsAndTimeline()
             self?.refreshSessionsMenu(sessions: self?.runtime.allCCSessions() ?? [])
         }
+    }
+
+    private func closeMainPopover(_ sender: Any?) {
+        guard let popover = mainPopover, popover.isShown else { return }
+        popover.performClose(sender)
+        removeOutsideClickMonitors()
+    }
+
+    private func observeAppDeactivation() {
+        appDeactivateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.closeMainPopover(nil)
+        }
+    }
+
+    private func installOutsideClickMonitors() {
+        removeOutsideClickMonitors()
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] event in
+            self?.closePopoverIfClickIsOutside(event)
+            return event
+        }
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] event in
+            self?.closePopoverIfClickIsOutside(event)
+        }
+    }
+
+    private func removeOutsideClickMonitors() {
+        if let monitor = localMouseMonitor {
+            NSEvent.removeMonitor(monitor)
+            localMouseMonitor = nil
+        }
+        if let monitor = globalMouseMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalMouseMonitor = nil
+        }
+    }
+
+    private func closePopoverIfClickIsOutside(_ event: NSEvent) {
+        guard let popover = mainPopover, popover.isShown else { return }
+        let clickPoint = screenPoint(for: event)
+        if isInsidePopover(clickPoint) || isInsideStatusButton(clickPoint) {
+            return
+        }
+        closeMainPopover(nil)
+    }
+
+    private func screenPoint(for event: NSEvent) -> NSPoint {
+        if let window = event.window {
+            return window.convertPoint(toScreen: event.locationInWindow)
+        }
+        return NSEvent.mouseLocation
+    }
+
+    private func isInsidePopover(_ screenPoint: NSPoint) -> Bool {
+        guard let frame = mainPopover?.contentViewController?.view.window?.frame else { return false }
+        return frame.insetBy(dx: -1, dy: -1).contains(screenPoint)
+    }
+
+    private func isInsideStatusButton(_ screenPoint: NSPoint) -> Bool {
+        guard let button = statusItem?.button, let buttonWindow = button.window else { return false }
+        let buttonRectInWindow = button.convert(button.bounds, to: nil)
+        let buttonRectOnScreen = buttonWindow.convertToScreen(buttonRectInWindow)
+        return buttonRectOnScreen.insetBy(dx: -2, dy: -2).contains(screenPoint)
     }
 }
