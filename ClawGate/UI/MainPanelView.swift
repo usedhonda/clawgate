@@ -19,6 +19,7 @@ struct MainPanelView: View {
         case sessions = "Sessions"
         case opsLogs = "Ops Logs"
         case settings = "Settings"
+        case vibeterm = "VibeTerm"
 
         var id: String { rawValue }
     }
@@ -38,8 +39,8 @@ struct MainPanelView: View {
 
     @State private var selectedTab: MainPanelTab = .sessions
 
-    private let bodyFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
-    private let titleFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
+    private let bodyFont = Font.system(size: 14, weight: .semibold, design: .monospaced)
+    private let titleFont = Font.system(size: 14, weight: .semibold, design: .monospaced)
 
     private struct HoverInteractiveRowModifier: ViewModifier {
         let cornerRadius: CGFloat
@@ -64,31 +65,14 @@ struct MainPanelView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Picker("Section", selection: $selectedTab) {
-                    ForEach(MainPanelTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
-                    }
+        VStack(alignment: .leading, spacing: 14) {
+            Picker("Section", selection: $selectedTab) {
+                ForEach(MainPanelTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .frame(maxWidth: .infinity)
-
-                Button(action: onOpenQRCode) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "qrcode")
-                            .font(.system(size: 11, weight: .semibold))
-                        Text("QR")
-                            .font(titleFont)
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .contentShape(Rectangle())
-                    .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
-                }
-                .buttonStyle(.plain)
             }
+            .labelsHidden()
+            .pickerStyle(.segmented)
 
             Divider()
 
@@ -120,7 +104,7 @@ struct MainPanelView: View {
         switch selectedTab {
         case .sessions:
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 14) {
                     sessionSection(title: "Codex Sessions", sessions: panelModel.codexSessions)
                     sessionSection(title: "Claude Code Sessions", sessions: panelModel.claudeSessions)
                 }
@@ -128,7 +112,7 @@ struct MainPanelView: View {
             }
         case .opsLogs:
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 14) {
                     sectionTitle("Ops Logs (latest \(logLimit))")
                     if panelModel.logs.isEmpty {
                         Text("  No recent logs")
@@ -147,9 +131,38 @@ struct MainPanelView: View {
             }
         case .settings:
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 14) {
                     sectionTitle("Settings")
-                    InlineSettingsView(model: settingsModel, embedInScroll: false, onOpenQRCode: onOpenQRCode)
+                    InlineSettingsView(model: settingsModel, embedInScroll: false, onOpenQRCode: nil)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .vibeterm:
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    sectionTitle("VibeTerm")
+
+                    Button(action: onOpenQRCode) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "qrcode")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Show QR Code")
+                                .font(titleFont)
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.secondary)
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                        .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+
+                    Text("Open QR for iOS pairing and VibeTerm setup.")
+                        .font(bodyFont)
+                        .foregroundStyle(Color.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -204,7 +217,7 @@ struct MainPanelView: View {
                     .foregroundStyle(Color.secondary)
             }
             .padding(.horizontal, 4)
-            .padding(.vertical, 3)
+            .padding(.vertical, 5)
             .contentShape(Rectangle())
             .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
         }
