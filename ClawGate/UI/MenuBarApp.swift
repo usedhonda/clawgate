@@ -7,6 +7,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var mainPopover: NSPopover?
     private var mainPanelHost: NSHostingController<MainPanelView>?
     private var refreshTimer: Timer?
+    private let mainPanelLogLimit = 30
 
     private let modeOrder: [String] = ["ignore", "observe", "auto", "autonomous"]
 
@@ -58,15 +59,16 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                 self?.setSessionMode(sessionType: sessionType, project: project, next: mode)
             },
             onOpenQRCode: { [weak self] in
-                self?.openQRCodeWindow()
+                self?.openQRCodeFromMainPopover()
             },
             onQuit: { [weak self] in
                 self?.quit()
-            }
+            },
+            logLimit: mainPanelLogLimit
         )
         let host = NSHostingController(rootView: view)
         let popover = NSPopover()
-        popover.behavior = .semitransient
+        popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: 520, height: 780)
         popover.contentViewController = host
@@ -137,6 +139,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         qrCodeWindow = window
+    }
+
+    private func openQRCodeFromMainPopover() {
+        mainPopover?.performClose(nil)
+        DispatchQueue.main.async { [weak self] in
+            self?.openQRCodeWindow()
+        }
     }
 
     private func updateStatusIcon() {
@@ -224,7 +233,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     func refreshStatsAndTimeline() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let entries = self.opsLogStore.recent(limit: 10)
+            let entries = self.opsLogStore.recent(limit: self.mainPanelLogLimit)
             if entries.isEmpty {
                 let now = Self.timeFormatter.string(from: Date())
                 self.panelModel.logs = [

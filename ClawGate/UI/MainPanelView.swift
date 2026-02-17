@@ -15,6 +15,14 @@ final class MainPanelModel: ObservableObject {
 }
 
 struct MainPanelView: View {
+    private enum MainPanelTab: String, CaseIterable, Identifiable {
+        case sessions = "Sessions"
+        case opsLogs = "Ops Logs"
+        case settings = "Settings"
+
+        var id: String { rawValue }
+    }
+
     @Environment(\.colorScheme) private var colorScheme
 
     @ObservedObject var settingsModel: SettingsModel
@@ -26,6 +34,9 @@ struct MainPanelView: View {
     let onSetSessionMode: (String, String, String) -> Void
     let onOpenQRCode: () -> Void
     let onQuit: () -> Void
+    let logLimit: Int
+
+    @State private var selectedTab: MainPanelTab = .sessions
 
     private let bodyFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
     private let titleFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
@@ -53,40 +64,23 @@ struct MainPanelView: View {
     }
 
     var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 12) {
-                sessionSection(title: "Codex Sessions", sessions: panelModel.codexSessions)
-                sessionSection(title: "Claude Code Sessions", sessions: panelModel.claudeSessions)
-
-                Divider()
-
-                sectionTitle("Ops Logs (latest 10)")
-                if panelModel.logs.isEmpty {
-                    Text("  No recent logs")
-                        .font(bodyFont)
-                        .foregroundStyle(Color.secondary)
-                } else {
-                    ForEach(panelModel.logs) { row in
-                        Text("  \(row.text)")
-                            .font(bodyFont)
-                            .foregroundStyle(readableSemanticColor(from: row.color))
-                            .lineLimit(1)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Picker("Section", selection: $selectedTab) {
+                    ForEach(MainPanelTab.allCases) { tab in
+                        Text(tab.rawValue).tag(tab)
                     }
                 }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: .infinity)
 
-                Divider()
-
-                sectionTitle("Settings")
-                InlineSettingsView(model: settingsModel, embedInScroll: false, onOpenQRCode: onOpenQRCode)
-
-                Divider()
-
-                Button(action: onQuit) {
-                    HStack(spacing: 8) {
-                        Text("Quit")
+                Button(action: onOpenQRCode) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "qrcode")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("QR")
                             .font(titleFont)
-                            .foregroundStyle(Color.primary)
-                        Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 6)
@@ -95,10 +89,71 @@ struct MainPanelView: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(12)
+
+            Divider()
+
+            tabContent
+
+            Divider()
+
+            Button(action: onQuit) {
+                HStack(spacing: 8) {
+                    Text("Quit")
+                        .font(titleFont)
+                        .foregroundStyle(Color.primary)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+                .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
+            }
+            .buttonStyle(.plain)
         }
+        .padding(12)
         .frame(width: 520, height: 780)
         .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder
+    private var tabContent: some View {
+        switch selectedTab {
+        case .sessions:
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    sessionSection(title: "Codex Sessions", sessions: panelModel.codexSessions)
+                    sessionSection(title: "Claude Code Sessions", sessions: panelModel.claudeSessions)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .opsLogs:
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle("Ops Logs (latest \(logLimit))")
+                    if panelModel.logs.isEmpty {
+                        Text("  No recent logs")
+                            .font(bodyFont)
+                            .foregroundStyle(Color.secondary)
+                    } else {
+                        ForEach(panelModel.logs) { row in
+                            Text("  \(row.text)")
+                                .font(bodyFont)
+                                .foregroundStyle(readableSemanticColor(from: row.color))
+                                .lineLimit(1)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .settings:
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 12) {
+                    sectionTitle("Settings")
+                    InlineSettingsView(model: settingsModel, embedInScroll: false, onOpenQRCode: onOpenQRCode)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     @ViewBuilder
