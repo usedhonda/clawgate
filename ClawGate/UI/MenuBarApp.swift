@@ -1,14 +1,18 @@
 import AppKit
 import SwiftUI
 
+private extension NSColor {
+    /// Bright light-gray for default log text — always readable on a dark panel background.
+    static let logDefault = NSColor(white: 0.82, alpha: 1.0)
+    /// Dimmer gray for "no logs" placeholder text.
+    static let logDim = NSColor(white: 0.55, alpha: 1.0)
+}
+
 final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var mainPanel: NSPanel?
     private var mainPanelHost: NSHostingController<MainPanelView>?
     private var refreshTimer: Timer?
-    private var localMouseMonitor: Any?
-    private var globalMouseMonitor: Any?
-    private var appDeactivateObserver: NSObjectProtocol?
     private let mainPanelLogLimit = 30
 
     private let modeOrder: [String] = ["ignore", "observe", "auto", "autonomous"]
@@ -27,19 +31,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
-    deinit {
-        removeOutsideClickMonitors()
-        if let observer = appDeactivateObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-    }
-
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
         configureStatusButton()
         configureMainPanel()
-        observeAppDeactivation()
 
         runtime.startServer()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
@@ -62,9 +58,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             modeLabel: { [weak self] mode in
                 self?.modeLabel(mode) ?? mode.capitalized
             },
-            modeColor: { [weak self] mode in
-                self?.modeColor(mode) ?? .labelColor
-            },
             onSetSessionMode: { [weak self] sessionType, project, mode in
                 self?.setSessionMode(sessionType: sessionType, project: project, next: mode)
             },
@@ -77,7 +70,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         mainPanelHost = host
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 900),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 600),
             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
             defer: true
@@ -88,11 +81,33 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
         panel.animationBehavior = .utilityWindow
+        panel.backgroundColor = PanelTheme.backgroundNSColor
+        panel.isOpaque = false
         panel.contentViewController = host
         panel.isReleasedWhenClosed = false
-        panel.minSize = NSSize(width: 380, height: 400)
+        panel.minSize = NSSize(width: 380, height: 300)
         panel.maxSize = NSSize(width: 700, height: 1400)
         mainPanel = panel
+    }
+
+    private func fitPanelToContent(_ panel: NSPanel) {
+        guard let host = mainPanelHost else { return }
+        host.view.layoutSubtreeIfNeeded()
+        let fitting = host.view.fittingSize
+
+        let w = min(max(fitting.width, panel.minSize.width), panel.maxSize.width)
+
+        let screenMaxH: CGFloat
+        if let screen = NSScreen.main {
+            screenMaxH = screen.visibleFrame.height - 28
+        } else {
+            screenMaxH = panel.maxSize.height
+        }
+        // 580: enough to show QR code section when switching to Config tab
+        let minH = max(panel.minSize.height, 580)
+        let h = min(max(fitting.height, minH), min(panel.maxSize.height, screenMaxH))
+
+        panel.setContentSize(NSSize(width: w, height: h))
     }
 
     @objc private func toggleMainPanel(_ sender: Any?) {
@@ -106,9 +121,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         settingsModel.reload()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
+        fitPanelToContent(panel)
         positionPanelBelowStatusItem(panel)
         panel.makeKeyAndOrderFront(nil)
-        installOutsideClickMonitors()
     }
 
     private func positionPanelBelowStatusItem(_ panel: NSPanel) {
@@ -118,7 +133,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         let panelSize = panel.frame.size
         let x = screenRect.midX - panelSize.width / 2
         let y = screenRect.minY - panelSize.height - 4
-        // Clamp to screen bounds
         if let screen = NSScreen.main {
             let visibleFrame = screen.visibleFrame
             let clampedX = max(visibleFrame.minX + 8, min(x, visibleFrame.maxX - panelSize.width - 8))
@@ -134,13 +148,34 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.updateStatusIcon()
-            let sorted = sessions.sorted { lhs, rhs in
-                lhs.project.localizedCaseInsensitiveCompare(rhs.project) == .orderedAscending
+            let deduped = self.deduplicateByProject(sessions)
+            let sorted = deduped.sorted {
+                $0.project.localizedCaseInsensitiveCompare($1.project) == .orderedAscending
             }
             self.panelModel.codexSessions = sorted.filter { $0.sessionType == "codex" }
             self.panelModel.claudeSessions = sorted.filter { $0.sessionType == "claude_code" }
             self.panelModel.sessionModes = self.runtime.configStore.load().tmuxSessionModes
         }
+    }
+
+    /// Deduplicate sessions by (sessionType, project): keep the most-active one.
+    /// Priority: running (2) > waiting_input (1) > other (0)
+    private func deduplicateByProject(
+        _ sessions: [CCStatusBarClient.CCSession]
+    ) -> [CCStatusBarClient.CCSession] {
+        let priority = ["running": 2, "waiting_input": 1]
+        var best: [String: CCStatusBarClient.CCSession] = [:]
+        for session in sessions {
+            let key = "\(session.sessionType):\(session.project)"
+            if let existing = best[key] {
+                let ep = priority[existing.status] ?? 0
+                let np = priority[session.status] ?? 0
+                if np > ep { best[key] = session }
+            } else {
+                best[key] = session
+            }
+        }
+        return Array(best.values)
     }
 
     private func setSessionMode(sessionType: String, project: String, next: String) {
@@ -211,15 +246,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         return "ignore"
     }
 
-    private func modeColor(_ mode: String) -> NSColor {
-        switch mode {
-        case "autonomous": return .systemRed
-        case "auto":       return .systemOrange
-        case "observe":    return .systemBlue
-        default:           return .labelColor
-        }
-    }
-
     private func modeLabel(_ mode: String) -> String {
         switch mode {
         case "ignore": return "Ignore"
@@ -244,17 +270,45 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             if entries.isEmpty {
                 let now = Self.timeFormatter.string(from: Date())
                 self.panelModel.logs = [
-                    MainPanelLogLine(text: "\(now) • No recent logs", color: .secondaryLabelColor),
+                    MainPanelLogLine(text: "\(now) • No recent logs", color: .logDim, event: ""),
                 ]
                 return
             }
 
-            self.panelModel.logs = entries.map { entry in
+            let rawLines = entries.map { entry in
                 let t = Self.timeFormatter.string(from: entry.date)
                 let style = self.compactLogStyle(for: entry)
-                return MainPanelLogLine(text: "\(t) \(style.text)", color: style.color)
+                return MainPanelLogLine(text: "\(t) \(style.text)", color: style.color, event: entry.event)
             }
+            self.panelModel.logs = deduplicateRuns(rawLines)
         }
+    }
+
+    /// Collapse consecutive runs of the same `event` into one line with "×N" suffix.
+    /// Input is newest-first (as returned by opsLogStore.recent).
+    private func deduplicateRuns(_ lines: [MainPanelLogLine]) -> [MainPanelLogLine] {
+        var result: [MainPanelLogLine] = []
+        var i = 0
+        while i < lines.count {
+            let current = lines[i]
+            var runCount = 1
+            // Count how many consecutive entries share the same event key
+            while i + runCount < lines.count && lines[i + runCount].event == current.event && !current.event.isEmpty {
+                runCount += 1
+            }
+            if runCount >= 2 {
+                let collapsed = MainPanelLogLine(
+                    text: current.text + " \u{00D7}\(runCount)",
+                    color: current.color,
+                    event: current.event
+                )
+                result.append(collapsed)
+            } else {
+                result.append(current)
+            }
+            i += runCount
+        }
+        return result
     }
 
     private func compactMessage(_ text: String, max: Int) -> String {
@@ -364,7 +418,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         case "federation.disabled", "federation.invalid_url":
             return (text, .systemOrange)
         case "tmux.completion", "tmux.question", "tmux.progress":
-            return (text, .labelColor)
+            return (text, .logDefault)
         case "line_send_ok":
             return (text, .systemGreen)
         case "line_send_start":
@@ -381,7 +435,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             if entry.level.lowercased() == "error" {
                 return (text, .systemRed)
             }
-            return (text, .labelColor)
+            return (text, .logDefault)
         }
     }
 
@@ -404,70 +458,5 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private func closeMainPanel(_ sender: Any?) {
         guard let panel = mainPanel, panel.isVisible else { return }
         panel.orderOut(sender)
-        removeOutsideClickMonitors()
-    }
-
-    private func observeAppDeactivation() {
-        appDeactivateObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didResignActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.closeMainPanel(nil)
-        }
-    }
-
-    private func installOutsideClickMonitors() {
-        removeOutsideClickMonitors()
-        localMouseMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] event in
-            self?.closePanelIfClickIsOutside(event)
-            return event
-        }
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] event in
-            self?.closePanelIfClickIsOutside(event)
-        }
-    }
-
-    private func removeOutsideClickMonitors() {
-        if let monitor = localMouseMonitor {
-            NSEvent.removeMonitor(monitor)
-            localMouseMonitor = nil
-        }
-        if let monitor = globalMouseMonitor {
-            NSEvent.removeMonitor(monitor)
-            globalMouseMonitor = nil
-        }
-    }
-
-    private func closePanelIfClickIsOutside(_ event: NSEvent) {
-        guard let panel = mainPanel, panel.isVisible else { return }
-        let clickPoint = screenPoint(for: event)
-        if isInsidePanel(clickPoint) || isInsideStatusButton(clickPoint) {
-            return
-        }
-        closeMainPanel(nil)
-    }
-
-    private func screenPoint(for event: NSEvent) -> NSPoint {
-        if let window = event.window {
-            return window.convertPoint(toScreen: event.locationInWindow)
-        }
-        return NSEvent.mouseLocation
-    }
-
-    private func isInsidePanel(_ screenPoint: NSPoint) -> Bool {
-        guard let frame = mainPanel?.frame else { return false }
-        return frame.insetBy(dx: -1, dy: -1).contains(screenPoint)
-    }
-
-    private func isInsideStatusButton(_ screenPoint: NSPoint) -> Bool {
-        guard let button = statusItem?.button, let buttonWindow = button.window else { return false }
-        let buttonRectInWindow = button.convert(button.bounds, to: nil)
-        let buttonRectOnScreen = buttonWindow.convertToScreen(buttonRectInWindow)
-        return buttonRectOnScreen.insetBy(dx: -2, dy: -2).contains(screenPoint)
     }
 }

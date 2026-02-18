@@ -84,6 +84,13 @@ final class TmuxInboundWatcher {
         let modeKey = AppConfig.modeKey(sessionType: session.sessionType, project: session.project)
         let scLine = "\(Date()) handleStateChange \(session.project) \(oldStatus)->\(newStatus) source=\(source) mode=\(configStore.load().tmuxSessionModes[modeKey] ?? "nil") waitingReason=\(session.waitingReason ?? "nil") tmux=\(session.tmuxTarget ?? "nil")\n"
         try? (scExisting + scLine).write(toFile: scPath, atomically: true, encoding: .utf8)
+        // Skip non-representative sessions: only the most-active session per project+type
+        // triggers automation. Others are effectively ignored.
+        guard isRepresentativeSession(session) else {
+            debugLog("skip non-rep: \(session.project) id=\(session.id)")
+            return
+        }
+
         // Check session mode — ignore sessions are skipped
         let config = configStore.load()
         let mode = config.tmuxSessionModes[modeKey] ?? "ignore"
@@ -398,6 +405,16 @@ final class TmuxInboundWatcher {
         } catch {
             logger.log(.warning, "TmuxInboundWatcher: auto-answer failed: \(error)")
         }
+    }
+
+    /// Returns true if this session is the most-active one for its (sessionType, project).
+    /// Peers with higher status priority -> this session is NOT the representative -> return false.
+    private func isRepresentativeSession(_ session: CCStatusBarClient.CCSession) -> Bool {
+        let priority = ["running": 2, "waiting_input": 1]
+        let selfPriority = priority[session.status] ?? 0
+        let peers = ccClient.sessions(forProject: session.project)
+            .filter { $0.sessionType == session.sessionType && $0.id != session.id }
+        return !peers.contains { (priority[$0.status] ?? 0) > selfPriority }
     }
 
     private func debugLog(_ line: String) {
