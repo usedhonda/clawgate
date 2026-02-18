@@ -293,6 +293,7 @@ final class BridgeCore {
             let adapter: String?
             let text: String
             let conversation: String?
+            let extra: [String: String]?
         }
         do {
             let req = try jsonDecoder.decode(DebugInjectRequest.self, from: body)
@@ -301,6 +302,11 @@ final class BridgeCore {
             var payload: [String: String] = ["text": req.text]
             if let conv = req.conversation {
                 payload["conversation"] = conv
+            }
+            if let extra = req.extra {
+                for (key, value) in extra where payload[key] == nil {
+                    payload[key] = value
+                }
             }
             let event = eventBus.append(type: eventType, adapter: adapter, payload: payload)
             logger.log(.info, "debug/inject: type=\(eventType) adapter=\(adapter) eventID=\(event.id)")

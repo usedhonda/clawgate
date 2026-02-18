@@ -38,8 +38,8 @@ struct MainPanelView: View {
 
     @State private var selectedTab: MainPanelTab = .sessions
 
-    private let bodyFont = Font.system(size: 14, weight: .semibold, design: .monospaced)
-    private let titleFont = Font.system(size: 14, weight: .semibold, design: .monospaced)
+    private let bodyFont = Font.system(size: 12.5, weight: .semibold, design: .monospaced)
+    private let titleFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
 
     private struct HoverInteractiveRowModifier: ViewModifier {
         let cornerRadius: CGFloat
@@ -94,7 +94,7 @@ struct MainPanelView: View {
             .buttonStyle(.plain)
         }
         .padding(12)
-        .frame(width: 520, height: 780)
+        .frame(minWidth: 380, maxWidth: 700, minHeight: 400, maxHeight: 1400)
         .background(.ultraThinMaterial)
     }
 
@@ -207,7 +207,7 @@ struct MainPanelView: View {
                     .foregroundStyle(Color.secondary)
             }
             .padding(.horizontal, 4)
-            .padding(.vertical, 5)
+            .padding(.vertical, 3)
             .contentShape(Rectangle())
             .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
         }

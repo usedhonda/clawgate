@@ -1,9 +1,9 @@
 import AppKit
 import SwiftUI
 
-final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var mainPopover: NSPopover?
+    private var mainPanel: NSPanel?
     private var mainPanelHost: NSHostingController<MainPanelView>?
     private var refreshTimer: Timer?
     private var localMouseMonitor: Any?
@@ -38,7 +38,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
         configureStatusButton()
-        configureMainPopover()
+        configureMainPanel()
         observeAppDeactivation()
 
         runtime.startServer()
@@ -50,11 +50,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
     private func configureStatusButton() {
         guard let button = statusItem?.button else { return }
         button.target = self
-        button.action = #selector(toggleMainPopover(_:))
+        button.action = #selector(toggleMainPanel(_:))
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
-    private func configureMainPopover() {
+    private func configureMainPanel() {
         let view = MainPanelView(
             settingsModel: settingsModel,
             panelModel: panelModel,
@@ -74,29 +74,59 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
             logLimit: mainPanelLogLimit
         )
         let host = NSHostingController(rootView: view)
-        let popover = NSPopover()
-        popover.behavior = .applicationDefined
-        popover.animates = true
-        popover.delegate = self
-        popover.contentSize = NSSize(width: 520, height: 780)
-        popover.contentViewController = host
         mainPanelHost = host
-        mainPopover = popover
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 900),
+            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
+            backing: .buffered,
+            defer: true
+        )
+        panel.isFloatingPanel = true
+        panel.level = .popUpMenu
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.animationBehavior = .utilityWindow
+        panel.contentViewController = host
+        panel.isReleasedWhenClosed = false
+        panel.minSize = NSSize(width: 380, height: 400)
+        panel.maxSize = NSSize(width: 700, height: 1400)
+        mainPanel = panel
     }
 
-    @objc private func toggleMainPopover(_ sender: Any?) {
-        guard let popover = mainPopover, let button = statusItem?.button else { return }
+    @objc private func toggleMainPanel(_ sender: Any?) {
+        guard let panel = mainPanel else { return }
 
-        if popover.isShown {
-            closeMainPopover(sender)
+        if panel.isVisible {
+            closeMainPanel(sender)
             return
         }
 
         settingsModel.reload()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+        positionPanelBelowStatusItem(panel)
+        panel.makeKeyAndOrderFront(nil)
         installOutsideClickMonitors()
+    }
+
+    private func positionPanelBelowStatusItem(_ panel: NSPanel) {
+        guard let button = statusItem?.button, let buttonWindow = button.window else { return }
+        let buttonRect = button.convert(button.bounds, to: nil)
+        let screenRect = buttonWindow.convertToScreen(buttonRect)
+        let panelSize = panel.frame.size
+        let x = screenRect.midX - panelSize.width / 2
+        let y = screenRect.minY - panelSize.height - 4
+        // Clamp to screen bounds
+        if let screen = NSScreen.main {
+            let visibleFrame = screen.visibleFrame
+            let clampedX = max(visibleFrame.minX + 8, min(x, visibleFrame.maxX - panelSize.width - 8))
+            let clampedY = max(visibleFrame.minY + 8, y)
+            panel.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
+        } else {
+            panel.setFrameOrigin(NSPoint(x: x, y: y))
+        }
     }
 
     /// Called by AppRuntime after CCStatusBarClient updates sessions.
@@ -356,15 +386,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
     }
 
     @objc private func quit() {
-        closeMainPopover(nil)
+        closeMainPanel(nil)
         refreshTimer?.invalidate()
         refreshTimer = nil
         runtime.stopServer()
         NSApplication.shared.terminate(nil)
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        removeOutsideClickMonitors()
     }
 
     private func startRefreshTimer() {
@@ -375,9 +401,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         }
     }
 
-    private func closeMainPopover(_ sender: Any?) {
-        guard let popover = mainPopover, popover.isShown else { return }
-        popover.performClose(sender)
+    private func closeMainPanel(_ sender: Any?) {
+        guard let panel = mainPanel, panel.isVisible else { return }
+        panel.orderOut(sender)
         removeOutsideClickMonitors()
     }
 
@@ -387,7 +413,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.closeMainPopover(nil)
+            self?.closeMainPanel(nil)
         }
     }
 
@@ -396,13 +422,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] event in
-            self?.closePopoverIfClickIsOutside(event)
+            self?.closePanelIfClickIsOutside(event)
             return event
         }
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] event in
-            self?.closePopoverIfClickIsOutside(event)
+            self?.closePanelIfClickIsOutside(event)
         }
     }
 
@@ -417,13 +443,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         }
     }
 
-    private func closePopoverIfClickIsOutside(_ event: NSEvent) {
-        guard let popover = mainPopover, popover.isShown else { return }
+    private func closePanelIfClickIsOutside(_ event: NSEvent) {
+        guard let panel = mainPanel, panel.isVisible else { return }
         let clickPoint = screenPoint(for: event)
-        if isInsidePopover(clickPoint) || isInsideStatusButton(clickPoint) {
+        if isInsidePanel(clickPoint) || isInsideStatusButton(clickPoint) {
             return
         }
-        closeMainPopover(nil)
+        closeMainPanel(nil)
     }
 
     private func screenPoint(for event: NSEvent) -> NSPoint {
@@ -433,8 +459,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelega
         return NSEvent.mouseLocation
     }
 
-    private func isInsidePopover(_ screenPoint: NSPoint) -> Bool {
-        guard let frame = mainPopover?.contentViewController?.view.window?.frame else { return false }
+    private func isInsidePanel(_ screenPoint: NSPoint) -> Bool {
+        guard let frame = mainPanel?.frame else { return false }
         return frame.insetBy(dx: -1, dy: -1).contains(screenPoint)
     }
 
