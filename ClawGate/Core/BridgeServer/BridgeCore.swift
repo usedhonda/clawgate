@@ -471,7 +471,7 @@ final class BridgeCore {
         let deliveredTmux = data.events.filter { event in
             guard event.adapter == "tmux", event.type == "inbound_message" else { return false }
             let source = event.payload["source"] ?? ""
-            return source == "completion" || source == "question" || source == "progress"
+            return source == "completion" || source == "question"
         }
         if !deliveredTmux.isEmpty {
             let trace = "poll-\(data.nextCursor)"

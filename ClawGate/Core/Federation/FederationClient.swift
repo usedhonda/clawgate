@@ -118,6 +118,8 @@ final class FederationClient: NSObject, URLSessionWebSocketDelegate {
             if event.payload["_from_federation"] == "1" { return }
             // Skip forwarding our own federation_status events to prevent echo noise
             if event.type == "federation_status" { return }
+            // Skip progress events — high-frequency, not useful for remote peers
+            if event.type == "inbound_message" && event.payload["source"] == "progress" { return }
             let message = FederationEnvelope(
                 type: "event",
                 timestamp: FederationMessage.now(),

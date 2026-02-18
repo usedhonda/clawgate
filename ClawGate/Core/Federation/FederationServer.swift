@@ -167,6 +167,8 @@ final class FederationServer {
     private func broadcastLocalEvent(_ event: BridgeEvent) {
         // Don't echo federation-origin events back
         if event.payload["_from_federation"] == "1" { return }
+        // Skip progress events — high-frequency, not useful for remote peers
+        if event.type == "inbound_message" && event.payload["source"] == "progress" { return }
         // Only forward tmux and outbound events
         guard event.adapter == "tmux" || event.type == "outbound_message" || event.type == "inbound_message" else { return }
 
