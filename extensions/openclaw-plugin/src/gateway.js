@@ -327,8 +327,10 @@ const autonomousLoopState = new Map();
 // ── Review-done suppression ─────────────────────────────────────
 // After LGTM terminates the review loop, mark the project as "review-done".
 // Completion events are skipped until a new task is sent or a question arrives.
-/** @type {Set<string>} */
-const reviewDoneProjects = new Set();
+// Safety valve: auto-clear stale review-done marks after a timeout.
+const REVIEW_DONE_TTL_MS = 15 * 60 * 1000;
+/** @type {Map<string, { setAt: number, reason: string }>} */
+const reviewDoneProjects = new Map();
 const AUTONOMOUS_RISK_PATTERNS = [
   /blocking/i,
   /regression/i,
@@ -397,6 +399,26 @@ function setAutonomousLoopActive(project, active) {
 
 function isAutonomousLoopActive(project) {
   return autonomousLoopState.get(project)?.active === true;
+}
+
+function setReviewDone(project, reason = "unknown") {
+  if (!project) return;
+  reviewDoneProjects.set(project, { setAt: Date.now(), reason });
+}
+
+function clearReviewDone(project) {
+  if (!project) return false;
+  return reviewDoneProjects.delete(project);
+}
+
+function getReviewDone(project) {
+  const state = reviewDoneProjects.get(project);
+  if (!state) return null;
+  if (Date.now() - state.setAt > REVIEW_DONE_TTL_MS) {
+    reviewDoneProjects.delete(project);
+    return null;
+  }
+  return state;
 }
 
 function autonomousMilestoneLine({ reason, round, maxRounds, taskText, lineText }) {
@@ -912,7 +934,7 @@ async function tryExtractAndSendTask({
       if (result?.ok) {
         log?.info?.(`clawgate: task sent to CC (${targetProject}): "${taskText.slice(0, 80)}"`);
         setTaskGoal(targetProject, taskText);
-        if (reviewDoneProjects.delete(targetProject)) {
+        if (clearReviewDone(targetProject)) {
           log?.info?.(`clawgate: review-done CLEARED for "${targetProject}" — new task sent, completions resumed`);
         }
         return { lineText, taskText, targetProject };
@@ -1285,7 +1307,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       // LGTM termination from inbound — forward lineText to LINE, set review-done
       if (result.terminated) {
         const proj = result.targetProject || sourceTaskProject || "unknown";
-        reviewDoneProjects.add(proj);
+        setReviewDone(proj, "lgtm_inbound");
         log?.info?.(`clawgate: [${accountId}] review-done SET for "${proj}" — LGTM via inbound`);
         if (result.lineText) {
           try { await clawgateSend(apiUrl, conversation, result.lineText, traceId); recordPluginSend(result.lineText); } catch {}
@@ -1416,7 +1438,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   sessionStatuses.set(project, "waiting_input");
   if (mode !== "autonomous") setAutonomousLoopActive(project, false);
   // Question event means CC is actively working — clear review-done suppression
-  if (reviewDoneProjects.delete(project)) {
+  if (clearReviewDone(project)) {
     log?.info?.(`clawgate: [${accountId}] review-done CLEARED for "${project}" — question event received`);
   }
 
@@ -1644,8 +1666,9 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   }
 
   // Guard: review-done — LGTM closed the review loop, suppress completions until next task
-  if (reviewDoneProjects.has(project)) {
-    log?.debug?.(`clawgate: [${accountId}] skipping completion for "${project}" — review-done (awaiting next task)`);
+  const reviewDoneState = getReviewDone(project);
+  if (reviewDoneState) {
+    log?.debug?.(`clawgate: [${accountId}] skipping completion for "${project}" — review-done(reason=${reviewDoneState.reason}, awaiting next task)`);
     // Still update session state so roster stays accurate
     sessionModes.set(project, mode);
     sessionStatuses.set(project, "waiting_input");
@@ -1836,7 +1859,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             log?.info?.(`clawgate: [${accountId}] autonomous loop terminated by LGTM signal (project=${project}, round=${rounds + 1})`);
             questionRoundMap.delete(project);
             setAutonomousLoopActive(project, false);
-            reviewDoneProjects.add(project);
+            setReviewDone(project, "lgtm_autonomous");
             log?.info?.(`clawgate: [${accountId}] review-done SET for "${project}" — completions suppressed until next task`);
             logAutonomousLineEvent(log, {
               accountId,
@@ -1939,7 +1962,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       // No <cc_task> or max rounds reached — reset counter, strip tags, fall through to LINE
       questionRoundMap.delete(project);
       setAutonomousLoopActive(project, false);
-      reviewDoneProjects.add(project);
+      setReviewDone(project, "autonomous_no_cc_task");
       log?.info?.(`clawgate: [${accountId}] review-done SET for "${project}" — max rounds reached or no cc_task, completions suppressed`);
       // Strip any <cc_task> tags so they don't leak raw into LINE
       replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
@@ -1953,7 +1976,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       if (result) {
         // LGTM termination in auto mode — forward lineText, set review-done
         if (result.terminated) {
-          reviewDoneProjects.add(result.targetProject || project);
+          setReviewDone(result.targetProject || project, "lgtm_auto");
           log?.info?.(`clawgate: [${accountId}] review-done SET for "${result.targetProject || project}" — LGTM in auto mode`);
           if (result.lineText) {
             const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
@@ -2170,6 +2193,9 @@ export async function startAccount(ctx) {
             setProgressSnapshot(proj, progressText);
             appendProgressTrail(proj, progressText);
             sessionStatuses.set(proj, "running");
+            if (clearReviewDone(proj)) {
+              log?.info?.(`clawgate: [${accountId}] review-done CLEARED for "${proj}" — progress detected (new work started)`);
+            }
             continue;
           }
 

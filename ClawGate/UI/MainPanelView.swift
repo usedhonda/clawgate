@@ -13,6 +13,7 @@ final class MainPanelModel: ObservableObject {
     @Published var claudeSessions: [CCStatusBarClient.CCSession] = []
     @Published var sessionModes: [String: String] = [:]
     @Published var logs: [MainPanelLogLine] = []
+    @Published var autonomousStatus: String = "Autonomous: not configured"
 }
 
 struct MainPanelView: View {
@@ -65,6 +66,10 @@ struct MainPanelView: View {
         case .monitor:
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
+                    Text(panelModel.autonomousStatus)
+                        .font(PanelTheme.smallFont)
+                        .foregroundStyle(PanelTheme.textSecondary)
+
                     sessionSection(title: "Codex Sessions", sessions: panelModel.codexSessions)
                     sessionSection(title: "Claude Code Sessions", sessions: panelModel.claudeSessions)
 

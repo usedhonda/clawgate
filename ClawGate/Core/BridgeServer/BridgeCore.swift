@@ -15,6 +15,9 @@ final class BridgeCore {
     private let configStore: ConfigStore
     private let jsonDecoder = JSONDecoder()
     private let jsonEncoder = JSONEncoder()
+    private let autonomousStatusLock = NSLock()
+    private var reportedAutonomousStalledTraceIDs: Set<String> = []
+    private let autonomousStallThresholdSeconds: TimeInterval = 120
 
     init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, opsLogStore: OpsLogStore, configStore: ConfigStore, statsCollector: StatsCollector) {
         self.eventBus = eventBus
@@ -465,6 +468,118 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(content))
     }
 
+    func autonomousStatus() -> HTTPResult {
+        let snapshot = autonomousStatusSnapshot()
+        let role = configStore.load().nodeRole.rawValue
+        opsLogStore.append(
+            level: "info",
+            event: "autonomous.status_snapshot",
+            role: role,
+            script: "clawgate.app",
+            message: "project=\(snapshot.targetProject.isEmpty ? "-" : snapshot.targetProject) mode=\(snapshot.mode) review_done=\(snapshot.reviewDone) reason=\(snapshot.lastSuppressionReason)"
+        )
+        return jsonResponse(
+            status: .ok,
+            body: encode(APIResponse(ok: true, result: snapshot, error: nil))
+        )
+    }
+
+    func autonomousStatusSnapshot() -> AutonomousStatusResult {
+        let config = configStore.load()
+        let candidates = config.tmuxSessionModes
+            .filter { (key, mode) in
+                key.hasPrefix("codex:") && (mode == "autonomous" || mode == "auto")
+            }
+            .sorted { $0.key < $1.key }
+
+        guard let target = candidates.first else {
+            return AutonomousStatusResult(
+                targetProject: "",
+                mode: "ignore",
+                reviewDone: false,
+                lastCompletionAt: nil,
+                lastTaskSentAt: nil,
+                lastLineSendOKAt: nil,
+                lastSuppressionReason: "no_target"
+            )
+        }
+
+        let project = String(target.key.dropFirst("codex:".count))
+        let mode = target.value
+        let entries = opsLogStore.recent(limit: 400)
+
+        var lastCompletionAt: String?
+        var lastCompletionDate: Date?
+        var lastCompletionTraceID: String?
+        var lastTaskSentAt: String?
+        var lastLineSendOKAt: String?
+
+        for entry in entries {
+            if lastCompletionAt == nil, entry.event == "tmux.completion" {
+                let kv = parseKeyValueMessage(entry.message)
+                if kv["project"] == project {
+                    lastCompletionAt = entry.ts
+                    lastCompletionDate = entry.date
+                    lastCompletionTraceID = kv["trace_id"]
+                }
+            }
+
+            if lastTaskSentAt == nil, entry.event == "tmux.forward" {
+                let kv = parseKeyValueMessage(entry.message)
+                if kv["project"] == project {
+                    lastTaskSentAt = entry.ts
+                }
+            }
+
+            if lastLineSendOKAt == nil, entry.event == "line_send_ok" {
+                if let traceID = lastCompletionTraceID, !traceID.isEmpty {
+                    if entry.message.contains("trace_id=\(traceID)") {
+                        lastLineSendOKAt = entry.ts
+                    }
+                } else {
+                    // Fallback: when trace_id is unavailable, use the latest line_send_ok
+                    // after the most recent completion timestamp.
+                    if let completionDate = lastCompletionDate {
+                        if entry.date >= completionDate {
+                            lastLineSendOKAt = entry.ts
+                        }
+                    }
+                }
+            }
+
+            if lastCompletionAt != nil && lastTaskSentAt != nil && lastLineSendOKAt != nil {
+                break
+            }
+        }
+
+        var suppressionReason = "none"
+        var reviewDone = false
+        if lastCompletionAt != nil && lastLineSendOKAt == nil {
+            if let completionDate = lastCompletionDate {
+                let age = Date().timeIntervalSince(completionDate)
+                if age >= autonomousStallThresholdSeconds {
+                    suppressionReason = "stalled_no_line_send"
+                    reviewDone = true
+                    recordAutonomousStalledIfNeeded(project: project, traceID: lastCompletionTraceID, ageSeconds: Int(age))
+                } else {
+                    suppressionReason = "pending_line_send"
+                }
+            } else {
+                suppressionReason = "pending_line_send"
+            }
+        }
+
+        return AutonomousStatusResult(
+            targetProject: project,
+            mode: mode,
+            reviewDone: reviewDone,
+            lastCompletionAt: lastCompletionAt,
+            lastTaskSentAt: lastTaskSentAt,
+            lastLineSendOKAt: lastLineSendOKAt,
+            lastSuppressionReason: suppressionReason
+        )
+    }
+
     func poll(since: Int64?) -> HTTPResult {
         let data = eventBus.poll(since: since)
 
@@ -646,6 +761,8 @@ final class BridgeCore {
             result = health()
         case (.GET, "/v1/config"):
             result = config()
+        case (.GET, "/v1/autonomous/status"):
+            result = autonomousStatus()
         case (.GET, "/v1/poll"):
             let since = components?.queryItems?.first(where: { $0.name == "since" })?.value.flatMap(Int64.init)
             result = poll(since: since)
@@ -885,6 +1002,46 @@ final class BridgeCore {
         let responseBody = Data(response.body.utf8)
         let status = HTTPResponseStatus(statusCode: response.status)
         return HTTPResult(status: status, headers: headers, body: responseBody)
+    }
+
+    private func parseKeyValueMessage(_ message: String) -> [String: String] {
+        var result: [String: String] = [:]
+        for token in message.split(separator: " ") {
+            guard let eq = token.firstIndex(of: "=") else { continue }
+            let key = String(token[..<eq])
+            let value = String(token[token.index(after: eq)...])
+            if !key.isEmpty && !value.isEmpty {
+                result[key] = value
+            }
+        }
+        return result
+    }
+
+    private func recordAutonomousStalledIfNeeded(project: String, traceID: String?, ageSeconds: Int) {
+        let normalizedTrace = (traceID ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let dedupKey = normalizedTrace.isEmpty ? "project:\(project)" : normalizedTrace
+
+        autonomousStatusLock.lock()
+        if reportedAutonomousStalledTraceIDs.contains(dedupKey) {
+            autonomousStatusLock.unlock()
+            return
+        }
+        reportedAutonomousStalledTraceIDs.insert(dedupKey)
+        if reportedAutonomousStalledTraceIDs.count > 512 {
+            let keep = reportedAutonomousStalledTraceIDs.suffix(256)
+            reportedAutonomousStalledTraceIDs = Set(keep)
+        }
+        autonomousStatusLock.unlock()
+
+        let role = configStore.load().nodeRole.rawValue
+        let traceField = normalizedTrace.isEmpty ? "trace_id=unknown" : "trace_id=\(normalizedTrace)"
+        opsLogStore.append(
+            level: "warning",
+            event: "autonomous.stalled",
+            role: role,
+            script: "clawgate.app",
+            message: "project=\(project) \(traceField) age_s=\(ageSeconds) reason=stalled_no_line_send"
+        )
     }
 
     private func normalizedTraceID(_ traceID: String?) -> String {

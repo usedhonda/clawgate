@@ -22,6 +22,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/poll"),
         (.GET, "/v1/stats"),
         (.GET, "/v1/ops/logs"),
+        (.GET, "/v1/autonomous/status"),
         (.POST, "/v1/send"),
         (.GET, "/v1/context"),
         (.GET, "/v1/messages"),
@@ -84,7 +85,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         }
 
         // Track meaningful API requests (exclude high-frequency polling/monitoring)
-        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs"]
+        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs", "/v1/autonomous/status"]
         if !noTrack.contains(path) {
             core.statsCollector.increment("api_requests", adapter: "system")
         }
@@ -118,6 +119,11 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
             let daysStr = components?.queryItems?.first(where: { $0.name == "days" })?.value
             let days = min(daysStr.flatMap(Int.init) ?? 7, 90)
             writeResponse(context: context, result: core.stats(days: days))
+            return
+        }
+
+        if head.method == .GET && path == "/v1/autonomous/status" {
+            writeResponse(context: context, result: core.autonomousStatus())
             return
         }
 

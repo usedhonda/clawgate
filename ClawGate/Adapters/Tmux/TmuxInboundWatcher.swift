@@ -256,6 +256,7 @@ final class TmuxInboundWatcher {
     /// Used from both the permission_prompt branch and captureAndEmit.
     private func emitQuestionEvent(session: CCStatusBarClient.CCSession, question: DetectedQuestion, mode: String, context: String? = nil) {
         let eventID = UUID().uuidString
+        let traceID = "tmux-\(eventID)"
         let payload: [String: String] = [
             "conversation": session.project,
             "text": question.questionText,
@@ -265,6 +266,7 @@ final class TmuxInboundWatcher {
             "sender": session.sessionType == "codex" ? "codex" : "claude_code",
             "mode": mode,
             "event_id": eventID,
+            "trace_id": traceID,
             "session_type": session.sessionType,
             "question_text": question.questionText,
             "question_options": question.options.joined(separator: "\n"),
@@ -321,6 +323,7 @@ final class TmuxInboundWatcher {
                     lastProgressSummary[session.project] = summary
                 }
                 let eventID = UUID().uuidString
+                let traceID = "tmux-\(eventID)"
                 let payload: [String: String] = [
                     "conversation": session.project,
                     "text": summary,
@@ -330,6 +333,7 @@ final class TmuxInboundWatcher {
                     "sender": session.sessionType == "codex" ? "codex" : "claude_code",
                     "mode": mode,
                     "event_id": eventID,
+                    "trace_id": traceID,
                     "session_type": session.sessionType,
                     "attention_level": "\(session.attentionLevel)",
                 ]
@@ -451,6 +455,7 @@ final class TmuxInboundWatcher {
             lastProgressSummary[session.project] = summary
         }
         let eventID = UUID().uuidString
+        let traceID = "tmux-\(eventID)"
         let payload: [String: String] = [
             "conversation": session.project,
             "text": summary,
@@ -460,6 +465,7 @@ final class TmuxInboundWatcher {
             "sender": session.sessionType == "codex" ? "codex" : "claude_code",
             "mode": mode,
             "event_id": eventID,
+            "trace_id": traceID,
             "session_type": session.sessionType,
             "attention_level": "\(session.attentionLevel)",
         ]
@@ -553,6 +559,7 @@ final class TmuxInboundWatcher {
         )
 
         let eventID = UUID().uuidString
+        let traceID = "tmux-\(eventID)"
         let payload: [String: String] = [
             "conversation": session.project,
             "text": outputSummary,
@@ -563,6 +570,7 @@ final class TmuxInboundWatcher {
             "mode": mode,
             "capture": captureState,
             "event_id": eventID,
+            "trace_id": traceID,
             "session_type": session.sessionType,
             "attention_level": "\(session.attentionLevel)",
         ]

@@ -266,6 +266,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     func refreshStatsAndTimeline() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.panelModel.autonomousStatus = self.runtime.autonomousStatusSummary()
             let entries = self.opsLogStore.recent(limit: self.mainPanelLogLimit)
             if entries.isEmpty {
                 let now = Self.timeFormatter.string(from: Date())

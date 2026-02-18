@@ -77,6 +77,25 @@ final class AppRuntime {
         ccStatusBarClient.allSessions()
     }
 
+    func autonomousStatusSummary() -> String {
+        let snapshot = core.autonomousStatusSnapshot()
+        guard !snapshot.targetProject.isEmpty else {
+            return "Autonomous: not configured"
+        }
+
+        let state: String
+        switch snapshot.lastSuppressionReason {
+        case "stalled_no_line_send":
+            state = "Stalled"
+        case "pending_line_send":
+            state = "Pending"
+        default:
+            state = "Active"
+        }
+
+        return "Autonomous: \(snapshot.targetProject) / \(snapshot.mode) / \(state)"
+    }
+
     func startServer() {
         requestPermissionPromptsIfNeeded()
 
@@ -192,11 +211,13 @@ final class AppRuntime {
             guard event.adapter == "tmux" else { return }
             let source = event.payload["source"] ?? ""
             let project = event.payload["project"] ?? "unknown"
+            let traceID = event.payload["trace_id"] ?? ""
             let text = (event.payload["text"] ?? "")
                 .replacingOccurrences(of: "\n", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let byteCount = text.lengthOfBytes(using: .utf8)
             let short = text.isEmpty ? "(empty)" : String(text.prefix(96))
+            let tracePart = traceID.isEmpty ? "" : " trace_id=\(traceID)"
 
             switch source {
             case "completion":
@@ -205,7 +226,7 @@ final class AppRuntime {
                     event: "tmux.completion",
                     role: role,
                     script: "clawgate.app",
-                    message: "project=\(project) bytes=\(byteCount) text=\(short)"
+                    message: "project=\(project)\(tracePart) bytes=\(byteCount) text=\(short)"
                 )
             case "question":
                 opsLogStore.append(
@@ -213,7 +234,7 @@ final class AppRuntime {
                     event: "tmux.question",
                     role: role,
                     script: "clawgate.app",
-                    message: "project=\(project) bytes=\(byteCount) text=\(short)"
+                    message: "project=\(project)\(tracePart) bytes=\(byteCount) text=\(short)"
                 )
             case "progress":
                 opsLogStore.append(
@@ -221,7 +242,7 @@ final class AppRuntime {
                     event: "tmux.progress",
                     role: role,
                     script: "clawgate.app",
-                    message: "project=\(project) bytes=\(byteCount) text=\(short)"
+                    message: "project=\(project)\(tracePart) bytes=\(byteCount) text=\(short)"
                 )
             default:
                 break

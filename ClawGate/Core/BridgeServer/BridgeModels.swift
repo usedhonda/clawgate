@@ -248,3 +248,25 @@ struct OpsLogsResult: Codable {
     let entries: [OpsLogEntry]
     let count: Int
 }
+
+// MARK: - Autonomous Status
+
+struct AutonomousStatusResult: Codable {
+    let targetProject: String
+    let mode: String
+    let reviewDone: Bool
+    let lastCompletionAt: String?
+    let lastTaskSentAt: String?
+    let lastLineSendOKAt: String?
+    let lastSuppressionReason: String
+
+    enum CodingKeys: String, CodingKey {
+        case targetProject = "target_project"
+        case mode
+        case reviewDone = "review_done"
+        case lastCompletionAt = "last_completion_at"
+        case lastTaskSentAt = "last_task_sent_at"
+        case lastLineSendOKAt = "last_line_send_ok_at"
+        case lastSuppressionReason = "last_suppression_reason"
+    }
+}
