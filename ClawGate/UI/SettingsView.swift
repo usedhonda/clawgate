@@ -20,7 +20,6 @@ final class SettingsModel: ObservableObject {
 struct InlineSettingsView: View {
     let embedInScroll: Bool
     let onOpenQRCode: (() -> Void)?
-    private var isEmbeddedPanelStyle: Bool { !embedInScroll }
 
     init(model: SettingsModel, embedInScroll: Bool = true, onOpenQRCode: (() -> Void)? = nil) {
         self.model = model
@@ -29,152 +28,24 @@ struct InlineSettingsView: View {
     }
 
     private enum ConnectivityState {
-        case unknown
-        case checking
-        case online
-        case offline
+        case unknown, checking, online, offline
 
         var color: Color {
             switch self {
-            case .online: return .green
-            case .offline: return .red
-            case .checking: return .orange
-            case .unknown: return .gray
+            case .online:   return PanelTheme.accentGreen
+            case .offline:  return PanelTheme.accentRed
+            case .checking: return PanelTheme.accentYellow
+            case .unknown:  return PanelTheme.textTertiary
             }
         }
 
         var text: String {
             switch self {
-            case .online: return "Connected"
-            case .offline: return "Disconnected"
+            case .online:   return "Connected"
+            case .offline:  return "Disconnected"
             case .checking: return "Checking"
-            case .unknown: return "Idle"
+            case .unknown:  return "Idle"
             }
-        }
-    }
-
-    private enum UITheme {
-        static let baseFontSize: CGFloat = 13
-        static let bodyFont = Font.system(size: baseFontSize, weight: .semibold, design: .monospaced)
-        static let titleFont = Font.system(size: baseFontSize, weight: .semibold, design: .monospaced)
-
-        static let panelWidth: CGFloat = 430
-        static let sectionSpacing: CGFloat = 12
-        static let panelPadding: CGFloat = 12
-        static let cardPadding: CGFloat = 12
-        static let cardSpacing: CGFloat = 9
-        static let cardRadius: CGFloat = 14
-
-        static let accent = Color(red: 0.15, green: 0.44, blue: 0.95)
-        static let primaryText = Color.primary
-        static let secondaryText = Color.primary.opacity(0.78)
-        static let tertiaryText = Color.primary.opacity(0.62)
-
-        static let cardTop = Color.white.opacity(0.78)
-        static let cardBottom = Color.white.opacity(0.6)
-        static let cardStroke = Color.white.opacity(0.82)
-        static let cardInnerStroke = Color.black.opacity(0.1)
-        static let cardShadow = Color.black.opacity(0.1)
-
-        static let chipFill = Color.white.opacity(0.84)
-        static let chipStroke = Color.black.opacity(0.12)
-        static let inputFill = Color.white.opacity(0.9)
-        static let inputStroke = Color.black.opacity(0.14)
-
-        static let buttonFill = Color.white.opacity(0.88)
-        static let buttonStroke = Color.black.opacity(0.14)
-    }
-
-    private struct GlassButtonStyle: ButtonStyle {
-        let prominent: Bool
-        let embedded: Bool
-
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .font(UITheme.titleFont)
-                .foregroundStyle(prominent && !embedded ? Color.white : UITheme.primaryText)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(
-                            embedded
-                            ? Color.primary.opacity(
-                                prominent
-                                ? (configuration.isPressed ? 0.18 : 0.12)
-                                : (configuration.isPressed ? 0.12 : 0.08)
-                              )
-                            : (
-                                prominent
-                                ? UITheme.accent.opacity(configuration.isPressed ? 0.72 : 0.9)
-                                : UITheme.buttonFill.opacity(configuration.isPressed ? 0.72 : 0.9)
-                              )
-                        )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(
-                            embedded
-                            ? Color.primary.opacity(configuration.isPressed ? 0.28 : 0.18)
-                            : (
-                                prominent
-                                ? Color.white.opacity(0.22)
-                                : UITheme.buttonStroke.opacity(configuration.isPressed ? 0.7 : 1.0)
-                              ),
-                            lineWidth: 1
-                        )
-                )
-        }
-    }
-
-    private struct InputChromeModifier: ViewModifier {
-        let embedded: Bool
-
-        func body(content: Content) -> some View {
-            content
-                .font(UITheme.bodyFont)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 7)
-                .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(embedded ? Color.primary.opacity(0.06) : UITheme.inputFill)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(embedded ? Color.primary.opacity(0.14) : UITheme.inputStroke, lineWidth: 1)
-                )
-        }
-    }
-
-    private struct HoverInteractiveControlModifier: ViewModifier {
-        let cornerRadius: CGFloat
-        let embedded: Bool
-        @State private var isHovered = false
-
-        func body(content: Content) -> some View {
-            content
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(
-                            embedded
-                            ? Color.primary.opacity(isHovered ? 0.22 : 0)
-                            : UITheme.accent.opacity(isHovered ? 0.55 : 0),
-                            lineWidth: 1
-                        )
-                )
-                .background(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(
-                            embedded
-                            ? Color.primary.opacity(isHovered ? 0.08 : 0)
-                            : UITheme.accent.opacity(isHovered ? 0.12 : 0)
-                        )
-                )
-                .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.12)) {
-                        isHovered = hovering
-                    }
-                }
         }
     }
 
@@ -186,15 +57,9 @@ struct InlineSettingsView: View {
     @State private var suppressNodeRoleChange = false
     @State private var showServerRoleBlockedAlert = false
     @State private var serverRoleBlockedMessage = ""
-    private var secondaryTextColor: Color {
-        isEmbeddedPanelStyle ? Color.primary.opacity(0.88) : UITheme.secondaryText
-    }
-    private var tertiaryTextColor: Color {
-        isEmbeddedPanelStyle ? Color.primary.opacity(0.76) : UITheme.tertiaryText
-    }
 
     private var contentView: some View {
-        VStack(alignment: .leading, spacing: UITheme.sectionSpacing) {
+        VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
             headerCard
             if model.config.nodeRole == .server {
                 serverSection
@@ -202,7 +67,7 @@ struct InlineSettingsView: View {
                 clientSection
             }
         }
-        .padding(embedInScroll ? UITheme.panelPadding : 0)
+        .padding(embedInScroll ? PanelTheme.padding : 0)
     }
 
     var body: some View {
@@ -217,10 +82,9 @@ struct InlineSettingsView: View {
         }
         .toggleStyle(.switch)
         .controlSize(.regular)
-        .tint(isEmbeddedPanelStyle ? Color.primary : UITheme.accent)
+        .tint(PanelTheme.accentCyan)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(width: embedInScroll ? UITheme.panelWidth : nil, alignment: .leading)
-        .font(UITheme.bodyFont)
+        .font(PanelTheme.bodyFont)
         .onAppear {
             loadTailscalePeers()
             refreshConnectivity()
@@ -266,8 +130,19 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - Header
+
     private var headerCard: some View {
-        card("ClawGate", subtitle: model.config.nodeRole == .server ? "Server" : "Client") {
+        PanelCard {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("ClawGate")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
+                Text(model.config.nodeRole == .server ? "Server" : "Client")
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textSecondary)
+            }
+
             Picker("Role", selection: $model.config.nodeRole) {
                 Text("Server").tag(NodeRole.server)
                 Text("Client").tag(NodeRole.client)
@@ -275,68 +150,79 @@ struct InlineSettingsView: View {
             .pickerStyle(.segmented)
 
             HStack(spacing: 8) {
-                Button("Apply Recommended") {
+                PanelActionButton(title: "Apply Recommended", tone: .primary) {
                     applyRecommended(force: true)
                 }
-                .buttonStyle(GlassButtonStyle(prominent: true, embedded: isEmbeddedPanelStyle))
-                .modifier(HoverInteractiveControlModifier(cornerRadius: 9, embedded: isEmbeddedPanelStyle))
-
                 Text("Tailscale LAN defaults")
-                    .font(UITheme.bodyFont)
-                    .foregroundStyle(tertiaryTextColor)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textTertiary)
             }
         }
     }
 
+    // MARK: - Server Section
+
     private var serverSection: some View {
         Group {
-            card("Tmux") {
+            PanelCard {
+                Text("Tmux")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                 Toggle("Enabled", isOn: $model.config.tmuxEnabled)
                 statusRow(state: tmuxState)
                 Text("Feed: \(model.config.tmuxStatusBarURL)")
-                    .font(UITheme.bodyFont)
-                    .foregroundStyle(tertiaryTextColor)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textTertiary)
                     .lineLimit(1)
             }
 
-            card("Messenger (LINE)") {
+            PanelCard {
+                Text("Messenger (LINE)")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                 Toggle("Enabled", isOn: $model.config.lineEnabled)
                 if model.config.lineEnabled {
                     fieldRow("Conversation") {
                         TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
                             .textFieldStyle(.plain)
-                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
+                            .modifier(PanelInputModifier())
                     }
                     Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
                             value: $model.config.linePollIntervalSeconds, in: 1...30)
-                    .font(UITheme.bodyFont)
-                    .foregroundStyle(secondaryTextColor)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textSecondary)
                 }
             }
 
-            card("Federation") {
+            PanelCard {
+                Text("Federation")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                 Toggle("Enabled", isOn: $model.config.federationEnabled)
                 if model.config.federationEnabled {
                     Toggle("Remote Access (0.0.0.0)", isOn: $model.config.remoteAccessEnabled)
                     if !model.config.remoteAccessEnabled {
                         Text("Remote Access is off — only local clients can connect")
-                            .font(UITheme.bodyFont)
-                            .foregroundStyle(.orange)
+                            .font(PanelTheme.bodyFont)
+                            .foregroundStyle(PanelTheme.accentYellow)
                     }
                     statusRow(state: federationState)
                     Text("Accepting clients on ws://\(model.config.remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"):8765/federation")
-                        .font(UITheme.bodyFont)
-                        .foregroundStyle(tertiaryTextColor)
+                        .font(PanelTheme.bodyFont)
+                        .foregroundStyle(PanelTheme.textTertiary)
                         .lineLimit(2)
                     fieldRow("Token") {
                         SecureField("federation token", text: $model.config.federationToken)
                             .textFieldStyle(.plain)
-                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
+                            .modifier(PanelInputModifier())
                     }
                 }
             }
 
-            card("System") {
+            PanelCard {
+                Text("System")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                 if #available(macOS 13.0, *) {
                     Toggle("Launch at Login", isOn: launchAtLoginBinding)
                 }
@@ -347,18 +233,26 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - Client Section
+
     private var clientSection: some View {
         Group {
-            card("Tmux") {
+            PanelCard {
+                Text("Tmux")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                 Toggle("Enabled", isOn: $model.config.tmuxEnabled)
                 statusRow(state: tmuxState)
                 Text("Feed: \(model.config.tmuxStatusBarURL)")
-                    .font(UITheme.bodyFont)
-                    .foregroundStyle(tertiaryTextColor)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textTertiary)
                     .lineLimit(1)
             }
 
-            card("Federation") {
+            PanelCard {
+                Text("Federation")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                 Toggle("Enabled", isOn: $model.config.federationEnabled)
                 if model.config.federationEnabled {
                     statusRow(state: federationState)
@@ -376,41 +270,40 @@ struct InlineSettingsView: View {
                         } label: {
                             HStack(spacing: 6) {
                                 Text(selectedServerLabel())
-                                    .font(UITheme.bodyFont)
-                                    .foregroundStyle(UITheme.primaryText)
+                                    .font(PanelTheme.bodyFont)
+                                    .foregroundStyle(PanelTheme.textPrimary)
                                     .lineLimit(1)
                                 Spacer(minLength: 0)
                                 Image(systemName: "chevron.down")
                                     .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(secondaryTextColor)
+                                    .foregroundStyle(PanelTheme.textSecondary)
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
-                            .modifier(HoverInteractiveControlModifier(cornerRadius: 8, embedded: isEmbeddedPanelStyle))
+                            .modifier(PanelInputModifier())
                         }
                     }
 
                     if federationPeerSelectionBinding.wrappedValue.isEmpty {
                         TextField("server.tailnet.ts.net", text: federationHostBinding)
                             .textFieldStyle(.plain)
-                            .modifier(InputChromeModifier(embedded: isEmbeddedPanelStyle))
+                            .modifier(PanelInputModifier())
                     }
 
                     HStack(spacing: 8) {
-                        Button("Refresh Hosts") {
+                        PanelActionButton(title: "Refresh Hosts", tone: .neutral) {
                             loadTailscalePeers()
                         }
-                        .buttonStyle(GlassButtonStyle(prominent: false, embedded: isEmbeddedPanelStyle))
-                        .modifier(HoverInteractiveControlModifier(cornerRadius: 9, embedded: isEmbeddedPanelStyle))
-
                         Text("Detected: \(tailscalePeers.count)")
-                            .font(UITheme.bodyFont)
-                            .foregroundStyle(tertiaryTextColor)
+                            .font(PanelTheme.bodyFont)
+                            .foregroundStyle(PanelTheme.textTertiary)
                     }
                 }
             }
 
-            card("System") {
+            PanelCard {
+                Text("System")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                 if #available(macOS 13.0, *) {
                     Toggle("Launch at Login", isOn: launchAtLoginBinding)
                 }
@@ -421,18 +314,23 @@ struct InlineSettingsView: View {
         }
     }
 
+    // MARK: - Utilities
+
     @ViewBuilder
     private var utilitiesSection: some View {
         if let onOpenQRCode {
-            card("Utilities") {
-                Button("Show QR Code for [VibeTerm]") {
+            PanelCard {
+                Text("Utilities")
+                    .font(PanelTheme.titleFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
+                PanelActionButton(title: "Show QR Code for [VibeTerm]", tone: .neutral) {
                     onOpenQRCode()
                 }
-                .buttonStyle(GlassButtonStyle(prominent: false, embedded: isEmbeddedPanelStyle))
-                .modifier(HoverInteractiveControlModifier(cornerRadius: 9, embedded: isEmbeddedPanelStyle))
             }
         }
     }
+
+    // MARK: - Launch at Login
 
     @available(macOS 13.0, *)
     private var launchAtLoginBinding: Binding<Bool> {
@@ -454,93 +352,40 @@ struct InlineSettingsView: View {
         )
     }
 
-    private func card<Content: View>(_ title: String, subtitle: String? = nil, @ViewBuilder content: () -> Content) -> some View {
-        let cardShape = RoundedRectangle(cornerRadius: UITheme.cardRadius, style: .continuous)
-        return VStack(alignment: .leading, spacing: UITheme.cardSpacing) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(title)
-                    .font(UITheme.titleFont)
-                    .foregroundStyle(UITheme.primaryText)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(UITheme.bodyFont)
-                        .foregroundStyle(secondaryTextColor)
-                        .lineLimit(1)
-                }
-            }
-            content()
-        }
-        .padding(UITheme.cardPadding)
-        .background(
-            cardShape
-                .fill(
-                    isEmbeddedPanelStyle
-                    ? Color.primary.opacity(0.05)
-                    : Color.clear
-                )
-                .overlay(
-                    cardShape.fill(
-                        LinearGradient(
-                            colors: [UITheme.cardTop, UITheme.cardBottom],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .opacity(isEmbeddedPanelStyle ? 0 : 1)
-                )
-        )
-        .overlay(
-            cardShape
-                .stroke(
-                    isEmbeddedPanelStyle ? Color.primary.opacity(0.12) : UITheme.cardStroke,
-                    lineWidth: 1
-                )
-        )
-        .overlay(
-            cardShape
-                .inset(by: 0.5)
-                .stroke(
-                    isEmbeddedPanelStyle ? Color.clear : UITheme.cardInnerStroke,
-                    lineWidth: 0.5
-                )
-        )
-        .shadow(color: isEmbeddedPanelStyle ? Color.clear : UITheme.cardShadow, radius: 8, x: 0, y: 3)
-    }
+    // MARK: - Status Row
 
     private func statusRow(state: ConnectivityState) -> some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(state.color)
-                .frame(width: 8, height: 8)
+        HStack(spacing: 6) {
+            StatusDot(color: state.color)
             Text(state.text)
-                .font(UITheme.titleFont)
-                .foregroundStyle(UITheme.primaryText)
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textPrimary)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
         .background(
-            Capsule(style: .continuous)
-                .fill(isEmbeddedPanelStyle ? Color.primary.opacity(0.07) : UITheme.chipFill)
+            RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                .fill(state.color.opacity(0.08))
         )
         .overlay(
-            Capsule(style: .continuous)
-                .stroke(isEmbeddedPanelStyle ? Color.primary.opacity(0.14) : UITheme.chipStroke, lineWidth: 1)
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(state.color.opacity(0.22), lineWidth: 1)
+            RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                .stroke(state.color.opacity(0.15), lineWidth: 0.5)
         )
     }
+
+    // MARK: - Field Row
 
     private func fieldRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: 8) {
             Text(title)
-                .font(UITheme.titleFont)
-                .foregroundStyle(secondaryTextColor)
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textSecondary)
                 .frame(width: 84, alignment: .leading)
             content()
         }
     }
+
+    // MARK: - Federation Bindings
 
     private var federationHostBinding: Binding<String> {
         Binding(
@@ -600,6 +445,8 @@ struct InlineSettingsView: View {
         return selected
     }
 
+    // MARK: - Server Prerequisites
+
     private func evaluateServerRolePrerequisites() -> (ok: Bool, message: String) {
         let openClawReady: Bool
         if let gateway = readOpenClawGatewayConfig() {
@@ -641,6 +488,8 @@ struct InlineSettingsView: View {
         return (port: port, token: token)
     }
 
+    // MARK: - Recommended Settings
+
     private func applyRecommended(force: Bool = false) {
         if force || model.config.tmuxStatusBarURL.isEmpty {
             model.config.tmuxStatusBarURL = "ws://localhost:8080/ws/sessions"
@@ -654,7 +503,6 @@ struct InlineSettingsView: View {
             if force || !model.config.federationEnabled {
                 model.config.federationEnabled = true
             }
-            // Server mode: federationURL is not needed (we're the acceptor)
             if force || !model.config.tmuxEnabled {
                 model.config.tmuxEnabled = true
             }
@@ -691,6 +539,8 @@ struct InlineSettingsView: View {
     private func localMachineName() -> String {
         Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
+
+    // MARK: - Connectivity Probes
 
     private func startProbeTimer() {
         stopProbeTimer()
@@ -731,7 +581,6 @@ struct InlineSettingsView: View {
             return
         }
         if model.config.nodeRole == .server {
-            // Server: we're the listener, always "online"
             federationState = .online
             return
         }
@@ -817,5 +666,4 @@ struct InlineSettingsView: View {
         _ = semaphore.wait(timeout: .now() + timeout + 0.2)
         return result
     }
-
 }

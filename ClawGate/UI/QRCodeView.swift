@@ -1,7 +1,6 @@
 import SwiftUI
 import CoreImage.CIFilterBuiltins
 
-/// SwiftUI view for displaying VibeTerm connection QR code
 struct QRCodeView: View {
     @State private var tailscaleHostname: String?
     @State private var openClawToken: String?
@@ -14,19 +13,19 @@ struct QRCodeView: View {
     private static let appStoreURL = URL(string: "https://apps.apple.com/jp/app/vibeterm/id6758266443")!
 
     var body: some View {
-        VStack(spacing: 12) {
-            // Header — clickable to App Store
+        VStack(spacing: 8) {
             Link(destination: Self.appStoreURL) {
                 HStack(spacing: 6) {
                     Image(systemName: "iphone")
-                        .font(.system(size: 16))
+                        .font(.system(size: 14))
+                        .foregroundStyle(PanelTheme.accentCyan)
                     Text("Connect VibeTerm")
-                        .font(.headline)
+                        .font(PanelTheme.titleFont)
+                        .foregroundStyle(PanelTheme.textPrimary)
                 }
             }
             .padding(.top, 4)
 
-            // QR Code — clickable to App Store
             if let url = connectionURL, let qrImage = generateQRCode(from: url) {
                 Link(destination: Self.appStoreURL) {
                     Image(nsImage: qrImage)
@@ -34,71 +33,60 @@ struct QRCodeView: View {
                         .resizable()
                         .scaledToFit()
                         .frame(width: 200, height: 200)
-                        .padding()
+                        .padding(8)
                         .background(Color.white)
-                        .cornerRadius(8)
+                        .cornerRadius(PanelTheme.cornerRadius)
                 }
                 .onHover { inside in
                     if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
                 }
             } else {
-                VStack(spacing: 8) {
+                VStack(spacing: 6) {
                     Image(systemName: "qrcode")
                         .font(.system(size: 80))
-                        .foregroundColor(.secondary)
+                        .foregroundStyle(PanelTheme.textTertiary)
                     if let error = errorMessage {
                         Text(error)
-                            .foregroundColor(.orange)
-                            .font(.caption)
+                            .foregroundStyle(PanelTheme.accentYellow)
+                            .font(PanelTheme.smallFont)
                             .multilineTextAlignment(.center)
                     } else if isLoading {
                         ProgressView()
                             .scaleEffect(0.8)
                         Text("Fetching from server...")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
+                            .foregroundStyle(PanelTheme.textSecondary)
+                            .font(PanelTheme.smallFont)
                     } else {
                         Text("Loading...")
-                            .foregroundColor(.secondary)
-                            .font(.caption)
+                            .foregroundStyle(PanelTheme.textSecondary)
+                            .font(PanelTheme.smallFont)
                     }
                 }
                 .frame(width: 200, height: 200)
-                .padding()
+                .padding(8)
             }
 
-            // Connection info
-            VStack(alignment: .leading, spacing: 6) {
+            PanelCard {
                 ConnectionInfoRow(label: "Host", value: tailscaleHostname ?? "Not available")
                 ConnectionInfoRow(label: "Port", value: String(openClawPort))
             }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
 
-            // Copy URL button
-            Button(action: copyURL) {
-                HStack {
-                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                    Text(copied ? "Copied!" : "Copy URL")
-                }
-                .frame(maxWidth: .infinity)
+            PanelActionButton(title: copied ? "Copied!" : "Copy URL", tone: .primary) {
+                copyURL()
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(connectionURL == nil)
 
-            // Footer — clickable to App Store
             Link(destination: Self.appStoreURL) {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.down.app")
-                        .font(.caption2)
+                        .font(.system(size: 9))
                     Text("Get VibeTerm on App Store")
-                        .font(.caption)
+                        .font(PanelTheme.smallFont)
                 }
+                .foregroundStyle(PanelTheme.textTertiary)
             }
         }
-        .padding()
-        .frame(width: 320, height: 460)
+        .padding(PanelTheme.padding)
+        .frame(width: 300, height: 420)
         .onAppear {
             loadConnectionInfo()
         }
@@ -119,7 +107,6 @@ struct QRCodeView: View {
     }
 
     private func loadFromServer(federationURL: String) {
-        // Extract host:port from federation URL (e.g. "ws://host:8765/federation")
         guard let wsURL = URL(string: federationURL),
               let host = wsURL.host else {
             errorMessage = "Invalid federation URL"
@@ -289,7 +276,6 @@ private func getOpenClawConfig() -> (token: String, port: Int)? {
     return (token: token, port: port)
 }
 
-/// Row component for connection info display
 private struct ConnectionInfoRow: View {
     let label: String
     let value: String
@@ -297,15 +283,15 @@ private struct ConnectionInfoRow: View {
     var body: some View {
         HStack {
             Text(label + ":")
-                .foregroundColor(.secondary)
+                .foregroundStyle(PanelTheme.textSecondary)
                 .frame(width: 50, alignment: .trailing)
             Text(value)
-                .fontWeight(.medium)
+                .foregroundStyle(PanelTheme.textPrimary)
                 .textSelection(.enabled)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer()
         }
-        .font(.system(.body, design: .monospaced))
+        .font(PanelTheme.bodyFont)
     }
 }

@@ -5,6 +5,7 @@ struct MainPanelLogLine: Identifiable {
     let id = UUID()
     let text: String
     let color: NSColor
+    let event: String   // deduplication key (e.g. entry.event)
 }
 
 final class MainPanelModel: ObservableObject {
@@ -15,157 +16,93 @@ final class MainPanelModel: ObservableObject {
 }
 
 struct MainPanelView: View {
-    private enum MainPanelTab: String, CaseIterable, Identifiable {
-        case sessions = "Sessions"
-        case opsLogs = "Ops Logs"
-        case settings = "Settings"
-        case vibeterm = "VibeTerm"
-
-        var id: String { rawValue }
+    private enum Tab: String, CaseIterable {
+        case monitor = "Monitor"
+        case config  = "Config"
     }
-
-    @Environment(\.colorScheme) private var colorScheme
 
     @ObservedObject var settingsModel: SettingsModel
     @ObservedObject var panelModel: MainPanelModel
 
     let modeOrder: [String]
     let modeLabel: (String) -> String
-    let modeColor: (String) -> NSColor
     let onSetSessionMode: (String, String, String) -> Void
     let onQuit: () -> Void
     let logLimit: Int
 
-    @State private var selectedTab: MainPanelTab = .sessions
-
-    private let bodyFont = Font.system(size: 12.5, weight: .semibold, design: .monospaced)
-    private let titleFont = Font.system(size: 13, weight: .semibold, design: .monospaced)
-
-    private struct HoverInteractiveRowModifier: ViewModifier {
-        let cornerRadius: CGFloat
-        @State private var isHovered = false
-
-        func body(content: Content) -> some View {
-            content
-                .background(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(isHovered ? Color.primary.opacity(0.10) : Color.clear)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .stroke(Color.primary.opacity(isHovered ? 0.22 : 0), lineWidth: 1)
-                )
-                .onHover { hovering in
-                    withAnimation(.easeOut(duration: 0.12)) {
-                        isHovered = hovering
-                    }
-                }
-        }
-    }
+    @State private var selectedTab: Tab = .monitor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Picker("Section", selection: $selectedTab) {
-                ForEach(MainPanelTab.allCases) { tab in
-                    Text(tab.rawValue).tag(tab)
+        VStack(alignment: .leading, spacing: PanelTheme.spacing) {
+            // Tab bar
+            HStack(spacing: 2) {
+                ForEach(Tab.allCases, id: \.rawValue) { tab in
+                    PanelTabButton(
+                        title: tab.rawValue,
+                        isSelected: selectedTab == tab,
+                        action: { selectedTab = tab }
+                    )
                 }
+                Spacer()
             }
-            .labelsHidden()
-            .pickerStyle(.segmented)
+            .padding(.bottom, 2)
 
-            Divider()
-
+            // Tab content
             tabContent
 
-            Divider()
-
-            Button(action: onQuit) {
-                HStack(spacing: 8) {
-                    Text("Quit")
-                        .font(titleFont)
-                        .foregroundStyle(Color.primary)
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
-                .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
-            }
-            .buttonStyle(.plain)
+            // Quit
+            PanelActionButton(title: "Quit", tone: .danger, dense: true, action: onQuit)
         }
-        .padding(12)
+        .padding(PanelTheme.padding)
         .frame(minWidth: 380, maxWidth: 700, minHeight: 400, maxHeight: 1400)
-        .background(.ultraThinMaterial)
+        .background(PanelTheme.background)
+        .preferredColorScheme(.dark)
     }
 
     @ViewBuilder
     private var tabContent: some View {
         switch selectedTab {
-        case .sessions:
+        case .monitor:
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
                     sessionSection(title: "Codex Sessions", sessions: panelModel.codexSessions)
                     sessionSection(title: "Claude Code Sessions", sessions: panelModel.claudeSessions)
+
+                    Rectangle()
+                        .fill(PanelTheme.cardBorder)
+                        .frame(height: 1)
+
+                    opsLogsSection
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-        case .opsLogs:
+        case .config:
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
-                    sectionTitle("Ops Logs (latest \(logLimit))")
-                    if panelModel.logs.isEmpty {
-                        Text("  No recent logs")
-                            .font(bodyFont)
-                            .foregroundStyle(Color.secondary)
-                    } else {
-                        ForEach(panelModel.logs) { row in
-                            Text("  \(row.text)")
-                                .font(bodyFont)
-                                .foregroundStyle(readableSemanticColor(from: row.color))
-                                .lineLimit(1)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        case .settings:
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
-                    sectionTitle("Settings")
+                VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
+                    PanelSectionHeader(title: "Settings")
                     InlineSettingsView(model: settingsModel, embedInScroll: false, onOpenQRCode: nil)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        case .vibeterm:
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
-                    sectionTitle("VibeTerm")
 
-                    Text("Connect VibeTerm to OpenClaw on iPhone and keep your coding flow alive away from desk.")
-                        .font(bodyFont)
-                        .foregroundStyle(Color.secondary)
+                    Rectangle()
+                        .fill(PanelTheme.cardBorder)
+                        .frame(height: 1)
 
-                    HStack(spacing: 8) {
-                        vibetermPill("OpenClaw-linked", icon: "bolt.horizontal.circle")
-                        vibetermPill("Mobile Handoff", icon: "arrow.triangle.2.circlepath")
-                        vibetermPill("Remote Control", icon: "network")
-                    }
-
-                    QRCodeView()
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    vibetermSection
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
+    // MARK: - Sessions
+
     @ViewBuilder
     private func sessionSection(title: String, sessions: [CCStatusBarClient.CCSession]) -> some View {
-        sectionTitle(title)
+        PanelSectionHeader(title: title)
         if sessions.isEmpty {
-            Text("  No active sessions")
-                .font(bodyFont)
-                .foregroundStyle(Color.secondary)
+            Text("No active sessions")
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textTertiary)
+                .padding(.leading, 4)
         } else {
             ForEach(sessions, id: \.id) { session in
                 sessionRow(session)
@@ -178,7 +115,92 @@ struct MainPanelView: View {
             AppConfig.modeKey(sessionType: session.sessionType, project: session.project)
         ] ?? "ignore"
 
-        return Menu {
+        return SessionRowView(
+            session: session,
+            currentMode: currentMode,
+            modeOrder: modeOrder,
+            modeLabel: modeLabel,
+            onSetSessionMode: onSetSessionMode
+        )
+    }
+
+    // MARK: - Ops Logs
+
+    private var opsLogsSection: some View {
+        VStack(alignment: .leading, spacing: PanelTheme.spacing) {
+            PanelSectionHeader(title: "Ops Logs (\(logLimit))", accentColor: PanelTheme.accentYellow)
+            if panelModel.logs.isEmpty {
+                Text("No recent logs")
+                    .font(PanelTheme.smallFont)
+                    .foregroundStyle(PanelTheme.textTertiary)
+            } else {
+                ForEach(panelModel.logs) { row in
+                    Text(row.text)
+                        .font(PanelTheme.smallFont)
+                        .foregroundStyle(logColor(from: row.color))
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private func logColor(from nsColor: NSColor) -> Color {
+        // Resolve the NSColor to RGB in the current appearance context.
+        // Boost if luminance is too low to be readable on our dark background.
+        guard let rgb = nsColor.usingColorSpace(.deviceRGB) else {
+            return PanelTheme.textPrimary
+        }
+        var r = rgb.redComponent
+        var g = rgb.greenComponent
+        var b = rgb.blueComponent
+        let luminance = (0.2126 * r) + (0.7152 * g) + (0.0722 * b)
+
+        let minLuminance: CGFloat = 0.45
+        if luminance < minLuminance {
+            let lift = min((minLuminance - luminance) / max(1.0 - luminance, 0.001), 1.0)
+            r = r + (1.0 - r) * lift * 0.9
+            g = g + (1.0 - g) * lift * 0.9
+            b = b + (1.0 - b) * lift * 0.9
+        }
+
+        return Color(red: Double(r), green: Double(g), blue: Double(b))
+    }
+
+    // MARK: - VibeTerm
+
+    private var vibetermSection: some View {
+        VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
+            PanelSectionHeader(title: "VibeTerm", accentColor: PanelTheme.accentGreen)
+
+            Text("Connect VibeTerm to OpenClaw on iPhone.")
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textSecondary)
+
+            HStack(spacing: 4) {
+                PanelPill(text: "OpenClaw-linked", color: PanelTheme.accentCyan, fontSize: 10)
+                PanelPill(text: "Mobile Handoff", color: PanelTheme.accentGreen, fontSize: 10)
+                PanelPill(text: "Remote Control", color: PanelTheme.accentBlue, fontSize: 10)
+            }
+
+            QRCodeView()
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+}
+
+// MARK: - SessionRowView (hover-aware)
+
+private struct SessionRowView: View {
+    let session: CCStatusBarClient.CCSession
+    let currentMode: String
+    let modeOrder: [String]
+    let modeLabel: (String) -> String
+    let onSetSessionMode: (String, String, String) -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Menu {
             ForEach(modeOrder, id: \.self) { mode in
                 Button {
                     onSetSessionMode(session.sessionType, session.project, mode)
@@ -193,106 +215,52 @@ struct MainPanelView: View {
                 }
             }
         } label: {
-            HStack(spacing: 8) {
-                Text("  \(statusIcon(session: session, mode: currentMode)) \(session.project)")
-                    .font(bodyFont)
-                    .foregroundStyle(Color.primary)
+            HStack(spacing: 6) {
+                StatusDot(color: dotColor)
+
+                Text(session.project)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textPrimary)
                     .lineLimit(1)
-                Text("[\(currentMode)]")
-                    .font(bodyFont)
-                    .foregroundStyle(readableSemanticColor(from: modeColor(currentMode)))
+
+                PanelPill(
+                    text: currentMode,
+                    color: PanelTheme.modeColor(currentMode),
+                    lit: currentMode != "ignore"
+                )
+
+                PanelPill(
+                    text: PanelTheme.sessionTypeLabel(session.sessionType),
+                    color: PanelTheme.sessionTypeColor(session.sessionType)
+                )
+
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Color.secondary)
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(PanelTheme.textTertiary.opacity(isHovered ? 1 : 0))
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                    .fill(PanelTheme.textPrimary.opacity(isHovered ? 0.08 : 0))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                    .stroke(PanelTheme.textPrimary.opacity(isHovered ? 0.12 : 0), lineWidth: 0.5)
+            )
             .contentShape(Rectangle())
-            .modifier(HoverInteractiveRowModifier(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-    }
-
-    private func sectionTitle(_ text: String) -> some View {
-        Text(text)
-            .font(titleFont)
-            .foregroundStyle(Color.primary)
-    }
-
-    private func vibetermPill(_ text: String, icon: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
-            Text(text)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-        }
-        .foregroundStyle(Color.primary.opacity(0.82))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Color.primary.opacity(0.08))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
-        )
-    }
-
-    private func statusIcon(session: CCStatusBarClient.CCSession, mode: String) -> String {
-        if mode == "ignore" {
-            return "○"
-        }
-        switch session.status {
-        case "running":
-            return "▶"
-        case "waiting_input":
-            return "●"
-        default:
-            return "○"
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.1)) { isHovered = hovering }
+            if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
     }
 
-    private func readableSemanticColor(from color: NSColor) -> Color {
-        guard let rgb = color.usingColorSpace(.deviceRGB) else {
-            return Color(nsColor: color)
-        }
-        var red = rgb.redComponent
-        var green = rgb.greenComponent
-        var blue = rgb.blueComponent
-        let alpha = max(rgb.alphaComponent, 0.94)
-        let luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
-
-        if colorScheme == .light {
-            let maxLuminance: CGFloat = 0.42
-            if luminance > maxLuminance {
-                let scale = maxLuminance / max(luminance, 0.001)
-                red *= scale
-                green *= scale
-                blue *= scale
-            }
-            if let label = NSColor.labelColor.usingColorSpace(.deviceRGB) {
-                let blend: CGFloat = 0.16
-                red = (red * (1.0 - blend)) + (label.redComponent * blend)
-                green = (green * (1.0 - blend)) + (label.greenComponent * blend)
-                blue = (blue * (1.0 - blend)) + (label.blueComponent * blend)
-            }
-        } else {
-            let minLuminance: CGFloat = 0.60
-            if luminance < minLuminance {
-                let lift = min((minLuminance - luminance) / max(1.0 - luminance, 0.001), 1.0)
-                red = red + (1.0 - red) * lift * 0.55
-                green = green + (1.0 - green) * lift * 0.55
-                blue = blue + (1.0 - blue) * lift * 0.55
-            }
-        }
-
-        return Color(nsColor: NSColor(
-            calibratedRed: red,
-            green: green,
-            blue: blue,
-            alpha: alpha
-        ))
+    private var dotColor: Color {
+        if currentMode == "ignore" { return PanelTheme.textTertiary }
+        return PanelTheme.statusColor(session.status)
     }
 }
