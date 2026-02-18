@@ -9,10 +9,20 @@ private extension NSColor {
 }
 
 final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
+    private enum GhosttyAnchorSide {
+        case right
+        case left
+    }
+
     private var statusItem: NSStatusItem?
     private var mainPanel: NSPanel?
     private var mainPanelHost: NSHostingController<MainPanelView>?
     private var refreshTimer: Timer?
+    private var ghosttyFollowTimer: Timer?
+    private var lastGhosttyFrame: CGRect?
+    private var isGhosttySnapped = false
+    private var ghosttyDetachCooldownUntil: Date?
+    private var ghosttyAnchorSide: GhosttyAnchorSide = .right
     private let mainPanelLogLimit = 30
 
     private let modeOrder: [String] = ["ignore", "observe", "auto", "autonomous"]
@@ -126,21 +136,223 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    private func findGhosttyFrame() -> CGRect? {
+        guard
+            let windowInfo = CGWindowListCopyWindowInfo(
+                [.excludeDesktopElements, .optionOnScreenOnly],
+                kCGNullWindowID
+            ) as? [[String: Any]]
+        else {
+            return nil
+        }
+
+        let minWindowDimension: CGFloat = 120
+        var bestFrame: CGRect?
+        var bestVisibleArea: CGFloat = 0
+
+        for info in windowInfo {
+            guard let ownerName = info[kCGWindowOwnerName as String] as? String, ownerName == "Ghostty" else {
+                continue
+            }
+
+            let layerValue = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? -1
+            guard layerValue == 0 else { continue }
+
+            guard
+                let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                let cgFrame = CGRect(dictionaryRepresentation: boundsDict)
+            else {
+                continue
+            }
+            let globalTop = NSScreen.screens.map(\.frame.maxY).max() ?? cgFrame.maxY
+            let appKitY = globalTop - cgFrame.minY - cgFrame.height
+            let frame = CGRect(x: cgFrame.minX, y: appKitY, width: cgFrame.width, height: cgFrame.height)
+
+            guard
+                frame.width >= minWindowDimension,
+                frame.height >= minWindowDimension
+            else {
+                continue
+            }
+
+            let visibleArea = NSScreen.screens.reduce(CGFloat.zero) { partial, screen in
+                let intersection = frame.intersection(screen.visibleFrame)
+                if intersection.isNull || intersection.isEmpty {
+                    return partial
+                }
+                return partial + (intersection.width * intersection.height)
+            }
+
+            guard visibleArea > 0 else { continue }
+            if visibleArea > bestVisibleArea {
+                bestVisibleArea = visibleArea
+                bestFrame = frame
+            }
+        }
+
+        return bestFrame
+    }
+
+    private func clampPanelOrigin(_ origin: CGPoint, panelSize: CGSize, margin: CGFloat = 8) -> CGPoint {
+        let panelRect = CGRect(origin: origin, size: panelSize)
+        let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(panelRect) })
+            ?? NSScreen.screens.first(where: { $0.visibleFrame.contains(origin) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        guard let targetScreen = screen else { return origin }
+
+        let visibleFrame = targetScreen.visibleFrame
+        let minX = visibleFrame.minX + margin
+        let minY = visibleFrame.minY + margin
+        let maxX = max(minX, visibleFrame.maxX - panelSize.width - margin)
+        let maxY = max(minY, visibleFrame.maxY - panelSize.height - margin)
+
+        let clampedX = max(minX, min(origin.x, maxX))
+        let clampedY = max(minY, min(origin.y, maxY))
+        return CGPoint(x: clampedX, y: clampedY)
+    }
+
+    private func ghosttyAnchoredOrigin(
+        for ghosttyFrame: CGRect,
+        panelSize: CGSize,
+        preferredSide: GhosttyAnchorSide?
+    ) -> (origin: CGPoint, side: GhosttyAnchorSide) {
+        let gap: CGFloat = 2
+        let candidateScreen = NSScreen.screens.first(where: { $0.frame.intersects(ghosttyFrame) })
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
+        let visibleFrame = candidateScreen?.visibleFrame
+
+        let rightX = ghosttyFrame.maxX + gap
+        let leftX = ghosttyFrame.minX - panelSize.width - gap
+        let y = ghosttyFrame.maxY - panelSize.height
+
+        let fitsRight = visibleFrame.map { rightX + panelSize.width <= $0.maxX - 0.5 } ?? true
+        let fitsLeft = visibleFrame.map { leftX >= $0.minX + 0.5 } ?? true
+
+        var side = preferredSide ?? (fitsRight ? .right : .left)
+        if side == .right && !fitsRight && fitsLeft {
+            side = .left
+        } else if side == .left && !fitsLeft && fitsRight {
+            side = .right
+        }
+
+        let x = (side == .right) ? rightX : leftX
+        let clamped = clampPanelOrigin(CGPoint(x: x, y: y), panelSize: panelSize, margin: 2)
+        return (CGPoint(x: round(clamped.x), y: round(clamped.y)), side)
+    }
+
+    private func startGhosttyFollow() {
+        ghosttyFollowTimer?.invalidate()
+        ghosttyFollowTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] _ in
+            self?.tickGhosttyFollow()
+        }
+    }
+
+    private func stopGhosttyFollow() {
+        ghosttyFollowTimer?.invalidate()
+        ghosttyFollowTimer = nil
+        lastGhosttyFrame = nil
+        isGhosttySnapped = false
+        ghosttyDetachCooldownUntil = nil
+        ghosttyAnchorSide = .right
+    }
+
+    private func detectSnapSide(panelFrame: CGRect, ghosttyFrame: CGRect, threshold: CGFloat) -> GhosttyAnchorSide? {
+        let yOverlap = panelFrame.maxY > ghosttyFrame.minY && panelFrame.minY < ghosttyFrame.maxY
+        guard yOverlap else { return nil }
+
+        let rightDistance = abs(panelFrame.minX - ghosttyFrame.maxX)
+        let leftDistance = abs(panelFrame.maxX - ghosttyFrame.minX)
+        guard rightDistance <= threshold || leftDistance <= threshold else { return nil }
+        return rightDistance <= leftDistance ? .right : .left
+    }
+
+    private func tickGhosttyFollow() {
+        guard let panel = mainPanel, panel.isVisible else {
+            stopGhosttyFollow()
+            return
+        }
+        guard let currentGhosttyFrame = findGhosttyFrame() else {
+            stopGhosttyFollow()
+            return
+        }
+        let previousGhosttyFrame = lastGhosttyFrame
+        let currentFrame = panel.frame
+        let target = ghosttyAnchoredOrigin(
+            for: currentGhosttyFrame,
+            panelSize: currentFrame.size,
+            preferredSide: ghosttyAnchorSide
+        )
+        let currentOrigin = currentFrame.origin
+
+        if isGhosttySnapped {
+            let detachDistance = hypot(currentOrigin.x - target.origin.x, currentOrigin.y - target.origin.y)
+            let ghostMotion: CGFloat
+            if let previousGhosttyFrame {
+                ghostMotion = hypot(
+                    currentGhosttyFrame.origin.x - previousGhosttyFrame.origin.x,
+                    currentGhosttyFrame.origin.y - previousGhosttyFrame.origin.y
+                )
+            } else {
+                ghostMotion = 0
+            }
+            if detachDistance >= 28 && ghostMotion < 2 {
+                isGhosttySnapped = false
+                ghosttyDetachCooldownUntil = Date().addingTimeInterval(0.45)
+                lastGhosttyFrame = currentGhosttyFrame
+                return
+            }
+
+            ghosttyAnchorSide = target.side
+            if detachDistance >= 1.0 {
+                panel.setFrameOrigin(target.origin)
+            }
+        } else {
+            if let cooldownEnd = ghosttyDetachCooldownUntil, Date() < cooldownEnd {
+                lastGhosttyFrame = currentGhosttyFrame
+                return
+            }
+            ghosttyDetachCooldownUntil = nil
+
+            if let snapSide = detectSnapSide(panelFrame: currentFrame, ghosttyFrame: currentGhosttyFrame, threshold: 14) {
+                ghosttyAnchorSide = snapSide
+                let snapTarget = ghosttyAnchoredOrigin(
+                    for: currentGhosttyFrame,
+                    panelSize: currentFrame.size,
+                    preferredSide: snapSide
+                )
+                panel.setFrameOrigin(snapTarget.origin)
+                isGhosttySnapped = true
+                ghosttyAnchorSide = snapTarget.side
+            }
+        }
+
+        lastGhosttyFrame = currentGhosttyFrame
+    }
+
     private func positionPanelBelowStatusItem(_ panel: NSPanel) {
+        let panelSize = panel.frame.size
+
+        if let ghosttyFrame = findGhosttyFrame() {
+            let placement = ghosttyAnchoredOrigin(for: ghosttyFrame, panelSize: panelSize, preferredSide: nil)
+            panel.setFrameOrigin(placement.origin)
+            ghosttyAnchorSide = placement.side
+            isGhosttySnapped = true
+            ghosttyDetachCooldownUntil = nil
+            lastGhosttyFrame = ghosttyFrame
+            startGhosttyFollow()
+            return
+        }
+
+        stopGhosttyFollow()
+
         guard let button = statusItem?.button, let buttonWindow = button.window else { return }
         let buttonRect = button.convert(button.bounds, to: nil)
         let screenRect = buttonWindow.convertToScreen(buttonRect)
-        let panelSize = panel.frame.size
         let x = screenRect.midX - panelSize.width / 2
         let y = screenRect.minY - panelSize.height - 4
-        if let screen = NSScreen.main {
-            let visibleFrame = screen.visibleFrame
-            let clampedX = max(visibleFrame.minX + 8, min(x, visibleFrame.maxX - panelSize.width - 8))
-            let clampedY = max(visibleFrame.minY + 8, y)
-            panel.setFrameOrigin(NSPoint(x: clampedX, y: clampedY))
-        } else {
-            panel.setFrameOrigin(NSPoint(x: x, y: y))
-        }
+        panel.setFrameOrigin(clampPanelOrigin(CGPoint(x: x, y: y), panelSize: panelSize))
     }
 
     /// Called by AppRuntime after CCStatusBarClient updates sessions.
@@ -444,6 +656,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         closeMainPanel(nil)
         refreshTimer?.invalidate()
         refreshTimer = nil
+        stopGhosttyFollow()
         runtime.stopServer()
         NSApplication.shared.terminate(nil)
     }
@@ -458,6 +671,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
     private func closeMainPanel(_ sender: Any?) {
         guard let panel = mainPanel, panel.isVisible else { return }
+        stopGhosttyFollow()
         panel.orderOut(sender)
     }
 }

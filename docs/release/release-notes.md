@@ -1,9 +1,9 @@
-# ClawGate v0.3.1
+# ClawGate v0.3.3
 
 ## Summary
-- Public-facing wording is now messenger-first (LINE is documented as the current adapter, not a hard requirement everywhere).
-- Settings and diagnostics text now use "Messenger (LINE)" phrasing for clearer cross-messenger positioning.
-- Ops log compact labels for outbound chat send events were simplified (`MSG SEND`, `MSG OUT OK`).
+- Menu panel now snaps to a visible Ghostty window using `CGWindowList` (no AX dependency for tracking source).
+- Panel follow behavior while Ghostty moves is smoother and supports manual detach/re-snap behavior.
+- Placement offsets were tuned (vertical alignment and tighter horizontal gap) while preserving off-screen clamping and fallback to status-item placement when Ghostty is absent.
 
 ## Breaking Changes
 - None.
@@ -15,10 +15,10 @@
 
 ## Known Issues
 - OCR-based inbound capture (LINE adapter) can still miss edge-case long/complex bubbles; tuning is ongoing.
-- If Tailscale/Federation environment is unstable, session relay state may take a short time to converge after restart.
+- Ghostty-follow behavior depends on Ghostty exposing a normal on-screen layer-0 window; hidden/minimized windows intentionally fall back to status-item placement.
 
 ## Rollback
-- Previous stable release: v0.3.0
+- Previous stable release: v0.3.2
 - Rollback steps: see `docs/runbooks/rollback.md`
 
 ## Support
