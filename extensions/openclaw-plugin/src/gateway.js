@@ -78,6 +78,14 @@ try {
 // ── Prompt loading with layered overlays ───────────────────────────
 const DEFAULT_PRIVATE_PROMPTS_PATH = join(homedir(), ".clawgate", "prompts-private.js");
 const PROMPT_PROFILE_VERSION = "2026-02-19.autonomous-policy-v1";
+function envFlag(name, fallback = false) {
+  const raw = `${process.env[name] ?? ""}`.trim();
+  if (!raw) return fallback;
+  return /^(1|true|yes|on)$/i.test(raw);
+}
+const ENABLE_INTERACTION_PENDING_STRICT_V2 = envFlag("CLAWGATE_INTERACTION_PENDING_STRICT_V2", true);
+const ENABLE_AUTONOMOUS_LOOP_GUARD_V2 = envFlag("CLAWGATE_AUTONOMOUS_LOOP_GUARD_V2", true);
+const ENABLE_INGRESS_DEDUP_TUNE_V2 = envFlag("CLAWGATE_INGRESS_DEDUP_TUNE_V2", false);
 const OBSERVE_REQUIRED_TOKENS = ["goal", "scope", "risk", "3-8"];
 const AUTONOMOUS_REQUIRED_TOKENS = ["<cc_task>"];
 const AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS = [
@@ -501,6 +509,10 @@ const TASK_SEND_ESCALATION_WINDOW_MS = Math.max(
   5_000,
   (Number.parseInt(process.env.CLAWGATE_TASK_SEND_ESCALATION_SEC || "60", 10) || 60) * 1000
 );
+const INTERACTION_PENDING_NOTIFY_WINDOW_MS = Math.max(
+  5_000,
+  (Number.parseInt(process.env.CLAWGATE_INTERACTION_PENDING_NOTIFY_SEC || "60", 10) || 60) * 1000
+);
 const TMUX_TYPING_GUARD_READ_LINES = 120;
 const TMUX_TYPING_GUARD_SCAN_TAIL_LINES = 48;
 const TMUX_TYPING_GUARD_MAX_PROMPT_DISTANCE_LINES = 8;
@@ -515,6 +527,8 @@ const recentCompletionDispatches = new Map();
 const recentTaskSendErrors = new Map();
 /** @type {Map<string, { firstAt: number, lastAt: number, lastEscalatedAt: number, count: number, category: string }>} */
 const taskSendFailureStreaks = new Map();
+/** @type {Map<string, number>} */
+const recentInteractionPendingNotifications = new Map();
 
 function normalizeFingerprintText(text, max = 800) {
   const normalized = `${text || ""}`.replace(/\s+/g, " ").trim();
@@ -561,6 +575,31 @@ function shouldNotifyTaskSendError({ project, errorCode, taskText }) {
     return false;
   }
   recentTaskSendErrors.set(key, now);
+  return true;
+}
+
+function shouldNotifyInteractionPending({
+  project,
+  reason,
+  questionText,
+  options = [],
+}) {
+  if (!ENABLE_AUTONOMOUS_LOOP_GUARD_V2) return true;
+  const now = Date.now();
+  for (const [k, ts] of recentInteractionPendingNotifications) {
+    if (now - ts > INTERACTION_PENDING_NOTIFY_WINDOW_MS) recentInteractionPendingNotifications.delete(k);
+  }
+  const normalizedQuestion = normalizeFingerprintText(questionText, 400);
+  const normalizedOptions = Array.isArray(options)
+    ? options.map((opt) => normalizeFingerprintText(opt, 120)).join("|")
+    : "";
+  const keyMaterial = `${project || "unknown"}::${reason || "interaction_pending"}::${normalizedQuestion}::${normalizedOptions}`;
+  const key = hashFingerprint(keyMaterial);
+  const last = recentInteractionPendingNotifications.get(key);
+  if (last && now - last <= INTERACTION_PENDING_NOTIFY_WINDOW_MS) {
+    return false;
+  }
+  recentInteractionPendingNotifications.set(key, now);
   return true;
 }
 
@@ -691,6 +730,26 @@ function recordPluginSend(text) {
  * Check if event text looks like an echo of a recently sent message.
  * Uses substring matching since OCR text may be noisy/truncated.
  */
+function normalizeEchoText(text) {
+  return `${text || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function isLikelyPluginEcho(candidate, sent) {
+  const normalizedCandidate = normalizeEchoText(candidate);
+  const normalizedSent = normalizeEchoText(sent);
+  if (normalizedSent.length < 6 || !normalizedCandidate) return false;
+  if (normalizedCandidate === normalizedSent) return true;
+  if (normalizedCandidate.includes(normalizedSent)) {
+    const dominance = normalizedSent.length / Math.max(normalizedCandidate.length, 1);
+    return dominance >= 0.70;
+  }
+  if (normalizedSent.includes(normalizedCandidate)) {
+    const coverage = normalizedCandidate.length / Math.max(normalizedSent.length, 1);
+    return coverage >= 0.85;
+  }
+  return false;
+}
+
 function isPluginEcho(eventText) {
   if (!eventText) return false;
   const now = Date.now();
@@ -703,7 +762,13 @@ function isPluginEcho(eventText) {
 
   for (const s of recentSends) {
     if (s.time < cutoff) continue;
-    // Check if any significant portion of the sent text appears in the event
+    if (ENABLE_INGRESS_DEDUP_TUNE_V2) {
+      if (isLikelyPluginEcho(normalizedEvent, s.text)) {
+        return true;
+      }
+      continue;
+    }
+    // Legacy behavior: prefix substring match
     const sentSnippet = s.text.slice(0, 40).replace(/\s+/g, " ");
     if (sentSnippet.length >= 8 && normalizedEvent.includes(sentSnippet)) {
       return true;
@@ -720,6 +785,14 @@ function isPluginEcho(eventText) {
 const DEDUP_WINDOW_MS = 0; // disable duplicate suppression (recall-first)
 const MIN_TEXT_LENGTH = 1;      // Favor recall over precision for OCR-driven ingress
 const STALE_REPEAT_WINDOW_MS = 0; // disable stale-repeat suppression (recall-first)
+const DEDUP_WINDOW_MS_V2 = Math.max(
+  0,
+  (Number.parseInt(process.env.CLAWGATE_INGRESS_DEDUP_WINDOW_MS || "8000", 10) || 8000)
+);
+const STALE_REPEAT_WINDOW_MS_V2 = Math.max(
+  0,
+  (Number.parseInt(process.env.CLAWGATE_INGRESS_STALE_REPEAT_WINDOW_MS || "20000", 10) || 20000)
+);
 
 /** @type {{ fingerprint: string, time: number }[]} */
 const recentInbounds = [];
@@ -730,11 +803,20 @@ function eventFingerprint(text) {
   return text.replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
+function activeDedupWindowMs() {
+  return ENABLE_INGRESS_DEDUP_TUNE_V2 ? DEDUP_WINDOW_MS_V2 : DEDUP_WINDOW_MS;
+}
+
+function activeStaleRepeatWindowMs() {
+  return ENABLE_INGRESS_DEDUP_TUNE_V2 ? STALE_REPEAT_WINDOW_MS_V2 : STALE_REPEAT_WINDOW_MS;
+}
+
 function isDuplicateInbound(eventText) {
-  if (DEDUP_WINDOW_MS <= 0) return false;
+  const windowMs = activeDedupWindowMs();
+  if (windowMs <= 0) return false;
   const now = Date.now();
   // Prune expired entries
-  while (recentInbounds.length > 0 && recentInbounds[0].time < now - DEDUP_WINDOW_MS) {
+  while (recentInbounds.length > 0 && recentInbounds[0].time < now - windowMs) {
     recentInbounds.shift();
   }
   const fp = eventFingerprint(eventText);
@@ -753,12 +835,13 @@ function stableKey(eventText, conversation) {
 }
 
 function isStaleRepeatInbound(eventText, conversation, source) {
-  if (STALE_REPEAT_WINDOW_MS <= 0) return false;
+  const windowMs = activeStaleRepeatWindowMs();
+  if (windowMs <= 0) return false;
   // Notification banner is explicit new-message signal; don't block it.
   if (source === "notification_banner") return false;
 
   const now = Date.now();
-  while (recentStableInbounds.length > 0 && recentStableInbounds[0].time < now - STALE_REPEAT_WINDOW_MS) {
+  while (recentStableInbounds.length > 0 && recentStableInbounds[0].time < now - windowMs) {
     recentStableInbounds.shift();
   }
   const key = stableKey(eventText, conversation);
@@ -1096,15 +1179,36 @@ function detectInteractionPendingFromCompletion({ payload, text, project }) {
   const hasShortcutFooter = /\?\s*for shortcuts/i.test(`${text || ""}`);
 
   const hintByReason = waitingReason === "permission_prompt" || waitingReason === "askuserquestion";
-  if (!parsed && !hintByReason && !pending && !hasShortcutFooter) return null;
-
   const normalizedPending = pending ? normalizeQuestionRecord(pending) : null;
   const normalizedParsed = parsed ? normalizeQuestionRecord(parsed) : null;
+  const parsedHasOptions = (normalizedParsed?.options?.length || 0) >= 2;
+  const pendingHasOptions = (normalizedPending?.options?.length || 0) >= 2;
+
+  if (!ENABLE_INTERACTION_PENDING_STRICT_V2) {
+    if (!parsed && !hintByReason && !pending && !hasShortcutFooter) return null;
+  } else {
+    // Strict mode: shortcuts footer alone is not enough.
+    const hasStructuredEvidence = hintByReason || parsedHasOptions || pendingHasOptions;
+    if (!hasStructuredEvidence) return null;
+  }
+
+  let reason = "pending_question";
+  if (hintByReason) {
+    reason = waitingReason;
+  } else if (parsedHasOptions && parsed?.reason) {
+    reason = parsed.reason;
+  } else if (pendingHasOptions) {
+    reason = "pending_question";
+  } else if (!ENABLE_INTERACTION_PENDING_STRICT_V2 && hasShortcutFooter) {
+    reason = "shortcuts_footer";
+  }
 
   return {
-    reason: parsed?.reason || (hintByReason ? waitingReason : "pending_question"),
+    reason,
     questionText: normalizedParsed?.questionText || normalizedPending?.questionText || "Interactive prompt detected in terminal.",
-    options: normalizedParsed?.options?.length ? normalizedParsed.options : (normalizedPending?.options || []),
+    options: parsedHasOptions
+      ? normalizedParsed.options
+      : (pendingHasOptions ? normalizedPending.options : []),
     selectedIndex: Number.isFinite(normalizedParsed?.selectedIndex)
       ? normalizedParsed.selectedIndex
       : (normalizedPending?.selectedIndex || 0),
@@ -1715,6 +1819,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   const activeProject = getActiveProject(conversationKey);
   const sourceTaskProject = `${activeProject?.project || ""}`.trim();
   const sourceTaskMode = sourceTaskProject ? (sessionModes.get(sourceTaskProject) || "ignore") : "ignore";
+  const suppressAutonomousRoutingNoise = ENABLE_AUTONOMOUS_LOOP_GUARD_V2 && sourceTaskMode === "autonomous";
 
   // Clear active project so outbound.sendText doesn't leak tmux prefixes into messenger replies.
   clearActiveProject(conversationKey);
@@ -1792,6 +1897,18 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           project: targetProject,
           error_code: errorCode,
         });
+
+        if (suppressAutonomousRoutingNoise) {
+          const streak = trackTaskSendFailureStreak({ project: targetProject, category });
+          logAutonomousLineEvent(log, {
+            accountId,
+            project: targetProject,
+            reason: "routing_error",
+            status: "suppressed",
+            detail: `inbound_autonomous_guard category=${category} count=${streak.count}`,
+          });
+          return;
+        }
 
         if (category !== "other") {
           const streak = trackTaskSendFailureStreak({ project: targetProject, category });
@@ -2162,6 +2279,22 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
         advisoryRaw || "Interactive prompt is waiting. Please choose an option in the terminal.",
         { project, sessionType, eventKind: "question" }
       );
+      const shouldNotify = shouldNotifyInteractionPending({
+        project,
+        reason: "question_advisory",
+        questionText,
+        options,
+      });
+      if (!shouldNotify) {
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "interaction_pending",
+          status: "suppressed",
+          detail: "question_advisory_dedup",
+        });
+        return;
+      }
       try {
         await sendLine(defaultConversation || project, advisory);
         logAutonomousLineEvent(log, {
@@ -2490,6 +2623,22 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         replyText || "Interactive prompt is waiting. Please choose an option in the terminal.",
         { project, sessionType, eventKind: "question" }
       );
+      const shouldNotify = shouldNotifyInteractionPending({
+        project,
+        reason: interactionPending.reason,
+        questionText: interactionPending.questionText,
+        options: interactionPending.options || [],
+      });
+      if (!shouldNotify) {
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "interaction_pending",
+          status: "suppressed",
+          detail: "completion_advisory_dedup",
+        });
+        return;
+      }
       try {
         await sendLine(defaultConversation || project, advisory);
         logAutonomousLineEvent(log, {
@@ -3115,22 +3264,52 @@ export async function startAccount(ctx) {
           // Skip only near-empty texts; keep short Japanese lines for recall.
           if (eventText.trim().length < MIN_TEXT_LENGTH) {
             log?.debug?.(`clawgate: [${accountId}] skipped short/noisy text (raw=${rawEventText.length}, clean=${eventText.length})`);
+            traceLog(log, "info", {
+              trace_id: traceId,
+              stage: "ingress_dropped",
+              action: "sanitize",
+              status: "suppressed",
+              reason: "too_short",
+              raw_len: rawEventText.length,
+              clean_len: eventText.length,
+            });
             continue;
           }
 
           // Plugin-level echo suppression (ClawGate's 8s window is too short for AI replies)
           if (isPluginEcho(eventText)) {
             log?.debug?.(`clawgate: [${accountId}] suppressed echo: "${eventText.slice(0, 60)}"`);
+            traceLog(log, "info", {
+              trace_id: traceId,
+              stage: "ingress_dropped",
+              action: "echo_guard",
+              status: "suppressed",
+              reason: "plugin_echo",
+            });
             continue;
           }
 
           // Cross-source deduplication (AXRow / PixelDiff / NotificationBanner)
           if (isDuplicateInbound(eventText)) {
             log?.debug?.(`clawgate: [${accountId}] suppressed duplicate: "${eventText.slice(0, 60)}"`);
+            traceLog(log, "info", {
+              trace_id: traceId,
+              stage: "ingress_dropped",
+              action: "dedup",
+              status: "suppressed",
+              reason: "duplicate_window",
+            });
             continue;
           }
           if (isStaleRepeatInbound(eventText, conversation, source)) {
             log?.debug?.(`clawgate: [${accountId}] suppressed stale repeat: "${eventText.slice(0, 60)}"`);
+            traceLog(log, "info", {
+              trace_id: traceId,
+              stage: "ingress_dropped",
+              action: "dedup",
+              status: "suppressed",
+              reason: "stale_repeat",
+            });
             continue;
           }
 
@@ -3140,6 +3319,14 @@ export async function startAccount(ctx) {
           if (event.payload) {
             event.payload.text = eventText;
           }
+          traceLog(log, "info", {
+            trace_id: traceId,
+            stage: "ingress_accepted",
+            action: "dispatch_inbound_message",
+            status: "ok",
+            source,
+            conversation,
+          });
 
           try {
             await handleInboundMessage({

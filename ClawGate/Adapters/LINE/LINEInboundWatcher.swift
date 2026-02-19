@@ -40,6 +40,8 @@ final class LINEInboundWatcher {
     private var lastInboundFingerprint: String = ""
     private var lastInboundAt: Date = .distantPast
     private let inboundDedupWindowSeconds: TimeInterval = 20
+    private let inboundDedupWindowSecondsV2: TimeInterval
+    private let ingressDedupTuneV2Enabled: Bool
     private var lastSeparatorAnchorY: Int?
     private var lastSeparatorAnchorConfidence: Int = 0
     private var lastSeparatorAnchorMethod: String = "none"
@@ -65,6 +67,25 @@ final class LINEInboundWatcher {
         self.enableProcessSignal = enableProcessSignal
         self.enableNotificationStoreSignal = enableNotificationStoreSignal
         self.fusionEngine = LineDetectionFusionEngine(threshold: fusionThreshold)
+        self.ingressDedupTuneV2Enabled = Self.envBool("CLAWGATE_INGRESS_DEDUP_TUNE_V2", defaultValue: false)
+        self.inboundDedupWindowSecondsV2 = TimeInterval(
+            max(
+                1,
+                Self.envInt("CLAWGATE_LINE_INBOUND_DEDUP_WINDOW_SEC", defaultValue: 8)
+            )
+        )
+    }
+
+    private static func envBool(_ key: String, defaultValue: Bool) -> Bool {
+        guard let raw = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return defaultValue }
+        return ["1", "true", "yes", "on"].contains(raw.lowercased())
+    }
+
+    private static func envInt(_ key: String, defaultValue: Int) -> Int {
+        guard let raw = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let parsed = Int(raw) else { return defaultValue }
+        return parsed
     }
 
     func start() {
@@ -324,16 +345,29 @@ final class LINEInboundWatcher {
     }
 
     private func shouldSuppressDuplicateInbound(text: String, conversation: String) -> Bool {
-        let normalized = LineTextSanitizer.normalizeForEcho(text)
+        let normalized = normalizeForDuplicateFingerprint(text)
         guard !normalized.isEmpty else { return false }
+        if ingressDedupTuneV2Enabled, normalized.count < 6 { return false }
         let fingerprint = "\(conversation.lowercased())|\(normalized)"
         let now = Date()
-        if fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < inboundDedupWindowSeconds {
+        let windowSeconds = ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds
+        if fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < windowSeconds {
             return true
         }
         lastInboundFingerprint = fingerprint
         lastInboundAt = now
         return false
+    }
+
+    private func normalizeForDuplicateFingerprint(_ text: String) -> String {
+        if !ingressDedupTuneV2Enabled {
+            return LineTextSanitizer.normalizeForEcho(text)
+        }
+        return text
+            .lowercased()
+            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func collectStructuralSignal(chatList: AXUIElement, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
@@ -868,6 +902,8 @@ final class LINEInboundWatcher {
             "fusion_should_emit": String(decision.shouldEmit),
             "sanitized_text": sanitizedText ?? "",
             "dedup_result": dedupResult,
+            "dedup_mode": ingressDedupTuneV2Enabled ? "v2" : "legacy",
+            "dedup_window_sec": String(Int(ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds)),
             "emitted": String(emitted),
             "conversation": decision.conversation,
         ]
