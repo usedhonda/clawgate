@@ -545,6 +545,12 @@ function classifyTaskSendFailure({ errorCode, errorMessage }) {
   ) {
     return "aborted";
   }
+  if (
+    code === "interaction_pending" ||
+    message.includes("waiting for user interaction")
+  ) {
+    return "interaction_pending";
+  }
   return "other";
 }
 
@@ -598,6 +604,9 @@ function buildTaskFailureEscalationLine({ project, category, streakDurationMs })
   }
   if (category === "aborted") {
     return `Autonomous relay for ${project} is being aborted repeatedly (${seconds}s). I’ll continue retrying and report recovery.`;
+  }
+  if (category === "interaction_pending") {
+    return `Autonomous relay for ${project} is paused for a terminal choice (${seconds}s). Please answer the prompt in-session.`;
   }
   return `Autonomous relay for ${project} is unstable (${seconds}s). I’ll keep monitoring and report recovery.`;
 }
@@ -798,6 +807,54 @@ function mergeWrappedLines(lines) {
 
 /** @type {Map<string, { questionText: string, questionId: string, options: string[], selectedIndex: number }>} */
 const pendingQuestions = new Map();
+/** @type {Map<string, { reason: string, setAt: number, questionText: string, options: string[], selectedIndex: number }>} */
+const interactionPendingProjects = new Map();
+const INTERACTION_PENDING_TTL_MS = 5 * 60 * 1000;
+
+function normalizeQuestionRecord(questionLike = {}) {
+  const questionText = `${questionLike.questionText || questionLike.question_text || ""}`.trim();
+  const questionId = `${questionLike.questionId || questionLike.question_id || Date.now()}`;
+  const selectedRaw = Number.parseInt(`${questionLike.selectedIndex ?? questionLike.question_selected ?? 0}`, 10);
+  const selectedIndex = Number.isFinite(selectedRaw) ? Math.max(0, selectedRaw) : 0;
+  const optionsRaw = Array.isArray(questionLike.options)
+    ? questionLike.options
+    : `${questionLike.question_options || ""}`.split("\n");
+  const options = optionsRaw.map((x) => `${x}`.trim()).filter(Boolean);
+  return { questionText, questionId, options, selectedIndex };
+}
+
+function pruneInteractionPending() {
+  const now = Date.now();
+  for (const [project, state] of interactionPendingProjects) {
+    if (!state?.setAt || now - state.setAt > INTERACTION_PENDING_TTL_MS) {
+      interactionPendingProjects.delete(project);
+    }
+  }
+}
+
+function setInteractionPending(project, reason, questionLike = {}) {
+  if (!project) return;
+  pruneInteractionPending();
+  const normalized = normalizeQuestionRecord(questionLike);
+  interactionPendingProjects.set(project, {
+    reason: reason || "interaction_pending",
+    setAt: Date.now(),
+    questionText: normalized.questionText,
+    options: normalized.options,
+    selectedIndex: normalized.selectedIndex,
+  });
+}
+
+function getInteractionPending(project) {
+  if (!project) return null;
+  pruneInteractionPending();
+  return interactionPendingProjects.get(project) || null;
+}
+
+function clearInteractionPending(project) {
+  if (!project) return false;
+  return interactionPendingProjects.delete(project);
+}
 
 function makeTraceId(prefix, event) {
   const existing = event?.payload?.trace_id;
@@ -906,6 +963,98 @@ function normalizeLineReplyText(text, { project = "", sessionType = "claude_code
   }
 
   return result;
+}
+
+function stripChoiceTags(text) {
+  let result = `${text || ""}`.trim();
+  if (!result) return "";
+  result = result
+    .replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "")
+    .replace(/<cc_answer\s+project="[^"]*">([\s\S]*?)<\/cc_answer>/gi, "")
+    .replace(/<cc_read\s+project="[^"]+"\s*\/?>(?:<\/cc_read>)?/gi, "")
+    .trim();
+  return result;
+}
+
+function hasChoiceTags(text) {
+  return /<cc_task(?:\s+project="[^"]*")?>[\s\S]*?<\/cc_task>/i.test(text)
+    || /<cc_answer\s+project="[^"]*">[\s\S]*?<\/cc_answer>/i.test(text);
+}
+
+function parseInteractivePromptFromText(text) {
+  const rawLines = `${text || ""}`.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const lines = rawLines.map((l) => l.trim());
+  const nonEmpty = lines.filter(Boolean);
+  if (nonEmpty.length === 0) return null;
+
+  /** @type {{ text: string, selected: boolean }[]} */
+  const options = [];
+  let selectedIndex = 0;
+
+  for (const line of nonEmpty) {
+    if (/^[❯●○]\s+/.test(line)) {
+      const selected = /^[❯●]\s+/.test(line);
+      const cleaned = line.replace(/^[❯●○]\s+/, "").trim();
+      if (cleaned) {
+        if (selected) selectedIndex = options.length;
+        options.push({ text: cleaned, selected });
+      }
+      continue;
+    }
+    if (/^\d+\.\s+/.test(line)) {
+      const cleaned = line.replace(/^\d+\.\s+/, "").trim();
+      if (cleaned) options.push({ text: cleaned, selected: false });
+    }
+  }
+
+  // Fallback: Codex interactive footer without clearly captured options.
+  const hasShortcutFooter = /\?\s*for shortcuts/i.test(nonEmpty.join("\n"));
+
+  if (options.length < 2 && !hasShortcutFooter) return null;
+
+  let questionText = "";
+  for (let i = nonEmpty.length - 1; i >= 0; i--) {
+    const line = nonEmpty[i];
+    if (/[?？]$/.test(line)) {
+      questionText = line;
+      break;
+    }
+  }
+  if (!questionText) {
+    questionText = hasShortcutFooter
+      ? "Interactive prompt detected in terminal."
+      : "A choice prompt is currently open in the session.";
+  }
+
+  return {
+    questionText,
+    options: options.map((x) => x.text),
+    selectedIndex,
+    reason: hasShortcutFooter ? "shortcuts_footer" : "option_markers",
+  };
+}
+
+function detectInteractionPendingFromCompletion({ payload, text, project }) {
+  const waitingReason = `${payload?.waiting_reason || payload?.waitingReason || ""}`.toLowerCase();
+  const pending = pendingQuestions.get(project);
+  const parsed = parseInteractivePromptFromText(text);
+  const hasShortcutFooter = /\?\s*for shortcuts/i.test(`${text || ""}`);
+
+  const hintByReason = waitingReason === "permission_prompt" || waitingReason === "askuserquestion";
+  if (!parsed && !hintByReason && !pending && !hasShortcutFooter) return null;
+
+  const normalizedPending = pending ? normalizeQuestionRecord(pending) : null;
+  const normalizedParsed = parsed ? normalizeQuestionRecord(parsed) : null;
+
+  return {
+    reason: parsed?.reason || (hintByReason ? waitingReason : "pending_question"),
+    questionText: normalizedParsed?.questionText || normalizedPending?.questionText || "Interactive prompt detected in terminal.",
+    options: normalizedParsed?.options?.length ? normalizedParsed.options : (normalizedPending?.options || []),
+    selectedIndex: Number.isFinite(normalizedParsed?.selectedIndex)
+      ? normalizedParsed.selectedIndex
+      : (normalizedPending?.selectedIndex || 0),
+    questionId: normalizedPending?.questionId || `${Date.now()}`,
+  };
 }
 
 function buildPairingGuidance({ project = "", mode = "", eventKind = "", sessionType = "claude_code", firstTime = false } = {}) {
@@ -1017,6 +1166,12 @@ async function tryExtractAndSendTask({
   if (targetMode !== "autonomous" && targetMode !== "auto") {
     const err = new Error(`Session '${targetProject}' is in ${targetMode} mode (task send disabled)`);
     return { error: err, errorCode: "session_read_only", lineText, taskText, targetProject };
+  }
+
+  const interactionPending = getInteractionPending(targetProject);
+  if (interactionPending) {
+    const err = new Error(`Session '${targetProject}' is waiting for user interaction (${interactionPending.reason})`);
+    return { error: err, errorCode: "interaction_pending", lineText, taskText, targetProject };
   }
 
   // LGTM termination: intercept before sending to CC — don't pollute the session with "LGTM" tasks
@@ -1162,6 +1317,7 @@ async function tryExtractAndSendAnswer({ replyText, apiUrl, traceId, log }) {
     if (result?.ok) {
       log?.info?.(`clawgate: answer sent to CC (${project}): option ${zeroBasedIndex}`);
       pendingQuestions.delete(project);
+      clearInteractionPending(project);
       return { lineText, answerIndex: zeroBasedIndex };
     } else {
       const errMsg = result?.error || "unknown error";
@@ -1617,7 +1773,8 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   // Track pending question
   const options = optionsRaw.split("\n").filter(Boolean);
-  pendingQuestions.set(project, { questionText, questionId, options, selectedIndex });
+  pendingQuestions.set(project, { questionText, questionId, options, selectedIndex, setAt: Date.now() });
+  setInteractionPending(project, "question_event", { questionText, questionId, options, selectedIndex });
 
   if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
 
@@ -1760,15 +1917,44 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     }
 
     // Default: forward to LINE (observe + auto fallback).
-    // Autonomous policy: Risk + Final only (question relay is suppressed).
+    // Autonomous question events are user-decision checkpoints:
+    // recommendation to LINE is allowed, but task/answer tags must not execute.
     if (mode === "autonomous") {
-      logAutonomousLineEvent(log, {
-        accountId,
-        project,
-        reason: "question",
-        status: "suppressed",
-        detail: "policy=risk_final_only",
-      });
+      const hadChoiceTags = hasChoiceTags(replyText);
+      const advisoryRaw = stripChoiceTags(replyText);
+      if (hadChoiceTags) {
+        traceLog(log, "warn", {
+          trace_id: traceId,
+          stage: "interaction_pending_blocked",
+          action: "question_advisory",
+          status: "ok",
+          project,
+          detail: "choice_tags_stripped",
+        });
+      }
+      const advisory = normalizeLineReplyText(
+        advisoryRaw || "Interactive prompt is waiting. Please choose an option in the terminal.",
+        { project, sessionType, eventKind: "question" }
+      );
+      try {
+        await sendLine(defaultConversation || project, advisory);
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "interaction_pending",
+          status: "sent",
+          detail: "question_advisory",
+        });
+      } catch (err) {
+        log?.error?.(`clawgate: [${accountId}] send autonomous question advisory failed: ${err}`);
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "interaction_pending",
+          status: "failed",
+          detail: String(err),
+        });
+      }
       return;
     }
 
@@ -1869,8 +2055,31 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   sessionStatuses.set(project, "waiting_input");
   if (mode !== "autonomous") setAutonomousLoopActive(project, false);
 
-  // Clear any pending question (completion means question was answered or session moved on)
-  pendingQuestions.delete(project);
+  const interactionPending = mode === "autonomous"
+    ? detectInteractionPendingFromCompletion({ payload, text, project })
+    : null;
+  if (interactionPending) {
+    pendingQuestions.set(project, {
+      questionText: interactionPending.questionText,
+      questionId: interactionPending.questionId || String(Date.now()),
+      options: interactionPending.options || [],
+      selectedIndex: interactionPending.selectedIndex || 0,
+      setAt: Date.now(),
+    });
+    setInteractionPending(project, interactionPending.reason, interactionPending);
+    traceLog(log, "warn", {
+      trace_id: traceId,
+      stage: "interaction_pending_detected",
+      action: "tmux_completion",
+      status: "ok",
+      project,
+      detail: interactionPending.reason,
+    });
+  } else {
+    // Clear any pending question only when we are not in an interaction-pending state.
+    pendingQuestions.delete(project);
+    clearInteractionPending(project);
+  }
 
   // Keep last output in progress snapshot for roster visibility (waiting_input shows last output)
   setProgressSnapshot(project, text);
@@ -1924,22 +2133,43 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   }
   clearProgressTrail(project);
 
-  const isFirstGuidance = !guidanceSentProjects.has(project);
-  const guidance = buildPairingGuidance({ project, mode, eventKind: "completion", sessionType, firstTime: isFirstGuidance });
+  const isFirstGuidance = !guidanceSentProjects.has(project) && !interactionPending;
+  const guidance = buildPairingGuidance({
+    project,
+    mode,
+    eventKind: interactionPending ? "question" : "completion",
+    sessionType,
+    firstTime: isFirstGuidance,
+  });
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
-  // Append metadata notes so Chi understands information gaps
-  const hasGoal = !!taskGoal;
-  const hasUncommitted = dynamic?.envelope?.includes("Uncommitted changes:");
-  const hasTrail = !!trail;
-  const metaNotes = [
-    !hasGoal ? "(No task goal registered — user-initiated or goal unknown)" : null,
-    !hasUncommitted && !hasTrail ? "(No file changes or progress trail detected)" : null,
-  ].filter(Boolean).join("\n");
-  const metaSection = metaNotes ? `\n\n[Note: ${metaNotes}]` : "";
-
-  const completionOutput = `[${sessionLabel(sessionType)} ${project}] [${mode}] Completion Output:\n\n${displayText}${metaSection}`;
-  const requiredParts = [guidance, completionOutput];
+  let requiredParts;
+  if (interactionPending) {
+    const options = (interactionPending.options || [])
+      .map((opt, i) => `${i === interactionPending.selectedIndex ? ">>>" : "   "} ${i + 1}. ${opt}`)
+      .join("\n");
+    const interactionBody = options
+      ? fillTemplate(_prompts.questionBody.default, {
+          label: sessionLabel(sessionType),
+          project,
+          questionText: interactionPending.questionText,
+          numberedOptions: options,
+        })
+      : `[${sessionLabel(sessionType)} ${project}] Interactive prompt is open in terminal.\n\n${interactionPending.questionText}\n\n[Give recommendation only. Do NOT use <cc_task> or <cc_answer>.]`;
+    requiredParts = [guidance, interactionBody];
+  } else {
+    // Append metadata notes so Chi understands information gaps
+    const hasGoal = !!taskGoal;
+    const hasUncommitted = dynamic?.envelope?.includes("Uncommitted changes:");
+    const hasTrail = !!trail;
+    const metaNotes = [
+      !hasGoal ? "(No task goal registered — user-initiated or goal unknown)" : null,
+      !hasUncommitted && !hasTrail ? "(No file changes or progress trail detected)" : null,
+    ].filter(Boolean).join("\n");
+    const metaSection = metaNotes ? `\n\n[Note: ${metaNotes}]` : "";
+    const completionOutput = `[${sessionLabel(sessionType)} ${project}] [${mode}] Completion Output:\n\n${displayText}${metaSection}`;
+    requiredParts = [guidance, completionOutput];
+  }
 
   // Apply total message cap with guidance preservation (trim optional context first)
   const MAX_TOTAL_BODY_CHARS = 16000;
@@ -1948,7 +2178,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     optionalParts,
     maxChars: MAX_TOTAL_BODY_CHARS,
     log,
-    scope: "tmux-completion",
+    scope: interactionPending ? "tmux-interaction-pending" : "tmux-completion",
   });
 
   const ctx = {
@@ -1970,7 +2200,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     CommandAuthorized: true,
     OriginatingChannel: "clawgate",
     OriginatingTo: defaultConversation || project,
-    _clawgateSource: "tmux_completion",
+    _clawgateSource: interactionPending ? "tmux_interaction_pending" : "tmux_completion",
     _tmuxMode: mode,
   };
 
@@ -2005,6 +2235,45 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           ? `${readResult.lineText}\n\n${header}\n${content}`
           : `${header}\n${content}`;
         try { await sendLine(defaultConversation || project, msg); } catch {}
+      }
+      return;
+    }
+
+    if (interactionPending) {
+      const hadChoiceTags = hasChoiceTags(replyText);
+      replyText = stripChoiceTags(replyText);
+      if (hadChoiceTags) {
+        traceLog(log, "warn", {
+          trace_id: traceId,
+          stage: "interaction_pending_blocked",
+          action: "cc_task_send",
+          status: "ok",
+          project,
+          detail: interactionPending.reason,
+        });
+      }
+      const advisory = normalizeLineReplyText(
+        replyText || "Interactive prompt is waiting. Please choose an option in the terminal.",
+        { project, sessionType, eventKind: "question" }
+      );
+      try {
+        await sendLine(defaultConversation || project, advisory);
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "interaction_pending",
+          status: "sent",
+          detail: interactionPending.reason,
+        });
+      } catch (err) {
+        log?.error?.(`clawgate: [${accountId}] interaction pending advisory send failed: ${err}`);
+        logAutonomousLineEvent(log, {
+          accountId,
+          project,
+          reason: "interaction_pending",
+          status: "failed",
+          detail: String(err),
+        });
       }
       return;
     }
@@ -2537,6 +2806,9 @@ export async function startAccount(ctx) {
             setProgressSnapshot(proj, progressText);
             appendProgressTrail(proj, progressText);
             sessionStatuses.set(proj, "running");
+            if (clearInteractionPending(proj)) {
+              log?.info?.(`clawgate: [${accountId}] interaction_pending CLEARED for "${proj}" — progress detected`);
+            }
             if (clearReviewDone(proj)) {
               log?.info?.(`clawgate: [${accountId}] review-done CLEARED for "${proj}" — progress detected (new work started)`);
             }

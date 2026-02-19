@@ -569,6 +569,7 @@ final class TmuxInboundWatcher {
             "sender": session.sessionType == "codex" ? "codex" : "claude_code",
             "mode": mode,
             "capture": captureState,
+            "waiting_reason": session.waitingReason ?? "",
             "event_id": eventID,
             "trace_id": traceID,
             "session_type": session.sessionType,
