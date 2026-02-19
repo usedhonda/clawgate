@@ -23,6 +23,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var isGhosttySnapped = false
     private var ghosttyDetachCooldownUntil: Date?
     private var ghosttyAnchorSide: GhosttyAnchorSide = .right
+    private var ghosttyLastDebugLogAt: Date = .distantPast
     private let mainPanelLogLimit = 30
 
     private let modeOrder: [String] = ["ignore", "observe", "auto", "autonomous"]
@@ -136,6 +137,46 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.makeKeyAndOrderFront(nil)
     }
 
+    private func shouldDebugGhosttyFollow() -> Bool {
+        runtime.configStore.load().debugLogging
+    }
+
+    private func logGhosttyFollow(_ message: String, level: String = "debug") {
+        guard shouldDebugGhosttyFollow() else { return }
+        let role = runtime.configStore.load().nodeRole.rawValue
+        opsLogStore.append(
+            level: level,
+            event: "ghostty_follow",
+            role: role,
+            script: "clawgate.app",
+            message: message
+        )
+    }
+
+    private func logGhosttyFollowThrottled(_ message: String, level: String = "debug", minInterval: TimeInterval = 1.0) {
+        guard shouldDebugGhosttyFollow() else { return }
+        let now = Date()
+        guard now.timeIntervalSince(ghosttyLastDebugLogAt) >= minInterval else { return }
+        ghosttyLastDebugLogAt = now
+        logGhosttyFollow(message, level: level)
+    }
+
+    private func visibleArea(for frame: CGRect) -> CGFloat {
+        NSScreen.screens.reduce(CGFloat.zero) { partial, screen in
+            let intersection = frame.intersection(screen.visibleFrame)
+            if intersection.isNull || intersection.isEmpty {
+                return partial
+            }
+            return partial + (intersection.width * intersection.height)
+        }
+    }
+
+    private func appKitFrameFromCGWindowBounds(_ cgFrame: CGRect) -> CGRect {
+        let globalTop = NSScreen.screens.map(\.frame.maxY).max() ?? cgFrame.maxY
+        let appKitY = globalTop - cgFrame.minY - cgFrame.height
+        return CGRect(x: cgFrame.minX, y: appKitY, width: cgFrame.width, height: cgFrame.height)
+    }
+
     private func findGhosttyFrame() -> CGRect? {
         guard
             let windowInfo = CGWindowListCopyWindowInfo(
@@ -146,12 +187,22 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
 
-        let minWindowDimension: CGFloat = 120
+        let minWindowDimension: CGFloat = 40
         var bestFrame: CGRect?
         var bestVisibleArea: CGFloat = 0
 
         for info in windowInfo {
-            guard let ownerName = info[kCGWindowOwnerName as String] as? String, ownerName == "Ghostty" else {
+            let ownerName = (info[kCGWindowOwnerName as String] as? String) ?? ""
+            let ownerLower = ownerName.lowercased()
+            let ownerMatches = ownerLower.contains("ghostty")
+
+            let ownerPID = (info[kCGWindowOwnerPID as String] as? NSNumber).map { pid_t($0.intValue) }
+            let bundleID = ownerPID.flatMap { pid in
+                NSRunningApplication(processIdentifier: pid)?.bundleIdentifier?.lowercased()
+            }
+            let bundleMatches = bundleID?.contains("ghostty") ?? false
+
+            guard ownerMatches || bundleMatches else {
                 continue
             }
 
@@ -164,9 +215,18 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             else {
                 continue
             }
-            let globalTop = NSScreen.screens.map(\.frame.maxY).max() ?? cgFrame.maxY
-            let appKitY = globalTop - cgFrame.minY - cgFrame.height
-            let frame = CGRect(x: cgFrame.minX, y: appKitY, width: cgFrame.width, height: cgFrame.height)
+            let convertedFrame = appKitFrameFromCGWindowBounds(cgFrame)
+            let rawVisibleArea = visibleArea(for: cgFrame)
+            let convertedVisibleArea = visibleArea(for: convertedFrame)
+            let frame: CGRect
+            let visibleArea: CGFloat
+            if convertedVisibleArea >= rawVisibleArea {
+                frame = convertedFrame
+                visibleArea = convertedVisibleArea
+            } else {
+                frame = cgFrame
+                visibleArea = rawVisibleArea
+            }
 
             guard
                 frame.width >= minWindowDimension,
@@ -175,19 +235,24 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                 continue
             }
 
-            let visibleArea = NSScreen.screens.reduce(CGFloat.zero) { partial, screen in
-                let intersection = frame.intersection(screen.visibleFrame)
-                if intersection.isNull || intersection.isEmpty {
-                    return partial
-                }
-                return partial + (intersection.width * intersection.height)
-            }
-
             guard visibleArea > 0 else { continue }
             if visibleArea > bestVisibleArea {
                 bestVisibleArea = visibleArea
                 bestFrame = frame
             }
+        }
+
+        if let bestFrame {
+            logGhosttyFollowThrottled(
+                "Ghostty frame detected frame=\(bestFrame.integral) visibleArea=\(Int(bestVisibleArea))",
+                minInterval: 0.8
+            )
+        } else {
+            logGhosttyFollowThrottled(
+                "Ghostty frame not detected (window scan returned no eligible frame)",
+                level: "warning",
+                minInterval: 1.5
+            )
         }
 
         return bestFrame
@@ -274,6 +339,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard let currentGhosttyFrame = findGhosttyFrame() else {
+            logGhosttyFollow("stop follow: ghostty frame unavailable", level: "warning")
             stopGhosttyFollow()
             return
         }
@@ -301,6 +367,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                 isGhosttySnapped = false
                 ghosttyDetachCooldownUntil = Date().addingTimeInterval(0.45)
                 lastGhosttyFrame = currentGhosttyFrame
+                logGhosttyFollow("detached from Ghostty manually (distance=\(Int(detachDistance)))")
                 return
             }
 
@@ -325,6 +392,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                 panel.setFrameOrigin(snapTarget.origin)
                 isGhosttySnapped = true
                 ghosttyAnchorSide = snapTarget.side
+                logGhosttyFollow("resnapped to Ghostty side=\(snapTarget.side)")
             }
         }
 
@@ -341,11 +409,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             isGhosttySnapped = true
             ghosttyDetachCooldownUntil = nil
             lastGhosttyFrame = ghosttyFrame
+            logGhosttyFollow("opened near Ghostty origin=\(placement.origin) side=\(placement.side)")
             startGhosttyFollow()
             return
         }
 
         stopGhosttyFollow()
+        logGhosttyFollow("Ghostty not found at open; using status-item placement", level: "warning")
 
         guard let button = statusItem?.button, let buttonWindow = button.window else { return }
         let buttonRect = button.convert(button.bounds, to: nil)
