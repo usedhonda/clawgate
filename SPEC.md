@@ -624,6 +624,22 @@ Per-project session modes are stored in `tmuxSessionModes` config (project name 
 
 Mode is resolved by looking up the project name in the `tmuxSessionModes` dictionary. Projects not in the dictionary default to `ignore`.
 
+### Observe / Autonomous Project-View Grounding
+
+For Observe and Autonomous reviews, gateway can append a read-only project snapshot via `chi-projects-read` (when local stable context cannot be resolved, e.g. federated remote sessions).
+
+- Default command: `chi-projects-read`
+- Root resolution order:
+  1. `projectView.projects[project].root`
+  2. `projectView.projectRoots[project]`
+  3. Derive from resolved absolute path under `projectView.rootPrefix` (`/Users/usedhonda/projects`)
+- File resolution order:
+  1. `projectView.projects[project].files`
+  2. `projectView.projectFiles[project]`
+  3. `projectView.defaultFiles` (`AGENTS.md`, `CLAUDE.md`, `README.md`)
+- Fail-safe behavior: command/file read errors suppress overlay only; dispatch continues.
+- Cache: per-project TTL (default 90s) with char caps (`maxFileChars`, `maxTotalChars`).
+
 ### Menu Bar Sessions Submenu
 
 The menu bar displays a "Sessions" submenu showing all tracked Claude Code sessions:

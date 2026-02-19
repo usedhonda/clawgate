@@ -84,6 +84,16 @@ The plugin reads ClawGate's config via `/v1/openclaw-info`. Key settings in the 
 | `apiUrl` | `http://127.0.0.1:8765` | ClawGate HTTP API base URL |
 | `pollIntervalMs` | `3000` | Event polling interval in milliseconds |
 
+Optional (`projectView`) for Observe/Autonomous doc grounding via read-only bridge:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `projectView.enabled` | `true` | Enable read-only project-view overlay |
+| `projectView.command` | `chi-projects-read` | Wrapper command (read-only) |
+| `projectView.rootPrefix` | `/Users/usedhonda/projects` | Base path for deriving relative roots |
+| `projectView.projectRoots` | `{}` | Project -> relative root mapping |
+| `projectView.projectFiles` | `{}` | Project -> prioritized files list |
+
 ### Prompt Customization
 
 The plugin uses two prompt files:

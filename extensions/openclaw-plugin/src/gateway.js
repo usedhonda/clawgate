@@ -52,6 +52,7 @@ import {
   deduplicateTrailAgainst,
   capText,
 } from "./context-cache.js";
+import { createProjectViewReader } from "./project-view.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
 let _runtime = null;
@@ -335,6 +336,8 @@ let _filterDisplayName = "";
 const sessionModes = new Map();
 /** @type {Map<string, string>} project -> status */
 const sessionStatuses = new Map();
+/** @type {Map<string, { getContextBlock: Function }>} accountId -> read-only project-view reader */
+const projectViewReaders = new Map();
 
 // ── Pairing guidance dedup (full guidance sent once per project) ──
 /** @type {Set<string>} */
@@ -369,6 +372,14 @@ const AUTONOMOUS_RISK_PATTERNS = [
   /破壊/u,
   /壊/u,
 ];
+
+function getProjectViewReader(accountId, log) {
+  const reader = projectViewReaders.get(accountId);
+  if (reader) return reader;
+  const fallback = createProjectViewReader({ enabled: false }, log);
+  projectViewReaders.set(accountId, fallback);
+  return fallback;
+}
 
 function joinSections(parts) {
   return (parts || []).filter(Boolean).join("\n\n---\n\n");
@@ -1776,7 +1787,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   pendingQuestions.set(project, { questionText, questionId, options, selectedIndex, setAt: Date.now() });
   setInteractionPending(project, "question_event", { questionText, questionId, options, selectedIndex });
 
-  if (tmuxTarget) resolveProjectPath(project, tmuxTarget);
+  const resolvedProjectPath = tmuxTarget ? (resolveProjectPath(project, tmuxTarget) || "") : "";
 
   // Invalidate context cache (files may have changed while CC was working)
   invalidateProject(project);
@@ -1797,6 +1808,16 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     optionalParts.push(
       `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
     );
+  }
+
+  const projectView = getProjectViewReader(accountId, log).getContextBlock({
+    project,
+    mode,
+    resolvedProjectPath,
+    hasStableContext: !!stable?.context,
+  });
+  if (projectView) {
+    optionalParts.push(projectView);
   }
 
   // Task goal (what Chi asked CC to do — helps Chi understand what the question is about)
@@ -2085,9 +2106,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   setProgressSnapshot(project, text);
 
   // Resolve project path and register for roster
-  if (tmuxTarget) {
-    resolveProjectPath(project, tmuxTarget);
-  }
+  const resolvedProjectPath = tmuxTarget ? (resolveProjectPath(project, tmuxTarget) || "") : "";
 
   // Invalidate context cache (files may have changed during the task)
   invalidateProject(project);
@@ -2107,6 +2126,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     optionalParts.push(
       `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
     );
+  }
+
+  const projectView = getProjectViewReader(accountId, log).getContextBlock({
+    project,
+    mode,
+    resolvedProjectPath,
+    hasStableContext: !!stable?.context,
+  });
+  if (projectView) {
+    optionalParts.push(projectView);
   }
 
   // Task goal (what Chi asked CC to do — enables goal vs result comparison)
@@ -2702,12 +2731,16 @@ export async function startAccount(ctx) {
 
   // Set configurable display name filter (replaces hardcoded "Test User")
   _filterDisplayName = account.config?.filterDisplayName || "";
+  projectViewReaders.set(accountId, createProjectViewReader(account.config?.projectView, log));
 
   log?.info?.(`clawgate: [${accountId}] starting gateway (apiUrl=${apiUrl}, poll=${pollIntervalMs}ms, defaultConv="${defaultConversation}")`);
 
   // Wait for ClawGate to be reachable
   await waitForReady(apiUrl, abortSignal, log);
-  if (abortSignal?.aborted) return;
+  if (abortSignal?.aborted) {
+    projectViewReaders.delete(accountId);
+    return;
+  }
 
   // Verify system health
   try {
@@ -2913,5 +2946,6 @@ export async function startAccount(ctx) {
     await sleep(pollIntervalMs, abortSignal);
   }
 
+  projectViewReaders.delete(accountId);
   log?.info?.(`clawgate: [${accountId}] gateway stopped`);
 }
