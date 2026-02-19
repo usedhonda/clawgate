@@ -19,6 +19,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
     private static let routes: [(HTTPMethod, String)] = [
         (.GET, "/v1/health"),
         (.GET, "/v1/config"),
+        (.GET, "/v1/tmux/session-mode"),
+        (.PUT, "/v1/tmux/session-mode"),
         (.GET, "/v1/poll"),
         (.GET, "/v1/stats"),
         (.GET, "/v1/ops/logs"),
@@ -182,6 +184,12 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.axdump(adapter: adapter)
             } else if method == .GET && path == "/v1/doctor" {
                 result = core.doctor()
+            } else if method == .GET && path == "/v1/tmux/session-mode" {
+                let sessionType = components?.queryItems?.first(where: { $0.name == "session_type" })?.value ?? ""
+                let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
+                result = core.tmuxSessionMode(sessionType: sessionType, project: project)
+            } else if method == .PUT && path == "/v1/tmux/session-mode" {
+                result = core.setTmuxSessionMode(body: bodyData)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()

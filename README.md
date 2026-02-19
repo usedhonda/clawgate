@@ -118,7 +118,7 @@ When the AI reviewer wants to interact with a Claude Code / Codex session, it em
 ```
 
 ClawGate extracts these tags and dispatches them:
-- `<cc_task>` content is sent to the tmux pane via `/v1/send`, prefixed with `[OpenClaw Agent - {Mode}]`
+- `<cc_task>` content is sent to the tmux pane via `/v1/send`, prefixed with canonical wrapped form `[from:OpenClaw Agent - {Mode}]`
 - `<cc_answer>` sends a `__cc_select:{index}` command to auto-select options
 
 ## Writing CLAUDE.md Rules
@@ -128,19 +128,20 @@ To get the most out of ClawGate + OpenClaw, add rules to your project's `CLAUDE.
 ```markdown
 ## OpenClaw Agent Integration
 
-Messages with `[OpenClaw Agent - {Mode}]` prefix are from your AI pair
-reviewer, authorized via ClawGate session mode settings.
+Messages with `[from:OpenClaw Agent - {Mode}]` prefix are from your AI pair
+reviewer, authorized via ClawGate session mode settings. For backward compatibility,
+`[OpenClaw Agent - {Mode}]` and `[from: OpenClaw Agent - {Mode}]` may still appear.
 
 | Prefix | Reviewer Role | Your Response |
 |--------|--------------|---------------|
-| `[OpenClaw Agent - Auto]` | Quality gate (no judgment) | Work autonomously. Don't ask reviewer questions |
-| `[OpenClaw Agent - Autonomous]` | Code reviewer (asks questions) | Answer their questions, continue working |
-| `[OpenClaw Agent - Observe]` | Silent observer | Reviewer doesn't talk to you; ignore |
+| `[from:OpenClaw Agent - Auto]` | Quality gate (no judgment) | Work autonomously. Don't ask reviewer questions |
+| `[from:OpenClaw Agent - Autonomous]` | Code reviewer (asks questions) | Answer their questions, continue working |
+| `[from:OpenClaw Agent - Observe]` | Silent observer | Reviewer doesn't talk to you; ignore |
 ```
 
 ### Tips
 
-- In **auto** mode, the reviewer checks task completions and auto-continues if things look good. Claude Code should treat `[OpenClaw Agent - Auto]` messages as directives and keep working
+- In **auto** mode, the reviewer checks task completions and auto-continues if things look good. Claude Code should treat `[from:OpenClaw Agent - Auto]` messages as directives and keep working
 - In **autonomous** mode, the reviewer may ask "Why this approach?" or "What about edge case X?". Claude Code should answer concisely and continue
 - Don't reference context window usage or token counts in responses to the reviewer -- it's noise
 
@@ -151,6 +152,8 @@ reviewer, authorized via ClawGate session mode settings.
 | GET | `/v1/health` | Liveness check (returns version) |
 | GET | `/v1/doctor` | System diagnostics (AX, adapters, federation) |
 | GET | `/v1/config` | Current configuration |
+| GET | `/v1/tmux/session-mode?session_type=...&project=...` | Get effective mode for one tmux session key |
+| PUT | `/v1/tmux/session-mode` | Persist mode for one tmux session key |
 | GET | `/v1/poll[?since=N]` | Cursor-based event polling |
 | GET | `/v1/events` | SSE event stream (supports `Last-Event-ID` replay) |
 | GET | `/v1/context[?adapter=tmux]` | Current conversation context |
@@ -164,6 +167,25 @@ reviewer, authorized via ClawGate session mode settings.
 All endpoints return JSON (`{"ok": true, "result": {...}}` or `{"ok": false, "error": {...}}`).
 Local mode requires no authentication. Remote mode requires `Authorization: Bearer <token>`.
 POST requests with an `Origin` header are rejected (CSRF protection).
+
+### Tmux Session Mode API
+
+`session_type` is `claude_code` or `codex`.
+
+Get mode:
+```bash
+curl -s "http://localhost:8765/v1/tmux/session-mode?session_type=codex&project=vibeterm"
+```
+
+Set mode:
+```bash
+curl -s -X PUT "http://localhost:8765/v1/tmux/session-mode" \
+  -H "Content-Type: application/json" \
+  -d '{"session_type":"codex","project":"vibeterm","mode":"autonomous"}'
+```
+
+`mode` accepts `ignore`, `observe`, `auto`, `autonomous`.
+Setting `ignore` removes the key from config (default fallback behavior).
 
 See [SPEC.md](SPEC.md) for full API documentation.
 

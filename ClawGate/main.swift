@@ -89,6 +89,8 @@ final class AppRuntime {
             state = "Stalled"
         case "pending_line_send":
             state = "Pending"
+        case "line_send_not_local":
+            state = "Remote"
         default:
             state = "Active"
         }

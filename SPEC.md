@@ -173,6 +173,9 @@ Error:
 | `unsupported_action` | 400 | false | action != "send_message" |
 | `invalid_conversation_hint` | 400 | false | Empty conversation_hint |
 | `invalid_text` | 400 | false | Empty text |
+| `invalid_session_type` | 400 | false | session_type is not `claude_code` or `codex` |
+| `invalid_project` | 400 | false | project is empty |
+| `invalid_mode` | 400 | false | mode is not one of ignore/observe/auto/autonomous |
 | `ax_permission_missing` | 400 | false | Accessibility not granted |
 | `line_not_running` | 503 | true | LINE app not running |
 | `line_window_not_found` | 503 | true | LINE window not accessible |
@@ -232,6 +235,60 @@ Response:
   }
 }
 ```
+
+---
+
+#### `GET /v1/tmux/session-mode?session_type=...&project=...`
+Returns effective mode for one tmux session key.
+
+Query:
+- `session_type`: `claude_code` or `codex` (required)
+- `project`: project name (required)
+
+Response:
+```json
+{
+  "ok": true,
+  "result": {
+    "session_type": "codex",
+    "project": "vibeterm",
+    "mode": "autonomous",
+    "source": "config"
+  }
+}
+```
+
+`source` is `config` when key exists, otherwise `default_ignore`.
+
+---
+
+#### `PUT /v1/tmux/session-mode`
+Updates mode for one tmux session key.
+
+Request:
+```json
+{
+  "session_type": "codex",
+  "project": "vibeterm",
+  "mode": "auto"
+}
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "result": {
+    "session_type": "codex",
+    "project": "vibeterm",
+    "mode": "auto",
+    "updated": true
+  }
+}
+```
+
+Allowed `mode`: `ignore`, `observe`, `auto`, `autonomous`.
+`ignore` removes the key from config (effective fallback mode is ignore).
 
 ---
 
@@ -623,6 +680,17 @@ Per-project session modes are stored in `tmuxSessionModes` config (project name 
 | `autonomous` | Yes | Yes | Yes | AI-designed follow-up tasks with full context |
 
 Mode is resolved by looking up the project name in the `tmuxSessionModes` dictionary. Projects not in the dictionary default to `ignore`.
+
+### Autonomous Input-Collision Guard
+
+To avoid overwriting text while the user is typing in a CC/Codex pane, task dispatch now applies a pre-send draft guard for `auto` and `autonomous` modes:
+
+- Before sending `<cc_task>`, gateway reads pane tail via `GET /v1/messages?adapter=tmux&conversation=<project>&limit=120`.
+- If unsent draft text is detected on the active prompt line, dispatch is blocked with `errorCode: "session_typing_busy"`.
+- If pane read/parse is inconclusive, fail-safe behavior is also to block (`session_typing_busy`), not to send.
+- Guard runs on each send attempt (including retry paths) to avoid race windows.
+- Bridge server enforces the same guard in `TmuxAdapter.sendMessage` (except `__cc_select:N` menu selections), so non-gateway callers are also protected.
+- LINE advisory for this condition is throttled at 60s per project to avoid notification spam.
 
 ### Observe / Autonomous Project-View Grounding
 

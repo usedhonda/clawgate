@@ -225,6 +225,48 @@ struct ConfigResult: Codable {
     let remote: ConfigRemoteSection
 }
 
+// MARK: - Tmux Session Mode
+
+struct TmuxSessionModeResult: Codable {
+    let sessionType: String
+    let project: String
+    let mode: String
+    let source: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionType = "session_type"
+        case project
+        case mode
+        case source
+    }
+}
+
+struct TmuxSessionModeUpdateRequest: Codable {
+    let sessionType: String
+    let project: String
+    let mode: String
+
+    enum CodingKeys: String, CodingKey {
+        case sessionType = "session_type"
+        case project
+        case mode
+    }
+}
+
+struct TmuxSessionModeUpdateResult: Codable {
+    let sessionType: String
+    let project: String
+    let mode: String
+    let updated: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case sessionType = "session_type"
+        case project
+        case mode
+        case updated
+    }
+}
+
 // MARK: - Stats Response
 
 struct DayStatsEntry: Codable {

@@ -89,6 +89,15 @@ const AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS = [
   /3-5\s*chars?/i,
   /one-word acknowledg/i,
 ];
+const AUTONOMOUS_SUPPRESSED_LINE_PATTERNS = [
+  /^見た[。.!]?$/u,
+  /^確認(した|済み)?[。.!]?$/u,
+  /^了解[。.!]?$/u,
+  /^ok[。.!]?$/i,
+  /autonomous review loop started/i,
+  /\[task send failed:/i,
+  /i'?m discussing details directly in-session/i,
+];
 let _prompts = defaultPrompts;
 let _promptsLoaded = false;
 let _promptLoadSignature = "";
@@ -154,6 +163,19 @@ function containsForbiddenAutonomousPromptText(lines) {
   const text = asPromptLines(lines).join("\n");
   if (!text.trim()) return false;
   return AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+function shouldSuppressAutonomousLine(text) {
+  const normalized = `${text || ""}`.replace(/\s+/g, " ").trim();
+  if (!normalized) return true;
+  if (AUTONOMOUS_SUPPRESSED_LINE_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return true;
+  }
+  // Very short acknowledgements are almost always noise in LINE autonomous flow.
+  if (normalized.length <= 24 && /^(見た|確認(した|済み)?|了解|ok)[。.!]?$/iu.test(normalized)) {
+    return true;
+  }
+  return false;
 }
 
 function validatePromptShape(prompts) {
@@ -479,6 +501,11 @@ const TASK_SEND_ESCALATION_WINDOW_MS = Math.max(
   5_000,
   (Number.parseInt(process.env.CLAWGATE_TASK_SEND_ESCALATION_SEC || "60", 10) || 60) * 1000
 );
+const TMUX_TYPING_GUARD_READ_LINES = 120;
+const TMUX_TYPING_GUARD_SCAN_TAIL_LINES = 48;
+const TMUX_TYPING_GUARD_MAX_PROMPT_DISTANCE_LINES = 8;
+const TMUX_TYPING_GUARD_MAX_CONTINUATION_LINES = 2;
+const TMUX_PROMPT_LINE_RE = /^\s*[›❯>]\s*/u;
 const ENABLE_DEBUG_TASK_FAILURE_CONTEXT = /^(1|true|yes)$/i.test(
   `${process.env.CLAWGATE_DEBUG_TASK_FAILURE_CONTEXT || process.env.CLAWGATE_DEBUG_FAILURE_CONTEXT || ""}`.trim()
 );
@@ -523,8 +550,11 @@ function shouldNotifyTaskSendError({ project, errorCode, taskText }) {
     if (now - ts > TASK_SEND_ERROR_NOTIFY_WINDOW_MS) recentTaskSendErrors.delete(k);
   }
 
+  const normalizedCode = `${errorCode || "unknown"}`.toLowerCase();
   const normalizedTask = normalizeFingerprintText(taskText, 240);
-  const keyMaterial = `${project || "unknown"}::${errorCode || "unknown"}::${normalizedTask}`;
+  const keyMaterial = normalizedCode === "session_typing_busy"
+    ? `${project || "unknown"}::${normalizedCode}`
+    : `${project || "unknown"}::${normalizedCode}::${normalizedTask}`;
   const key = hashFingerprint(keyMaterial);
   const last = recentTaskSendErrors.get(key);
   if (last && now - last <= TASK_SEND_ERROR_NOTIFY_WINDOW_MS) {
@@ -538,6 +568,13 @@ function classifyTaskSendFailure({ errorCode, errorMessage }) {
   const code = `${errorCode || ""}`.toLowerCase();
   const message = `${errorMessage || ""}`.toLowerCase();
 
+  if (
+    code === "session_typing_busy" ||
+    message.includes("unsent input") ||
+    message.includes("prompt state is unknown")
+  ) {
+    return "typing_busy";
+  }
   if (code === "session_busy" || message.includes("currently running") || message.includes("session busy")) {
     return "busy";
   }
@@ -607,6 +644,9 @@ function clearTaskSendFailureStreak(project) {
 
 function buildTaskFailureEscalationLine({ project, category, streakDurationMs }) {
   const seconds = Math.max(1, Math.round(streakDurationMs / 1000));
+  if (category === "typing_busy") {
+    return `Autonomous relay for ${project} is paused while terminal input is being edited (${seconds}s). I will retry after input settles.`;
+  }
   if (category === "busy") {
     return `Autonomous relay for ${project} is busy (${seconds}s). I’ll keep retrying and send only meaningful updates.`;
   }
@@ -620,6 +660,10 @@ function buildTaskFailureEscalationLine({ project, category, streakDurationMs })
     return `Autonomous relay for ${project} is paused for a terminal choice (${seconds}s). Please answer the prompt in-session.`;
   }
   return `Autonomous relay for ${project} is unstable (${seconds}s). I’ll keep monitoring and report recovery.`;
+}
+
+function buildTypingBusyAdvisoryLine(project) {
+  return `Paused autonomous task send for ${project}: unsent text is detected in the terminal input. I will resume after you finish typing.`;
 }
 
 // ── Plugin-level echo suppression ──────────────────────────────
@@ -1139,6 +1183,133 @@ function buildTaskFailureMessage(errorMsg, lineText, project) {
   return parts.join("\n\n");
 }
 
+function stripAnsiControlCodes(text) {
+  return `${text || ""}`
+    .replace(/\u001B\[[0-9;]*[a-zA-Z]/g, "")
+    .replace(/\u001B\][^\u0007]*\u0007/g, "");
+}
+
+function isTmuxFooterLine(line) {
+  const s = `${line || ""}`.trim();
+  if (!s) return false;
+  if (/^\?\s+for shortcuts$/i.test(s)) return true;
+  if (/^\d+%\s+context left$/i.test(s)) return true;
+  if (/^\d+%\s+context window$/i.test(s)) return true;
+  if (/^autonomous:\s+/i.test(s)) return true;
+  return false;
+}
+
+function isTmuxDividerLine(line) {
+  const s = `${line || ""}`.trim();
+  return /^[-─━]{3,}$/.test(s);
+}
+
+function detectTmuxInputDraft(lines) {
+  const source = Array.isArray(lines)
+    ? lines.map((line) => stripAnsiControlCodes(line))
+    : [];
+  if (source.length === 0) {
+    return { parseOk: false, reason: "empty_capture", isTyping: true, draftText: "" };
+  }
+
+  const tail = source.slice(-TMUX_TYPING_GUARD_SCAN_TAIL_LINES);
+  let end = tail.length - 1;
+  while (end >= 0 && !tail[end].trim()) end--;
+  if (end < 0) {
+    return { parseOk: false, reason: "blank_capture", isTyping: true, draftText: "" };
+  }
+
+  while (end >= 0 && (isTmuxFooterLine(tail[end]) || isTmuxDividerLine(tail[end]))) end--;
+  if (end < 0) {
+    return { parseOk: false, reason: "footer_only_capture", isTyping: true, draftText: "" };
+  }
+
+  const searchStart = Math.max(0, end - 16);
+  let promptIndex = -1;
+  for (let i = end; i >= searchStart; i--) {
+    if (TMUX_PROMPT_LINE_RE.test(tail[i])) {
+      promptIndex = i;
+      break;
+    }
+  }
+
+  if (promptIndex < 0) {
+    return { parseOk: false, reason: "prompt_not_found", isTyping: true, draftText: "" };
+  }
+
+  if (end - promptIndex > TMUX_TYPING_GUARD_MAX_PROMPT_DISTANCE_LINES) {
+    return { parseOk: false, reason: "prompt_too_far_from_bottom", isTyping: true, draftText: "" };
+  }
+
+  const draftParts = [];
+  const firstDraft = tail[promptIndex]
+    .replace(TMUX_PROMPT_LINE_RE, "")
+    .replace(/[▌█▋▍▎▏]+$/u, "")
+    .trim();
+  if (firstDraft) draftParts.push(firstDraft);
+
+  const continuationEnd = Math.min(end, promptIndex + TMUX_TYPING_GUARD_MAX_CONTINUATION_LINES);
+  for (let i = promptIndex + 1; i <= continuationEnd; i++) {
+    const raw = tail[i];
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (isTmuxFooterLine(raw) || isTmuxDividerLine(raw) || TMUX_PROMPT_LINE_RE.test(raw)) break;
+    draftParts.push(trimmed.replace(/[▌█▋▍▎▏]+$/u, ""));
+  }
+
+  const draftText = draftParts.join(" ").replace(/\s+/g, " ").trim();
+  if (!draftText) {
+    return { parseOk: true, reason: "prompt_idle", isTyping: false, draftText: "" };
+  }
+  return { parseOk: true, reason: "draft_detected", isTyping: true, draftText };
+}
+
+async function inspectTmuxDraftBeforeTaskSend({ apiUrl, project, traceId, log }) {
+  try {
+    const result = await clawgateTmuxRead(apiUrl, project, TMUX_TYPING_GUARD_READ_LINES, traceId);
+    if (!result?.ok) {
+      const reason = result?.error?.message || result?.error?.code || "pane_read_failed";
+      log?.warn?.(`clawgate: typing guard read failed for "${project}": ${reason}`);
+      return {
+        blocked: true,
+        reason: "pane_read_failed",
+        message: `Session '${project}' prompt state is unknown (read failed: ${reason}). Skipped task send to avoid overwriting user input.`,
+      };
+    }
+
+    const lines = Array.isArray(result?.result?.messages)
+      ? result.result.messages.map((item) => `${item?.text || ""}`)
+      : [];
+    const detection = detectTmuxInputDraft(lines);
+    if (!detection.parseOk) {
+      log?.warn?.(`clawgate: typing guard parse failed for "${project}" (${detection.reason})`);
+      return {
+        blocked: true,
+        reason: detection.reason,
+        message: `Session '${project}' prompt state is unknown (${detection.reason}). Skipped task send to avoid overwriting user input.`,
+      };
+    }
+    if (detection.isTyping) {
+      const snippet = detection.draftText.slice(0, 80);
+      log?.info?.(`clawgate: typing guard blocked task send for "${project}" (draft="${snippet}")`);
+      return {
+        blocked: true,
+        reason: "draft_detected",
+        message: `Session '${project}' has unsent input in terminal. Skipped task send to avoid overwriting user input.`,
+      };
+    }
+    return { blocked: false, reason: "idle_prompt", message: "" };
+  } catch (err) {
+    const reason = err?.message || String(err);
+    log?.warn?.(`clawgate: typing guard exception for "${project}": ${reason}`);
+    return {
+      blocked: true,
+      reason: "pane_read_exception",
+      message: `Session '${project}' prompt state is unknown (read exception). Skipped task send to avoid overwriting user input.`,
+    };
+  }
+}
+
 // ── Autonomous task chaining ──────────────────────────────────
 
 /**
@@ -1191,16 +1362,33 @@ async function tryExtractAndSendTask({
     return { lineText, taskText, targetProject, terminated: true };
   }
 
-  // Prefix task with [OpenClaw Agent - {Mode}] so CC knows the origin and mode
+  // Prefix task with canonical wrapped form so CC/Codex can treat it as OpenClaw-origin
+  // while preserving sender metadata compatibility: [from:OpenClaw Agent - {Mode}]
   const sourceMode = `${mode || ""}`.trim() || targetMode;
   const modeLabel = sourceMode ? sourceMode.charAt(0).toUpperCase() + sourceMode.slice(1) : "Unknown";
-  const prefixedTask = `[OpenClaw Agent - ${modeLabel}] ${taskText}`;
+  const prefixedTask = `[from:OpenClaw Agent - ${modeLabel}] ${taskText}`;
 
   // 2 tries total (initial + one retry), 6s total window.
   const MAX_RETRIES = 1;
   const RETRY_DELAY_MS = 3000;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const typingGuard = await inspectTmuxDraftBeforeTaskSend({
+      apiUrl,
+      project: targetProject,
+      traceId,
+      log,
+    });
+    if (typingGuard.blocked) {
+      return {
+        error: new Error(typingGuard.message),
+        errorCode: "session_typing_busy",
+        lineText,
+        taskText,
+        targetProject,
+      };
+    }
+
     try {
       const result = await clawgateTmuxSend(apiUrl, targetProject, prefixedTask, traceId);
       if (result?.ok) {
@@ -1610,7 +1798,24 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           log?.info?.(
             `clawgate: [${accountId}] task send benign failure suppressed (project=${targetProject}, category=${category}, count=${streak.count})`
           );
-          if (result.lineText) {
+          if (category === "typing_busy") {
+            const shouldNotifyTyping = shouldNotifyTaskSendError({
+              project: targetProject,
+              errorCode,
+              taskText: "",
+            });
+            if (shouldNotifyTyping) {
+              const advisory = buildTypingBusyAdvisoryLine(targetProject);
+              try {
+                await clawgateSend(apiUrl, conversation, advisory, traceId);
+                recordPluginSend(advisory);
+              } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] send typing-busy advisory to LINE failed: ${err}`);
+              }
+            } else {
+              log?.info?.(`clawgate: [${accountId}] typing-busy advisory suppressed (project=${targetProject})`);
+            }
+          } else if (result.lineText) {
             const shouldForwardLine = shouldNotifyTaskSendError({
               project: targetProject,
               errorCode,
@@ -1627,7 +1832,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
               log?.info?.(`clawgate: [${accountId}] benign failure fallback line suppressed (project=${targetProject}, code=${errorCode})`);
             }
           }
-          if (streak.shouldEscalate) {
+          if (streak.shouldEscalate && category !== "typing_busy") {
             const msg = buildTaskFailureEscalationLine({
               project: targetProject,
               category,
@@ -2328,6 +2533,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             // Forward the review summary (lineText) to LINE as final milestone.
             if (result.lineText) {
               const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
+              if (shouldSuppressAutonomousLine(normalized)) {
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project,
+                  reason: "final",
+                  status: "suppressed",
+                  detail: "low_value_final",
+                });
+                return;
+              }
               try {
                 await sendLine(defaultConversation || project, normalized);
                 logAutonomousLineEvent(log, {
@@ -2384,33 +2599,43 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
                 status: "suppressed",
                 detail: `${category} count=${streak.count}`,
               });
-              if (result.lineText) {
+              if (category === "typing_busy") {
+                const shouldNotifyTyping = shouldNotifyTaskSendError({
+                  project: targetProject,
+                  errorCode,
+                  taskText: "",
+                });
+                if (shouldNotifyTyping) {
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "suppressed",
+                    detail: "typing_busy",
+                  });
+                } else {
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "suppressed",
+                    detail: "typing_busy_dedup",
+                  });
+                }
+              } else if (result.lineText) {
                 const shouldForwardLine = shouldNotifyTaskSendError({
                   project: targetProject,
                   errorCode,
                   taskText: result.taskText || "",
                 });
                 if (shouldForwardLine) {
-                  const normalizedFallback = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
-                  try {
-                    await sendLine(defaultConversation || project, normalizedFallback);
-                    logAutonomousLineEvent(log, {
-                      accountId,
-                      project: targetProject,
-                      reason: "routing_error",
-                      status: "sent",
-                      detail: "sanitized_fallback",
-                    });
-                  } catch (err) {
-                    log?.error?.(`clawgate: [${accountId}] autonomous fallback review send failed: ${err}`);
-                    logAutonomousLineEvent(log, {
-                      accountId,
-                      project: targetProject,
-                      reason: "routing_error",
-                      status: "failed",
-                      detail: String(err),
-                    });
-                  }
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "suppressed",
+                    detail: "sanitized_fallback",
+                  });
                 } else {
                   logAutonomousLineEvent(log, {
                     accountId,
@@ -2422,40 +2647,23 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
                 }
               }
 
-              if (streak.shouldEscalate) {
-                const msg = buildTaskFailureEscalationLine({
+              if (streak.shouldEscalate && category !== "typing_busy") {
+                logAutonomousLineEvent(log, {
+                  accountId,
                   project: targetProject,
-                  category,
-                  streakDurationMs: streak.streakDurationMs,
+                  reason: "routing_error",
+                  status: "suppressed",
+                  detail: `escalated ${Math.round(streak.streakDurationMs / 1000)}s`,
                 });
-                try {
-                  await sendLine(defaultConversation || project, msg);
-                  logAutonomousLineEvent(log, {
-                    accountId,
-                    project: targetProject,
-                    reason: "routing_error",
-                    status: "sent",
-                    detail: `escalated ${Math.round(streak.streakDurationMs / 1000)}s`,
-                  });
-                  traceLog(log, "info", {
-                    trace_id: traceId,
-                    stage: "task_send_escalated",
-                    action: "line_send",
-                    status: "ok",
-                    project: targetProject,
-                    error_code: errorCode,
-                    escalation_sec: Math.round(streak.streakDurationMs / 1000),
-                  });
-                } catch (err) {
-                  log?.error?.(`clawgate: [${accountId}] autonomous escalation send failed: ${err}`);
-                  logAutonomousLineEvent(log, {
-                    accountId,
-                    project: targetProject,
-                    reason: "routing_error",
-                    status: "failed",
-                    detail: String(err),
-                  });
-                }
+                traceLog(log, "info", {
+                  trace_id: traceId,
+                  stage: "task_send_escalated",
+                  action: "line_send",
+                  status: "suppressed",
+                  project: targetProject,
+                  error_code: errorCode,
+                  escalation_sec: Math.round(streak.streakDurationMs / 1000),
+                });
               }
             } else {
               clearTaskSendFailureStreak(targetProject);
@@ -2465,25 +2673,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
                 taskText: result.taskText || "",
               });
               if (shouldNotify) {
-                const msg = buildTaskFailureMessage(errorMessage, result.lineText, targetProject);
-                try {
-                  await sendLine(defaultConversation || project, msg);
-                  logAutonomousLineEvent(log, {
-                    accountId,
-                    project: targetProject,
-                    reason: "routing_error",
-                    status: "sent",
-                  });
-                } catch (err) {
-                  log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
-                  logAutonomousLineEvent(log, {
-                    accountId,
-                    project: targetProject,
-                    reason: "routing_error",
-                    status: "failed",
-                    detail: String(err),
-                  });
-                }
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project: targetProject,
+                  reason: "routing_error",
+                  status: "suppressed",
+                  detail: "other_error",
+                });
               } else {
                 logAutonomousLineEvent(log, {
                   accountId,
@@ -2586,7 +2782,26 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           if (category !== "other") {
             const streak = trackTaskSendFailureStreak({ project: targetProject, category });
             log?.info?.(`clawgate: [${accountId}] auto task send benign failure suppressed (project=${targetProject}, category=${category}, count=${streak.count})`);
-            if (result.lineText) {
+            if (category === "typing_busy") {
+              const shouldNotifyTyping = shouldNotifyTaskSendError({
+                project: targetProject,
+                errorCode,
+                taskText: "",
+              });
+              if (shouldNotifyTyping) {
+                const advisory = normalizeLineReplyText(
+                  buildTypingBusyAdvisoryLine(targetProject),
+                  { project, sessionType, eventKind: "completion" }
+                );
+                try {
+                  await sendLine(defaultConversation || project, advisory);
+                } catch (err) {
+                  log?.error?.(`clawgate: [${accountId}] auto typing-busy advisory send failed: ${err}`);
+                }
+              } else {
+                log?.info?.(`clawgate: [${accountId}] auto typing-busy advisory suppressed (project=${targetProject})`);
+              }
+            } else if (result.lineText) {
               const shouldForwardLine = shouldNotifyTaskSendError({
                 project: targetProject,
                 errorCode,
@@ -2603,7 +2818,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
                 log?.info?.(`clawgate: [${accountId}] auto benign fallback line suppressed (project=${targetProject}, code=${errorCode})`);
               }
             }
-            if (streak.shouldEscalate) {
+            if (streak.shouldEscalate && category !== "typing_busy") {
               const msg = buildTaskFailureEscalationLine({
                 project: targetProject,
                 category,
@@ -2655,6 +2870,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
     // Default: forward all to LINE
     const lineText = normalizeLineReplyText(replyText, { project, sessionType, eventKind: "completion" });
+    if (mode === "autonomous" && shouldSuppressAutonomousLine(lineText)) {
+      logAutonomousLineEvent(log, {
+        accountId,
+        project,
+        reason: "final",
+        status: "suppressed",
+        detail: "low_value_final",
+      });
+      return;
+    }
     log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);

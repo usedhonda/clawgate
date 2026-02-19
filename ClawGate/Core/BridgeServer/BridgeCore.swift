@@ -166,6 +166,171 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: body)
     }
 
+    func tmuxSessionMode(sessionType: String, project: String) -> HTTPResult {
+        let normalizedType = sessionType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedType == "claude_code" || normalizedType == "codex" else {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(
+                    APIResponse<TmuxSessionModeResult>(
+                        ok: false,
+                        result: nil,
+                        error: ErrorPayload(
+                            code: "invalid_session_type",
+                            message: "session_type must be claude_code or codex",
+                            retriable: false,
+                            failedStep: "validate_request",
+                            details: normalizedType
+                        )
+                    )
+                )
+            )
+        }
+
+        let normalizedProject = project.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedProject.isEmpty else {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(
+                    APIResponse<TmuxSessionModeResult>(
+                        ok: false,
+                        result: nil,
+                        error: ErrorPayload(
+                            code: "invalid_project",
+                            message: "project is required",
+                            retriable: false,
+                            failedStep: "validate_request",
+                            details: nil
+                        )
+                    )
+                )
+            )
+        }
+
+        let cfg = configStore.load()
+        let key = AppConfig.modeKey(sessionType: normalizedType, project: normalizedProject)
+        let configuredMode = cfg.tmuxSessionModes[key]
+        let result = TmuxSessionModeResult(
+            sessionType: normalizedType,
+            project: normalizedProject,
+            mode: configuredMode ?? "ignore",
+            source: configuredMode == nil ? "default_ignore" : "config"
+        )
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+    }
+
+    func setTmuxSessionMode(body: Data) -> HTTPResult {
+        let request: TmuxSessionModeUpdateRequest
+        do {
+            request = try jsonDecoder.decode(TmuxSessionModeUpdateRequest.self, from: body)
+        } catch {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(
+                    APIResponse<TmuxSessionModeUpdateResult>(
+                        ok: false,
+                        result: nil,
+                        error: ErrorPayload(
+                            code: "invalid_json",
+                            message: "Could not parse request JSON",
+                            retriable: false,
+                            failedStep: "decode_request",
+                            details: String(describing: error)
+                        )
+                    )
+                )
+            )
+        }
+
+        let normalizedType = request.sessionType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedType == "claude_code" || normalizedType == "codex" else {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(
+                    APIResponse<TmuxSessionModeUpdateResult>(
+                        ok: false,
+                        result: nil,
+                        error: ErrorPayload(
+                            code: "invalid_session_type",
+                            message: "session_type must be claude_code or codex",
+                            retriable: false,
+                            failedStep: "validate_request",
+                            details: normalizedType
+                        )
+                    )
+                )
+            )
+        }
+
+        let normalizedProject = request.project.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedProject.isEmpty else {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(
+                    APIResponse<TmuxSessionModeUpdateResult>(
+                        ok: false,
+                        result: nil,
+                        error: ErrorPayload(
+                            code: "invalid_project",
+                            message: "project is required",
+                            retriable: false,
+                            failedStep: "validate_request",
+                            details: nil
+                        )
+                    )
+                )
+            )
+        }
+
+        let normalizedMode = request.mode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let allowedModes = ["ignore", "observe", "auto", "autonomous"]
+        guard allowedModes.contains(normalizedMode) else {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(
+                    APIResponse<TmuxSessionModeUpdateResult>(
+                        ok: false,
+                        result: nil,
+                        error: ErrorPayload(
+                            code: "invalid_mode",
+                            message: "mode must be one of ignore|observe|auto|autonomous",
+                            retriable: false,
+                            failedStep: "validate_request",
+                            details: normalizedMode
+                        )
+                    )
+                )
+            )
+        }
+
+        var cfg = configStore.load()
+        let key = AppConfig.modeKey(sessionType: normalizedType, project: normalizedProject)
+        if normalizedMode == "ignore" {
+            cfg.tmuxSessionModes.removeValue(forKey: key)
+        } else {
+            cfg.tmuxSessionModes[key] = normalizedMode
+        }
+        configStore.save(cfg)
+
+        eventBus.append(
+            type: "tmux.session_mode_updated",
+            adapter: "tmux",
+            payload: [
+                "session_type": normalizedType,
+                "project": normalizedProject,
+                "mode": normalizedMode,
+            ]
+        )
+
+        let result = TmuxSessionModeUpdateResult(
+            sessionType: normalizedType,
+            project: normalizedProject,
+            mode: normalizedMode,
+            updated: true
+        )
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+    }
+
     func send(body: Data, traceID: String?) -> HTTPResult {
         let requestTrace = normalizedTraceID(traceID)
         let start = Date()
@@ -486,6 +651,7 @@ final class BridgeCore {
 
     func autonomousStatusSnapshot() -> AutonomousStatusResult {
         let config = configStore.load()
+        let localLineSendExpected = config.nodeRole != .client && config.lineEnabled
         let candidates = config.tmuxSessionModes
             .filter { (key, mode) in
                 key.hasPrefix("codex:") && (mode == "autonomous" || mode == "auto")
@@ -523,39 +689,39 @@ final class BridgeCore {
                     lastCompletionTraceID = kv["trace_id"]
                 }
             }
-
             if lastTaskSentAt == nil, entry.event == "tmux.forward" {
                 let kv = parseKeyValueMessage(entry.message)
                 if kv["project"] == project {
                     lastTaskSentAt = entry.ts
                 }
             }
+            if lastCompletionAt != nil && lastTaskSentAt != nil {
+                break
+            }
+        }
 
-            if lastLineSendOKAt == nil, entry.event == "line_send_ok" {
+        if let completionDate = lastCompletionDate {
+            for entry in entries where entry.event == "line_send_ok" {
                 if let traceID = lastCompletionTraceID, !traceID.isEmpty {
                     if entry.message.contains("trace_id=\(traceID)") {
                         lastLineSendOKAt = entry.ts
+                        break
                     }
-                } else {
+                } else if entry.date >= completionDate {
                     // Fallback: when trace_id is unavailable, use the latest line_send_ok
                     // after the most recent completion timestamp.
-                    if let completionDate = lastCompletionDate {
-                        if entry.date >= completionDate {
-                            lastLineSendOKAt = entry.ts
-                        }
-                    }
+                    lastLineSendOKAt = entry.ts
+                    break
                 }
-            }
-
-            if lastCompletionAt != nil && lastTaskSentAt != nil && lastLineSendOKAt != nil {
-                break
             }
         }
 
         var suppressionReason = "none"
         var reviewDone = false
         if lastCompletionAt != nil && lastLineSendOKAt == nil {
-            if let completionDate = lastCompletionDate {
+            if !localLineSendExpected {
+                suppressionReason = "line_send_not_local"
+            } else if let completionDate = lastCompletionDate {
                 let age = Date().timeIntervalSince(completionDate)
                 if age >= autonomousStallThresholdSeconds {
                     suppressionReason = "stalled_no_line_send"
@@ -761,6 +927,13 @@ final class BridgeCore {
             result = health()
         case (.GET, "/v1/config"):
             result = config()
+        case (.GET, "/v1/tmux/session-mode"):
+            let sessionType = components?.queryItems?.first(where: { $0.name == "session_type" })?.value ?? ""
+            let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
+            result = tmuxSessionMode(sessionType: sessionType, project: project)
+        case (.PUT, "/v1/tmux/session-mode"):
+            let body = command.body?.data(using: .utf8) ?? Data()
+            result = setTmuxSessionMode(body: body)
         case (.GET, "/v1/autonomous/status"):
             result = autonomousStatus()
         case (.GET, "/v1/poll"):

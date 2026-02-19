@@ -42,6 +42,10 @@ trap 'ops_log error "restart_failed" "local restart failed (line=$LINENO exit=$?
 APP_PATH="$PROJECT_PATH/ClawGate.app"
 APP_BIN="$APP_PATH/Contents/MacOS/ClawGate"
 BUILD_BIN="$PROJECT_PATH/.build/debug/ClawGate"
+PLUGIN_CLAWGATE_SRC="$PROJECT_PATH/extensions/openclaw-plugin"
+PLUGIN_TELEMETRY_SRC="$PROJECT_PATH/extensions/vibeterm-telemetry"
+PLUGIN_CLAWGATE_DST="$HOME/.openclaw/extensions/clawgate"
+PLUGIN_TELEMETRY_DST="$HOME/.openclaw/extensions/vibeterm-telemetry"
 
 cd "$PROJECT_PATH"
 
@@ -52,12 +56,12 @@ echo "Skip sync   : $SKIP_SYNC"
 echo "Skip sign   : $SKIP_SIGN"
 
 if [[ "$SKIP_BUILD" != "true" ]]; then
-  echo "[1/4] Build"
+  echo "[1/5] Build"
   swift build
 fi
 
 if [[ "$SKIP_SYNC" != "true" ]]; then
-  echo "[2/4] Sync app binary"
+  echo "[2/5] Sync app binary"
   if [[ ! -f "$BUILD_BIN" ]]; then
     echo "Missing build output: $BUILD_BIN" >&2
     exit 1
@@ -68,24 +72,46 @@ if [[ "$SKIP_SYNC" != "true" ]]; then
     cp "$PROJECT_PATH/resources/AppIcon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
   fi
 else
-  echo "[2/4] Skip sync (by option)"
+  echo "[2/5] Skip app-binary sync (by option)"
 fi
+
+echo "[3/5] Sync OpenClaw plugins"
+sync_plugin_dir() {
+  local src="$1"
+  local dst="$2"
+  local label="$3"
+  if [[ ! -d "$src" ]]; then
+    echo "  - skip $label (missing source: $src)"
+    return
+  fi
+  mkdir -p "$dst"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "$src/" "$dst/"
+  else
+    rm -rf "$dst"
+    mkdir -p "$dst"
+    cp -R "$src/." "$dst/"
+  fi
+  echo "  - synced $label -> $dst"
+}
+sync_plugin_dir "$PLUGIN_CLAWGATE_SRC" "$PLUGIN_CLAWGATE_DST" "clawgate"
+sync_plugin_dir "$PLUGIN_TELEMETRY_SRC" "$PLUGIN_TELEMETRY_DST" "vibeterm-telemetry"
 
 if [[ "$SKIP_SIGN" != "true" ]]; then
   if security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
-    echo "[3/4] Codesign (ClawGate Dev)"
+    echo "[4/5] Codesign (ClawGate Dev)"
     codesign --force --deep --options runtime \
       --identifier com.clawgate.app \
       --entitlements ClawGate.entitlements \
       --sign "ClawGate Dev" "$APP_PATH"
   else
-    echo "[3/4] Skip codesign (ClawGate Dev not found)"
+    echo "[4/5] Skip codesign (ClawGate Dev not found)"
   fi
 else
-  echo "[3/4] Skip codesign (by option)"
+  echo "[4/5] Skip codesign (by option)"
 fi
 
-echo "[4/4] Restart app"
+echo "[5/5] Restart app + local gateway"
 pkill -f "/Users/usedhonda/projects/Mac/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
 pkill -f "/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
 
@@ -104,6 +130,13 @@ done
 
 open -na "$APP_PATH"
 sleep 2
+
+if launchctl list 2>/dev/null | grep -q 'ai\.openclaw\.gateway'; then
+  launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
+  sleep 1
+  launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true
+  sleep 1
+fi
 
 echo "Process:"
 ps aux | grep "/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate" | grep -v grep || true
