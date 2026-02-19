@@ -76,9 +76,18 @@ try {
 
 // ── Prompt loading with layered overlays ───────────────────────────
 const DEFAULT_PRIVATE_PROMPTS_PATH = join(homedir(), ".clawgate", "prompts-private.js");
-const PROMPT_PROFILE_VERSION = "2026-02-17.observe-quality-v1";
+const PROMPT_PROFILE_VERSION = "2026-02-19.autonomous-policy-v1";
 const OBSERVE_REQUIRED_TOKENS = ["goal", "scope", "risk", "3-8"];
 const AUTONOMOUS_REQUIRED_TOKENS = ["<cc_task>"];
+const AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS = [
+  /見た/u,
+  /確認した/u,
+  /kickoff/i,
+  /review loop started/i,
+  /3[〜-]?5\s*文字/u,
+  /3-5\s*chars?/i,
+  /one-word acknowledg/i,
+];
 let _prompts = defaultPrompts;
 let _promptsLoaded = false;
 let _promptLoadSignature = "";
@@ -140,6 +149,12 @@ function linesIncludeTokens(lines, tokens) {
   return tokens.every((token) => text.includes(token.toLowerCase()));
 }
 
+function containsForbiddenAutonomousPromptText(lines) {
+  const text = asPromptLines(lines).join("\n");
+  if (!text.trim()) return false;
+  return AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 function validatePromptShape(prompts) {
   const errors = [];
   if (!Array.isArray(prompts?.firstTime) || prompts.firstTime.length === 0) {
@@ -190,6 +205,14 @@ function enforceCriticalPromptContracts(prompts) {
   if (!linesIncludeTokens(prompts?.completion?.autonomous, AUTONOMOUS_REQUIRED_TOKENS)) {
     prompts.completion.autonomous = structuredClone(defaultPrompts.completion.autonomous);
     repaired.push("completion.autonomous");
+  }
+  if (containsForbiddenAutonomousPromptText(prompts?.completion?.autonomous)) {
+    prompts.completion.autonomous = structuredClone(defaultPrompts.completion.autonomous);
+    repaired.push("completion.autonomous(forbidden_chatter)");
+  }
+  if (containsForbiddenAutonomousPromptText(prompts?.firstTime)) {
+    prompts.firstTime = structuredClone(defaultPrompts.firstTime);
+    repaired.push("firstTime(forbidden_chatter)");
   }
   return repaired;
 }
@@ -397,10 +420,6 @@ function setAutonomousLoopActive(project, active) {
   autonomousLoopState.set(project, { active: true });
 }
 
-function isAutonomousLoopActive(project) {
-  return autonomousLoopState.get(project)?.active === true;
-}
-
 function setReviewDone(project, reason = "unknown") {
   if (!project) return;
   reviewDoneProjects.set(project, { setAt: Date.now(), reason });
@@ -426,9 +445,6 @@ function autonomousMilestoneLine({ reason, round, maxRounds, taskText, lineText 
     const riskSummary = summarizeForLine(lineText || taskText || "");
     return `Autonomous review found a potential risk at round ${round}/${maxRounds}.\n${riskSummary || "I flagged this in-session and will send final status after verification."}`;
   }
-  if (reason === "kickoff") {
-    return `Autonomous review loop started (${round}/${maxRounds}). I'm discussing details directly in-session and will send a final summary when it closes.`;
-  }
   return "";
 }
 
@@ -448,10 +464,19 @@ function eventTimestamp(event) {
 // ── Completion / task-send loop guards ─────────────────────────
 const COMPLETION_DISPATCH_DEDUP_WINDOW_MS = 30_000;
 const TASK_SEND_ERROR_NOTIFY_WINDOW_MS = 60_000;
+const TASK_SEND_ESCALATION_WINDOW_MS = Math.max(
+  5_000,
+  (Number.parseInt(process.env.CLAWGATE_TASK_SEND_ESCALATION_SEC || "60", 10) || 60) * 1000
+);
+const ENABLE_DEBUG_TASK_FAILURE_CONTEXT = /^(1|true|yes)$/i.test(
+  `${process.env.CLAWGATE_DEBUG_TASK_FAILURE_CONTEXT || process.env.CLAWGATE_DEBUG_FAILURE_CONTEXT || ""}`.trim()
+);
 /** @type {Map<string, number>} */
 const recentCompletionDispatches = new Map();
 /** @type {Map<string, number>} */
 const recentTaskSendErrors = new Map();
+/** @type {Map<string, { firstAt: number, lastAt: number, lastEscalatedAt: number, count: number, category: string }>} */
+const taskSendFailureStreaks = new Map();
 
 function normalizeFingerprintText(text, max = 800) {
   const normalized = `${text || ""}`.replace(/\s+/g, " ").trim();
@@ -496,6 +521,85 @@ function shouldNotifyTaskSendError({ project, errorCode, taskText }) {
   }
   recentTaskSendErrors.set(key, now);
   return true;
+}
+
+function classifyTaskSendFailure({ errorCode, errorMessage }) {
+  const code = `${errorCode || ""}`.toLowerCase();
+  const message = `${errorMessage || ""}`.toLowerCase();
+
+  if (code === "session_busy" || message.includes("currently running") || message.includes("session busy")) {
+    return "busy";
+  }
+  if (
+    code === "session_read_only" ||
+    message.includes("read-only") ||
+    message.includes("task send disabled")
+  ) {
+    return "readonly";
+  }
+  if (
+    code === "aborterror" ||
+    code === "aborted" ||
+    message.includes("operation was aborted") ||
+    message.includes("was aborted")
+  ) {
+    return "aborted";
+  }
+  return "other";
+}
+
+function trackTaskSendFailureStreak({ project, category }) {
+  const key = `${project || "unknown"}::${category}`;
+  const now = Date.now();
+  const existing = taskSendFailureStreaks.get(key);
+  const stale = !existing || now - existing.lastAt > TASK_SEND_ESCALATION_WINDOW_MS;
+  const firstAt = stale ? now : existing.firstAt;
+  const count = stale ? 1 : (existing.count + 1);
+  const next = {
+    firstAt,
+    lastAt: now,
+    lastEscalatedAt: existing?.lastEscalatedAt || 0,
+    count,
+    category,
+  };
+
+  const streakDurationMs = now - firstAt;
+  const shouldEscalate =
+    streakDurationMs >= TASK_SEND_ESCALATION_WINDOW_MS &&
+    (next.lastEscalatedAt === 0 || now - next.lastEscalatedAt >= TASK_SEND_ESCALATION_WINDOW_MS);
+  if (shouldEscalate) {
+    next.lastEscalatedAt = now;
+  }
+
+  taskSendFailureStreaks.set(key, next);
+  return {
+    shouldEscalate,
+    streakDurationMs,
+    count,
+  };
+}
+
+function clearTaskSendFailureStreak(project) {
+  const prefix = `${project || "unknown"}::`;
+  for (const key of taskSendFailureStreaks.keys()) {
+    if (key.startsWith(prefix)) {
+      taskSendFailureStreaks.delete(key);
+    }
+  }
+}
+
+function buildTaskFailureEscalationLine({ project, category, streakDurationMs }) {
+  const seconds = Math.max(1, Math.round(streakDurationMs / 1000));
+  if (category === "busy") {
+    return `Autonomous relay for ${project} is busy (${seconds}s). I’ll keep retrying and send only meaningful updates.`;
+  }
+  if (category === "readonly") {
+    return `Autonomous relay for ${project} is blocked by session mode (${seconds}s). I’ll keep monitoring and report when routing resumes.`;
+  }
+  if (category === "aborted") {
+    return `Autonomous relay for ${project} is being aborted repeatedly (${seconds}s). I’ll continue retrying and report recovery.`;
+  }
+  return `Autonomous relay for ${project} is unstable (${seconds}s). I’ll keep monitoring and report recovery.`;
 }
 
 // ── Plugin-level echo suppression ──────────────────────────────
@@ -847,26 +951,28 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", session
  * @returns {string}
  */
 function buildTaskFailureMessage(errorMsg, lineText, project) {
-  const MAX_TRAIL_LINES = 20;
-  const MAX_SNAPSHOT_LINES = 10;
   const parts = [`[Task send failed: ${errorMsg}]`];
 
-  const trail = getProgressTrail(project);
-  if (trail) {
-    const lines = trail.split("\n");
-    const tail = lines.length > MAX_TRAIL_LINES
-      ? lines.slice(-MAX_TRAIL_LINES).join("\n")
-      : trail;
-    parts.push(`[Progress Trail (last ${Math.min(lines.length, MAX_TRAIL_LINES)} lines)]\n${tail}`);
-  }
+  if (ENABLE_DEBUG_TASK_FAILURE_CONTEXT) {
+    const MAX_TRAIL_LINES = 20;
+    const MAX_SNAPSHOT_LINES = 10;
+    const trail = getProgressTrail(project);
+    if (trail) {
+      const lines = trail.split("\n");
+      const tail = lines.length > MAX_TRAIL_LINES
+        ? lines.slice(-MAX_TRAIL_LINES).join("\n")
+        : trail;
+      parts.push(`[Progress Trail (last ${Math.min(lines.length, MAX_TRAIL_LINES)} lines)]\n${tail}`);
+    }
 
-  const snapshot = getProgressSnapshot(project);
-  if (snapshot?.text) {
-    const sLines = snapshot.text.split("\n");
-    const sTail = sLines.length > MAX_SNAPSHOT_LINES
-      ? sLines.slice(-MAX_SNAPSHOT_LINES).join("\n")
-      : snapshot.text;
-    parts.push(`[Last Snapshot]\n${sTail}`);
+    const snapshot = getProgressSnapshot(project);
+    if (snapshot?.text) {
+      const sLines = snapshot.text.split("\n");
+      const sTail = sLines.length > MAX_SNAPSHOT_LINES
+        ? sLines.slice(-MAX_SNAPSHOT_LINES).join("\n")
+        : snapshot.text;
+      parts.push(`[Last Snapshot]\n${sTail}`);
+    }
   }
 
   if (lineText) parts.push(lineText);
@@ -933,6 +1039,7 @@ async function tryExtractAndSendTask({
       const result = await clawgateTmuxSend(apiUrl, targetProject, prefixedTask, traceId);
       if (result?.ok) {
         log?.info?.(`clawgate: task sent to CC (${targetProject}): "${taskText.slice(0, 80)}"`);
+        clearTaskSendFailureStreak(targetProject);
         setTaskGoal(targetProject, taskText);
         if (clearReviewDone(targetProject)) {
           log?.info?.(`clawgate: review-done CLEARED for "${targetProject}" — new task sent, completions resumed`);
@@ -1307,6 +1414,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       // LGTM termination from inbound — forward lineText to LINE, set review-done
       if (result.terminated) {
         const proj = result.targetProject || sourceTaskProject || "unknown";
+        clearTaskSendFailureStreak(proj);
         setReviewDone(proj, "lgtm_inbound");
         log?.info?.(`clawgate: [${accountId}] review-done SET for "${proj}" — LGTM via inbound`);
         if (result.lineText) {
@@ -1315,21 +1423,83 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
         return;
       }
       if (result.error) {
-        const shouldNotify = shouldNotifyTaskSendError({
-          project: result.targetProject || sourceTaskProject || "unknown",
-          errorCode: result.errorCode || "unknown_error",
-          taskText: result.taskText || "",
+        const targetProject = result.targetProject || sourceTaskProject || "unknown";
+        const errorCode = result.errorCode || "unknown_error";
+        const errorMessage = result.error.message || String(result.error);
+        const category = classifyTaskSendFailure({ errorCode, errorMessage });
+        const eventName = `task_send_failed.${category}`;
+
+        traceLog(log, "warn", {
+          trace_id: traceId,
+          stage: eventName,
+          action: "cc_task_send",
+          status: "failed",
+          project: targetProject,
+          error_code: errorCode,
         });
-        if (shouldNotify) {
-          const msg = buildTaskFailureMessage(result.error.message || String(result.error), result.lineText, result.targetProject || sourceTaskProject || "unknown");
-          try {
-            await clawgateSend(apiUrl, conversation, msg, traceId);
-            recordPluginSend(msg);
-          } catch (err) {
-            log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+
+        if (category !== "other") {
+          const streak = trackTaskSendFailureStreak({ project: targetProject, category });
+          log?.info?.(
+            `clawgate: [${accountId}] task send benign failure suppressed (project=${targetProject}, category=${category}, count=${streak.count})`
+          );
+          if (result.lineText) {
+            const shouldForwardLine = shouldNotifyTaskSendError({
+              project: targetProject,
+              errorCode,
+              taskText: result.taskText || "",
+            });
+            if (shouldForwardLine) {
+              try {
+                await clawgateSend(apiUrl, conversation, result.lineText, traceId);
+                recordPluginSend(result.lineText);
+              } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] send fallback review text to LINE failed: ${err}`);
+              }
+            } else {
+              log?.info?.(`clawgate: [${accountId}] benign failure fallback line suppressed (project=${targetProject}, code=${errorCode})`);
+            }
+          }
+          if (streak.shouldEscalate) {
+            const msg = buildTaskFailureEscalationLine({
+              project: targetProject,
+              category,
+              streakDurationMs: streak.streakDurationMs,
+            });
+            try {
+              await clawgateSend(apiUrl, conversation, msg, traceId);
+              recordPluginSend(msg);
+              traceLog(log, "info", {
+                trace_id: traceId,
+                stage: "task_send_escalated",
+                action: "line_send",
+                status: "ok",
+                project: targetProject,
+                error_code: errorCode,
+                escalation_sec: Math.round(streak.streakDurationMs / 1000),
+              });
+            } catch (err) {
+              log?.error?.(`clawgate: [${accountId}] send task escalation to LINE failed: ${err}`);
+            }
           }
         } else {
-          log?.info?.(`clawgate: [${accountId}] task send error notice suppressed (project=${result.targetProject || sourceTaskProject || "unknown"}, code=${result.errorCode || "unknown_error"})`);
+          clearTaskSendFailureStreak(targetProject);
+          const shouldNotify = shouldNotifyTaskSendError({
+            project: targetProject,
+            errorCode,
+            taskText: result.taskText || "",
+          });
+          if (shouldNotify) {
+            const msg = buildTaskFailureMessage(errorMessage, result.lineText, targetProject);
+            try {
+              await clawgateSend(apiUrl, conversation, msg, traceId);
+              recordPluginSend(msg);
+            } catch (err) {
+              log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+            }
+          } else {
+            log?.info?.(`clawgate: [${accountId}] task send error notice suppressed (project=${targetProject}, code=${errorCode})`);
+          }
         }
       } else if (result.lineText) {
         try {
@@ -1589,30 +1759,26 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
       }
     }
 
-    // Default: forward to LINE (observe, autonomous, auto fallback)
+    // Default: forward to LINE (observe + auto fallback).
+    // Autonomous policy: Risk + Final only (question relay is suppressed).
+    if (mode === "autonomous") {
+      logAutonomousLineEvent(log, {
+        accountId,
+        project,
+        reason: "question",
+        status: "suppressed",
+        detail: "policy=risk_final_only",
+      });
+      return;
+    }
+
+    // Observe + auto fallback
     const lineText = normalizeLineReplyText(replyText, { project, sessionType, eventKind: "question" });
     log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);
-      if (mode === "autonomous") {
-        logAutonomousLineEvent(log, {
-          accountId,
-          project,
-          reason: "question",
-          status: "sent",
-        });
-      }
     } catch (err) {
       log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
-      if (mode === "autonomous") {
-        logAutonomousLineEvent(log, {
-          accountId,
-          project,
-          reason: "question",
-          status: "failed",
-          detail: String(err),
-        });
-      }
     }
   };
 
@@ -1847,7 +2013,6 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     if (mode === "autonomous") {
       const rounds = questionRoundMap.get(project) || 0;
       const MAX_ROUNDS = 3;
-      const loopWasActive = isAutonomousLoopActive(project);
 
       if (rounds < MAX_ROUNDS) {
         const result = await tryExtractAndSendTask({
@@ -1857,57 +2022,179 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           // LGTM termination: tryExtractAndSendTask intercepted before sending to CC
           if (result.terminated) {
             log?.info?.(`clawgate: [${accountId}] autonomous loop terminated by LGTM signal (project=${project}, round=${rounds + 1})`);
+            clearTaskSendFailureStreak(result.targetProject || project);
             questionRoundMap.delete(project);
             setAutonomousLoopActive(project, false);
             setReviewDone(project, "lgtm_autonomous");
             log?.info?.(`clawgate: [${accountId}] review-done SET for "${project}" — completions suppressed until next task`);
-            logAutonomousLineEvent(log, {
-              accountId,
-              project,
-              reason: "lgtm",
-              status: "sent",
-              detail: `round=${rounds + 1}/${MAX_ROUNDS} signal=${result.taskText.trim()}`,
-            });
-            // Forward the review summary (lineText) to LINE
+            // Forward the review summary (lineText) to LINE as final milestone.
             if (result.lineText) {
               const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
-              try { await sendLine(defaultConversation || project, normalized); } catch {}
+              try {
+                await sendLine(defaultConversation || project, normalized);
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project,
+                  reason: "final",
+                  status: "sent",
+                  detail: `round=${rounds + 1}/${MAX_ROUNDS} signal=${result.taskText.trim()}`,
+                });
+              } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] autonomous final send failed: ${err}`);
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project,
+                  reason: "final",
+                  status: "failed",
+                  detail: String(err),
+                });
+              }
+            } else {
+              logAutonomousLineEvent(log, {
+                accountId,
+                project,
+                reason: "final",
+                status: "suppressed",
+                detail: "no_line_text",
+              });
             }
             return;
           }
 
           if (result.error) {
-            const shouldNotify = shouldNotifyTaskSendError({
-              project: result.targetProject || project,
-              errorCode: result.errorCode || "unknown_error",
-              taskText: result.taskText || "",
+            const targetProject = result.targetProject || project;
+            const errorCode = result.errorCode || "unknown_error";
+            const errorMessage = result.error.message || String(result.error);
+            const category = classifyTaskSendFailure({ errorCode, errorMessage });
+            const eventName = `task_send_failed.${category}`;
+
+            traceLog(log, "warn", {
+              trace_id: traceId,
+              stage: eventName,
+              action: "cc_task_send",
+              status: "failed",
+              project: targetProject,
+              error_code: errorCode,
             });
-            if (shouldNotify) {
-              const msg = buildTaskFailureMessage(result.error.message || String(result.error), result.lineText, result.targetProject || project);
-              try { await sendLine(defaultConversation || project, msg); } catch (err) {
-                log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
-                logAutonomousLineEvent(log, {
-                  accountId,
-                  project,
-                  reason: "routing_error",
-                  status: "failed",
-                  detail: String(err),
-                });
-              }
+
+            if (category !== "other") {
+              const streak = trackTaskSendFailureStreak({ project: targetProject, category });
               logAutonomousLineEvent(log, {
                 accountId,
-                project,
-                reason: "routing_error",
-                status: "sent",
-              });
-            } else {
-              logAutonomousLineEvent(log, {
-                accountId,
-                project,
+                project: targetProject,
                 reason: "routing_error",
                 status: "suppressed",
-                detail: result.errorCode || "unknown_error",
+                detail: `${category} count=${streak.count}`,
               });
+              if (result.lineText) {
+                const shouldForwardLine = shouldNotifyTaskSendError({
+                  project: targetProject,
+                  errorCode,
+                  taskText: result.taskText || "",
+                });
+                if (shouldForwardLine) {
+                  const normalizedFallback = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
+                  try {
+                    await sendLine(defaultConversation || project, normalizedFallback);
+                    logAutonomousLineEvent(log, {
+                      accountId,
+                      project: targetProject,
+                      reason: "routing_error",
+                      status: "sent",
+                      detail: "sanitized_fallback",
+                    });
+                  } catch (err) {
+                    log?.error?.(`clawgate: [${accountId}] autonomous fallback review send failed: ${err}`);
+                    logAutonomousLineEvent(log, {
+                      accountId,
+                      project: targetProject,
+                      reason: "routing_error",
+                      status: "failed",
+                      detail: String(err),
+                    });
+                  }
+                } else {
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "suppressed",
+                    detail: "fallback_dedup",
+                  });
+                }
+              }
+
+              if (streak.shouldEscalate) {
+                const msg = buildTaskFailureEscalationLine({
+                  project: targetProject,
+                  category,
+                  streakDurationMs: streak.streakDurationMs,
+                });
+                try {
+                  await sendLine(defaultConversation || project, msg);
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "sent",
+                    detail: `escalated ${Math.round(streak.streakDurationMs / 1000)}s`,
+                  });
+                  traceLog(log, "info", {
+                    trace_id: traceId,
+                    stage: "task_send_escalated",
+                    action: "line_send",
+                    status: "ok",
+                    project: targetProject,
+                    error_code: errorCode,
+                    escalation_sec: Math.round(streak.streakDurationMs / 1000),
+                  });
+                } catch (err) {
+                  log?.error?.(`clawgate: [${accountId}] autonomous escalation send failed: ${err}`);
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "failed",
+                    detail: String(err),
+                  });
+                }
+              }
+            } else {
+              clearTaskSendFailureStreak(targetProject);
+              const shouldNotify = shouldNotifyTaskSendError({
+                project: targetProject,
+                errorCode,
+                taskText: result.taskText || "",
+              });
+              if (shouldNotify) {
+                const msg = buildTaskFailureMessage(errorMessage, result.lineText, targetProject);
+                try {
+                  await sendLine(defaultConversation || project, msg);
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "sent",
+                  });
+                } catch (err) {
+                  log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+                  logAutonomousLineEvent(log, {
+                    accountId,
+                    project: targetProject,
+                    reason: "routing_error",
+                    status: "failed",
+                    detail: String(err),
+                  });
+                }
+              } else {
+                logAutonomousLineEvent(log, {
+                  accountId,
+                  project: targetProject,
+                  reason: "routing_error",
+                  status: "suppressed",
+                  detail: errorCode,
+                });
+              }
             }
           } else {
             const nextRound = rounds + 1;
@@ -1915,8 +2202,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             setAutonomousLoopActive(project, true);
 
             const riskDetected = hasAutonomousRiskSignal(result.taskText, result.lineText);
-            const shouldKickoff = !loopWasActive;
-            const reason = riskDetected ? "risk" : (shouldKickoff ? "kickoff" : "suppressed");
+            const reason = riskDetected ? "risk" : "suppressed";
 
             if (reason === "suppressed") {
               logAutonomousLineEvent(log, {
@@ -1962,8 +2248,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       // No <cc_task> or max rounds reached — reset counter, strip tags, fall through to LINE
       questionRoundMap.delete(project);
       setAutonomousLoopActive(project, false);
-      setReviewDone(project, "autonomous_no_cc_task");
-      log?.info?.(`clawgate: [${accountId}] review-done SET for "${project}" — max rounds reached or no cc_task, completions suppressed`);
+      log?.info?.(`clawgate: [${accountId}] autonomous loop reset for "${project}" — max rounds reached or no cc_task`);
       // Strip any <cc_task> tags so they don't leak raw into LINE
       replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
     }
@@ -1976,6 +2261,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       if (result) {
         // LGTM termination in auto mode — forward lineText, set review-done
         if (result.terminated) {
+          clearTaskSendFailureStreak(result.targetProject || project);
           setReviewDone(result.targetProject || project, "lgtm_auto");
           log?.info?.(`clawgate: [${accountId}] review-done SET for "${result.targetProject || project}" — LGTM in auto mode`);
           if (result.lineText) {
@@ -1985,18 +2271,76 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           return;
         }
         if (result.error) {
-          const shouldNotify = shouldNotifyTaskSendError({
-            project: result.targetProject || project,
-            errorCode: result.errorCode || "unknown_error",
-            taskText: result.taskText || "",
+          const targetProject = result.targetProject || project;
+          const errorCode = result.errorCode || "unknown_error";
+          const errorMessage = result.error.message || String(result.error);
+          const category = classifyTaskSendFailure({ errorCode, errorMessage });
+
+          traceLog(log, "warn", {
+            trace_id: traceId,
+            stage: `task_send_failed.${category}`,
+            action: "cc_task_send",
+            status: "failed",
+            project: targetProject,
+            error_code: errorCode,
           });
-          if (shouldNotify) {
-            const msg = buildTaskFailureMessage(result.error.message || String(result.error), result.lineText, result.targetProject || project);
-            try { await sendLine(defaultConversation || project, msg); } catch (err) {
-              log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+
+          if (category !== "other") {
+            const streak = trackTaskSendFailureStreak({ project: targetProject, category });
+            log?.info?.(`clawgate: [${accountId}] auto task send benign failure suppressed (project=${targetProject}, category=${category}, count=${streak.count})`);
+            if (result.lineText) {
+              const shouldForwardLine = shouldNotifyTaskSendError({
+                project: targetProject,
+                errorCode,
+                taskText: result.taskText || "",
+              });
+              if (shouldForwardLine) {
+                const normalizedFallback = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
+                try {
+                  await sendLine(defaultConversation || project, normalizedFallback);
+                } catch (err) {
+                  log?.error?.(`clawgate: [${accountId}] auto fallback review send failed: ${err}`);
+                }
+              } else {
+                log?.info?.(`clawgate: [${accountId}] auto benign fallback line suppressed (project=${targetProject}, code=${errorCode})`);
+              }
+            }
+            if (streak.shouldEscalate) {
+              const msg = buildTaskFailureEscalationLine({
+                project: targetProject,
+                category,
+                streakDurationMs: streak.streakDurationMs,
+              });
+              try {
+                await sendLine(defaultConversation || project, msg);
+                traceLog(log, "info", {
+                  trace_id: traceId,
+                  stage: "task_send_escalated",
+                  action: "line_send",
+                  status: "ok",
+                  project: targetProject,
+                  error_code: errorCode,
+                  escalation_sec: Math.round(streak.streakDurationMs / 1000),
+                });
+              } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] auto escalation send failed: ${err}`);
+              }
             }
           } else {
-            log?.info?.(`clawgate: [${accountId}] task send error notice suppressed (project=${result.targetProject || project}, code=${result.errorCode || "unknown_error"})`);
+            clearTaskSendFailureStreak(targetProject);
+            const shouldNotify = shouldNotifyTaskSendError({
+              project: targetProject,
+              errorCode,
+              taskText: result.taskText || "",
+            });
+            if (shouldNotify) {
+              const msg = buildTaskFailureMessage(errorMessage, result.lineText, targetProject);
+              try { await sendLine(defaultConversation || project, msg); } catch (err) {
+                log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+              }
+            } else {
+              log?.info?.(`clawgate: [${accountId}] task send error notice suppressed (project=${targetProject}, code=${errorCode})`);
+            }
           }
         } else {
           if (result.lineText) {
