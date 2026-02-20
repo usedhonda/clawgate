@@ -523,6 +523,9 @@ final class LINEInboundWatcher {
             if now.timeIntervalSince(entry.at) > windowSeconds { break }
             if entry.conversation != conversation { continue }
             if linesLikelyEquivalent(normalizedLine, entry.normalizedLine) {
+                let matchedHead = String(entry.normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
+                let queryHead = String(normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
+                logger.log(.debug, "LINEInboundWatcher: fuzzy_dedup_hit query=[\(queryHead)] matched=[\(matchedHead)]")
                 return true
             }
         }
@@ -909,9 +912,10 @@ final class LINEInboundWatcher {
             if baseline.frameSkippedNoCutDescription == "1" {
                 logger.log(.debug, "LINEInboundWatcher: baseline fallback without y-cut (continuing)")
             }
-            lastOCRText = baseline.text
+            let baselineHead = String(baseline.text.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
+            lastOCRText = ""  // force textChanged=true on first poll after baseline
             baselineCaptured = true
-            logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash), lane=\(baseline.laneXDescription), y_cut=\(baseline.cutYDescription))")
+            logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash), lane=\(baseline.laneXDescription), y_cut=\(baseline.cutYDescription), text_head=[\(baselineHead)])")
             return nil
         }
 
@@ -926,6 +930,11 @@ final class LINEInboundWatcher {
         let pixelOCRText = burst.text
         let previousOCRText = lastOCRText
         let textChanged = pixelOCRText != previousOCRText
+        if !textChanged {
+            let prevHead = String(previousOCRText.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
+            let currHead = String(pixelOCRText.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
+            logger.log(.debug, "LINEInboundWatcher: text_unchanged prev=[\(prevHead)] curr=[\(currHead)]")
+        }
         if textChanged {
             lastOCRText = pixelOCRText
         }

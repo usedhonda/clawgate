@@ -374,8 +374,8 @@ const projectViewReaders = new Map();
 const guidanceSentProjects = new Set();
 
 // ── Autonomous conversation round tracking ──────────────────────
-// Tracks how many completion->question rounds Chi has had with CC per project.
-// Reset on question events, incremented on completion when Chi sends <cc_task>.
+// Tracks how many completion->question rounds the reviewer agent has had with CC per project.
+// Reset on question events, incremented on completion when the reviewer agent sends <cc_task>.
 /** @type {Map<string, number>} project -> round count */
 const questionRoundMap = new Map();
 /** @type {Map<string, { active: boolean }>} project -> autonomous loop state */
@@ -709,7 +709,7 @@ function buildTypingBusyAdvisoryLine(project) {
 // ClawGate's RecentSendTracker uses an 8-second window which is too short
 // for AI replies (typically 10-30s). We maintain a secondary tracker here.
 
-const ECHO_WINDOW_MS = 45_000; // 45 seconds — covers AI processing time
+const ECHO_WINDOW_MS = 600_000; // 10 minutes — covers delayed re-render of Chi's replies
 const COOLDOWN_MS = 5_000;     // retained for metrics/log context (no blanket drop)
 
 /** @type {{ text: string, time: number }[]} */
@@ -717,10 +717,12 @@ const recentSends = [];
 let lastSendTime = 0;
 
 function recordPluginSend(text) {
-  lastSendTime = Date.now();
-  recentSends.push({ text: text.trim(), time: Date.now() });
+  const now = Date.now();
+  lastSendTime = now;
+  recentSends.push({ text: text.trim(), time: now });
+  console.debug(`[outbound_recorded] text_head="${text.slice(0, 40)}" ts=${now} echo_window_ms=${ECHO_WINDOW_MS}`);
   // Prune old entries
-  const cutoff = Date.now() - ECHO_WINDOW_MS;
+  const cutoff = now - ECHO_WINDOW_MS;
   while (recentSends.length > 0 && recentSends[0].time < cutoff) {
     recentSends.shift();
   }
@@ -801,6 +803,13 @@ function isPluginEcho(eventText) {
     if (isLikelyPluginEchoByLines(eventText, activeSends)) {
       return true;
     }
+  }
+  // Log echo guard miss so we can diagnose re-delivered messages that bypass the guard
+  const lastSendAge = recentSends.length ? now - recentSends[recentSends.length - 1].time : -1;
+  const activeSendCount = recentSends.filter((s) => s.time >= cutoff).length;
+  if (activeSendCount > 0) {
+    // Only log when there were candidates (miss is interesting, not "no sends recorded")
+    console.debug(`[echo_guard_miss] text_head="${eventText.slice(0, 40)}" active_sends=${activeSendCount} last_send_age_ms=${lastSendAge}`);
   }
   return false;
 }
@@ -1407,7 +1416,7 @@ function normalizeLineReplyText(text, { project = "", sessionType = "claude_code
 
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
-  // Strip any existing [CC/Codex ...] prefix (Chi may have added one) before re-adding
+  // Strip any existing [CC/Codex ...] prefix (agent may have added one) before re-adding
   // to ensure consistent formatting.
   if (project) {
     result = result.replace(/^\[(CC|Codex) [^\]]*\]\n?/, "").trim();
@@ -2155,7 +2164,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       return;
     }
 
-    // Try to extract <cc_read> — on-demand pane reading for Chi
+    // Try to extract <cc_read> — on-demand pane reading for the reviewer agent
     const readResult = await tryExtractAndReadPane({ replyText: text, apiUrl, traceId, log });
     if (readResult) {
       if (readResult.error) {
@@ -2415,7 +2424,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     log?.info?.(`clawgate: [${accountId}] review-done CLEARED for "${project}" — question event received`);
   }
 
-  // Reset autonomous conversation round counter (question = CC responded, not Chi's turn)
+  // Reset autonomous conversation round counter (question = CC responded, not agent's turn)
   questionRoundMap.delete(project);
 
   // Track pending question
@@ -2456,7 +2465,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     optionalParts.push(projectView);
   }
 
-  // Task goal (what Chi asked CC to do — helps Chi understand what the question is about)
+  // Task goal (what the reviewer agent asked CC to do — helps the agent understand what the question is about)
   // Note: DON'T clearTaskGoal here — question doesn't end the task
   const taskGoal = getTaskGoal(project);
   if (taskGoal) {
@@ -2477,7 +2486,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     optionalParts.push(`[Screen Context (above question)]\n${questionContext}`);
   }
 
-  // Progress trail (what CC did so far — helps Chi understand the question in context)
+  // Progress trail (what CC did so far — helps the agent understand the question in context)
   // Note: DON'T clearProgressTrail — question doesn't end the task
   // Deduplicate against questionContext to avoid repeating the same content
   const trail = getProgressTrail(project);
@@ -2493,7 +2502,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   const guidance = buildPairingGuidance({ project, mode, eventKind: "question", sessionType, firstTime: isFirstGuidance });
   if (isFirstGuidance) guidanceSentProjects.add(project);
 
-  // Format numbered options for Chi
+  // Format numbered options for the reviewer agent
   const numberedOptions = options.map((opt, i) => {
     const marker = i === selectedIndex ? ">>>" : "   ";
     return `${marker} ${i + 1}. ${opt}`;
@@ -2790,7 +2799,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     optionalParts.push(projectView);
   }
 
-  // Task goal (what Chi asked CC to do — enables goal vs result comparison)
+  // Task goal (what the reviewer agent asked CC to do — enables goal vs result comparison)
   const taskGoal = getTaskGoal(project);
   if (taskGoal) {
     optionalParts.push(`[Task Goal]\n${taskGoal}`);
@@ -2839,7 +2848,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       : `[${sessionLabel(sessionType)} ${project}] Interactive prompt is open in terminal.\n\n${interactionPending.questionText}\n\n[Give recommendation only. Do NOT use <cc_task> or <cc_answer>.]`;
     requiredParts = [guidance, interactionBody];
   } else {
-    // Append metadata notes so Chi understands information gaps
+    // Append metadata notes so the reviewer agent understands information gaps
     const hasGoal = !!taskGoal;
     const hasUncommitted = dynamic?.envelope?.includes("Uncommitted changes:");
     const hasTrail = !!trail;

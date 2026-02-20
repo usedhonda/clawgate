@@ -18,6 +18,7 @@ final class BridgeCore {
     private let autonomousStatusLock = NSLock()
     private var reportedAutonomousStalledTraceIDs: Set<String> = []
     private let autonomousStallThresholdSeconds: TimeInterval = 120
+    private var typingBusyStreakCount = 0
 
     init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, opsLogStore: OpsLogStore, configStore: ConfigStore, statsCollector: StatsCollector) {
         self.eventBus = eventBus
@@ -409,6 +410,7 @@ final class BridgeCore {
             logger.log(.info, "send_message completed with \(steps.count) steps")
             let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
             writeOps(level: "info", event: "\(adapterAction)_ok", traceID: trace, stage: "adapter", action: adapterAction, status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
+            typingBusyStreakCount = 0
             statsCollector.increment("sent", adapter: request.adapter)
             eventBus.append(type: "outbound_message", adapter: request.adapter, payload: [
                 "text": String(request.payload.text.prefix(100)),
@@ -436,6 +438,12 @@ final class BridgeCore {
 
             let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
             writeOps(level: "error", event: "send_failed", traceID: requestTrace, stage: "bridge_server", action: "send_message", status: "failed", errorCode: err.code, errorMessage: err.message, latencyMs: latencyMs)
+            if err.code == "session_typing_busy" {
+                typingBusyStreakCount += 1
+                logger.log(.debug, "BridgeCore: typing_busy streak=\(typingBusyStreakCount)")
+            } else {
+                typingBusyStreakCount = 0
+            }
             return jsonResponse(
                 status: err.retriable ? .serviceUnavailable : .badRequest,
                 body: encode(APIResponse<SendResult>(ok: false, result: nil, error: err.asPayload())),
@@ -704,6 +712,15 @@ final class BridgeCore {
             for entry in entries where entry.event == "line_send_ok" {
                 if let traceID = lastCompletionTraceID, !traceID.isEmpty {
                     if entry.message.contains("trace_id=\(traceID)") {
+                        logger.log(.debug, "BridgeCore: line_send_ok matched trace_id=\(traceID)")
+                        lastLineSendOKAt = entry.ts
+                        break
+                    }
+                    // Proximity fallback: accept line_send_ok within 5 minutes of completion
+                    // even if trace_id doesn't match (e.g. gateway-side trace vs bridge-side trace)
+                    let proximityWindow: TimeInterval = 300
+                    if entry.date >= completionDate && entry.date.timeIntervalSince(completionDate) <= proximityWindow {
+                        logger.log(.debug, "BridgeCore: line_send_ok fallback by timestamp (trace_id=\(traceID))")
                         lastLineSendOKAt = entry.ts
                         break
                     }
@@ -711,6 +728,21 @@ final class BridgeCore {
                     // Fallback: when trace_id is unavailable, use the latest line_send_ok
                     // after the most recent completion timestamp.
                     lastLineSendOKAt = entry.ts
+                    break
+                }
+            }
+            if lastLineSendOKAt == nil {
+                logger.log(.debug, "BridgeCore: line_send_ok NOT found for trace_id=\(lastCompletionTraceID ?? "nil") -> stall risk")
+            }
+        }
+
+        // Find the most recent send_failed error code after the last completion
+        var lastSendFailedErrorCode: String? = nil
+        if let completionDate = lastCompletionDate {
+            for entry in entries where entry.event == "send_failed" {
+                if entry.date >= completionDate {
+                    let kv = parseKeyValueMessage(entry.message)
+                    lastSendFailedErrorCode = kv["error_code"]
                     break
                 }
             }
@@ -724,9 +756,15 @@ final class BridgeCore {
             } else if let completionDate = lastCompletionDate {
                 let age = Date().timeIntervalSince(completionDate)
                 if age >= autonomousStallThresholdSeconds {
-                    suppressionReason = "stalled_no_line_send"
-                    reviewDone = true
-                    recordAutonomousStalledIfNeeded(project: project, traceID: lastCompletionTraceID, ageSeconds: Int(age))
+                    if lastSendFailedErrorCode == "session_typing_busy" {
+                        suppressionReason = "stalled_typing_busy"
+                        // reviewDone remains false — typing_busy is transient, don't suppress notifications
+                    } else {
+                        suppressionReason = "stalled_no_line_send"
+                        reviewDone = true
+                        recordAutonomousStalledIfNeeded(project: project, traceID: lastCompletionTraceID, ageSeconds: Int(age))
+                    }
+                    logger.log(.debug, "BridgeCore: autonomous_stall_check age_s=\(Int(age)) threshold=\(Int(autonomousStallThresholdSeconds)) send_fail_code=\(lastSendFailedErrorCode ?? "none") -> \(suppressionReason)")
                 } else {
                     suppressionReason = "pending_line_send"
                 }
