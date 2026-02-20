@@ -366,16 +366,29 @@ final class TmuxAdapter: AdapterProtocol {
         if draft.isEmpty {
             return PromptDraftDetection(state: .idle, draft: "", reason: "prompt_idle")
         }
+        if isTemplatePromptDraft(draft) {
+            return PromptDraftDetection(state: .idle, draft: "", reason: "template_prompt_idle")
+        }
         return PromptDraftDetection(state: .typing, draft: draft, reason: "draft_detected")
     }
 
     private func isTmuxFooterLine(_ line: String) -> Bool {
         let s = line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if s.isEmpty { return false }
-        if s == "? for shortcuts" { return true }
+        if s.contains("? for shortcuts") { return true }
         if s.range(of: #"^\d+%\s+context left$"#, options: .regularExpression) != nil { return true }
         if s.range(of: #"^\d+%\s+context window$"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"\d+%\s+context left"#, options: .regularExpression) != nil { return true }
+        if s.range(of: #"\d+%\s+context window"#, options: .regularExpression) != nil { return true }
         if s.hasPrefix("autonomous: ") { return true }
+        return false
+    }
+
+    private func isTemplatePromptDraft(_ draft: String) -> Bool {
+        let s = draft.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if s.isEmpty { return false }
+        if s == "implement {feature}" { return true }
+        if s == "run /review on my current changes" { return true }
         return false
     }
 

@@ -89,13 +89,13 @@ const ENABLE_INGRESS_DEDUP_TUNE_V2 = envFlag("CLAWGATE_INGRESS_DEDUP_TUNE_V2", t
 const OBSERVE_REQUIRED_TOKENS = ["goal", "scope", "risk", "3-8"];
 const AUTONOMOUS_REQUIRED_TOKENS = ["<cc_task>"];
 const AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS = [
-  /見た/u,
-  /確認した/u,
-  /kickoff/i,
-  /review loop started/i,
-  /3[〜-]?5\s*文字/u,
-  /3-5\s*chars?/i,
-  /one-word acknowledg/i,
+  /^\s*見た[。.!]?\s*$/u,
+  /^\s*確認(した|済み)?[。.!]?\s*$/u,
+  /^\s*kickoff(?:\s+message)?[。.!]?\s*$/i,
+  /^\s*autonomous review loop started.*$/i,
+  /^\s*3[〜-]?5\s*文字[。.!]?\s*$/u,
+  /^\s*3-5\s*chars?(?:\s+only)?[。.!]?\s*$/i,
+  /^\s*one-word acknowledg(?:e|ement).*[。.!]?\s*$/i,
 ];
 const AUTONOMOUS_SUPPRESSED_LINE_PATTERNS = [
   /^見た[。.!]?$/u,
@@ -529,6 +529,20 @@ const recentTaskSendErrors = new Map();
 const taskSendFailureStreaks = new Map();
 /** @type {Map<string, number>} */
 const recentInteractionPendingNotifications = new Map();
+/** @type {Map<string, { key: string, project: string, targetProject: string, taskText: string, prefixedTask: string, mode: string, traceId: string, createdAt: number, lastQueuedAt: number, retryCount: number }>} */
+const pendingTaskQueue = new Map();
+const TASK_QUEUE_TTL_MS = Math.max(
+  10_000,
+  (Number.parseInt(process.env.CLAWGATE_TASK_QUEUE_TTL_MS || "600000", 10) || 600000)
+);
+const TASK_QUEUE_MAX_GLOBAL = Math.max(
+  10,
+  (Number.parseInt(process.env.CLAWGATE_TASK_QUEUE_MAX_GLOBAL || "100", 10) || 100)
+);
+const TASK_QUEUE_MAX_PER_PROJECT = Math.max(
+  1,
+  (Number.parseInt(process.env.CLAWGATE_TASK_QUEUE_MAX_PER_PROJECT || "3", 10) || 3)
+);
 
 function normalizeFingerprintText(text, max = 800) {
   const normalized = `${text || ""}`.replace(/\s+/g, " ").trim();
@@ -539,6 +553,202 @@ function normalizeFingerprintText(text, max = 800) {
 
 function hashFingerprint(text) {
   return createHash("sha1").update(text).digest("hex");
+}
+
+function buildPendingTaskKey(targetProject, taskText) {
+  const normalizedProject = `${targetProject || "unknown"}`.trim().toLowerCase();
+  const normalizedTask = normalizeFingerprintText(taskText, 400);
+  const hash = hashFingerprint(`${normalizedProject}::${normalizedTask}`);
+  return `${normalizedProject}::${hash}`;
+}
+
+function queueProjectSize(project) {
+  const normalizedProject = `${project || ""}`.trim();
+  if (!normalizedProject) return 0;
+  let count = 0;
+  for (const item of pendingTaskQueue.values()) {
+    if (item.targetProject === normalizedProject) count += 1;
+  }
+  return count;
+}
+
+function queueOldest(predicate = null) {
+  /** @type {{key: string, createdAt: number} | null} */
+  let oldest = null;
+  for (const [key, item] of pendingTaskQueue) {
+    if (predicate && !predicate(item)) continue;
+    if (!oldest || item.createdAt < oldest.createdAt) {
+      oldest = { key, createdAt: item.createdAt };
+    }
+  }
+  return oldest?.key || null;
+}
+
+function prunePendingTaskQueue(log, now = Date.now()) {
+  for (const [key, item] of pendingTaskQueue) {
+    if (now - item.createdAt > TASK_QUEUE_TTL_MS) {
+      pendingTaskQueue.delete(key);
+      log?.info?.(
+        `clawgate: task_queue_dropped_stale project=${item.targetProject} age_ms=${now - item.createdAt}`
+      );
+    }
+  }
+
+  while (pendingTaskQueue.size > TASK_QUEUE_MAX_GLOBAL) {
+    const oldestKey = queueOldest();
+    if (!oldestKey) break;
+    const dropped = pendingTaskQueue.get(oldestKey);
+    pendingTaskQueue.delete(oldestKey);
+    if (dropped) {
+      log?.info?.(
+        `clawgate: task_queue_dropped_overflow scope=global project=${dropped.targetProject} key=${dropped.key.slice(0, 18)}`
+      );
+    }
+  }
+}
+
+function enqueuePendingTask({
+  project,
+  targetProject,
+  taskText,
+  prefixedTask,
+  mode,
+  traceId,
+  log,
+}) {
+  const now = Date.now();
+  prunePendingTaskQueue(log, now);
+  const key = buildPendingTaskKey(targetProject, taskText);
+  const existing = pendingTaskQueue.get(key);
+  if (existing) {
+    existing.lastQueuedAt = now;
+    pendingTaskQueue.set(key, existing);
+    log?.info?.(
+      `clawgate: task_queue_enqueued project=${targetProject} key=${key.slice(0, 18)} dedup=1 size=${pendingTaskQueue.size}`
+    );
+    return { queued: true, dedup: true, key };
+  }
+
+  while (queueProjectSize(targetProject) >= TASK_QUEUE_MAX_PER_PROJECT) {
+    const oldestProjectKey = queueOldest((item) => item.targetProject === targetProject);
+    if (!oldestProjectKey) break;
+    const dropped = pendingTaskQueue.get(oldestProjectKey);
+    pendingTaskQueue.delete(oldestProjectKey);
+    if (dropped) {
+      log?.info?.(
+        `clawgate: task_queue_dropped_overflow scope=project project=${targetProject} key=${dropped.key.slice(0, 18)}`
+      );
+    }
+  }
+
+  pendingTaskQueue.set(key, {
+    key,
+    project,
+    targetProject,
+    taskText,
+    prefixedTask,
+    mode,
+    traceId,
+    createdAt: now,
+    lastQueuedAt: now,
+    retryCount: 0,
+  });
+  prunePendingTaskQueue(log, now);
+  log?.info?.(
+    `clawgate: task_queue_enqueued project=${targetProject} key=${key.slice(0, 18)} dedup=0 size=${pendingTaskQueue.size}`
+  );
+  return { queued: true, dedup: false, key };
+}
+
+async function flushPendingTaskQueue({
+  apiUrl,
+  traceId,
+  log,
+  resolveMode = (targetProject) => sessionModes.get(targetProject) || "ignore",
+}) {
+  if (pendingTaskQueue.size === 0) return;
+  const now = Date.now();
+  prunePendingTaskQueue(log, now);
+  if (pendingTaskQueue.size === 0) return;
+
+  const items = [...pendingTaskQueue.values()].sort((a, b) => a.createdAt - b.createdAt);
+  for (const item of items) {
+    const mode = `${resolveMode(item.targetProject) || "ignore"}`.toLowerCase();
+    if (mode !== "autonomous" && mode !== "auto") {
+      pendingTaskQueue.delete(item.key);
+      log?.info?.(
+        `clawgate: task_queue_dropped_mode project=${item.targetProject} mode=${mode} key=${item.key.slice(0, 18)}`
+      );
+      continue;
+    }
+
+    const interactionPending = getInteractionPending(item.targetProject);
+    if (interactionPending) {
+      continue;
+    }
+
+    const typingGuard = await inspectTmuxDraftBeforeTaskSend({
+      apiUrl,
+      project: item.targetProject,
+      traceId: traceId || item.traceId,
+      log,
+    });
+    if (typingGuard.blocked) {
+      if (typingGuard.reason === "draft_detected") {
+        continue;
+      }
+      // Unknown prompt state: don't block forwarding forever. Try actual tmux send path.
+      log?.warn?.(
+        `clawgate: task_queue typing-guard bypass project=${item.targetProject} reason=${typingGuard.reason}`
+      );
+    }
+
+    try {
+      const result = await clawgateTmuxSend(
+        apiUrl,
+        item.targetProject,
+        item.prefixedTask,
+        traceId || item.traceId
+      );
+      if (result?.ok) {
+        pendingTaskQueue.delete(item.key);
+        clearTaskSendFailureStreak(item.targetProject);
+        setTaskGoal(item.targetProject, item.taskText);
+        if (clearReviewDone(item.targetProject)) {
+          log?.info?.(
+            `clawgate: review-done CLEARED for "${item.targetProject}" — queued task sent, completions resumed`
+          );
+        }
+        log?.info?.(
+          `clawgate: task_queue_flushed project=${item.targetProject} key=${item.key.slice(0, 18)} age_ms=${Date.now() - item.createdAt}`
+        );
+        continue;
+      }
+
+      const errCode = `${result?.error?.code || ""}`.toLowerCase();
+      if (errCode === "session_busy" || errCode === "session_not_found") {
+        item.retryCount += 1;
+        pendingTaskQueue.set(item.key, item);
+        continue;
+      }
+
+      pendingTaskQueue.delete(item.key);
+      log?.info?.(
+        `clawgate: task_queue_dropped_send_failed project=${item.targetProject} code=${errCode || "unknown"} key=${item.key.slice(0, 18)}`
+      );
+    } catch (err) {
+      const errMsg = `${err?.message || err || ""}`.toLowerCase();
+      if (errMsg.includes("currently running") || errMsg.includes("session busy")) {
+        item.retryCount += 1;
+        pendingTaskQueue.set(item.key, item);
+        continue;
+      }
+      pendingTaskQueue.delete(item.key);
+      log?.info?.(
+        `clawgate: task_queue_dropped_exception project=${item.targetProject} key=${item.key.slice(0, 18)}`
+      );
+    }
+  }
 }
 
 function shouldSkipCompletionDispatch({ project, mode, sessionType, text }) {
@@ -1619,9 +1829,11 @@ function stripAnsiControlCodes(text) {
 function isTmuxFooterLine(line) {
   const s = `${line || ""}`.trim();
   if (!s) return false;
-  if (/^\?\s+for shortcuts$/i.test(s)) return true;
+  if (/\?\s+for shortcuts/i.test(s)) return true;
   if (/^\d+%\s+context left$/i.test(s)) return true;
   if (/^\d+%\s+context window$/i.test(s)) return true;
+  if (/\d+%\s+context left/i.test(s)) return true;
+  if (/\d+%\s+context window/i.test(s)) return true;
   if (/^autonomous:\s+/i.test(s)) return true;
   return false;
 }
@@ -1688,14 +1900,34 @@ function detectTmuxInputDraft(lines) {
   if (!draftText) {
     return { parseOk: true, reason: "prompt_idle", isTyping: false, draftText: "" };
   }
+  if (isTemplatePromptDraft(draftText)) {
+    return { parseOk: true, reason: "template_prompt_idle", isTyping: false, draftText: "" };
+  }
   return { parseOk: true, reason: "draft_detected", isTyping: true, draftText };
+}
+
+function isTemplatePromptDraft(text) {
+  const s = `${text || ""}`.trim().toLowerCase();
+  if (!s) return false;
+  if (s === "implement {feature}") return true;
+  if (s === "run /review on my current changes") return true;
+  return false;
 }
 
 async function inspectTmuxDraftBeforeTaskSend({ apiUrl, project, traceId, log }) {
   try {
     const result = await clawgateTmuxRead(apiUrl, project, TMUX_TYPING_GUARD_READ_LINES, traceId);
     if (!result?.ok) {
+      const errCode = `${result?.error?.code || ""}`.toLowerCase();
       const reason = result?.error?.message || result?.error?.code || "pane_read_failed";
+      if (errCode === "session_not_found" || errCode === "tmux_target_missing") {
+        log?.debug?.(`clawgate: typing guard bypass for "${project}" (${errCode})`);
+        return {
+          blocked: false,
+          reason: "non_authoritative_host",
+          message: "",
+        };
+      }
       log?.warn?.(`clawgate: typing guard read failed for "${project}": ${reason}`);
       return {
         blocked: true,
@@ -1807,18 +2039,36 @@ async function tryExtractAndSendTask({
       log,
     });
     if (typingGuard.blocked) {
-      return {
-        error: new Error(typingGuard.message),
-        errorCode: "session_typing_busy",
-        lineText,
-        taskText,
-        targetProject,
-      };
+      if (typingGuard.reason === "draft_detected") {
+        const queueResult = enqueuePendingTask({
+          project: sourceProject || targetProject,
+          targetProject,
+          taskText,
+          prefixedTask,
+          mode: sourceMode,
+          traceId,
+          log,
+        });
+        return {
+          error: new Error(typingGuard.message),
+          errorCode: "session_typing_busy",
+          lineText,
+          taskText,
+          targetProject,
+          queued: queueResult.queued,
+          queuedDedup: queueResult.dedup,
+        };
+      }
+      log?.warn?.(
+        `clawgate: typing guard bypass for "${targetProject}" reason=${typingGuard.reason} (will attempt send)`
+      );
     }
 
     try {
       const result = await clawgateTmuxSend(apiUrl, targetProject, prefixedTask, traceId);
       if (result?.ok) {
+        const queuedKey = buildPendingTaskKey(targetProject, taskText);
+        pendingTaskQueue.delete(queuedKey);
         log?.info?.(`clawgate: task sent to CC (${targetProject}): "${taskText.slice(0, 80)}"`);
         clearTaskSendFailureStreak(targetProject);
         setTaskGoal(targetProject, taskText);
@@ -1839,11 +2089,52 @@ async function tryExtractAndSendTask({
 
       const errCode = err?.code || "unknown_error";
       const errMsg = err?.message || err?.code || "unknown error";
+      if (errCode === "session_busy") {
+        const queueResult = enqueuePendingTask({
+          project: sourceProject || targetProject,
+          targetProject,
+          taskText,
+          prefixedTask,
+          mode: sourceMode,
+          traceId,
+          log,
+        });
+        return {
+          error: new Error(errMsg),
+          errorCode: errCode,
+          lineText,
+          taskText,
+          targetProject,
+          queued: queueResult.queued,
+          queuedDedup: queueResult.dedup,
+        };
+      }
       log?.error?.(`clawgate: failed to send task to CC (${targetProject}): ${errMsg} — task: ${taskText.slice(0, 200)}`);
       // Don't pollute LINE with internal routing errors — send clean review text only
       return { error: new Error(errMsg), errorCode: errCode, lineText, taskText, targetProject };
     } catch (err) {
       const errCode = err?.name || "send_exception";
+      const errMessage = `${err?.message || err || ""}`.toLowerCase();
+      if (errMessage.includes("currently running") || errMessage.includes("session busy")) {
+        const queueResult = enqueuePendingTask({
+          project: sourceProject || targetProject,
+          targetProject,
+          taskText,
+          prefixedTask,
+          mode: sourceMode,
+          traceId,
+          log,
+        });
+        return {
+          error: err instanceof Error ? err : new Error(String(err)),
+          errorCode: "session_busy",
+          lineText,
+          taskText,
+          targetProject,
+          queued: queueResult.queued,
+          queuedDedup: queueResult.dedup,
+        };
+      }
       log?.error?.(`clawgate: failed to send task to CC (${targetProject}): ${err} — task: ${taskText.slice(0, 200)}`);
       return { error: err, errorCode: errCode, lineText, taskText, targetProject };
     }
@@ -2239,21 +2530,27 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
             `clawgate: [${accountId}] task send benign failure suppressed (project=${targetProject}, category=${category}, count=${streak.count})`
           );
           if (category === "typing_busy") {
-            const shouldNotifyTyping = shouldNotifyTaskSendError({
-              project: targetProject,
-              errorCode,
-              taskText: "",
-            });
-            if (shouldNotifyTyping) {
-              const advisory = buildTypingBusyAdvisoryLine(targetProject);
-              try {
-                await clawgateSend(apiUrl, conversation, advisory, traceId);
-                recordPluginSend(advisory);
-              } catch (err) {
-                log?.error?.(`clawgate: [${accountId}] send typing-busy advisory to LINE failed: ${err}`);
-              }
+            if (result.queued) {
+              log?.info?.(
+                `clawgate: [${accountId}] typing-busy task queued (project=${targetProject}, dedup=${result.queuedDedup ? 1 : 0})`
+              );
             } else {
-              log?.info?.(`clawgate: [${accountId}] typing-busy advisory suppressed (project=${targetProject})`);
+              const shouldNotifyTyping = shouldNotifyTaskSendError({
+                project: targetProject,
+                errorCode,
+                taskText: "",
+              });
+              if (shouldNotifyTyping) {
+                const advisory = buildTypingBusyAdvisoryLine(targetProject);
+                try {
+                  await clawgateSend(apiUrl, conversation, advisory, traceId);
+                  recordPluginSend(advisory);
+                } catch (err) {
+                  log?.error?.(`clawgate: [${accountId}] send typing-busy advisory to LINE failed: ${err}`);
+                }
+              } else {
+                log?.info?.(`clawgate: [${accountId}] typing-busy advisory suppressed (project=${targetProject})`);
+              }
             }
           } else if (result.lineText) {
             const shouldForwardLine = shouldNotifyTaskSendError({
@@ -3071,28 +3368,63 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
                 status: "suppressed",
                 detail: `${category} count=${streak.count}`,
               });
-              if (category === "typing_busy") {
-                const shouldNotifyTyping = shouldNotifyTaskSendError({
-                  project: targetProject,
-                  errorCode,
-                  taskText: "",
-                });
-                if (shouldNotifyTyping) {
+              if (category === "typing_busy" || category === "busy") {
+                if (result.queued) {
                   logAutonomousLineEvent(log, {
                     accountId,
                     project: targetProject,
                     reason: "routing_error",
                     status: "suppressed",
-                    detail: "typing_busy",
+                    detail: category === "busy"
+                      ? (result.queuedDedup ? "busy_queued_dedup" : "busy_queued")
+                      : (result.queuedDedup ? "typing_busy_queued_dedup" : "typing_busy_queued"),
                   });
-                } else {
-                  logAutonomousLineEvent(log, {
-                    accountId,
+                } else if (category === "typing_busy") {
+                  const shouldNotifyTyping = shouldNotifyTaskSendError({
                     project: targetProject,
-                    reason: "routing_error",
-                    status: "suppressed",
-                    detail: "typing_busy_dedup",
+                    errorCode,
+                    taskText: "",
                   });
+                  if (shouldNotifyTyping) {
+                    logAutonomousLineEvent(log, {
+                      accountId,
+                      project: targetProject,
+                      reason: "routing_error",
+                      status: "suppressed",
+                      detail: "typing_busy",
+                    });
+                  } else {
+                    logAutonomousLineEvent(log, {
+                      accountId,
+                      project: targetProject,
+                      reason: "routing_error",
+                      status: "suppressed",
+                      detail: "typing_busy_dedup",
+                    });
+                  }
+                } else if (result.lineText) {
+                  const shouldForwardLine = shouldNotifyTaskSendError({
+                    project: targetProject,
+                    errorCode,
+                    taskText: result.taskText || "",
+                  });
+                  if (shouldForwardLine) {
+                    logAutonomousLineEvent(log, {
+                      accountId,
+                      project: targetProject,
+                      reason: "routing_error",
+                      status: "suppressed",
+                      detail: "sanitized_fallback",
+                    });
+                  } else {
+                    logAutonomousLineEvent(log, {
+                      accountId,
+                      project: targetProject,
+                      reason: "routing_error",
+                      status: "suppressed",
+                      detail: "fallback_dedup",
+                    });
+                  }
                 }
               } else if (result.lineText) {
                 const shouldForwardLine = shouldNotifyTaskSendError({
@@ -3255,23 +3587,29 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             const streak = trackTaskSendFailureStreak({ project: targetProject, category });
             log?.info?.(`clawgate: [${accountId}] auto task send benign failure suppressed (project=${targetProject}, category=${category}, count=${streak.count})`);
             if (category === "typing_busy") {
-              const shouldNotifyTyping = shouldNotifyTaskSendError({
-                project: targetProject,
-                errorCode,
-                taskText: "",
-              });
-              if (shouldNotifyTyping) {
-                const advisory = normalizeLineReplyText(
-                  buildTypingBusyAdvisoryLine(targetProject),
-                  { project, sessionType, eventKind: "completion" }
+              if (result.queued) {
+                log?.info?.(
+                  `clawgate: [${accountId}] auto typing-busy task queued (project=${targetProject}, dedup=${result.queuedDedup ? 1 : 0})`
                 );
-                try {
-                  await sendLine(defaultConversation || project, advisory);
-                } catch (err) {
-                  log?.error?.(`clawgate: [${accountId}] auto typing-busy advisory send failed: ${err}`);
-                }
               } else {
-                log?.info?.(`clawgate: [${accountId}] auto typing-busy advisory suppressed (project=${targetProject})`);
+                const shouldNotifyTyping = shouldNotifyTaskSendError({
+                  project: targetProject,
+                  errorCode,
+                  taskText: "",
+                });
+                if (shouldNotifyTyping) {
+                  const advisory = normalizeLineReplyText(
+                    buildTypingBusyAdvisoryLine(targetProject),
+                    { project, sessionType, eventKind: "completion" }
+                  );
+                  try {
+                    await sendLine(defaultConversation || project, advisory);
+                  } catch (err) {
+                    log?.error?.(`clawgate: [${accountId}] auto typing-busy advisory send failed: ${err}`);
+                  }
+                } else {
+                  log?.info?.(`clawgate: [${accountId}] auto typing-busy advisory suppressed (project=${targetProject})`);
+                }
               }
             } else if (result.lineText) {
               const shouldForwardLine = shouldNotifyTaskSendError({
@@ -3623,6 +3961,16 @@ export async function startAccount(ctx) {
   // Polling loop
   while (!abortSignal?.aborted) {
     try {
+      await flushPendingTaskQueue({
+        apiUrl,
+        traceId: makeTraceId("task-queue-flush"),
+        log,
+      });
+    } catch (err) {
+      log?.warn?.(`clawgate: [${accountId}] task queue flush failed (pre-poll): ${err}`);
+    }
+
+    try {
       const poll = await clawgatePoll(apiUrl, cursor);
 
       if (poll.ok && poll.events?.length > 0) {
@@ -3921,6 +4269,16 @@ export async function startAccount(ctx) {
       log?.error?.(`clawgate: [${accountId}] poll error: ${err}`);
     }
 
+    try {
+      await flushPendingTaskQueue({
+        apiUrl,
+        traceId: makeTraceId("task-queue-flush"),
+        log,
+      });
+    } catch (err) {
+      log?.warn?.(`clawgate: [${accountId}] task queue flush failed (post-poll): ${err}`);
+    }
+
     await sleep(pollIntervalMs, abortSignal);
   }
 
@@ -3929,6 +4287,16 @@ export async function startAccount(ctx) {
     for (const key of pendingKeys) {
       await flushLineBurstBuffer(key, "shutdown");
     }
+  }
+
+  try {
+    await flushPendingTaskQueue({
+      apiUrl,
+      traceId: makeTraceId("task-queue-flush"),
+      log,
+    });
+  } catch (err) {
+    log?.warn?.(`clawgate: [${accountId}] task queue flush failed (shutdown): ${err}`);
   }
 
   projectViewReaders.delete(accountId);
