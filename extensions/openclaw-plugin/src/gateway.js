@@ -85,7 +85,7 @@ function envFlag(name, fallback = false) {
 }
 const ENABLE_INTERACTION_PENDING_STRICT_V2 = envFlag("CLAWGATE_INTERACTION_PENDING_STRICT_V2", true);
 const ENABLE_AUTONOMOUS_LOOP_GUARD_V2 = envFlag("CLAWGATE_AUTONOMOUS_LOOP_GUARD_V2", true);
-const ENABLE_INGRESS_DEDUP_TUNE_V2 = envFlag("CLAWGATE_INGRESS_DEDUP_TUNE_V2", false);
+const ENABLE_INGRESS_DEDUP_TUNE_V2 = envFlag("CLAWGATE_INGRESS_DEDUP_TUNE_V2", true);
 const OBSERVE_REQUIRED_TOKENS = ["goal", "scope", "risk", "3-8"];
 const AUTONOMOUS_REQUIRED_TOKENS = ["<cc_task>"];
 const AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS = [
@@ -710,7 +710,7 @@ function buildTypingBusyAdvisoryLine(project) {
 // for AI replies (typically 10-30s). We maintain a secondary tracker here.
 
 const ECHO_WINDOW_MS = 45_000; // 45 seconds — covers AI processing time
-const COOLDOWN_MS = 5_000;     // 5 seconds cooldown after each send
+const COOLDOWN_MS = 5_000;     // retained for metrics/log context (no blanket drop)
 
 /** @type {{ text: string, time: number }[]} */
 const recentSends = [];
@@ -737,8 +737,9 @@ function normalizeEchoText(text) {
 function isLikelyPluginEcho(candidate, sent) {
   const normalizedCandidate = normalizeEchoText(candidate);
   const normalizedSent = normalizeEchoText(sent);
-  if (normalizedSent.length < 6 || !normalizedCandidate) return false;
-  if (normalizedCandidate === normalizedSent) return true;
+  if (!normalizedCandidate || !normalizedSent) return false;
+  if (normalizedCandidate === normalizedSent) return normalizedCandidate.length >= 2;
+  if (Math.min(normalizedCandidate.length, normalizedSent.length) < 6) return false;
   if (normalizedCandidate.includes(normalizedSent)) {
     const dominance = normalizedSent.length / Math.max(normalizedCandidate.length, 1);
     return dominance >= 0.70;
@@ -750,18 +751,39 @@ function isLikelyPluginEcho(candidate, sent) {
   return false;
 }
 
+function isLikelyPluginEchoByLines(candidate, sends) {
+  const lines = `${candidate || ""}`
+    .split("\n")
+    .map((line) => normalizeEchoText(line))
+    .filter((line) => line.length >= 6);
+  if (lines.length < 2) return false;
+
+  let matched = 0;
+  for (const line of lines) {
+    const hit = sends.some((s) => isLikelyPluginEcho(line, s.text));
+    if (hit) matched += 1;
+  }
+  if (matched >= 2) return true;
+  return (matched / lines.length) >= 0.6;
+}
+
 function isPluginEcho(eventText) {
   if (!eventText) return false;
   const now = Date.now();
-
-  // Cooldown: suppress everything within COOLDOWN_MS of last send
-  if (now - lastSendTime < COOLDOWN_MS) return true;
-
   const cutoff = now - ECHO_WINDOW_MS;
   const normalizedEvent = eventText.replace(/\s+/g, " ").trim();
+  const inCooldown = (now - lastSendTime) < COOLDOWN_MS;
 
   for (const s of recentSends) {
     if (s.time < cutoff) continue;
+    if (inCooldown && ENABLE_INGRESS_DEDUP_TUNE_V2) {
+      // For very short, immediate echoes, allow only strict-match suppression.
+      const a = normalizeEchoText(normalizedEvent).replace(/\s+/g, "");
+      const b = normalizeEchoText(s.text).replace(/\s+/g, "");
+      if (a.length >= 2 && a === b) {
+        return true;
+      }
+    }
     if (ENABLE_INGRESS_DEDUP_TUNE_V2) {
       if (isLikelyPluginEcho(normalizedEvent, s.text)) {
         return true;
@@ -771,6 +793,12 @@ function isPluginEcho(eventText) {
     // Legacy behavior: prefix substring match
     const sentSnippet = s.text.slice(0, 40).replace(/\s+/g, " ");
     if (sentSnippet.length >= 8 && normalizedEvent.includes(sentSnippet)) {
+      return true;
+    }
+  }
+  if (ENABLE_INGRESS_DEDUP_TUNE_V2) {
+    const activeSends = recentSends.filter((s) => s.time >= cutoff);
+    if (isLikelyPluginEchoByLines(eventText, activeSends)) {
       return true;
     }
   }
@@ -793,14 +821,49 @@ const STALE_REPEAT_WINDOW_MS_V2 = Math.max(
   0,
   (Number.parseInt(process.env.CLAWGATE_INGRESS_STALE_REPEAT_WINDOW_MS || "20000", 10) || 20000)
 );
+const ENABLE_COMMON_INGRESS_DEDUP = envFlag("CLAWGATE_COMMON_INGRESS_DEDUP", true);
+const COMMON_INGRESS_DEDUP_WINDOW_MS = Math.max(
+  5_000,
+  (Number.parseInt(process.env.CLAWGATE_COMMON_INGRESS_DEDUP_WINDOW_MS || "45000", 10) || 45000)
+);
+const COMMON_INGRESS_DEDUP_MAX_ENTRIES = Math.max(
+  200,
+  (Number.parseInt(process.env.CLAWGATE_COMMON_INGRESS_DEDUP_MAX_ENTRIES || "2000", 10) || 2000)
+);
+const ENABLE_SHORT_LINE_DEDUP = envFlag("CLAWGATE_SHORT_LINE_DEDUP", true);
+const SHORT_LINE_DEDUP_WINDOW_MS = Math.max(
+  3_000,
+  (Number.parseInt(process.env.CLAWGATE_SHORT_LINE_DEDUP_WINDOW_MS || "25000", 10) || 25000)
+);
+const SHORT_LINE_MAX_CHARS = Math.max(
+  2,
+  (Number.parseInt(process.env.CLAWGATE_SHORT_LINE_MAX_CHARS || "24", 10) || 24)
+);
+const ENABLE_LINE_BURST_COALESCE = envFlag("CLAWGATE_LINE_BURST_COALESCE", true);
+const LINE_BURST_COALESCE_WINDOW_MS = Math.max(
+  0,
+  (Number.parseInt(process.env.CLAWGATE_LINE_BURST_COALESCE_WINDOW_MS || "1500", 10) || 1500)
+);
+const LINE_BURST_MAX_SEGMENTS = Math.max(
+  4,
+  (Number.parseInt(process.env.CLAWGATE_LINE_BURST_MAX_SEGMENTS || "36", 10) || 36)
+);
 
 /** @type {{ fingerprint: string, time: number }[]} */
 const recentInbounds = [];
 /** @type {{ key: string, time: number }[]} */
 const recentStableInbounds = [];
+/** @type {{ keyHash: string, compact: string, time: number }[]} */
+const recentCommonInbounds = [];
+/** @type {{ keyHash: string, compact: string, time: number }[]} */
+const recentShortLineInbounds = [];
 
 function eventFingerprint(text) {
   return text.replace(/\s+/g, " ").trim().slice(0, 60);
+}
+
+function dedupTextHead(text, maxChars = 80) {
+  return `${text || ""}`.replace(/\s+/g, " ").trim().slice(0, maxChars);
 }
 
 function activeDedupWindowMs() {
@@ -832,6 +895,257 @@ function stableKey(eventText, conversation) {
   const normalizedText = eventText.replace(/\s+/g, " ").trim().toLowerCase();
   const normalizedConv = (conversation || "").replace(/\s+/g, " ").trim().toLowerCase();
   return `${normalizedConv}::${normalizedText}`;
+}
+
+function normalizeCommonDedupText(rawText) {
+  const normalized = `${rawText || ""}`
+    .normalize("NFKC")
+    .replace(/\[tproj-msg:[^\]]*\]\s*/giu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  if (!normalized) return { normalized: "", compact: "" };
+  const compact = normalized
+    .replace(/[\p{P}\p{S}\s_]+/gu, "")
+    .slice(0, 400);
+  return { normalized, compact };
+}
+
+function buildCommonIngressDedupKey({ adapter, conversation, eventText }) {
+  const normalizedAdapter = `${adapter || "unknown"}`
+    .trim()
+    .toLowerCase();
+  const normalizedConversation = `${conversation || ""}`
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  const { compact } = normalizeCommonDedupText(eventText);
+  if (compact.length < 10) {
+    return { enabled: false, keyHash: "", compact: "" };
+  }
+  const material = `${normalizedAdapter}::${normalizedConversation}::${compact}`;
+  return {
+    enabled: true,
+    keyHash: hashFingerprint(material),
+    compact,
+  };
+}
+
+function compactSimilarityScore(a, b) {
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+
+  const short = a.length <= b.length ? a : b;
+  const long = a.length <= b.length ? b : a;
+  if (short.length >= 12 && long.includes(short)) {
+    return short.length / Math.max(long.length, 1);
+  }
+
+  if (a.length < 3 || b.length < 3) return 0;
+  const gramsA = new Set();
+  const gramsB = new Set();
+  for (let i = 0; i <= a.length - 3; i += 1) gramsA.add(a.slice(i, i + 3));
+  for (let i = 0; i <= b.length - 3; i += 1) gramsB.add(b.slice(i, i + 3));
+  if (gramsA.size === 0 || gramsB.size === 0) return 0;
+  let inter = 0;
+  for (const g of gramsA) {
+    if (gramsB.has(g)) inter += 1;
+  }
+  return (2 * inter) / (gramsA.size + gramsB.size);
+}
+
+function pruneCommonIngressDedup(now = Date.now()) {
+  const cutoff = now - COMMON_INGRESS_DEDUP_WINDOW_MS;
+  while (recentCommonInbounds.length > 0 && recentCommonInbounds[0].time < cutoff) {
+    recentCommonInbounds.shift();
+  }
+  if (recentCommonInbounds.length > COMMON_INGRESS_DEDUP_MAX_ENTRIES) {
+    recentCommonInbounds.splice(0, recentCommonInbounds.length - COMMON_INGRESS_DEDUP_MAX_ENTRIES);
+  }
+}
+
+function matchCommonIngressDuplicate(commonKey) {
+  if (!ENABLE_COMMON_INGRESS_DEDUP || !commonKey?.enabled) {
+    return { hit: false, reason: "disabled" };
+  }
+  const now = Date.now();
+  pruneCommonIngressDedup(now);
+
+  const exact = recentCommonInbounds.find((entry) => entry.keyHash === commonKey.keyHash);
+  if (exact) {
+    return { hit: true, reason: "exact_key", matchedKeyHash: exact.keyHash };
+  }
+
+  const near = recentCommonInbounds.find((entry) => {
+    const score = compactSimilarityScore(commonKey.compact, entry.compact);
+    return score >= 0.93;
+  });
+  if (near) {
+    return { hit: true, reason: "near_compact", matchedKeyHash: near.keyHash };
+  }
+  return { hit: false, reason: "none" };
+}
+
+function recordCommonIngress(commonKey) {
+  if (!ENABLE_COMMON_INGRESS_DEDUP || !commonKey?.enabled) return;
+  const now = Date.now();
+  pruneCommonIngressDedup(now);
+  recentCommonInbounds.push({
+    keyHash: commonKey.keyHash,
+    compact: commonKey.compact,
+    time: now,
+  });
+}
+
+function normalizeShortLineDedupText(rawText) {
+  return `${rawText || ""}`
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[\p{P}\p{S}_]+/gu, "")
+    .trim();
+}
+
+function buildShortLineIngressDedupKey({ adapter, conversation, eventText, source }) {
+  if (!ENABLE_SHORT_LINE_DEDUP) {
+    return { enabled: false, keyHash: "", compact: "" };
+  }
+  const normalizedAdapter = `${adapter || "unknown"}`.trim().toLowerCase();
+  const normalizedSource = `${source || "poll"}`.trim().toLowerCase();
+  if (normalizedAdapter !== "line") {
+    return { enabled: false, keyHash: "", compact: "" };
+  }
+  if (normalizedSource === "notification_banner") {
+    return { enabled: false, keyHash: "", compact: "" };
+  }
+  if (`${eventText || ""}`.includes("\n")) {
+    return { enabled: false, keyHash: "", compact: "" };
+  }
+  const compact = normalizeShortLineDedupText(eventText);
+  if (compact.length < 2 || compact.length > SHORT_LINE_MAX_CHARS) {
+    return { enabled: false, keyHash: "", compact };
+  }
+  const normalizedConversation = `${conversation || ""}`
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  const material = `${normalizedAdapter}::${normalizedConversation}::${compact}`;
+  return {
+    enabled: true,
+    keyHash: hashFingerprint(material),
+    compact,
+  };
+}
+
+function pruneShortLineIngressDedup(now = Date.now()) {
+  const cutoff = now - SHORT_LINE_DEDUP_WINDOW_MS;
+  while (recentShortLineInbounds.length > 0 && recentShortLineInbounds[0].time < cutoff) {
+    recentShortLineInbounds.shift();
+  }
+}
+
+function matchShortLineIngressDuplicate(shortKey) {
+  if (!ENABLE_SHORT_LINE_DEDUP || !shortKey?.enabled) {
+    return { hit: false, reason: "disabled" };
+  }
+  const now = Date.now();
+  pruneShortLineIngressDedup(now);
+  const exact = recentShortLineInbounds.find((entry) => entry.keyHash === shortKey.keyHash);
+  if (!exact) return { hit: false, reason: "none" };
+  return { hit: true, reason: "short_line_exact", matchedKeyHash: exact.keyHash };
+}
+
+function recordShortLineIngress(shortKey) {
+  if (!ENABLE_SHORT_LINE_DEDUP || !shortKey?.enabled) return;
+  const now = Date.now();
+  pruneShortLineIngressDedup(now);
+  recentShortLineInbounds.push({
+    keyHash: shortKey.keyHash,
+    compact: shortKey.compact,
+    time: now,
+  });
+}
+
+function inferIngressOrigin(adapter, source) {
+  const normalizedAdapter = `${adapter || "unknown"}`.trim().toLowerCase();
+  const normalizedSource = `${source || "poll"}`.trim().toLowerCase();
+  if (normalizedAdapter === "line") {
+    return `line_${normalizedSource}`;
+  }
+  if (normalizedAdapter === "tproj") {
+    return `tproj_${normalizedSource}`;
+  }
+  if (normalizedAdapter === "tmux") {
+    return `tmux_${normalizedSource}`;
+  }
+  return `${normalizedAdapter}_${normalizedSource}`;
+}
+
+function parseOptionalMs(value) {
+  const parsed = Number.parseInt(`${value ?? ""}`, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function normalizeBurstLine(line) {
+  return `${line || ""}`
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactBurstLine(line) {
+  return normalizeBurstLine(line)
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}\s_]+/gu, "");
+}
+
+function burstLineEquivalent(a, b) {
+  if (!a || !b) return false;
+  const ca = compactBurstLine(a);
+  const cb = compactBurstLine(b);
+  if (!ca || !cb) return false;
+  if (ca === cb) return true;
+  const short = ca.length <= cb.length ? ca : cb;
+  const long = ca.length <= cb.length ? cb : ca;
+  if (short.length >= 6 && long.includes(short)) {
+    const coverage = short.length / Math.max(long.length, 1);
+    if (coverage >= 0.82) return true;
+  }
+  return compactSimilarityScore(ca, cb) >= 0.90;
+}
+
+function mergeLineBurstTexts(texts) {
+  const candidates = (texts || [])
+    .map((text) => `${text || ""}`.trim())
+    .filter((text) => text.length > 0);
+  if (candidates.length === 0) return "";
+  if (candidates.length === 1) return candidates[0];
+
+  const ordered = [...candidates].sort((a, b) => b.length - a.length);
+  const mergedLines = [];
+  const mergedCompacts = [];
+
+  for (const text of ordered) {
+    const lines = text
+      .split("\n")
+      .map((line) => normalizeBurstLine(line))
+      .filter((line) => line.length > 0);
+    for (const line of lines) {
+      const compact = compactBurstLine(line);
+      if (!compact) continue;
+      const duplicate = mergedCompacts.some((existing, idx) => burstLineEquivalent(line, mergedLines[idx]) || existing === compact);
+      if (duplicate) continue;
+      mergedLines.push(line);
+      mergedCompacts.push(compact);
+      if (mergedLines.length >= LINE_BURST_MAX_SEGMENTS) break;
+    }
+    if (mergedLines.length >= LINE_BURST_MAX_SEGMENTS) break;
+  }
+
+  if (mergedLines.length === 0) return ordered[0];
+  return mergedLines.join("\n");
 }
 
 function isStaleRepeatInbound(eventText, conversation, source) {
@@ -3165,6 +3479,138 @@ export async function startAccount(ctx) {
     log?.warn?.(`clawgate: [${accountId}] initial poll failed: ${err}`);
   }
 
+  const enableLineBurstCoalesce = ENABLE_LINE_BURST_COALESCE && LINE_BURST_COALESCE_WINDOW_MS > 0;
+  /** @type {Map<string, { conversation: string, firstAt: number, lastAt: number, timer: any, entries: Array<{ event: any, eventText: string, traceId: string, upstreamEventId: string, source: string, latencyFields: Record<string, number> }> }>} */
+  const lineBurstBuffers = new Map();
+
+  const flushLineBurstBuffer = async (key, trigger = "timer") => {
+    const buffer = lineBurstBuffers.get(key);
+    if (!buffer) return;
+    lineBurstBuffers.delete(key);
+    if (buffer.timer) clearTimeout(buffer.timer);
+
+    const entries = buffer.entries;
+    if (!entries || entries.length === 0) return;
+
+    const latestEntry = entries[entries.length - 1];
+    const firstEntry = entries[0];
+    const mergedText = mergeLineBurstTexts(entries.map((entry) => entry.eventText)) || latestEntry.eventText;
+    const mergedTraceId = `${latestEntry.traceId}-c${entries.length}`;
+    const baseEvent = {
+      ...latestEntry.event,
+      payload: {
+        ...(latestEntry.event?.payload || {}),
+      },
+    };
+    baseEvent.payload.text = mergedText;
+    baseEvent.payload.trace_id = mergedTraceId;
+    baseEvent.payload.coalesced = entries.length > 1 ? "1" : "0";
+    baseEvent.payload.coalesce_count = String(entries.length);
+    baseEvent.payload.coalesce_window_ms = String(Math.max(0, buffer.lastAt - buffer.firstAt));
+    baseEvent.payload.coalesce_trigger = trigger;
+    baseEvent.payload.coalesce_first_trace_id = firstEntry.traceId;
+    baseEvent.payload.coalesce_upstream_ids = entries.map((entry) => entry.upstreamEventId).filter(Boolean).join(",");
+
+    traceLog(log, "info", {
+      trace_id: mergedTraceId,
+      stage: "ingress_coalesced",
+      action: "dispatch_inbound_message",
+      status: "ok",
+      source: latestEntry.source,
+      adapter: baseEvent.adapter || "line",
+      conversation: buffer.conversation,
+      coalesce_count: entries.length,
+      coalesce_window_ms: Math.max(0, buffer.lastAt - buffer.firstAt),
+      coalesce_trigger: trigger,
+      upstream_event_ids: entries.map((entry) => entry.upstreamEventId).filter(Boolean).join(","),
+      event_text_len: mergedText.length,
+      event_text_head: dedupTextHead(mergedText),
+      ...(latestEntry.latencyFields || {}),
+    });
+
+    try {
+      await handleInboundMessage({
+        event: baseEvent,
+        accountId,
+        apiUrl,
+        cfg,
+        defaultConversation,
+        log,
+      });
+    } catch (err) {
+      log?.error?.(`clawgate: [${accountId}] handleInboundMessage failed after coalesce: ${err}`);
+      traceLog(log, "error", {
+        trace_id: mergedTraceId,
+        stage: "gateway_forward_failed",
+        action: "handle_inbound_message",
+        status: "failed",
+        error: String(err),
+      });
+    }
+  };
+
+  const enqueueLineBurstEvent = ({
+    event,
+    eventText,
+    traceId,
+    conversation,
+    source,
+    upstreamEventId,
+    latencyFields,
+  }) => {
+    if (!enableLineBurstCoalesce || event.adapter !== "line") return false;
+    const key = `${accountId}::${conversation || ""}`;
+    const now = Date.now();
+    const clonedEvent = {
+      ...event,
+      payload: {
+        ...(event.payload || {}),
+      },
+    };
+
+    let buffer = lineBurstBuffers.get(key);
+    if (!buffer) {
+      buffer = {
+        conversation,
+        firstAt: now,
+        lastAt: now,
+        timer: null,
+        entries: [],
+      };
+      lineBurstBuffers.set(key, buffer);
+    }
+    buffer.lastAt = now;
+    buffer.entries.push({
+      event: clonedEvent,
+      eventText,
+      traceId,
+      upstreamEventId,
+      source,
+      latencyFields: latencyFields || {},
+    });
+    if (buffer.timer) clearTimeout(buffer.timer);
+    buffer.timer = setTimeout(() => {
+      void flushLineBurstBuffer(key, "timer");
+    }, LINE_BURST_COALESCE_WINDOW_MS);
+
+    traceLog(log, "debug", {
+      trace_id: traceId,
+      stage: "ingress_buffered",
+      action: "coalesce_wait",
+      status: "queued",
+      adapter: event.adapter || "line",
+      source,
+      conversation,
+      coalesce_count: buffer.entries.length,
+      coalesce_window_ms: LINE_BURST_COALESCE_WINDOW_MS,
+      upstream_event_id: upstreamEventId,
+      event_text_len: eventText.length,
+      event_text_head: dedupTextHead(eventText),
+      ...(latencyFields || {}),
+    });
+    return true;
+  };
+
   // Polling loop
   while (!abortSignal?.aborted) {
     try {
@@ -3179,13 +3625,31 @@ export async function startAccount(ctx) {
           const traceId = makeTraceId("event", event);
           if (!event.payload) event.payload = {};
           event.payload.trace_id = traceId;
+          const source = event.payload?.source || "poll";
+          const ingressOrigin = inferIngressOrigin(event.adapter, source);
+          const upstreamEventId = `${event?.id ?? ""}`;
+          const ingressAgeMs = Math.max(0, Date.now() - eventTimestamp(event));
+          const ingressLatencyFields = {
+            ingress_age_ms: ingressAgeMs,
+          };
+          const lineWatchCaptureMs = parseOptionalMs(event.payload?.line_watch_capture_ms);
+          const lineWatchSignalCollectMs = parseOptionalMs(event.payload?.line_watch_signal_collect_ms);
+          const lineWatchFusionMs = parseOptionalMs(event.payload?.line_watch_fusion_ms);
+          const lineWatchTotalDetectMs = parseOptionalMs(event.payload?.line_watch_total_detect_ms);
+          if (lineWatchCaptureMs !== undefined) ingressLatencyFields.line_watch_capture_ms = lineWatchCaptureMs;
+          if (lineWatchSignalCollectMs !== undefined) ingressLatencyFields.line_watch_signal_collect_ms = lineWatchSignalCollectMs;
+          if (lineWatchFusionMs !== undefined) ingressLatencyFields.line_watch_fusion_ms = lineWatchFusionMs;
+          if (lineWatchTotalDetectMs !== undefined) ingressLatencyFields.line_watch_total_detect_ms = lineWatchTotalDetectMs;
           traceLog(log, "info", {
             trace_id: traceId,
             stage: "ingress_received",
             action: "poll_event",
             status: "ok",
             adapter: event.adapter || "unknown",
-            source: event.payload?.source || "poll",
+            source,
+            ingress_origin: ingressOrigin,
+            upstream_event_id: upstreamEventId,
+            ...ingressLatencyFields,
           });
 
           // Track tmux session state for roster
@@ -3256,10 +3720,20 @@ export async function startAccount(ctx) {
             continue;
           }
 
-          const source = event.payload?.source || "poll";
           const conversation = event.payload?.conversation || "";
           const rawEventText = event.payload?.text || "";
           const eventText = normalizeInboundText(rawEventText, source);
+          const commonDedupKey = buildCommonIngressDedupKey({
+            adapter: event.adapter || "unknown",
+            conversation,
+            eventText,
+          });
+          const shortLineDedupKey = buildShortLineIngressDedupKey({
+            adapter: event.adapter || "unknown",
+            conversation,
+            eventText,
+            source,
+          });
 
           // Skip only near-empty texts; keep short Japanese lines for recall.
           if (eventText.trim().length < MIN_TEXT_LENGTH) {
@@ -3272,6 +3746,9 @@ export async function startAccount(ctx) {
               reason: "too_short",
               raw_len: rawEventText.length,
               clean_len: eventText.length,
+              ingress_origin: ingressOrigin,
+              dedup_key: commonDedupKey.keyHash || "",
+              ...ingressLatencyFields,
             });
             continue;
           }
@@ -3285,6 +3762,49 @@ export async function startAccount(ctx) {
               action: "echo_guard",
               status: "suppressed",
               reason: "plugin_echo",
+              ingress_origin: ingressOrigin,
+              dedup_key: commonDedupKey.keyHash || "",
+              ...ingressLatencyFields,
+            });
+            continue;
+          }
+
+          const shortLineDedupResult = matchShortLineIngressDuplicate(shortLineDedupKey);
+          if (shortLineDedupResult.hit) {
+            log?.debug?.(`clawgate: [${accountId}] suppressed short-line duplicate: "${eventText.slice(0, 60)}"`);
+            traceLog(log, "info", {
+              trace_id: traceId,
+              stage: "ingress_dropped",
+              action: "dedup",
+              status: "suppressed",
+              reason: "short_line_dedup",
+              dedup_hit: true,
+              dedup_reason: shortLineDedupResult.reason,
+              dedup_window_sec: Math.floor(SHORT_LINE_DEDUP_WINDOW_MS / 1000),
+              dedup_key: shortLineDedupKey.keyHash || "",
+              event_text_len: eventText.length,
+              event_text_head: dedupTextHead(eventText),
+              ingress_origin: ingressOrigin,
+              ...ingressLatencyFields,
+            });
+            continue;
+          }
+
+          const commonDedupResult = matchCommonIngressDuplicate(commonDedupKey);
+          if (commonDedupResult.hit) {
+            log?.debug?.(`clawgate: [${accountId}] suppressed common dedup (${commonDedupResult.reason}): "${eventText.slice(0, 60)}"`);
+            traceLog(log, "info", {
+              trace_id: traceId,
+              stage: "ingress_dropped",
+              action: "dedup",
+              status: "suppressed",
+              reason: "common_dedup",
+              dedup_hit: true,
+              dedup_reason: commonDedupResult.reason,
+              dedup_window_sec: Math.floor(COMMON_INGRESS_DEDUP_WINDOW_MS / 1000),
+              dedup_key: commonDedupKey.keyHash || "",
+              ingress_origin: ingressOrigin,
+              ...ingressLatencyFields,
             });
             continue;
           }
@@ -3298,6 +3818,12 @@ export async function startAccount(ctx) {
               action: "dedup",
               status: "suppressed",
               reason: "duplicate_window",
+              dedup_hit: true,
+              dedup_reason: "duplicate_window",
+              dedup_window_sec: Math.floor(activeDedupWindowMs() / 1000),
+              dedup_key: commonDedupKey.keyHash || "",
+              ingress_origin: ingressOrigin,
+              ...ingressLatencyFields,
             });
             continue;
           }
@@ -3309,6 +3835,12 @@ export async function startAccount(ctx) {
               action: "dedup",
               status: "suppressed",
               reason: "stale_repeat",
+              dedup_hit: true,
+              dedup_reason: "stale_repeat",
+              dedup_window_sec: Math.floor(activeStaleRepeatWindowMs() / 1000),
+              dedup_key: commonDedupKey.keyHash || "",
+              ingress_origin: ingressOrigin,
+              ...ingressLatencyFields,
             });
             continue;
           }
@@ -3316,6 +3848,8 @@ export async function startAccount(ctx) {
           // Record before dispatch so subsequent duplicates are caught
           recordInbound(eventText);
           recordStableInbound(eventText, conversation);
+          recordShortLineIngress(shortLineDedupKey);
+          recordCommonIngress(commonDedupKey);
           if (event.payload) {
             event.payload.text = eventText;
           }
@@ -3326,7 +3860,29 @@ export async function startAccount(ctx) {
             status: "ok",
             source,
             conversation,
+            dedup_hit: false,
+            dedup_reason: "none",
+            dedup_window_sec: Math.floor(COMMON_INGRESS_DEDUP_WINDOW_MS / 1000),
+            dedup_key: commonDedupKey.keyHash || "",
+            short_dedup_key: shortLineDedupKey.keyHash || "",
+            event_text_len: eventText.length,
+            event_text_head: dedupTextHead(eventText),
+            ingress_origin: ingressOrigin,
+            upstream_event_id: upstreamEventId,
+            ...ingressLatencyFields,
           });
+
+          if (enqueueLineBurstEvent({
+            event,
+            eventText,
+            traceId,
+            conversation,
+            source,
+            upstreamEventId,
+            latencyFields: ingressLatencyFields,
+          })) {
+            continue;
+          }
 
           try {
             await handleInboundMessage({
@@ -3345,6 +3901,7 @@ export async function startAccount(ctx) {
               action: "handle_inbound_message",
               status: "failed",
               error: String(err),
+              ...ingressLatencyFields,
             });
           }
         }
@@ -3356,6 +3913,13 @@ export async function startAccount(ctx) {
     }
 
     await sleep(pollIntervalMs, abortSignal);
+  }
+
+  if (lineBurstBuffers.size > 0) {
+    const pendingKeys = [...lineBurstBuffers.keys()];
+    for (const key of pendingKeys) {
+      await flushLineBurstBuffer(key, "shutdown");
+    }
   }
 
   projectViewReaders.delete(accountId);

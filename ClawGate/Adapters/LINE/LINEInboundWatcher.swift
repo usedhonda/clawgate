@@ -39,6 +39,14 @@ final class LINEInboundWatcher {
     private var lastConfidence: String = "low"
     private var lastInboundFingerprint: String = ""
     private var lastInboundAt: Date = .distantPast
+    private struct RecentInboundLineObservation {
+        let conversation: String
+        let normalizedLine: String
+        let at: Date
+    }
+    private var recentInboundLineObservations: [RecentInboundLineObservation] = []
+    private let maxRecentInboundLineObservations = 240
+    private let inboundLineMemoryWindowSeconds: TimeInterval = 75
     private let inboundDedupWindowSeconds: TimeInterval = 20
     private let inboundDedupWindowSecondsV2: TimeInterval
     private let ingressDedupTuneV2Enabled: Bool
@@ -46,6 +54,10 @@ final class LINEInboundWatcher {
     private var lastSeparatorAnchorConfidence: Int = 0
     private var lastSeparatorAnchorMethod: String = "none"
     private var shouldSkipPollNoLine: Bool = false
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        return f
+    }()
 
     init(
         eventBus: EventBus,
@@ -67,7 +79,7 @@ final class LINEInboundWatcher {
         self.enableProcessSignal = enableProcessSignal
         self.enableNotificationStoreSignal = enableNotificationStoreSignal
         self.fusionEngine = LineDetectionFusionEngine(threshold: fusionThreshold)
-        self.ingressDedupTuneV2Enabled = Self.envBool("CLAWGATE_INGRESS_DEDUP_TUNE_V2", defaultValue: false)
+        self.ingressDedupTuneV2Enabled = Self.envBool("CLAWGATE_INGRESS_DEDUP_TUNE_V2", defaultValue: true)
         self.inboundDedupWindowSecondsV2 = TimeInterval(
             max(
                 1,
@@ -86,6 +98,15 @@ final class LINEInboundWatcher {
         guard let raw = ProcessInfo.processInfo.environment[key]?.trimmingCharacters(in: .whitespacesAndNewlines),
               let parsed = Int(raw) else { return defaultValue }
         return parsed
+    }
+
+    private func isoString(_ date: Date) -> String {
+        Self.isoFormatter.string(from: date)
+    }
+
+    private func elapsedMs(from start: Date, to end: Date) -> String {
+        let value = Int(max(0, end.timeIntervalSince(start) * 1000.0))
+        return String(value)
     }
 
     func start() {
@@ -210,6 +231,7 @@ final class LINEInboundWatcher {
     }
 
     private func doPoll(pollID: UUID) {
+        let pollStartedAt = Date()
         guard shouldContinue(pollID: pollID) else { return }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else {
             return
@@ -230,9 +252,11 @@ final class LINEInboundWatcher {
         guard let chatList = findChatList(in: nodes) else {
             return
         }
+        let captureDoneAt = Date()
 
         shouldSkipPollNoLine = false
         var signals: [LineDetectionSignal] = []
+        let signalCollectStartedAt = Date()
 
         if let structuralSignal = collectStructuralSignal(chatList: chatList, lineWindowID: lineWindowID, conversation: windowTitle) {
             signals.append(structuralSignal)
@@ -252,6 +276,7 @@ final class LINEInboundWatcher {
         if enableNotificationStoreSignal {
             logger.log(.debug, "LINEInboundWatcher: notification store signal is enabled but not implemented yet")
         }
+        let signalCollectDoneAt = Date()
 
         if detectionMode == "legacy" {
             // In legacy mode, keep historical behavior: emit from first available signal.
@@ -261,6 +286,7 @@ final class LINEInboundWatcher {
             return
         }
 
+        let fusionStartedAt = Date()
         let decisionText = signals.first(where: { !$0.text.isEmpty })?.text ?? ""
         let isEcho = recentSendTracker.isLikelyEcho(text: decisionText)
         let decision = fusionEngine.decide(
@@ -269,6 +295,22 @@ final class LINEInboundWatcher {
             fallbackConversation: windowTitle,
             isEcho: isEcho
         )
+        let fusionDoneAt = Date()
+
+        func buildTimingFields(now: Date, dropStage: String, dropReason: String) -> [String: String] {
+            [
+                "poll_started_at": isoString(pollStartedAt),
+                "capture_done_at": isoString(captureDoneAt),
+                "signal_collect_done_at": isoString(signalCollectDoneAt),
+                "fusion_done_at": isoString(fusionDoneAt),
+                "capture_ms": elapsedMs(from: pollStartedAt, to: captureDoneAt),
+                "signal_collect_ms": elapsedMs(from: signalCollectStartedAt, to: signalCollectDoneAt),
+                "fusion_ms": elapsedMs(from: fusionStartedAt, to: fusionDoneAt),
+                "total_detect_ms": elapsedMs(from: pollStartedAt, to: now),
+                "drop_stage": dropStage,
+                "drop_reason_detail": dropReason,
+            ]
+        }
 
         lastSignalNames = decision.signals
         lastScore = decision.score
@@ -281,22 +323,42 @@ final class LINEInboundWatcher {
                     "LINEInboundWatcher: detection below threshold (score=\(decision.score), threshold=\(fusionEngine.threshold), signals=\(decision.signals.joined(separator: ",")))"
                 )
             }
-            savePipelineResult(decision: decision, sanitizedText: nil, dedupResult: "n/a", emitted: false)
+            savePipelineResult(
+                decision: decision,
+                sanitizedText: nil,
+                dedupResult: "n/a",
+                emitted: false,
+                extra: buildTimingFields(now: Date(), dropStage: "fusion", dropReason: "below_threshold")
+            )
             return
         }
 
         let filteredDecisionText = LineTextSanitizer.sanitize(decision.text)
         guard !filteredDecisionText.isEmpty else {
             logger.log(.debug, "LINEInboundWatcher: dropped empty/standalone-ui text after sanitize")
-            savePipelineResult(decision: decision, sanitizedText: "", dedupResult: "n/a", emitted: false)
+            savePipelineResult(
+                decision: decision,
+                sanitizedText: "",
+                dedupResult: "n/a",
+                emitted: false,
+                extra: buildTimingFields(now: Date(), dropStage: "sanitize", dropReason: "empty_after_sanitize")
+            )
             return
         }
         if shouldSuppressDuplicateInbound(text: filteredDecisionText, conversation: decision.conversation) {
             logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window")
-            savePipelineResult(decision: decision, sanitizedText: filteredDecisionText, dedupResult: "suppressed", emitted: false)
+            savePipelineResult(
+                decision: decision,
+                sanitizedText: filteredDecisionText,
+                dedupResult: "suppressed",
+                emitted: false,
+                extra: buildTimingFields(now: Date(), dropStage: "dedup", dropReason: "line_memory_or_window")
+            )
             return
         }
 
+        let eventAppendAt = Date()
+        let timingFields = buildTimingFields(now: eventAppendAt, dropStage: "none", dropReason: "accepted")
         var payload: [String: String] = [
             "text": filteredDecisionText,
             "conversation": decision.conversation,
@@ -305,6 +367,17 @@ final class LINEInboundWatcher {
             "score": String(decision.score),
             "signals": decision.signals.joined(separator: ","),
             "pipeline_version": "line-hybrid-v1",
+            "line_watch_poll_started_at": timingFields["poll_started_at"] ?? "",
+            "line_watch_capture_done_at": timingFields["capture_done_at"] ?? "",
+            "line_watch_signal_collect_done_at": timingFields["signal_collect_done_at"] ?? "",
+            "line_watch_fusion_done_at": timingFields["fusion_done_at"] ?? "",
+            "line_watch_eventbus_appended_at": isoString(eventAppendAt),
+            "line_watch_capture_ms": timingFields["capture_ms"] ?? "",
+            "line_watch_signal_collect_ms": timingFields["signal_collect_ms"] ?? "",
+            "line_watch_fusion_ms": timingFields["fusion_ms"] ?? "",
+            "line_watch_total_detect_ms": timingFields["total_detect_ms"] ?? "",
+            "line_watch_drop_stage": "none",
+            "line_watch_drop_reason": "accepted",
         ]
         for (k, v) in decision.details {
             payload[k] = v
@@ -312,7 +385,13 @@ final class LINEInboundWatcher {
 
         _ = eventBus.append(type: decision.eventType, adapter: "line", payload: payload)
         logger.log(.debug, "LINEInboundWatcher: \(decision.eventType) via fusion score=\(decision.score), conf=\(decision.confidence), signals=\(decision.signals.joined(separator: ","))")
-        savePipelineResult(decision: decision, sanitizedText: filteredDecisionText, dedupResult: "passed", emitted: true)
+        savePipelineResult(
+            decision: decision,
+            sanitizedText: filteredDecisionText,
+            dedupResult: "passed",
+            emitted: true,
+            extra: timingFields
+        )
     }
 
     private func emitFromSignal(_ signal: LineDetectionSignal) {
@@ -348,14 +427,42 @@ final class LINEInboundWatcher {
         let normalized = normalizeForDuplicateFingerprint(text)
         guard !normalized.isEmpty else { return false }
         if ingressDedupTuneV2Enabled, normalized.count < 6 { return false }
-        let fingerprint = "\(conversation.lowercased())|\(normalized)"
+
+        let normalizedConversation = conversation.lowercased()
+        let fingerprint = "\(normalizedConversation)|\(normalized)"
         let now = Date()
         let windowSeconds = ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds
+        let lineMemoryWindowSeconds = max(windowSeconds, inboundLineMemoryWindowSeconds)
+
+        let normalizedLines = normalizedInboundLinesForDedup(text)
+        pruneRecentInboundLineObservations(now: now, windowSeconds: lineMemoryWindowSeconds)
+        if !normalizedLines.isEmpty {
+            let hasNovelLine = normalizedLines.contains { normalizedLine in
+                !lineSeenRecently(
+                    normalizedLine: normalizedLine,
+                    conversation: normalizedConversation,
+                    now: now,
+                    windowSeconds: lineMemoryWindowSeconds
+                )
+            }
+            if !hasNovelLine {
+                logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound by line memory")
+                return true
+            }
+        }
+
         if fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < windowSeconds {
             return true
         }
+
         lastInboundFingerprint = fingerprint
         lastInboundAt = now
+        recordInboundLines(
+            normalizedLines,
+            conversation: normalizedConversation,
+            at: now,
+            windowSeconds: lineMemoryWindowSeconds
+        )
         return false
     }
 
@@ -368,6 +475,108 @@ final class LINEInboundWatcher {
             .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
             .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedInboundLinesForDedup(_ text: String) -> [String] {
+        let sanitized = LineTextSanitizer.sanitize(text)
+        guard !sanitized.isEmpty else { return [] }
+        let lines = sanitized
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var segments: [String] = []
+        for line in lines {
+            segments.append(line)
+            let punctuated = line
+                .replacingOccurrences(of: "•", with: "\n")
+                .replacingOccurrences(of: "・", with: "\n")
+                .replacingOccurrences(of: "。", with: "\n")
+                .replacingOccurrences(of: "！", with: "\n")
+                .replacingOccurrences(of: "？", with: "\n")
+                .replacingOccurrences(of: "!", with: "\n")
+                .replacingOccurrences(of: "?", with: "\n")
+            let parts = punctuated
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            segments.append(contentsOf: parts)
+        }
+        return segments
+            .map { normalizeForDuplicateFingerprint($0) }
+            .filter { $0.count >= 4 }
+    }
+
+    private func pruneRecentInboundLineObservations(now: Date, windowSeconds: TimeInterval) {
+        recentInboundLineObservations.removeAll { now.timeIntervalSince($0.at) > windowSeconds }
+        if recentInboundLineObservations.count > maxRecentInboundLineObservations {
+            recentInboundLineObservations.removeFirst(recentInboundLineObservations.count - maxRecentInboundLineObservations)
+        }
+    }
+
+    private func lineSeenRecently(
+        normalizedLine: String,
+        conversation: String,
+        now: Date,
+        windowSeconds: TimeInterval
+    ) -> Bool {
+        for entry in recentInboundLineObservations.reversed() {
+            if now.timeIntervalSince(entry.at) > windowSeconds { break }
+            if entry.conversation != conversation { continue }
+            if linesLikelyEquivalent(normalizedLine, entry.normalizedLine) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func recordInboundLines(
+        _ normalizedLines: [String],
+        conversation: String,
+        at now: Date,
+        windowSeconds: TimeInterval
+    ) {
+        guard !normalizedLines.isEmpty else { return }
+        var seenInBatch = Set<String>()
+        for normalizedLine in normalizedLines where seenInBatch.insert(normalizedLine).inserted {
+            recentInboundLineObservations.append(
+                RecentInboundLineObservation(
+                    conversation: conversation,
+                    normalizedLine: normalizedLine,
+                    at: now
+                )
+            )
+        }
+        pruneRecentInboundLineObservations(now: now, windowSeconds: windowSeconds)
+    }
+
+    private func linesLikelyEquivalent(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs == rhs { return true }
+        let short = lhs.count <= rhs.count ? lhs : rhs
+        let long = lhs.count <= rhs.count ? rhs : lhs
+        if short.count >= 8, long.contains(short) {
+            let coverage = Double(short.count) / Double(max(long.count, 1))
+            if coverage >= 0.84 { return true }
+        }
+        if min(lhs.count, rhs.count) < 8 { return false }
+        return trigramSimilarity(lhs, rhs) >= 0.88
+    }
+
+    private func trigramSimilarity(_ lhs: String, _ rhs: String) -> Double {
+        let left = Array(lhs)
+        let right = Array(rhs)
+        guard left.count >= 3, right.count >= 3 else { return 0.0 }
+
+        var leftGrams = Set<String>()
+        var rightGrams = Set<String>()
+        for i in 0...(left.count - 3) {
+            leftGrams.insert(String(left[i...(i + 2)]))
+        }
+        for i in 0...(right.count - 3) {
+            rightGrams.insert(String(right[i...(i + 2)]))
+        }
+        guard !leftGrams.isEmpty, !rightGrams.isEmpty else { return 0.0 }
+        let common = leftGrams.intersection(rightGrams).count
+        return (2.0 * Double(common)) / Double(leftGrams.count + rightGrams.count)
     }
 
     private func collectStructuralSignal(chatList: AXUIElement, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
@@ -697,9 +906,12 @@ final class LINEInboundWatcher {
         if !baselineCaptured {
             lastImageHash = hash
             let baseline = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
+            if baseline.frameSkippedNoCutDescription == "1" {
+                logger.log(.debug, "LINEInboundWatcher: baseline fallback without y-cut (continuing)")
+            }
             lastOCRText = baseline.text
             baselineCaptured = true
-            logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash))")
+            logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash), lane=\(baseline.laneXDescription), y_cut=\(baseline.cutYDescription))")
             return nil
         }
 
@@ -708,6 +920,9 @@ final class LINEInboundWatcher {
         lastImageHash = hash
 
         let burst = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
+        if burst.frameSkippedNoCutDescription == "1" {
+            logger.log(.debug, "LINEInboundWatcher: frame fallback without y-cut (continuing)")
+        }
         let pixelOCRText = burst.text
         let previousOCRText = lastOCRText
         let textChanged = pixelOCRText != previousOCRText
@@ -728,6 +943,11 @@ final class LINEInboundWatcher {
                 "pixel_burst_delays_ms": burst.delaysDescription,
                 "pixel_burst_chars": burst.lengthsDescription,
                 "pixel_anchor_y": burst.anchorYDescription,
+                "pixel_lane_x": burst.laneXDescription,
+                "pixel_y_cut": burst.cutYDescription,
+                "pixel_green_rows": burst.greenRowsDescription,
+                "pixel_green_rows_expanded": burst.expandedGreenRowsDescription,
+                "pixel_frame_skipped_no_cut": burst.frameSkippedNoCutDescription,
                 "frame_action": "processed",
             ]
         )
@@ -839,24 +1059,58 @@ final class LINEInboundWatcher {
         abs(avg.r - avg.g) < 18 && abs(avg.g - avg.b) < 18 && avg.r > 108 && avg.r < 240
     }
 
-    private func burstInboundOCR(from rect: CGRect, windowID: CGWindowID) -> (text: String, delaysDescription: String, lengthsDescription: String, anchorYDescription: String) {
+    private func burstInboundOCR(from rect: CGRect, windowID: CGWindowID) -> (
+        text: String,
+        delaysDescription: String,
+        lengthsDescription: String,
+        anchorYDescription: String,
+        laneXDescription: String,
+        cutYDescription: String,
+        greenRowsDescription: String,
+        expandedGreenRowsDescription: String,
+        frameSkippedNoCutDescription: String
+    ) {
         let delays = [0]
         var best = ""
         var lengths: [Int] = []
+        var selectedDebug = VisionOCR.InboundPreprocessDebug(
+            laneX: -1,
+            yCut: nil,
+            greenRows: 0,
+            expandedGreenRows: 0,
+            cutApplied: false,
+            frameSkippedNoCut: false
+        )
         for delay in delays {
             if delay > 0 { usleep(useconds_t(delay * 1000)) }
-            let raw = VisionOCR.extractTextLineInbound(from: rect, windowID: windowID) ?? ""
+            var debug = VisionOCR.InboundPreprocessDebug(
+                laneX: -1,
+                yCut: nil,
+                greenRows: 0,
+                expandedGreenRows: 0,
+                cutApplied: false,
+                frameSkippedNoCut: false
+            )
+            let raw = VisionOCR.extractTextLineInbound(from: rect, windowID: windowID, debug: &debug) ?? ""
             let sanitized = LineTextSanitizer.sanitize(raw)
             lengths.append(sanitized.count)
             if sanitized.count > best.count {
                 best = sanitized
+                selectedDebug = debug
+            } else if delays.count == 1 {
+                selectedDebug = debug
             }
         }
         return (
             text: best,
             delaysDescription: delays.map(String.init).joined(separator: ","),
             lengthsDescription: lengths.map(String.init).joined(separator: ","),
-            anchorYDescription: String(Int(rect.origin.y))
+            anchorYDescription: String(Int(rect.origin.y)),
+            laneXDescription: String(selectedDebug.laneX),
+            cutYDescription: selectedDebug.yCut.map(String.init) ?? "",
+            greenRowsDescription: String(selectedDebug.greenRows),
+            expandedGreenRowsDescription: String(selectedDebug.expandedGreenRows),
+            frameSkippedNoCutDescription: selectedDebug.frameSkippedNoCut ? "1" : "0"
         )
     }
 
@@ -891,10 +1145,11 @@ final class LINEInboundWatcher {
         decision: LineDetectionDecision,
         sanitizedText: String?,
         dedupResult: String,
-        emitted: Bool
+        emitted: Bool,
+        extra: [String: String] = [:]
     ) {
         guard logger.isDebugEnabled else { return }
-        let result: [String: String] = [
+        var result: [String: String] = [
             "ts": ISO8601DateFormatter().string(from: Date()),
             "fusion_score": String(decision.score),
             "fusion_threshold": String(fusionEngine.threshold),
@@ -907,6 +1162,9 @@ final class LINEInboundWatcher {
             "emitted": String(emitted),
             "conversation": decision.conversation,
         ]
+        for (k, v) in extra {
+            result[k] = v
+        }
         let url = URL(fileURLWithPath: "/tmp/clawgate-ocr-debug/latest-pipeline.json")
         if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: url, options: .atomic)

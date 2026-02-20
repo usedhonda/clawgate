@@ -5,6 +5,15 @@ import Vision
 /// Requires Screen Recording permission for CGWindowListCreateImage.
 /// Gracefully returns nil when permission is not granted.
 enum VisionOCR {
+    struct InboundPreprocessDebug {
+        var laneX: Int
+        var yCut: Int?
+        var greenRows: Int
+        var expandedGreenRows: Int
+        var cutApplied: Bool
+        var frameSkippedNoCut: Bool
+    }
+
     /// Extract text from a screen rectangle (in global CG coordinates).
     /// Returns nil if Screen Recording permission is missing or OCR fails.
     /// When windowID is provided, captures only that window (immune to occlusion).
@@ -19,21 +28,26 @@ enum VisionOCR {
     /// OCR for LINE inbound text:
     /// runs OCR on the raw image and filters results by bounding-box geometry
     /// to keep only left-aligned (inbound) observations.
-    static func extractTextLineInbound(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> String? {
+    static func extractTextLineInbound(
+        from screenRect: CGRect,
+        windowID: CGWindowID = kCGNullWindowID,
+        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil
+    ) -> String? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
         }
-        return performOCRInbound(on: image)
+        return performOCRInbound(on: image, debug: debug)
     }
 
     /// Capture raw + preprocessed images for inbound OCR debugging.
     /// Returns nil when capture failed (e.g. Screen Recording permission missing).
-    /// Preprocessing is now a no-op; preprocessed is identical to raw.
+    /// Preprocessed image reflects fixed-lane outbound masking and bottom cut.
     static func captureInboundDebugImages(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> (raw: CGImage, preprocessed: CGImage?)? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
         }
-        return (raw: image, preprocessed: image)
+        let preprocessed = preprocessInboundImage(image)
+        return (raw: image, preprocessed: preprocessed.image)
     }
 
     /// Extract text from multiple screen rectangles merged into one capture (with padding).
@@ -66,13 +80,13 @@ enum VisionOCR {
         return image
     }
 
-    /// OCR for inbound text with outgoing (green bubble) rows masked out.
-    /// Before OCR, scans the right edge of the image for green-tinted pixels
-    /// (LINE outgoing bubbles) and whites out those rows entirely.
-    /// This eliminates outgoing text at the pixel level, making bounding-box
-    /// filtering unnecessary.
-    private static func performOCRInbound(on image: CGImage) -> String? {
-        let ocrImage = maskOutgoingRows(in: image) ?? image
+    private static func performOCRInbound(
+        on image: CGImage,
+        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil
+    ) -> String? {
+        let preprocessing = preprocessInboundImage(image)
+        debug?.pointee = preprocessing.debug
+        let ocrImage = preprocessing.image ?? image
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -102,14 +116,39 @@ enum VisionOCR {
         return inboundTexts.joined(separator: "\n")
     }
 
-    /// Mask outgoing (green bubble) rows by scanning the right edge column.
-    /// LINE outgoing bubbles are right-aligned, so a single pixel column near
-    /// the right edge reliably detects them. Detected rows are overwritten
-    /// with white pixels in-place before returning a new CGImage.
-    private static func maskOutgoingRows(in image: CGImage) -> CGImage? {
+    // MARK: - Inbound preprocessing (fixed right lane)
+
+    private static let laneOffsetFromRight = 38
+    private static let laneHalfWidth = 1  // 3px lane
+    private static let greenExpandRows = 3
+    private static let whiteThreshold = 238
+    private static let minBottomWhiteRun = 8
+
+    private enum LaneRowClass {
+        case white
+        case green
+        case other
+    }
+
+    /// Fixed-lane preprocessing for inbound OCR:
+    /// 1) uses right-offset lane to classify rows (white/green/other),
+    /// 2) finds bottom white run as Y cut,
+    /// 3) masks all green rows (+/- expand),
+    /// 4) drops everything at/below Y cut.
+    private static func preprocessInboundImage(_ image: CGImage) -> (image: CGImage?, debug: InboundPreprocessDebug) {
         let width = image.width
         let height = image.height
-        guard width > 32, height > 0 else { return nil }
+        let fallbackDebug = InboundPreprocessDebug(
+            laneX: max(0, width - laneOffsetFromRight),
+            yCut: nil,
+            greenRows: 0,
+            expandedGreenRows: 0,
+            cutApplied: false,
+            frameSkippedNoCut: true
+        )
+        guard width > (laneOffsetFromRight + laneHalfWidth), height > 0 else {
+            return (nil, fallbackDebug)
+        }
 
         let bytesPerRow = width * 4
         var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
@@ -122,38 +161,118 @@ enum VisionOCR {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
-            return nil
+            return (nil, fallbackDebug)
         }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        // Sample column near the right edge (offset inward to avoid border artifacts)
-        let sampleX = width - 16
+        let laneX = max(laneHalfWidth, min(width - 1 - laneHalfWidth, width - laneOffsetFromRight))
+        let laneRange = (laneX - laneHalfWidth)...(laneX + laneHalfWidth)
+        let voteThreshold = laneRange.count / 2 + 1
 
-        // Scan bottom-to-top; CGContext has origin at top-left after draw
-        var maskedCount = 0
-        for y in stride(from: height - 1, through: 0, by: -1) {
-            let offset = y * bytesPerRow + sampleX * 4
-            let ri = Int(buffer[offset])
-            let gi = Int(buffer[offset + 1])
-            let bi = Int(buffer[offset + 2])
-
-            // Same threshold as looksOutgoingBubbleColor:
-            // g > 118 && g > r + 10 && g > b + 16
-            // Use Int to avoid UInt8 overflow on white/bright pixels.
-            if gi > 118, gi > ri + 10, gi > bi + 16 {
-                // White out the entire row (RGBA = 255,255,255,255)
-                let rowStart = y * bytesPerRow
-                for i in stride(from: rowStart, to: rowStart + bytesPerRow, by: 1) {
-                    buffer[i] = 255
+        var rowClasses = [LaneRowClass](repeating: .other, count: height)
+        var greenRows = 0
+        for y in 0..<height {
+            let rowOffset = y * bytesPerRow
+            var greenVotes = 0
+            var whiteVotes = 0
+            for x in laneRange {
+                let i = rowOffset + x * 4
+                let r = Int(buffer[i])
+                let g = Int(buffer[i + 1])
+                let b = Int(buffer[i + 2])
+                if isOutgoingGreenPixel(r: r, g: g, b: b) {
+                    greenVotes += 1
+                } else if isNearWhitePixel(r: r, g: g, b: b) {
+                    whiteVotes += 1
                 }
-                maskedCount += 1
+            }
+
+            if greenVotes >= voteThreshold {
+                rowClasses[y] = .green
+                greenRows += 1
+            } else if whiteVotes >= voteThreshold {
+                rowClasses[y] = .white
+            } else {
+                rowClasses[y] = .other
             }
         }
 
-        // No rows masked — return nil to use original image (avoids CGImage creation cost)
-        guard maskedCount > 0 else { return nil }
+        let yCut = findBottomCutY(rowClasses: rowClasses)
 
-        return ctx.makeImage()
+        var expandedMask = [Bool](repeating: false, count: height)
+        if greenRows > 0 {
+            for y in 0..<height where rowClasses[y] == .green {
+                let start = max(0, y - greenExpandRows)
+                let end = min(height - 1, y + greenExpandRows)
+                for yy in start...end {
+                    expandedMask[yy] = true
+                }
+            }
+        }
+        let expandedGreenRows = expandedMask.reduce(0) { $0 + ($1 ? 1 : 0) }
+
+        var changed = false
+        for y in 0..<height {
+            let shouldWhiteRow = expandedMask[y] || {
+                guard let cutY = yCut else { return false }
+                return y >= cutY
+            }()
+            if !shouldWhiteRow { continue }
+            let rowStart = y * bytesPerRow
+            for i in rowStart..<(rowStart + bytesPerRow) {
+                buffer[i] = 255
+            }
+            changed = true
+        }
+
+        let processedImage = changed ? ctx.makeImage() : image
+
+        return (
+            processedImage,
+            InboundPreprocessDebug(
+                laneX: laneX,
+                yCut: yCut,
+                greenRows: greenRows,
+                expandedGreenRows: expandedGreenRows,
+                cutApplied: yCut != nil,
+                frameSkippedNoCut: yCut == nil
+            )
+        )
+    }
+
+    private static func findBottomCutY(rowClasses: [LaneRowClass]) -> Int? {
+        let height = rowClasses.count
+        guard height > 0 else { return nil }
+
+        let searchStart = max(0, Int(Double(height) * 0.55))
+        let minRun = max(minBottomWhiteRun, height / 120)
+
+        var run = 0
+        var runStart: Int?
+        for y in stride(from: height - 1, through: searchStart, by: -1) {
+            if rowClasses[y] == .white {
+                run += 1
+                runStart = y
+            } else {
+                if run >= minRun, let start = runStart {
+                    return start
+                }
+                run = 0
+                runStart = nil
+            }
+        }
+        if run >= minRun, let start = runStart {
+            return start
+        }
+        return nil
+    }
+
+    private static func isOutgoingGreenPixel(r: Int, g: Int, b: Int) -> Bool {
+        g > 130 && g > r + 8 && g > b + 12
+    }
+
+    private static func isNearWhitePixel(r: Int, g: Int, b: Int) -> Bool {
+        r >= whiteThreshold && g >= whiteThreshold && b >= whiteThreshold
     }
 
     private static func performOCR(on image: CGImage) -> String? {
