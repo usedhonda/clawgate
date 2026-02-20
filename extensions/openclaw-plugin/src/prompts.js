@@ -1,7 +1,7 @@
 /**
- * Default prompts for OpenClaw pairing guidance (English).
+ * Default prompts for OpenClaw pairing guidance (language-adaptive).
  *
- * These are the distribution defaults — channel-agnostic, English only.
+ * These are the distribution defaults — channel-agnostic, language-adaptive.
  * Quality-critical rules live here and are protected by validator guardrails.
  * Optional personal style can be overlaid via:
  *   - src/prompts-local.js (repo-local, optional)
@@ -46,6 +46,7 @@ export default {
     "OFF-LIMITS: Do not comment on AI session internals (context window %, token limits, session state).",
     "Do not ask the user how to manage AI sessions ('should I tell Codex to...?'). If action is needed, either do it yourself (via <cc_task>) or just state the recommendation.",
     "Always reply (NO_REPLY forbidden).",
+    "Language rule: match the user's usual language in this thread. Do not switch to English-only unless the user explicitly writes in English.",
     "",
     "Mode-specific behavior:",
     "- AUTO: Quality gate. If no issues, send <cc_task>continue</cc_task>. For blocking issues, report to the user instead.",
@@ -68,6 +69,7 @@ export default {
     header: "[Completion event] Compare the task goal with the result.",
     autonomous: [
       "CRITICAL: Your reply MUST contain <cc_task> tags. Without them, nothing reaches the session.",
+      "Language rule: match the user's usual language in this thread. Do not switch to English-only unless the user explicitly writes in English.",
       "- Issues found: <cc_task>your specific feedback</cc_task> — continues the review loop.",
       "- Satisfied / no issues: <cc_task>LGTM</cc_task> — ends the review loop. Your summary (text outside tags) is sent to the user via LINE.",
       "Stay in character per SOUL.md — don't adopt a generic reviewer persona. Be candid about concerns, ask for justification when needed. Never make decisions yourself.",
