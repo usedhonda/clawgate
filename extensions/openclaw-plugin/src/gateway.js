@@ -1605,6 +1605,16 @@ function sessionLabel(sessionType) {
   return sessionType === "codex" ? "Codex" : "CC";
 }
 
+function sessionPaneSuffix(sessionType) {
+  return sessionType === "codex" ? "cdx" : "cc";
+}
+
+function sessionPaneLabel(project, sessionType) {
+  const normalized = `${project || ""}`.trim();
+  if (!normalized) return "";
+  return `${normalized}.${sessionPaneSuffix(sessionType)}`;
+}
+
 function normalizeLineReplyText(text, { project = "", sessionType = "claude_code", eventKind = "reply" } = {}) {
   const trimmed = `${text || ""}`.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   if (!trimmed) return "";
@@ -1626,11 +1636,12 @@ function normalizeLineReplyText(text, { project = "", sessionType = "claude_code
 
   // Keep a compact prefix for tmux-origin messages so users can distinguish
   // CC updates from normal LINE conversations at a glance.
-  // Strip any existing [CC/Codex ...] prefix (agent may have added one) before re-adding
-  // to ensure consistent formatting.
+  // Strip any existing legacy prefix ([CC/Codex ...]) and pane-style prefix
+  // ([project.cc]/[project.cdx]) before re-adding canonical pane label.
   if (project) {
     result = result.replace(/^\[(CC|Codex) [^\]]*\]\n?/, "").trim();
-    result = `[${sessionLabel(sessionType)} ${project}]\n${result}`;
+    result = result.replace(/^\[[^\]\n]+\.(?:cc|cdx)\]\n?/i, "").trim();
+    result = `[${sessionPaneLabel(project, sessionType)}]\n${result}`;
   }
 
   return result;
