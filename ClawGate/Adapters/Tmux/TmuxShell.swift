@@ -68,6 +68,13 @@ enum TmuxShell {
         return try run(arguments: ["send-keys", "-t", target, key])
     }
 
+    /// Set a pane-local option on the given target.
+    /// Returns true on success; fails silently (returns false) if the pane is gone.
+    @discardableResult
+    static func setPaneOption(target: String, name: String, value: String) -> Bool {
+        (try? run(arguments: ["set-option", "-p", "-t", target, name, value])) != nil
+    }
+
     /// Resolve a tty path to a tmux session:window.pane target.
     /// Returns nil if the tty is not found in any tmux pane.
     static func resolveTarget(tty: String) -> String? {

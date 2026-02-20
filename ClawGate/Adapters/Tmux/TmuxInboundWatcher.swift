@@ -55,6 +55,7 @@ final class TmuxInboundWatcher {
             self?.handleProgress(session: session)
         }
         startProgressTimer()
+        initializePromptStates()
         logger.log(.info, "TmuxInboundWatcher: started (ws only)")
     }
 
@@ -62,6 +63,7 @@ final class TmuxInboundWatcher {
         ccClient.onStateChange = nil
         ccClient.onProgress = nil
         stopProgressTimer()
+        resetPromptStates()
         logger.log(.info, "TmuxInboundWatcher: stopped")
     }
 
@@ -94,6 +96,27 @@ final class TmuxInboundWatcher {
         // Check session mode — ignore sessions are skipped
         let config = configStore.load()
         let mode = config.tmuxSessionModes[modeKey] ?? "ignore"
+
+        // Write prompt state for any recognized status transition.
+        // This is unconditional — mode does not restrict state visibility.
+        if let target = session.tmuxTarget {
+            let promptState: String
+            switch newStatus {
+            case "running":
+                promptState = "typing"
+            case "waiting_input" where session.waitingReason == "askUserQuestion"
+                                    || session.waitingReason == "permission_prompt":
+                promptState = "suggestion"
+            case "waiting_input":
+                promptState = "idle"
+            default:
+                promptState = "unknown"
+            }
+            let tgt = target
+            BlockingWork.queue.async { [weak self] in
+                self?.writePromptState(target: tgt, state: promptState, project: session.project)
+            }
+        }
 
         // Bootstrap: synthetic state change from CCStatusBarClient startup.
         // Always go through captureAndEmit (skip permission auto-approve which may be stale).
@@ -342,6 +365,45 @@ final class TmuxInboundWatcher {
                 logger.log(.debug, "TmuxInboundWatcher: emitted progress for \(session.project)")
             } catch {
                 logger.log(.debug, "TmuxInboundWatcher: progress capture failed for \(session.project): \(error)")
+            }
+            // Heartbeat: refresh @prompt_state_ts for running (typing) sessions
+            let ts = String(Int(Date().timeIntervalSince1970))
+            TmuxShell.setPaneOption(target: target, name: "@prompt_state_ts", value: ts)
+        }
+    }
+
+    // MARK: - Prompt State Writer
+
+    /// Write @prompt_state / @prompt_state_src / @prompt_state_ts as pane-local options.
+    /// Must be called from BlockingWork.queue.
+    private func writePromptState(target: String, state: String, project: String) {
+        let ts = String(Int(Date().timeIntervalSince1970))
+        TmuxShell.setPaneOption(target: target, name: "@prompt_state", value: state)
+        TmuxShell.setPaneOption(target: target, name: "@prompt_state_src", value: "clawgate")
+        TmuxShell.setPaneOption(target: target, name: "@prompt_state_ts", value: ts)
+        logger.log(.debug, "TmuxInboundWatcher: prompt_state=\(state) src=clawgate ts=\(ts) target=\(target) project=\(project)")
+    }
+
+    /// Set all currently known sessions to `unknown` at startup.
+    private func initializePromptStates() {
+        let sessions = ccClient.allSessions()
+        BlockingWork.queue.async { [weak self] in
+            guard let self else { return }
+            for session in sessions {
+                guard let target = session.tmuxTarget else { continue }
+                self.writePromptState(target: target, state: "unknown", project: session.project)
+            }
+        }
+    }
+
+    /// Reset all currently known sessions to `unknown` at shutdown.
+    private func resetPromptStates() {
+        let sessions = ccClient.allSessions()
+        BlockingWork.queue.async { [weak self] in
+            guard let self else { return }
+            for session in sessions {
+                guard let target = session.tmuxTarget else { continue }
+                self.writePromptState(target: target, state: "unknown", project: session.project)
             }
         }
     }
