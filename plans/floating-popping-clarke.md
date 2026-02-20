@@ -18,7 +18,7 @@
 
 ## 現状
 
-- リポジトリ: `usedhonda/clawgate` (現在プライベート)
+- リポジトリ: `<owner>/clawgate` (現在プライベート)
 - 未コミット変更: Phase 1-4で実装した全機能
   - Doctor機能 (`/v1/doctor`)
   - ペアリング機能 (`/v1/pair/request`, `PairingCodeManager`)
@@ -41,7 +41,7 @@ git commit -m "feat: add Doctor, Pairing, release infrastructure"
 ### Step 2: リポジトリをパブリック化
 
 ```bash
-gh repo edit usedhonda/clawgate --visibility public
+gh repo edit <owner>/clawgate --visibility public
 ```
 
 ### Step 3: プッシュ
@@ -68,7 +68,7 @@ gh repo create homebrew-clawgate --public --description "Homebrew tap for ClawGa
 
 # 2. クローン
 cd ~/projects
-git clone git@github.com:usedhonda/homebrew-clawgate.git
+git clone git@github.com:<owner>/homebrew-clawgate.git
 cd homebrew-clawgate
 mkdir -p Casks
 
@@ -85,7 +85,7 @@ shasum -a 256 /tmp/ClawGate.dmg
 
 ```bash
 # インストールテスト
-brew tap usedhonda/clawgate
+brew tap <owner>/clawgate
 brew install --cask clawgate
 
 # 動作確認

@@ -1,6 +1,6 @@
 # ClawGate
 
-[![CI](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml/badge.svg)](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml)
+[![CI](https://github.com/<owner>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A macOS menu bar app that lets an AI agent (OpenClaw) monitor, review, and interact with your Claude Code / Codex sessions in real time.
@@ -23,7 +23,7 @@ Claude Code (tmux) <--WS--> cc-status-bar <--WS--> ClawGate <--HTTP--> OpenClaw 
 
 ### Download
 
-Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/clawgate/releases/latest).
+Download the latest DMG from [GitHub Releases](https://github.com/<owner>/<repo>/releases/latest).
 
 ### Install
 
@@ -62,7 +62,7 @@ Each tmux project can be assigned one of four session modes. Set them in the men
 
 ## OpenClaw Integration
 
-ClawGate includes an [OpenClaw](https://github.com/usedhonda/openclaw_general) channel plugin that connects the event stream to an AI reviewer.
+ClawGate includes an [OpenClaw](https://github.com/<owner>/openclaw_general) channel plugin that connects the event stream to an AI reviewer.
 
 ### Plugin Setup
 
@@ -89,8 +89,8 @@ Optional (`projectView`) for Observe/Autonomous doc grounding via read-only brid
 | Key | Default | Description |
 |-----|---------|-------------|
 | `projectView.enabled` | `true` | Enable read-only project-view overlay |
-| `projectView.command` | `chi-projects-read` | Wrapper command (read-only) |
-| `projectView.rootPrefix` | `/Users/usedhonda/projects` | Base path for deriving relative roots |
+| `projectView.command` | `project-context-read` | Wrapper command (read-only) |
+| `projectView.rootPrefix` | `$HOME/projects` | Base path for deriving relative roots |
 | `projectView.projectRoots` | `{}` | Project -> relative root mapping |
 | `projectView.projectFiles` | `{}` | Project -> prioritized files list |
 
@@ -193,7 +193,7 @@ See [SPEC.md](SPEC.md) for full API documentation.
 
 ```bash
 # Clone
-git clone https://github.com/usedhonda/clawgate.git
+git clone https://github.com/<owner>/clawgate.git
 cd clawgate
 
 # Build

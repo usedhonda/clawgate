@@ -1,15 +1,16 @@
 /**
  * project-view.js — read-only project docs bridge for Observe/Autonomous context.
  *
- * Uses an external wrapper command (default: chi-projects-read) that is expected
+ * Uses an external wrapper command (default: project-context-read) that is expected
  * to enforce read-only boundaries on the host side.
  */
 
 import { execFileSync } from "node:child_process";
+import { homedir } from "node:os";
 import { sep } from "node:path";
 
-const DEFAULT_COMMAND = "chi-projects-read";
-const DEFAULT_ROOT_PREFIX = "/Users/usedhonda/projects";
+const DEFAULT_COMMAND = "project-context-read";
+const DEFAULT_ROOT_PREFIX = `${homedir()}/projects`;
 const DEFAULT_FILES = ["AGENTS.md", "CLAUDE.md", "README.md"];
 const DEFAULT_TIMEOUT_MS = 2000;
 const DEFAULT_TTL_MS = 90_000;
@@ -95,6 +96,7 @@ export function createProjectViewReader(rawConfig = {}, log) {
   }
 
   let commandAvailable = null;
+  let activeCommand = command;
   let commandErrorSummary = "";
   /** @type {Map<string, { block: string, expiresAt: number }>} */
   const cache = new Map();
@@ -102,7 +104,7 @@ export function createProjectViewReader(rawConfig = {}, log) {
   const rootMissLogAt = new Map();
   const ROOT_MISS_LOG_COOLDOWN_MS = 60_000;
 
-  const runReadCommand = (args) => execFileSync(command, args, {
+  const runReadCommand = (args) => execFileSync(activeCommand, args, {
     encoding: "utf-8",
     timeout: timeoutMs,
     stdio: ["ignore", "pipe", "pipe"],
@@ -114,7 +116,7 @@ export function createProjectViewReader(rawConfig = {}, log) {
     try {
       runReadCommand(["list"]);
       commandAvailable = true;
-      log?.info?.(`clawgate: project_view command ready (${command})`);
+      log?.info?.(`clawgate: project_view command ready (${activeCommand})`);
       return true;
     } catch (err) {
       commandAvailable = false;
@@ -216,7 +218,7 @@ export function createProjectViewReader(rawConfig = {}, log) {
 
       const block = [
         `[Project View Snapshot]`,
-        `source=${command} root=${root}`,
+        `source=${activeCommand} root=${root}`,
         sections.join("\n\n"),
       ].join("\n");
 
@@ -225,4 +227,3 @@ export function createProjectViewReader(rawConfig = {}, log) {
     },
   };
 }
-

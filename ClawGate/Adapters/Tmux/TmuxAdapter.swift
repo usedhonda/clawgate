@@ -241,7 +241,7 @@ final class TmuxAdapter: AdapterProtocol {
     }
 
     /// Capture pane output for a specific project by name.
-    /// Searches all known sessions (not just active/configured ones) so Chi can inspect any tmux pane.
+    /// Searches all known sessions (not just active/configured ones) so the reviewer agent can inspect any tmux pane.
     func getMessages(limit: Int, forProject project: String) throws -> MessageList {
         let candidates = ccClient.sessions(forProject: project)
         guard let session = candidates.first, let target = session.tmuxTarget else {

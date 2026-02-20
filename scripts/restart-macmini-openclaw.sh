@@ -3,12 +3,13 @@
 #
 # Usage:
 #   ./scripts/restart-macmini-openclaw.sh
-#   ./scripts/restart-macmini-openclaw.sh --remote-host macmini --project-path /Users/usedhonda/projects/ios/clawgate
+#   ./scripts/restart-macmini-openclaw.sh --remote-host macmini --project-path "$(pwd)"
 
 set -euo pipefail
 
 REMOTE_HOST="macmini"
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_BUILD=false
 STOP_RELAY=false
 CLAWGATE_ROLE="host_b_client"
@@ -63,6 +64,7 @@ ops_log info \"remote_begin\" \"remote update started (build=\$BUILD_FLAG stop_r
 trap '\''ops_log error \"remote_failed\" \"remote update failed (line=\$LINENO exit=\$?)\"'\'' ERR
 cd \"\$PROJECT_PATH\"
 APP_PATH=\"\$PROJECT_PATH/ClawGate.app\"
+APP_BIN=\"\$APP_PATH/Contents/MacOS/ClawGate\"
 TMP_BACKUP=\"/tmp/ClawGate.app.backup.\$\$\"
 
 if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
@@ -125,11 +127,11 @@ if [[ \"\$STOP_RELAY_FLAG\" == \"1\" ]]; then
 fi
 
 echo \"[remote] app process:\"
-ps aux | grep \"/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate\" | grep -v grep || true
+ps aux | grep \"\$APP_BIN\" | grep -v grep || true
 echo \"[remote] app binary arch:\"
-file /Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate || true
+file \"\$APP_BIN\" || true
 echo \"[remote] app signature authority:\"
-codesign -dv --verbose=4 /Users/usedhonda/projects/ios/clawgate/ClawGate.app 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true
+codesign -dv --verbose=4 \"\$APP_PATH\" 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true
 echo \"[remote] gateway launchctl:\"
 launchctl list | grep ai.openclaw.gateway || true
 echo \"[remote] health:\"

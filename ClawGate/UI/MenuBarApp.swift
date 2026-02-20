@@ -24,7 +24,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var ghosttyDetachCooldownUntil: Date?
     private var ghosttyAnchorSide: GhosttyAnchorSide = .right
     private var ghosttyLastDebugLogAt: Date = .distantPast
+    private var activationObserver: NSObjectProtocol?
+    private var lastAppliedPanelLevel: NSWindow.Level?
     private let mainPanelLogLimit = 30
+    private let ghosttyBundleID = "com.mitchellh.ghostty"
 
     private let modeOrder: [String] = ["ignore", "observe", "auto", "autonomous"]
 
@@ -42,11 +45,18 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         super.init()
     }
 
+    deinit {
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
         configureStatusButton()
         configureMainPanel()
+        startWindowLevelObserver()
 
         runtime.startServer()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
@@ -86,8 +96,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: true
         )
-        panel.isFloatingPanel = true
-        panel.level = .popUpMenu
+        panel.isFloatingPanel = false
+        panel.level = .normal
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
@@ -99,6 +109,31 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.minSize = NSSize(width: 380, height: 300)
         panel.maxSize = NSSize(width: 700, height: 1400)
         mainPanel = panel
+        applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+    }
+
+    private func startWindowLevelObserver() {
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+        }
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.applyMainPanelLevel(frontmostBundleID: app?.bundleIdentifier)
+        }
+        applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+    }
+
+    private func applyMainPanelLevel(frontmostBundleID: String?) {
+        guard let panel = mainPanel else { return }
+        let desiredLevel: NSWindow.Level = (frontmostBundleID == ghosttyBundleID) ? .floating : .normal
+        guard desiredLevel != lastAppliedPanelLevel else { return }
+        panel.level = desiredLevel
+        panel.isFloatingPanel = (desiredLevel == .floating)
+        lastAppliedPanelLevel = desiredLevel
     }
 
     private func fitPanelToContent(_ panel: NSPanel) {
@@ -134,6 +169,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         refreshStatsAndTimeline()
         fitPanelToContent(panel)
         positionPanelBelowStatusItem(panel)
+        applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         panel.makeKeyAndOrderFront(nil)
     }
 

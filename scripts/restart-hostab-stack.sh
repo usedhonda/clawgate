@@ -9,10 +9,11 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/restart-hostab-stack.sh
-#   ./scripts/restart-hostab-stack.sh --remote-host macmini --project-path /Users/usedhonda/projects/ios/clawgate
+#   ./scripts/restart-hostab-stack.sh --remote-host macmini --project-path "$(pwd)"
 
 REMOTE_HOST="macmini"
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_SYNC=false
 SKIP_REMOTE_BUILD=true
 SKIP_LOCAL_RELAY=false

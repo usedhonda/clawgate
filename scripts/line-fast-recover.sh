@@ -14,7 +14,8 @@ set -euo pipefail
 #   KEYCHAIN_PASSWORD='...' ./scripts/line-fast-recover.sh --setup-cert
 
 REMOTE_HOST="macmini"
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 RESTART_GATEWAY=true
 RESTART_HOSTA_APP=false
 RUN_CERT_SETUP=false

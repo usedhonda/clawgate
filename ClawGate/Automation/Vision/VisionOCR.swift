@@ -123,6 +123,9 @@ enum VisionOCR {
     private static let greenExpandRows = 3
     private static let whiteThreshold = 238
     private static let minBottomWhiteRun = 8
+    /// Guard against false cut detection in the middle of chat history.
+    /// Input separator is expected near bottom in normal LINE layout.
+    private static let minAcceptedCutRatioFromTop = 0.84
 
     private enum LaneRowClass {
         case white
@@ -246,6 +249,7 @@ enum VisionOCR {
 
         let searchStart = max(0, Int(Double(height) * 0.55))
         let minRun = max(minBottomWhiteRun, height / 120)
+        let minAcceptedCutY = Int(Double(height) * minAcceptedCutRatioFromTop)
 
         var run = 0
         var runStart: Int?
@@ -255,14 +259,14 @@ enum VisionOCR {
                 runStart = y
             } else {
                 if run >= minRun, let start = runStart {
-                    return start
+                    return start >= minAcceptedCutY ? start : nil
                 }
                 run = 0
                 runStart = nil
             }
         }
         if run >= minRun, let start = runStart {
-            return start
+            return start >= minAcceptedCutY ? start : nil
         }
         return nil
     }

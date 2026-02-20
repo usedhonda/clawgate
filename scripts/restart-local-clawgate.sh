@@ -7,9 +7,10 @@ set -euo pipefail
 # Usage:
 #   ./scripts/restart-local-clawgate.sh
 #   ./scripts/restart-local-clawgate.sh --skip-build
-#   ./scripts/restart-local-clawgate.sh --project-path /Users/usedhonda/projects/ios/clawgate
+#   ./scripts/restart-local-clawgate.sh --project-path "$(pwd)"
 
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_BUILD=false
 SKIP_SYNC=false
 SKIP_SIGN=false
@@ -112,8 +113,8 @@ else
 fi
 
 echo "[5/5] Restart app + local gateway"
-pkill -f "/Users/usedhonda/projects/Mac/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
-pkill -f "/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
+pkill -f "$APP_BIN" >/dev/null 2>&1 || true
+pkill -f "/projects/Mac/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
 
 # Wait for old process to fully exit (up to 5s, then SIGKILL)
 for ((w=1; w<=5; w++)); do
@@ -139,7 +140,7 @@ if launchctl list 2>/dev/null | grep -q 'ai\.openclaw\.gateway'; then
 fi
 
 echo "Process:"
-ps aux | grep "/Users/usedhonda/projects/ios/clawgate/ClawGate.app/Contents/MacOS/ClawGate" | grep -v grep || true
+ps aux | grep "$APP_BIN" | grep -v grep || true
 
 echo "Binary marker:"
 strings "$APP_BIN" | egrep -n "Apply Recommended|Refresh Hosts|Manual \\(select server\\)" | head -n 5 || true

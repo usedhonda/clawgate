@@ -7,7 +7,8 @@ set -euo pipefail
 #   KEYCHAIN_PASSWORD='your-login-password' ./scripts/macmini-local-sign-and-restart.sh
 #   ./scripts/macmini-local-sign-and-restart.sh --keychain-password 'your-login-password'
 
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
 CERT_NAME="ClawGate Dev"

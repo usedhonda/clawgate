@@ -33,7 +33,7 @@ const sentHash = new Map();
 /** @type {Map<string, { text: string, timestamp: number }>} */
 const progressSnapshots = new Map();
 
-// ── Task goal tracking (remembers what Chi asked CC to do) ────
+// ── Task goal tracking (remembers what the reviewer agent asked CC to do) ────
 /** @type {Map<string, string>} project -> task goal text */
 const taskGoals = new Map();
 
@@ -336,7 +336,7 @@ export function clearProgressTrail(project) {
 }
 
 /**
- * Store the task goal that Chi sent to CC via <cc_task>.
+ * Store the task goal that the reviewer agent sent to CC via <cc_task>.
  * Used at completion time to compare goal vs result.
  * @param {string} project
  * @param {string} goalText

@@ -694,13 +694,13 @@ To avoid overwriting text while the user is typing in a CC/Codex pane, task disp
 
 ### Observe / Autonomous Project-View Grounding
 
-For Observe and Autonomous reviews, gateway can append a read-only project snapshot via `chi-projects-read` (when local stable context cannot be resolved, e.g. federated remote sessions).
+For Observe and Autonomous reviews, gateway can append a read-only project snapshot via `project-context-read` (when local stable context cannot be resolved, e.g. federated remote sessions).
 
-- Default command: `chi-projects-read`
+- Default command: `project-context-read`
 - Root resolution order:
   1. `projectView.projects[project].root`
   2. `projectView.projectRoots[project]`
-  3. Derive from resolved absolute path under `projectView.rootPrefix` (`/Users/usedhonda/projects`)
+  3. Derive from resolved absolute path under `projectView.rootPrefix` (default: `$HOME/projects`)
 - File resolution order:
   1. `projectView.projects[project].files`
   2. `projectView.projectFiles[project]`

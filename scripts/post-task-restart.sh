@@ -5,7 +5,8 @@ set -euo pipefail
 # Run this at the end of implementation tasks without waiting for manual confirmation.
 
 REMOTE_HOST="macmini"
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_SYNC=false
 SKIP_REMOTE_BUILD=true
 REQUIRE_HOSTA_LOCAL_SIGN=false

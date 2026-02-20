@@ -4,7 +4,8 @@ set -euo pipefail
 # One-click recovery for Host A (macmini) certificate/trust/sign/restart flow.
 # Run this on macmini local login session.
 
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 if [ -z "${KEYCHAIN_PASSWORD:-}" ]; then
   PW_FILE="$HOME/.local/secrets/keychain-password"
   if [ -f "$PW_FILE" ]; then

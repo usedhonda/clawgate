@@ -5,14 +5,15 @@ set -euo pipefail
 #
 # Usage:
 #   KEYCHAIN_PASSWORD='your-login-password' ./scripts/setup-cert-macmini.sh
-#   KEYCHAIN_PASSWORD='...' ./scripts/setup-cert-macmini.sh --remote-host macmini --project-path /Users/usedhonda/projects/ios/clawgate
+#   KEYCHAIN_PASSWORD='...' ./scripts/setup-cert-macmini.sh --remote-host macmini --project-path "$(pwd)"
 #
 # Notes:
 # - KEYCHAIN_PASSWORD is required for non-interactive keychain unlock/partition setup.
 # - This script does not modify host app binaries; it only prepares certificate/trust.
 
 REMOTE_HOST="macmini"
-PROJECT_PATH="/Users/usedhonda/projects/ios/clawgate"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 RESET=false
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
 

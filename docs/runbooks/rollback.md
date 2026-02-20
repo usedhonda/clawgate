@@ -23,7 +23,7 @@ Use this when the latest release causes user-facing failures.
 5. Restart and verify both hosts:
 
 ```bash
-./scripts/post-task-restart.sh --remote-host macmini --project-path /Users/usedhonda/projects/ios/clawgate
+./scripts/post-task-restart.sh --remote-host macmini --project-path "$(pwd)"
 ```
 
 6. Confirm runtime health:

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/usedhonda/clawgate/docs/release-manifest.schema.json",
+  "$id": "https://github.com/<owner>/<repo>/docs/release-manifest.schema.json",
   "title": "ClawGate Release Manifest",
   "type": "object",
   "required": [

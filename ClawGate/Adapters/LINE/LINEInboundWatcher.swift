@@ -54,6 +54,11 @@ final class LINEInboundWatcher {
     private var lastSeparatorAnchorConfidence: Int = 0
     private var lastSeparatorAnchorMethod: String = "none"
     private var shouldSkipPollNoLine: Bool = false
+
+    /// Text cursor: bottom N lines of last emitted OCR poll, used to skip already-seen content on next poll
+    private var lastEmittedTextCursor: [String] = []
+    private let textCursorLineCount = 4
+    private var lastEmittedTextCursorConversation: String = ""
     private static let isoFormatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         return f
@@ -937,8 +942,18 @@ final class LINEInboundWatcher {
         }
         if textChanged {
             lastOCRText = pixelOCRText
+            // Update text cursor with bottom N lines of current OCR output
+            let cursorLines = pixelOCRText
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            if !cursorLines.isEmpty {
+                lastEmittedTextCursor = Array(cursorLines.suffix(textCursorLineCount))
+                lastEmittedTextCursorConversation = conversation
+            }
         }
-        let deltaText = textChanged ? extractDeltaText(previous: previousOCRText, current: pixelOCRText) : ""
+        let cursorAdjustedText = applyCursorTruncation(to: pixelOCRText, conversation: conversation)
+        let deltaText = textChanged ? extractDeltaText(previous: previousOCRText, current: cursorAdjustedText) : ""
 
         return LineDetectionSignal(
             name: "pixel_diff",
@@ -985,6 +1000,38 @@ final class LINEInboundWatcher {
             return normalizedCurrent
         }
         return delta.joined(separator: "\n")
+    }
+
+    /// Truncates `text` to lines after the last known cursor position, preventing re-emission
+    /// of already-seen content across baseline resets and long-delayed re-renders.
+    private func applyCursorTruncation(to text: String, conversation: String) -> String {
+        guard !lastEmittedTextCursor.isEmpty,
+              lastEmittedTextCursorConversation == conversation else { return text }
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return text }
+
+        // Find the last position where any cursor line matches in the current OCR output
+        var cursorEndIndex: Int? = nil
+        for cursorLine in lastEmittedTextCursor {
+            for (i, line) in lines.enumerated() {
+                if linesLikelyEquivalent(line, cursorLine) {
+                    cursorEndIndex = max(cursorEndIndex ?? -1, i)
+                }
+            }
+        }
+
+        guard let endIdx = cursorEndIndex else {
+            logger.log(.debug, "LINEInboundWatcher: cursor_not_found (scrolled far or cleared)")
+            return text  // cursor not visible -> no truncation, process full text
+        }
+
+        let afterCursor = Array(lines[(endIdx + 1)...])
+        logger.log(.debug, "LINEInboundWatcher: cursor_truncation discarded=\(endIdx + 1) kept=\(afterCursor.count)")
+        if afterCursor.isEmpty { return "" }
+        return afterCursor.joined(separator: "\n")
     }
 
     private func collectProcessSignal(app: NSRunningApplication, conversation: String) -> LineDetectionSignal? {

@@ -128,7 +128,7 @@ final class TmuxInboundWatcher {
                                                  target: session.tmuxTarget ?? "")
                     }
                 } else {
-                    // observe / autonomous -> emit to Chi with pane context
+                    // observe / autonomous -> emit to agent with pane context
                     var questionContext: String? = nil
                     if let capture = session.paneCapture, !capture.isEmpty {
                         questionContext = extractQuestionContext(from: capture, questionText: text)
@@ -172,7 +172,7 @@ final class TmuxInboundWatcher {
                         self.autoAnswerQuestion(session: session, question: question,
                                                 target: session.tmuxTarget ?? "")
                     } else {
-                        // observe / autonomous -> emit to Chi with pane context
+                        // observe / autonomous -> emit to agent with pane context
                         let questionContext = self.extractQuestionContext(from: output, questionText: question.questionText)
                         self.emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
                     }
@@ -181,10 +181,10 @@ final class TmuxInboundWatcher {
                 // Real permission prompt
                 // Codex has no askUserQuestion — all interactive prompts
                 // (Plan mode, etc.) come through permission_prompt.
-                // For observe/autonomous: emit to Chi so she can decide.
+                // For observe/autonomous: emit to agent so it can decide.
                 if session.sessionType == "codex" {
                     if mode == "observe" || mode == "autonomous" {
-                        self.debugLog("permission_prompt -> codex \(mode), emitting to Chi")
+                        self.debugLog("permission_prompt -> codex \(mode), emitting to agent")
                         self.captureAndEmit(session: session, mode: mode)
                         return
                     }
@@ -230,7 +230,7 @@ final class TmuxInboundWatcher {
         }
     }
 
-    /// Extract the pane content above the question line as context for Chi.
+    /// Extract the pane content above the question line as context for the reviewer agent.
     /// Returns nil if no meaningful context is found.
     private func extractQuestionContext(from output: String, questionText: String) -> String? {
         let lines = output.components(separatedBy: "\n")
@@ -252,7 +252,7 @@ final class TmuxInboundWatcher {
         return context
     }
 
-    /// Emit a question event to the EventBus so Chi can receive it.
+    /// Emit a question event to the EventBus so the reviewer agent can receive it.
     /// Used from both the permission_prompt branch and captureAndEmit.
     private func emitQuestionEvent(session: CCStatusBarClient.CCSession, question: DetectedQuestion, mode: String, context: String? = nil) {
         let eventID = UUID().uuidString
@@ -502,13 +502,13 @@ final class TmuxInboundWatcher {
         // Try to detect AskUserQuestion menu
         if let question = detectQuestion(from: rawOutput) {
             debugLog("question detected: \(question.options.count) options")
-            // Auto mode: answer locally without sending to Chi
+            // Auto mode: answer locally without sending to the reviewer agent
             if mode == "auto" {
                 autoAnswerQuestion(session: session, question: question, target: target)
                 return
             }
 
-            // observe/autonomous: send to Chi via EventBus with pane context
+            // observe/autonomous: send to agent via EventBus with pane context
             let questionContext = extractQuestionContext(from: rawOutput, questionText: question.questionText)
             emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
             return
@@ -528,7 +528,7 @@ final class TmuxInboundWatcher {
             captureState = "progress_fallback"
         } else if mode == "auto" {
             // Auto mode: emit even when capture is empty (bootstrap / idle at prompt).
-            // Chi will recognize idle state and send "continue".
+            // Reviewer agent will recognize idle state and send "continue".
             outputSummary = "(idle at prompt — no recent output captured)"
             captureState = "idle_bootstrap"
         } else {

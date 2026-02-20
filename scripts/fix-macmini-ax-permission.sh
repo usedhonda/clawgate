@@ -11,7 +11,9 @@ set -euo pipefail
 REMOTE_HOST="macmini"
 WAIT_SECONDS=120
 BUNDLE_ID="com.clawgate.app"
-APP_PATH="/Users/usedhonda/projects/ios/clawgate/ClawGate.app"
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+APP_PATH="$PROJECT_PATH/ClawGate.app"
 FORCE_RESET=false
 
 while [[ $# -gt 0 ]]; do
