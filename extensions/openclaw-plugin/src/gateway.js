@@ -529,6 +529,8 @@ const recentTaskSendErrors = new Map();
 const taskSendFailureStreaks = new Map();
 /** @type {Map<string, number>} */
 const recentInteractionPendingNotifications = new Map();
+/** @type {Map<string, string>} project -> last interaction_pending key */
+const interactionPendingNotifiedKeyByProject = new Map();
 /** @type {Map<string, { key: string, project: string, targetProject: string, taskText: string, prefixedTask: string, mode: string, traceId: string, createdAt: number, lastQueuedAt: number, retryCount: number }>} */
 const pendingTaskQueue = new Map();
 const TASK_QUEUE_TTL_MS = Math.max(
@@ -805,11 +807,17 @@ function shouldNotifyInteractionPending({
     : "";
   const keyMaterial = `${project || "unknown"}::${reason || "interaction_pending"}::${normalizedQuestion}::${normalizedOptions}`;
   const key = hashFingerprint(keyMaterial);
+  const projectKey = `${project || "unknown"}`;
+  const lastProjectKey = interactionPendingNotifiedKeyByProject.get(projectKey);
+  if (lastProjectKey === key) {
+    return false;
+  }
   const last = recentInteractionPendingNotifications.get(key);
   if (last && now - last <= INTERACTION_PENDING_NOTIFY_WINDOW_MS) {
     return false;
   }
   recentInteractionPendingNotifications.set(key, now);
+  interactionPendingNotifiedKeyByProject.set(projectKey, key);
   return true;
 }
 
@@ -1524,6 +1532,7 @@ function getInteractionPending(project) {
 
 function clearInteractionPending(project) {
   if (!project) return false;
+  interactionPendingNotifiedKeyByProject.delete(project);
   return interactionPendingProjects.delete(project);
 }
 
@@ -3560,6 +3569,16 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       log?.info?.(`clawgate: [${accountId}] autonomous loop reset for "${project}" — max rounds reached or no cc_task`);
       // Strip any <cc_task> tags so they don't leak raw into LINE
       replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
+      // Canonical autonomous policy: avoid sending free-form fallback chatter to LINE.
+      // Only milestone-based LINE updates are allowed (risk / interaction_pending / final).
+      logAutonomousLineEvent(log, {
+        accountId,
+        project,
+        reason: "suppressed",
+        status: "suppressed",
+        detail: "no_cc_task_fallback",
+      });
+      return;
     }
 
     // Auto mode: try <cc_task> (no round limiting)
