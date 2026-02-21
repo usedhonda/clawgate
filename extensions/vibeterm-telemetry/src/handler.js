@@ -78,13 +78,9 @@ async function maybeWriteDiary(sample, log) {
   }
 
   const ts = sample.timestamp ? new Date(sample.timestamp) : new Date();
-  const timeStr = ts.toLocaleTimeString("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const dateStr = ts.toLocaleDateString("en-CA", { timeZone: "Asia/Tokyo" }); // YYYY-MM-DD
+  const iso = ts.toISOString();
+  const timeStr = iso.slice(11, 16) + "Z"; // HH:MMZ (UTC)
+  const dateStr = iso.slice(0, 10); // YYYY-MM-DD (UTC)
 
   const acc = typeof sample.accuracy === "number" ? Math.round(sample.accuracy) : "?";
   const line = `\u{1F4CD} ${timeStr} - ${sample.lat.toFixed(4)}, ${sample.lon.toFixed(4)} (accuracy ${acc}m)\n`;
@@ -126,13 +122,9 @@ async function maybeWriteHealthDiary(health, log) {
   }
 
   const ts = health.periodEnd ? new Date(health.periodEnd) : new Date();
-  const timeStr = ts.toLocaleTimeString("ja-JP", {
-    timeZone: "Asia/Tokyo",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  });
-  const dateStr = ts.toLocaleDateString("en-CA", { timeZone: "Asia/Tokyo" });
+  const iso = ts.toISOString();
+  const timeStr = iso.slice(11, 16) + "Z"; // HH:MMZ (UTC)
+  const dateStr = iso.slice(0, 10); // YYYY-MM-DD (UTC)
 
   // Build ❤️ line parts
   const parts = [];
