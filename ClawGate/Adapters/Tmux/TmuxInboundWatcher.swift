@@ -40,6 +40,16 @@ final class TmuxInboundWatcher {
     private var lastCompletionEmitState: [String: CompletionEmitState] = [:]
     private let completionEmitDedupInterval: TimeInterval = 8.0
 
+    // Question fingerprint dedup — suppress re-emit of the same question within a longer window.
+    // observe mode never auto-answers, so the same question can linger and re-trigger via
+    // waiting_input -> running -> waiting_input cycles. 5 minutes covers typical task durations.
+    private struct QuestionDedupState {
+        let fingerprint: Int
+        let at: Date
+    }
+    private var lastEmittedQuestionFingerprint: [String: QuestionDedupState] = [:]
+    private let questionDedupInterval: TimeInterval = 300 // 5 minutes
+
     init(ccClient: CCStatusBarClient, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
         self.ccClient = ccClient
         self.eventBus = eventBus
@@ -278,6 +288,18 @@ final class TmuxInboundWatcher {
     /// Emit a question event to the EventBus so the reviewer agent can receive it.
     /// Used from both the permission_prompt branch and captureAndEmit.
     private func emitQuestionEvent(session: CCStatusBarClient.CCSession, question: DetectedQuestion, mode: String, context: String? = nil) {
+        // Question fingerprint dedup: suppress re-emit of the same question within 5 minutes.
+        // In observe mode no one auto-answers, so the same question can re-trigger on state cycles.
+        let fingerprint = (question.questionText + question.options.joined()).hashValue
+        let now = Date()
+        if let last = lastEmittedQuestionFingerprint[session.project],
+           last.fingerprint == fingerprint,
+           now.timeIntervalSince(last.at) < questionDedupInterval {
+            logger.log(.debug, "TmuxInboundWatcher: question dedup suppressed repeat for \(session.project) (age=\(Int(now.timeIntervalSince(last.at)))s)")
+            return
+        }
+        lastEmittedQuestionFingerprint[session.project] = QuestionDedupState(fingerprint: fingerprint, at: now)
+
         let eventID = UUID().uuidString
         let traceID = "tmux-\(eventID)"
         let payload: [String: String] = [
