@@ -39,14 +39,10 @@ final class LINEInboundWatcher {
     private var lastConfidence: String = "low"
     private var lastInboundFingerprint: String = ""
     private var lastInboundAt: Date = .distantPast
-    private struct RecentInboundLineObservation {
-        let conversation: String
-        let normalizedLine: String
-        let at: Date
-    }
-    private var recentInboundLineObservations: [RecentInboundLineObservation] = []
-    private let maxRecentInboundLineObservations = 240
-    private let inboundLineMemoryWindowSeconds: TimeInterval = 75
+    /// Content-based seen-line registry per conversation.
+    /// Never expires by time; entries age out only by size cap.
+    private var seenLinesByConversation: [String: [String]] = [:]
+    private let maxSeenLinesPerConversation = 240
     private let inboundDedupWindowSeconds: TimeInterval = 20
     private let inboundDedupWindowSecondsV2: TimeInterval
     private let ingressDedupTuneV2Enabled: Bool
@@ -54,6 +50,12 @@ final class LINEInboundWatcher {
     private var lastSeparatorAnchorConfidence: Int = 0
     private var lastSeparatorAnchorMethod: String = "none"
     private var shouldSkipPollNoLine: Bool = false
+
+    /// Dedup pipeline history ring buffer (最新 20 件、デバッグエンドポイント用)
+    private var pipelineHistory: [LineInboundDedupSnapshot.PipelineEntry] = []
+    private let maxPipelineHistory = 20
+    /// lineSeenPreviously でマッチした行の先頭。shouldSuppressDuplicateInbound 内で参照する。
+    private var lastMatchedLineHead: String = ""
 
     /// Text cursor: bottom N lines of last emitted OCR poll, used to skip already-seen content on next poll
     private var lastEmittedTextCursor: [String] = []
@@ -437,37 +439,54 @@ final class LINEInboundWatcher {
         let fingerprint = "\(normalizedConversation)|\(normalized)"
         let now = Date()
         let windowSeconds = ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds
-        let lineMemoryWindowSeconds = max(windowSeconds, inboundLineMemoryWindowSeconds)
+        let textHead = String(text.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
 
         let normalizedLines = normalizedInboundLinesForDedup(text)
-        pruneRecentInboundLineObservations(now: now, windowSeconds: lineMemoryWindowSeconds)
         if !normalizedLines.isEmpty {
+            lastMatchedLineHead = ""
             let hasNovelLine = normalizedLines.contains { normalizedLine in
-                !lineSeenRecently(
-                    normalizedLine: normalizedLine,
-                    conversation: normalizedConversation,
-                    now: now,
-                    windowSeconds: lineMemoryWindowSeconds
-                )
+                !lineSeenPreviously(normalizedLine: normalizedLine, conversation: normalizedConversation)
             }
             if !hasNovelLine {
-                logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound by line memory")
+                logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound by content memory")
+                appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
+                    ts: isoString(now),
+                    result: "suppressed",
+                    reason: "content_memory",
+                    matchedLineHead: lastMatchedLineHead,
+                    conversation: normalizedConversation,
+                    textHead: textHead,
+                    emitted: false
+                ))
                 return true
             }
         }
 
         if fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < windowSeconds {
+            appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
+                ts: isoString(now),
+                result: "suppressed",
+                reason: "fingerprint_window",
+                matchedLineHead: "",
+                conversation: normalizedConversation,
+                textHead: textHead,
+                emitted: false
+            ))
             return true
         }
 
         lastInboundFingerprint = fingerprint
         lastInboundAt = now
-        recordInboundLines(
-            normalizedLines,
+        recordInboundLines(normalizedLines, conversation: normalizedConversation)
+        appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
+            ts: isoString(now),
+            result: "passed",
+            reason: "accepted",
+            matchedLineHead: "",
             conversation: normalizedConversation,
-            at: now,
-            windowSeconds: lineMemoryWindowSeconds
-        )
+            textHead: textHead,
+            emitted: true
+        ))
         return false
     }
 
@@ -511,50 +530,31 @@ final class LINEInboundWatcher {
             .filter { $0.count >= 4 }
     }
 
-    private func pruneRecentInboundLineObservations(now: Date, windowSeconds: TimeInterval) {
-        recentInboundLineObservations.removeAll { now.timeIntervalSince($0.at) > windowSeconds }
-        if recentInboundLineObservations.count > maxRecentInboundLineObservations {
-            recentInboundLineObservations.removeFirst(recentInboundLineObservations.count - maxRecentInboundLineObservations)
-        }
-    }
-
-    private func lineSeenRecently(
-        normalizedLine: String,
-        conversation: String,
-        now: Date,
-        windowSeconds: TimeInterval
-    ) -> Bool {
-        for entry in recentInboundLineObservations.reversed() {
-            if now.timeIntervalSince(entry.at) > windowSeconds { break }
-            if entry.conversation != conversation { continue }
-            if linesLikelyEquivalent(normalizedLine, entry.normalizedLine) {
-                let matchedHead = String(entry.normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
+    private func lineSeenPreviously(normalizedLine: String, conversation: String) -> Bool {
+        guard let lines = seenLinesByConversation[conversation] else { return false }
+        for seen in lines {
+            if linesLikelyEquivalent(normalizedLine, seen) {
+                let matchedHead = String(seen.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
                 let queryHead = String(normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
                 logger.log(.debug, "LINEInboundWatcher: fuzzy_dedup_hit query=[\(queryHead)] matched=[\(matchedHead)]")
+                lastMatchedLineHead = matchedHead
                 return true
             }
         }
         return false
     }
 
-    private func recordInboundLines(
-        _ normalizedLines: [String],
-        conversation: String,
-        at now: Date,
-        windowSeconds: TimeInterval
-    ) {
+    private func recordInboundLines(_ normalizedLines: [String], conversation: String) {
         guard !normalizedLines.isEmpty else { return }
-        var seenInBatch = Set<String>()
-        for normalizedLine in normalizedLines where seenInBatch.insert(normalizedLine).inserted {
-            recentInboundLineObservations.append(
-                RecentInboundLineObservation(
-                    conversation: conversation,
-                    normalizedLine: normalizedLine,
-                    at: now
-                )
-            )
+        var seen = seenLinesByConversation[conversation] ?? []
+        var addedInBatch = Set<String>()
+        for line in normalizedLines where addedInBatch.insert(line).inserted && !seen.contains(line) {
+            seen.append(line)
         }
-        pruneRecentInboundLineObservations(now: now, windowSeconds: windowSeconds)
+        if seen.count > maxSeenLinesPerConversation {
+            seen.removeFirst(seen.count - maxSeenLinesPerConversation)
+        }
+        seenLinesByConversation[conversation] = seen
     }
 
     private func linesLikelyEquivalent(_ lhs: String, _ rhs: String) -> Bool {
@@ -1194,6 +1194,25 @@ final class LINEInboundWatcher {
             y: messageAreaFrame.origin.y,
             width: cropWidth,
             height: cropHeight
+        )
+    }
+
+    private func appendPipelineEntry(_ entry: LineInboundDedupSnapshot.PipelineEntry) {
+        pipelineHistory.append(entry)
+        if pipelineHistory.count > maxPipelineHistory {
+            pipelineHistory.removeFirst(pipelineHistory.count - maxPipelineHistory)
+        }
+    }
+
+    func dedupSnapshot() -> LineInboundDedupSnapshot {
+        LineInboundDedupSnapshot(
+            seenConversations: seenLinesByConversation.mapValues(\.count),
+            seenLinesTotal: seenLinesByConversation.values.reduce(0) { $0 + $1.count },
+            lastFingerprintHead: String(lastInboundFingerprint.prefix(60)),
+            lastAcceptedAt: lastInboundAt == .distantPast ? "never" : isoString(lastInboundAt),
+            fingerprintWindowSec: Int(ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds),
+            pipelineHistory: pipelineHistory.reversed(),
+            timestamp: isoString(Date())
         )
     }
 

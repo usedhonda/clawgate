@@ -34,6 +34,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/openclaw-info"),
         (.GET, "/v1/events"),
         (.POST, "/v1/debug/inject"),
+        (.GET, "/v1/debug/line-dedup"),
     ]
 
     private var requestHead: HTTPRequestHead?
@@ -87,7 +88,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         }
 
         // Track meaningful API requests (exclude high-frequency polling/monitoring)
-        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs", "/v1/autonomous/status"]
+        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs", "/v1/autonomous/status", "/v1/debug/line-dedup"]
         if !noTrack.contains(path) {
             core.statsCollector.increment("api_requests", adapter: "system")
         }
@@ -160,7 +161,9 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         BlockingWork.queue.async { [self, core] in
             let result: HTTPResult
 
-            if method == .POST && path == "/v1/debug/inject" {
+            if method == .GET && path == "/v1/debug/line-dedup" {
+                result = core.handleLineDedupDebug()
+            } else if method == .POST && path == "/v1/debug/inject" {
                 result = core.debugInject(body: bodyData)
             } else if method == .POST && path == "/v1/send" {
                 let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")

@@ -121,6 +121,9 @@ final class AppRuntime {
             }
         }
 
+        // Connect lineInboundWatcher to core for /v1/debug/line-dedup endpoint
+        core.lineInboundWatcher = inboundWatcher
+
         if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
             inboundWatcher.start()
             notificationBannerWatcher.start()

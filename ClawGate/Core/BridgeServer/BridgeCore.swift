@@ -9,6 +9,9 @@ final class BridgeCore {
     /// Set by main.swift when running as federation server
     var federationServer: FederationServer?
 
+    /// Set by main.swift to enable /v1/debug/line-dedup endpoint
+    var lineInboundWatcher: LINEInboundWatcher?
+
     private let registry: AdapterRegistry
     private let logger: AppLogger
     private let opsLogStore: OpsLogStore
@@ -461,6 +464,19 @@ final class BridgeCore {
             )
             return jsonResponse(status: .badRequest, body: encode(APIResponse<SendResult>(ok: false, result: nil, error: payload)), traceID: requestTrace)
         }
+    }
+
+    func handleLineDedupDebug() -> HTTPResult {
+        let snapshot = lineInboundWatcher?.dedupSnapshot() ?? LineInboundDedupSnapshot(
+            seenConversations: [:],
+            seenLinesTotal: 0,
+            lastFingerprintHead: "",
+            lastAcceptedAt: "never",
+            fingerprintWindowSec: 0,
+            pipelineHistory: [],
+            timestamp: ISO8601DateFormatter().string(from: Date())
+        )
+        return jsonResponse(status: .ok, body: encode(snapshot))
     }
 
     func debugInject(body: Data) -> HTTPResult {
