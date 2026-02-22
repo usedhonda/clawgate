@@ -1530,9 +1530,11 @@ function getInteractionPending(project) {
   return interactionPendingProjects.get(project) || null;
 }
 
-function clearInteractionPending(project) {
+function clearInteractionPending(project, { keepNotifyKey = false } = {}) {
   if (!project) return false;
-  interactionPendingNotifiedKeyByProject.delete(project);
+  if (!keepNotifyKey) {
+    interactionPendingNotifiedKeyByProject.delete(project);
+  }
   return interactionPendingProjects.delete(project);
 }
 
@@ -2458,6 +2460,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   // Clear active project so outbound.sendText doesn't leak tmux prefixes into messenger replies.
   clearActiveProject(conversationKey);
 
+  // Collect plain reply blocks so multi-block AI responses are sent as a single LINE message.
+  const collectedLineBlocks = [];
+
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
   const deliver = async (payload) => {
     const text = extractReplyText(payload, log, "line_inbound_dispatch");
@@ -2642,35 +2647,8 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     }
 
     const lineText = normalizeLineReplyText(text, { project: event.payload?.project || "" });
-    log?.info?.(`clawgate: [${accountId}] sending reply to "${conversation}": "${lineText.slice(0, 80)}"`);
-    traceLog(log, "info", {
-      trace_id: traceId,
-      stage: "gateway_forward_start",
-      action: "line_send",
-      status: "start",
-      conversation,
-    });
-    try {
-      await clawgateSend(apiUrl, conversation, lineText, traceId);
-      recordPluginSend(lineText); // Track for echo suppression
-      traceLog(log, "info", {
-        trace_id: traceId,
-        stage: "gateway_forward_ok",
-        action: "line_send",
-        status: "ok",
-        conversation,
-      });
-    } catch (err) {
-      log?.error?.(`clawgate: [${accountId}] send reply failed: ${err}`);
-      traceLog(log, "error", {
-        trace_id: traceId,
-        stage: "gateway_forward_failed",
-        action: "line_send",
-        status: "failed",
-        conversation,
-        error: String(err),
-      });
-    }
+    log?.debug?.(`clawgate: [${accountId}] collected reply block[${collectedLineBlocks.length + 1}] for "${conversation}": "${lineText.slice(0, 80)}"`);
+    collectedLineBlocks.push(lineText);
   };
 
   try {
@@ -2685,6 +2663,43 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           onError: (err) => log?.error?.(`clawgate: dispatch error: ${err}`),
         },
       });
+
+      // Send all collected plain reply blocks as a single LINE message.
+      if (collectedLineBlocks.length > 0) {
+        const combinedText = collectedLineBlocks.join("\n");
+        log?.info?.(`clawgate: [${accountId}] sending reply (${collectedLineBlocks.length} block(s)) to "${conversation}": "${combinedText.slice(0, 80)}"`);
+        traceLog(log, "info", {
+          trace_id: traceId,
+          stage: "gateway_forward_start",
+          action: "line_send",
+          status: "start",
+          conversation,
+          blocks: collectedLineBlocks.length,
+        });
+        try {
+          await clawgateSend(apiUrl, conversation, combinedText, traceId);
+          recordPluginSend(combinedText);
+          traceLog(log, "info", {
+            trace_id: traceId,
+            stage: "gateway_forward_ok",
+            action: "line_send",
+            status: "ok",
+            conversation,
+            blocks: collectedLineBlocks.length,
+          });
+        } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send reply failed: ${err}`);
+          traceLog(log, "error", {
+            trace_id: traceId,
+            stage: "gateway_forward_failed",
+            action: "line_send",
+            status: "failed",
+            conversation,
+            error: String(err),
+          });
+        }
+      }
+
       traceLog(log, "info", {
         trace_id: traceId,
         stage: "gateway_dispatch_done",
@@ -4064,8 +4079,8 @@ export async function startAccount(ctx) {
             setProgressSnapshot(proj, progressText);
             appendProgressTrail(proj, progressText);
             sessionStatuses.set(proj, "running");
-            if (clearInteractionPending(proj)) {
-              log?.info?.(`clawgate: [${accountId}] interaction_pending CLEARED for "${proj}" — progress detected`);
+            if (clearInteractionPending(proj, { keepNotifyKey: true })) {
+              log?.info?.(`clawgate: [${accountId}] interaction_pending CLEARED for "${proj}" — progress detected (notify-key preserved)`);
             }
             if (clearReviewDone(proj)) {
               log?.info?.(`clawgate: [${accountId}] review-done CLEARED for "${proj}" — progress detected (new work started)`);
