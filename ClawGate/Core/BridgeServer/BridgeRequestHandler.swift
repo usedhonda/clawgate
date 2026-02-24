@@ -35,6 +35,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/events"),
         (.POST, "/v1/debug/inject"),
         (.GET, "/v1/debug/line-dedup"),
+        (.GET, "/v1/tmux/prompt-state"),
     ]
 
     private var requestHead: HTTPRequestHead?
@@ -193,6 +194,9 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.tmuxSessionMode(sessionType: sessionType, project: project)
             } else if method == .PUT && path == "/v1/tmux/session-mode" {
                 result = core.setTmuxSessionMode(body: bodyData)
+            } else if method == .GET && path == "/v1/tmux/prompt-state" {
+                let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
+                result = core.tmuxPromptState(project: project)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()

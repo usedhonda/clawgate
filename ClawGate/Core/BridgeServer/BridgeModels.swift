@@ -267,6 +267,14 @@ struct TmuxSessionModeUpdateResult: Codable {
     }
 }
 
+// MARK: - Tmux Prompt State
+
+struct PromptStateResult: Codable {
+    let state: String
+    let reason: String
+    let snippet: String
+}
+
 // MARK: - Stats Response
 
 struct DayStatsEntry: Codable {

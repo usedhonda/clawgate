@@ -129,7 +129,7 @@ final class TmuxAdapter: AdapterProtocol {
             let start3 = Date()
             let draftState = detectPromptDraftState(target: target)
             switch draftState.state {
-            case .idle:
+            case .idle, .suggestion:
                 stepLogger.record(step: "check_prompt_draft", start: start3, success: true, details: draftState.reason)
             case .typing:
                 stepLogger.record(step: "check_prompt_draft", start: start3, success: false, details: "draft_detected")
@@ -269,19 +269,23 @@ final class TmuxAdapter: AdapterProtocol {
         )
     }
 
-    private enum PromptDraftState {
+    enum PromptDraftState: String {
         case idle
         case typing
+        case suggestion
         case unknown
     }
 
-    private struct PromptDraftDetection {
+    struct PromptDraftDetection {
         let state: PromptDraftState
         let draft: String
         let reason: String
     }
 
     private func detectPromptDraftState(target: String) -> PromptDraftDetection {
+        // Raw capture (with ANSI) for dim detection
+        let rawOutput = try? TmuxShell.capturePaneRaw(target: target, lines: 120)
+
         guard let output = try? TmuxShell.capturePane(target: target, lines: 120) else {
             return PromptDraftDetection(state: .unknown, draft: "", reason: "capture_failed")
         }
@@ -369,6 +373,10 @@ final class TmuxAdapter: AdapterProtocol {
         if isTemplatePromptDraft(draft) {
             return PromptDraftDetection(state: .idle, draft: "", reason: "template_prompt_idle")
         }
+        // Check if draft text appears dim (SGR dim/bright-black) — indicates suggestion, not user typing
+        if let raw = rawOutput, promptLineDimDetected(raw) {
+            return PromptDraftDetection(state: .suggestion, draft: draft, reason: "dim_color_detected")
+        }
         return PromptDraftDetection(state: .typing, draft: draft, reason: "draft_detected")
     }
 
@@ -395,6 +403,41 @@ final class TmuxAdapter: AdapterProtocol {
     private func isTmuxDividerLine(_ line: String) -> Bool {
         line.trimmingCharacters(in: .whitespacesAndNewlines)
             .range(of: #"^[-─━]{3,}$"#, options: .regularExpression) != nil
+    }
+
+    /// Detect SGR dim codes on the prompt line's draft text (after the prompt marker).
+    /// Returns true if the text after ›/❯/> contains dim (ESC[2m variants) or bright-black (ESC[90m).
+    private func promptLineDimDetected(_ rawOutput: String) -> Bool {
+        let lines = rawOutput.components(separatedBy: "\n")
+        let promptRE = try! NSRegularExpression(pattern: #"^\s*[›❯>]\s*"#)
+        let ansiStripRE = try! NSRegularExpression(pattern: "\u{1B}\\[[0-9;]*[a-zA-Z]|\u{1B}\\][^\u{07}]*\u{07}")
+
+        // Find the last prompt line in raw output
+        var lastPromptRaw: String?
+        for line in lines {
+            let stripped = ansiStripRE.stringByReplacingMatches(
+                in: line, range: NSRange(line.startIndex..., in: line), withTemplate: "")
+            if promptRE.firstMatch(in: stripped, range: NSRange(stripped.startIndex..., in: stripped)) != nil {
+                lastPromptRaw = line
+            }
+        }
+        guard let promptRaw = lastPromptRaw else { return false }
+
+        // Extract text after prompt marker (in raw string with ANSI)
+        let markerRE = try! NSRegularExpression(pattern: #"[›❯>]\s*"#)
+        guard let markerMatch = markerRE.firstMatch(in: promptRaw, range: NSRange(promptRaw.startIndex..., in: promptRaw)),
+              let markerRange = Range(markerMatch.range, in: promptRaw) else { return false }
+        let afterPrompt = String(promptRaw[markerRange.upperBound...])
+
+        // Verify there's actual text content after stripping ANSI
+        let afterStripped = ansiStripRE.stringByReplacingMatches(
+            in: afterPrompt, range: NSRange(afterPrompt.startIndex..., in: afterPrompt), withTemplate: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if afterStripped.isEmpty { return false }
+
+        // Check for SGR dim codes: ESC[2m, ESC[0;2m, ESC[;2m, ESC[90m
+        let dimRE = try! NSRegularExpression(pattern: "\u{1B}\\[(0;)?2m|\u{1B}\\[;2m|\u{1B}\\[90m")
+        return dimRE.firstMatch(in: afterPrompt, range: NSRange(afterPrompt.startIndex..., in: afterPrompt)) != nil
     }
 
     /// Navigate an AskUserQuestion menu and select an option by index.
@@ -495,5 +538,16 @@ final class TmuxAdapter: AdapterProtocol {
             count: entries.count,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
+    }
+
+    // MARK: - Public prompt state API
+
+    /// Public wrapper for detectPromptDraftState — used by /v1/tmux/prompt-state endpoint.
+    func detectPromptState(forProject project: String) -> PromptDraftDetection {
+        let candidates = ccClient.sessions(forProject: project)
+        guard let session = candidates.first, let target = session.tmuxTarget else {
+            return PromptDraftDetection(state: .unknown, draft: "", reason: "session_not_found")
+        }
+        return detectPromptDraftState(target: target)
     }
 }

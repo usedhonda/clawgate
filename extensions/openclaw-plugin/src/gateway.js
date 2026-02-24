@@ -27,6 +27,7 @@ import {
   clawgatePoll,
   clawgateTmuxSend,
   clawgateTmuxRead,
+  clawgateTmuxPromptState,
   setClawgateAuthToken,
 } from "./client.js";
 import { setActiveProject, getActiveProject, clearActiveProject } from "./shared-state.js";
@@ -513,11 +514,6 @@ const INTERACTION_PENDING_NOTIFY_WINDOW_MS = Math.max(
   5_000,
   (Number.parseInt(process.env.CLAWGATE_INTERACTION_PENDING_NOTIFY_SEC || "60", 10) || 60) * 1000
 );
-const TMUX_TYPING_GUARD_READ_LINES = 120;
-const TMUX_TYPING_GUARD_SCAN_TAIL_LINES = 48;
-const TMUX_TYPING_GUARD_MAX_PROMPT_DISTANCE_LINES = 8;
-const TMUX_TYPING_GUARD_MAX_CONTINUATION_LINES = 2;
-const TMUX_PROMPT_LINE_RE = /^\s*[›❯>]\s*/u;
 const ENABLE_DEBUG_TASK_FAILURE_CONTEXT = /^(1|true|yes)$/i.test(
   `${process.env.CLAWGATE_DEBUG_TASK_FAILURE_CONTEXT || process.env.CLAWGATE_DEBUG_FAILURE_CONTEXT || ""}`.trim()
 );
@@ -1114,38 +1110,7 @@ function activeStaleRepeatWindowMs() {
   return ENABLE_INGRESS_DEDUP_TUNE_V2 ? STALE_REPEAT_WINDOW_MS_V2 : STALE_REPEAT_WINDOW_MS;
 }
 
-// --- Fuzzy inbound dedup (OCR re-read suppression) ---
-
-function lcsLength(a, b) {
-  const m = a.length, n = b.length;
-  let prev = new Uint16Array(n + 1);
-  let curr = new Uint16Array(n + 1);
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      curr[j] = a[i - 1] === b[j - 1]
-        ? prev[j - 1] + 1
-        : Math.max(prev[j], curr[j - 1]);
-    }
-    [prev, curr] = [curr, prev];
-  }
-  return prev[n];
-}
-
-function lcsRatio(a, b) {
-  if (!a || !b) return 0;
-  return (2 * lcsLength(a, b)) / (a.length + b.length);
-}
-
-function isFuzzyInboundMatch(a, b) {
-  if (!a || !b) return false;
-  if (a === b) return true;
-  if (Math.min(a.length, b.length) < 6) return false;
-  return lcsRatio(a, b) >= 0.60;
-}
-
-// --- End fuzzy inbound dedup helpers ---
-
-function isDuplicateInbound(eventText, conversation) {
+function isDuplicateInbound(eventText) {
   const windowMs = activeDedupWindowMs();
   if (windowMs <= 0) return false;
   const now = Date.now();
@@ -1155,30 +1120,11 @@ function isDuplicateInbound(eventText, conversation) {
   }
   const fp = eventFingerprint(eventText);
   if (fp.length < 10) return false; // Too short to compare reliably
-  // Exact fingerprint match (existing)
-  if (recentInbounds.some((r) => r.fingerprint === fp)) return true;
-  // Fuzzy match: catch OCR re-reads of the same message
-  const normalized = normalizeEchoText(eventText);
-  if (normalized.length < 6) return false;
-  const fuzzyMatch = recentInbounds.find((r) => {
-    if (r.conversation !== conversation) return false;
-    return isFuzzyInboundMatch(normalized, r.normalizedText);
-  });
-  if (fuzzyMatch) {
-    const ratio = lcsRatio(normalized, fuzzyMatch.normalizedText);
-    console.info(`[inbound_fuzzy_dedup] suppressed near-duplicate (lcs=${ratio.toFixed(2)}): "${eventText.slice(0, 40)}" ~ "${(fuzzyMatch.normalizedText || "").slice(0, 40)}"`);
-    return true;
-  }
-  return false;
+  return recentInbounds.some((r) => r.fingerprint === fp);
 }
 
-function recordInbound(eventText, conversation) {
-  recentInbounds.push({
-    fingerprint: eventFingerprint(eventText),
-    time: Date.now(),
-    normalizedText: normalizeEchoText(eventText),
-    conversation,
-  });
+function recordInbound(eventText) {
+  recentInbounds.push({ fingerprint: eventFingerprint(eventText), time: Date.now() });
 }
 
 function stableKey(eventText, conversation) {
@@ -1905,152 +1851,33 @@ function buildTaskFailureMessage(errorMsg, lineText, project) {
   return parts.join("\n\n");
 }
 
-function stripAnsiControlCodes(text) {
-  return `${text || ""}`
-    .replace(/\u001B\[[0-9;]*[a-zA-Z]/g, "")
-    .replace(/\u001B\][^\u0007]*\u0007/g, "");
-}
-
-function isTmuxFooterLine(line) {
-  const s = `${line || ""}`.trim();
-  if (!s) return false;
-  if (/\?\s+for shortcuts/i.test(s)) return true;
-  if (/^\d+%\s+context left$/i.test(s)) return true;
-  if (/^\d+%\s+context window$/i.test(s)) return true;
-  if (/\d+%\s+context left/i.test(s)) return true;
-  if (/\d+%\s+context window/i.test(s)) return true;
-  if (/^autonomous:\s+/i.test(s)) return true;
-  return false;
-}
-
-function isTmuxDividerLine(line) {
-  const s = `${line || ""}`.trim();
-  return /^[-─━]{3,}$/.test(s);
-}
-
-function detectTmuxInputDraft(lines) {
-  const source = Array.isArray(lines)
-    ? lines.map((line) => stripAnsiControlCodes(line))
-    : [];
-  if (source.length === 0) {
-    return { parseOk: false, reason: "empty_capture", isTyping: true, draftText: "" };
-  }
-
-  const tail = source.slice(-TMUX_TYPING_GUARD_SCAN_TAIL_LINES);
-  let end = tail.length - 1;
-  while (end >= 0 && !tail[end].trim()) end--;
-  if (end < 0) {
-    return { parseOk: false, reason: "blank_capture", isTyping: true, draftText: "" };
-  }
-
-  while (end >= 0 && (isTmuxFooterLine(tail[end]) || isTmuxDividerLine(tail[end]))) end--;
-  if (end < 0) {
-    return { parseOk: false, reason: "footer_only_capture", isTyping: true, draftText: "" };
-  }
-
-  const searchStart = Math.max(0, end - 16);
-  let promptIndex = -1;
-  for (let i = end; i >= searchStart; i--) {
-    if (TMUX_PROMPT_LINE_RE.test(tail[i])) {
-      promptIndex = i;
-      break;
-    }
-  }
-
-  if (promptIndex < 0) {
-    return { parseOk: false, reason: "prompt_not_found", isTyping: true, draftText: "" };
-  }
-
-  if (end - promptIndex > TMUX_TYPING_GUARD_MAX_PROMPT_DISTANCE_LINES) {
-    return { parseOk: false, reason: "prompt_too_far_from_bottom", isTyping: true, draftText: "" };
-  }
-
-  const draftParts = [];
-  const firstDraft = tail[promptIndex]
-    .replace(TMUX_PROMPT_LINE_RE, "")
-    .replace(/[▌█▋▍▎▏]+$/u, "")
-    .trim();
-  if (firstDraft) draftParts.push(firstDraft);
-
-  const continuationEnd = Math.min(end, promptIndex + TMUX_TYPING_GUARD_MAX_CONTINUATION_LINES);
-  for (let i = promptIndex + 1; i <= continuationEnd; i++) {
-    const raw = tail[i];
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    if (isTmuxFooterLine(raw) || isTmuxDividerLine(raw) || TMUX_PROMPT_LINE_RE.test(raw)) break;
-    draftParts.push(trimmed.replace(/[▌█▋▍▎▏]+$/u, ""));
-  }
-
-  const draftText = draftParts.join(" ").replace(/\s+/g, " ").trim();
-  if (!draftText) {
-    return { parseOk: true, reason: "prompt_idle", isTyping: false, draftText: "" };
-  }
-  if (isTemplatePromptDraft(draftText)) {
-    return { parseOk: true, reason: "template_prompt_idle", isTyping: false, draftText: "" };
-  }
-  return { parseOk: true, reason: "draft_detected", isTyping: true, draftText };
-}
-
-function isTemplatePromptDraft(text) {
-  const s = `${text || ""}`.trim().toLowerCase();
-  if (!s) return false;
-  if (s === "implement {feature}") return true;
-  if (s === "run /review on my current changes") return true;
-  return false;
-}
-
 async function inspectTmuxDraftBeforeTaskSend({ apiUrl, project, traceId, log }) {
   try {
-    const result = await clawgateTmuxRead(apiUrl, project, TMUX_TYPING_GUARD_READ_LINES, traceId);
+    const result = await clawgateTmuxPromptState(apiUrl, project, traceId);
     if (!result?.ok) {
       const errCode = `${result?.error?.code || ""}`.toLowerCase();
-      const reason = result?.error?.message || result?.error?.code || "pane_read_failed";
-      if (errCode === "session_not_found" || errCode === "tmux_target_missing") {
-        log?.debug?.(`clawgate: typing guard bypass for "${project}" (${errCode})`);
-        return {
-          blocked: false,
-          reason: "non_authoritative_host",
-          message: "",
-        };
+      if (errCode === "session_not_found" || errCode === "adapter_not_found") {
+        return { blocked: false, reason: "non_authoritative_host", message: "" };
       }
-      log?.warn?.(`clawgate: typing guard read failed for "${project}": ${reason}`);
-      return {
-        blocked: true,
-        reason: "pane_read_failed",
-        message: `Session '${project}' prompt state is unknown (read failed: ${reason}). Skipped task send to avoid overwriting user input.`,
-      };
+      return { blocked: true, reason: "prompt_state_failed", message: result?.error?.message || "unknown" };
     }
+    const state = result?.result?.state || "unknown";
+    const snippet = result?.result?.snippet || "";
+    const reason = result?.result?.reason || "unknown";
 
-    const lines = Array.isArray(result?.result?.messages)
-      ? result.result.messages.map((item) => `${item?.text || ""}`)
-      : [];
-    const detection = detectTmuxInputDraft(lines);
-    if (!detection.parseOk) {
-      log?.warn?.(`clawgate: typing guard parse failed for "${project}" (${detection.reason})`);
-      return {
-        blocked: true,
-        reason: detection.reason,
-        message: `Session '${project}' prompt state is unknown (${detection.reason}). Skipped task send to avoid overwriting user input.`,
-      };
+    if (state === "typing") {
+      log?.info?.(`clawgate: typing guard blocked for "${project}" (draft="${snippet.slice(0, 80)}")`);
+      return { blocked: true, reason: "draft_detected", message: `Session '${project}' has unsent input.` };
     }
-    if (detection.isTyping) {
-      const snippet = detection.draftText.slice(0, 80);
-      log?.info?.(`clawgate: typing guard blocked task send for "${project}" (draft="${snippet}")`);
-      return {
-        blocked: true,
-        reason: "draft_detected",
-        message: `Session '${project}' has unsent input in terminal. Skipped task send to avoid overwriting user input.`,
-      };
+    if (state === "unknown") {
+      log?.warn?.(`clawgate: typing guard unknown for "${project}" (${reason})`);
+      return { blocked: true, reason, message: `Session '${project}' prompt state unknown (${reason}).` };
     }
-    return { blocked: false, reason: "idle_prompt", message: "" };
+    // idle, suggestion -> OK
+    return { blocked: false, reason: state === "suggestion" ? "suggestion_idle" : "idle_prompt", message: "" };
   } catch (err) {
-    const reason = err?.message || String(err);
-    log?.warn?.(`clawgate: typing guard exception for "${project}": ${reason}`);
-    return {
-      blocked: true,
-      reason: "pane_read_exception",
-      message: `Session '${project}' prompt state is unknown (read exception). Skipped task send to avoid overwriting user input.`,
-    };
+    log?.warn?.(`clawgate: typing guard exception for "${project}": ${err?.message}`);
+    return { blocked: true, reason: "pane_read_exception", message: "prompt state unknown" };
   }
 }
 
@@ -4316,7 +4143,7 @@ export async function startAccount(ctx) {
           }
 
           // Cross-source deduplication (AXRow / PixelDiff / NotificationBanner)
-          if (isDuplicateInbound(eventText, conversation)) {
+          if (isDuplicateInbound(eventText)) {
             log?.debug?.(`clawgate: [${accountId}] suppressed duplicate: "${eventText.slice(0, 60)}"`);
             traceLog(log, "info", {
               trace_id: traceId,
@@ -4352,7 +4179,7 @@ export async function startAccount(ctx) {
           }
 
           // Record before dispatch so subsequent duplicates are caught
-          recordInbound(eventText, conversation);
+          recordInbound(eventText);
           recordStableInbound(eventText, conversation);
           recordShortLineIngress(shortLineDedupKey);
           recordCommonIngress(commonDedupKey);

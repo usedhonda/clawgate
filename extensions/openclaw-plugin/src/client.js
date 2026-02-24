@@ -188,6 +188,18 @@ export async function clawgateTmuxRead(apiUrl, project, limit = 50, traceId = ""
 }
 
 /**
+ * GET /v1/tmux/prompt-state?project=PROJECT — get prompt draft state from ClawGate.
+ * @param {string} apiUrl
+ * @param {string} project
+ * @param {string} [traceId]
+ * @returns {Promise<object>}
+ */
+export async function clawgateTmuxPromptState(apiUrl, project, traceId = "") {
+  const params = `project=${encodeURIComponent(project)}`;
+  return request(apiUrl, `/v1/tmux/prompt-state?${params}`, { traceId });
+}
+
+/**
  * Resolve the working directory of a tmux pane.
  * @param {string} tmuxTarget — tmux target pane (e.g. "clawgate:0.0")
  * @returns {string|null} — absolute path or null on failure

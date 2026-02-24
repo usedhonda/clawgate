@@ -335,6 +335,29 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
     }
 
+    func tmuxPromptState(project: String) -> HTTPResult {
+        guard let tmux = registry.adapter(for: "tmux") as? TmuxAdapter else {
+            let payload = ErrorPayload(
+                code: "adapter_not_found",
+                message: "tmux adapter not found",
+                retriable: false,
+                failedStep: "resolve_adapter",
+                details: nil
+            )
+            return jsonResponse(
+                status: .serviceUnavailable,
+                body: encode(APIResponse<PromptStateResult>(ok: false, result: nil, error: payload))
+            )
+        }
+        let detection = tmux.detectPromptState(forProject: project)
+        let result = PromptStateResult(
+            state: detection.state.rawValue,
+            reason: detection.reason,
+            snippet: String(detection.draft.prefix(120))
+        )
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+    }
+
     func send(body: Data, traceID: String?) -> HTTPResult {
         let requestTrace = normalizedTraceID(traceID)
         let start = Date()

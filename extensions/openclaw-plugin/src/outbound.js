@@ -8,9 +8,13 @@ import { getActiveProject } from "./shared-state.js";
 
 function ensurePrefix(text, project, sessionType) {
   if (!project) return text;
-  const stripped = text.replace(/^\[(CC|Codex) [^\]]*\]\n?/, "").trim();
-  const label = sessionType === "codex" ? "Codex" : "CC";
-  return `[${label} ${project}]\n${stripped}`;
+  // Strip both legacy format ([CC/Codex ...]) and canonical pane label ([project.cc/cdx])
+  const stripped = text
+    .replace(/^\[(CC|Codex) [^\]]*\]\n?/, "")
+    .replace(/^\[[^\]\n]+\.(?:cc|cdx)\]\n?/i, "")
+    .trim();
+  const suffix = sessionType === "codex" ? "cdx" : "cc";
+  return `[${project}.${suffix}]\n${stripped}`;
 }
 
 export const outbound = {

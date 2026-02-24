@@ -39,6 +39,11 @@ enum TmuxShell {
         try run(arguments: ["capture-pane", "-t", target, "-p", "-S", "-\(lines)"])
     }
 
+    /// Capture with -e flag (preserves ANSI escape sequences for SGR detection).
+    static func capturePaneRaw(target: String, lines: Int = 50) throws -> String {
+        try run(arguments: ["capture-pane", "-e", "-t", target, "-p", "-S", "-\(lines)"])
+    }
+
     /// List all tmux sessions.
     static func listSessions() throws -> [String] {
         let output = try run(arguments: ["list-sessions", "-F", "#{session_name}"])
