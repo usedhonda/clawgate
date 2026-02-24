@@ -12,6 +12,7 @@ final class LINEInboundWatcher {
     private let enablePixelSignal: Bool
     private let enableProcessSignal: Bool
     private let enableNotificationStoreSignal: Bool
+    private let ocrConfig: VisionOCR.OCRConfig
     private let fusionEngine: LineDetectionFusionEngine
 
     private var timer: Timer?
@@ -75,7 +76,8 @@ final class LINEInboundWatcher {
         fusionThreshold: Int,
         enablePixelSignal: Bool,
         enableProcessSignal: Bool,
-        enableNotificationStoreSignal: Bool
+        enableNotificationStoreSignal: Bool,
+        ocrConfig: VisionOCR.OCRConfig = .default
     ) {
         self.eventBus = eventBus
         self.logger = logger
@@ -85,6 +87,7 @@ final class LINEInboundWatcher {
         self.enablePixelSignal = enablePixelSignal
         self.enableProcessSignal = enableProcessSignal
         self.enableNotificationStoreSignal = enableNotificationStoreSignal
+        self.ocrConfig = ocrConfig
         self.fusionEngine = LineDetectionFusionEngine(threshold: fusionThreshold)
         self.ingressDedupTuneV2Enabled = Self.envBool("CLAWGATE_INGRESS_DEDUP_TUNE_V2", defaultValue: true)
         self.inboundDedupWindowSecondsV2 = TimeInterval(
@@ -688,7 +691,7 @@ final class LINEInboundWatcher {
 
     private func collectStructuralFallbackOCR(lastFrame: CGRect, lineWindowID: CGWindowID) -> String {
         // Fallback 1: OCR from latest row with wider padding.
-        let rowText = (VisionOCR.extractTextLineInbound(from: inboundCropRect(for: lastFrame, horizontalRatio: 0.82), windowID: lineWindowID) ?? "")
+        let rowText = (VisionOCR.extractTextLineInbound(from: inboundCropRect(for: lastFrame, horizontalRatio: 0.82), windowID: lineWindowID, config: ocrConfig) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return rowText
     }
@@ -701,7 +704,7 @@ final class LINEInboundWatcher {
         var rows: [String] = []
         for frame in ordered {
             let crop = inboundCropRect(for: frame, horizontalRatio: 0.90)
-            let text = (VisionOCR.extractTextLineInbound(from: crop, windowID: lineWindowID) ?? "")
+            let text = (VisionOCR.extractTextLineInbound(from: crop, windowID: lineWindowID, config: ocrConfig) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty {
                 let normalized = LineTextSanitizer.sanitize(text)
@@ -727,7 +730,7 @@ final class LINEInboundWatcher {
             return ""
         }
         let anchored = computeInboundAnchorCrop(in: image, baseRect: bottomHalf)
-        let text = VisionOCR.extractTextLineInbound(from: anchored, windowID: lineWindowID) ?? ""
+        let text = VisionOCR.extractTextLineInbound(from: anchored, windowID: lineWindowID, config: ocrConfig) ?? ""
         return LineTextSanitizer.sanitize(text)
     }
 
@@ -1147,7 +1150,7 @@ final class LINEInboundWatcher {
                 cutApplied: false,
                 frameSkippedNoCut: false
             )
-            let raw = VisionOCR.extractTextLineInbound(from: rect, windowID: windowID, debug: &debug) ?? ""
+            let raw = VisionOCR.extractTextLineInbound(from: rect, windowID: windowID, debug: &debug, config: ocrConfig) ?? ""
             let sanitized = LineTextSanitizer.sanitize(raw)
             lengths.append(sanitized.count)
             if sanitized.count > best.count {

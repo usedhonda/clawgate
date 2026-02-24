@@ -28,6 +28,13 @@ struct AppConfig: Codable {
     var tmuxStatusBarURL: String
     var tmuxSessionModes: [String: String]  // project -> "observe" | "auto" | "autonomous"; absent = ignore
 
+    // OCR
+    var ocrConfidenceAccept: Double
+    var ocrConfidenceFallback: Double
+    var ocrRevision: Int
+    var ocrUsesLanguageCorrection: Bool
+    var ocrCandidateCount: Int
+
     // Remote / Federation
     var remoteAccessEnabled: Bool
     var remoteAccessToken: String
@@ -57,6 +64,11 @@ struct AppConfig: Codable {
         tmuxEnabled: false,
         tmuxStatusBarURL: "ws://localhost:8080/ws/sessions",
         tmuxSessionModes: [:],
+        ocrConfidenceAccept: 0.40,
+        ocrConfidenceFallback: 0.25,
+        ocrRevision: 0,
+        ocrUsesLanguageCorrection: true,
+        ocrCandidateCount: 3,
         remoteAccessEnabled: false,
         remoteAccessToken: "",
         federationEnabled: false,
@@ -83,6 +95,12 @@ final class ConfigStore {
         static let tmuxEnabled = "clawgate.tmuxEnabled"
         static let tmuxStatusBarURL = "clawgate.tmuxStatusBarUrl"
         static let tmuxSessionModes = "clawgate.tmuxSessionModes"
+        // OCR
+        static let ocrConfidenceAccept = "clawgate.ocrConfidenceAccept"
+        static let ocrConfidenceFallback = "clawgate.ocrConfidenceFallback"
+        static let ocrRevision = "clawgate.ocrRevision"
+        static let ocrUsesLanguageCorrection = "clawgate.ocrUsesLanguageCorrection"
+        static let ocrCandidateCount = "clawgate.ocrCandidateCount"
         // Remote / Federation
         static let remoteAccessEnabled = "clawgate.remoteAccessEnabled"
         static let remoteAccessToken = "clawgate.remoteAccessToken"
@@ -157,6 +175,23 @@ final class ConfigStore {
             cfg.tmuxSessionModes = dict
         }
 
+        // OCR
+        if defaults.object(forKey: Keys.ocrConfidenceAccept) != nil {
+            cfg.ocrConfidenceAccept = max(0.10, min(0.90, defaults.double(forKey: Keys.ocrConfidenceAccept)))
+        }
+        if defaults.object(forKey: Keys.ocrConfidenceFallback) != nil {
+            cfg.ocrConfidenceFallback = max(0.05, min(0.50, defaults.double(forKey: Keys.ocrConfidenceFallback)))
+        }
+        if defaults.object(forKey: Keys.ocrRevision) != nil {
+            cfg.ocrRevision = max(0, min(3, defaults.integer(forKey: Keys.ocrRevision)))
+        }
+        if defaults.object(forKey: Keys.ocrUsesLanguageCorrection) != nil {
+            cfg.ocrUsesLanguageCorrection = defaults.bool(forKey: Keys.ocrUsesLanguageCorrection)
+        }
+        if defaults.object(forKey: Keys.ocrCandidateCount) != nil {
+            cfg.ocrCandidateCount = max(1, min(10, defaults.integer(forKey: Keys.ocrCandidateCount)))
+        }
+
         // Remote / Federation
         if defaults.object(forKey: Keys.remoteAccessEnabled) != nil {
             cfg.remoteAccessEnabled = defaults.bool(forKey: Keys.remoteAccessEnabled)
@@ -204,6 +239,12 @@ final class ConfigStore {
            let str = String(data: json, encoding: .utf8) {
             defaults.set(str, forKey: Keys.tmuxSessionModes)
         }
+        // OCR
+        defaults.set(cfg.ocrConfidenceAccept, forKey: Keys.ocrConfidenceAccept)
+        defaults.set(cfg.ocrConfidenceFallback, forKey: Keys.ocrConfidenceFallback)
+        defaults.set(cfg.ocrRevision, forKey: Keys.ocrRevision)
+        defaults.set(cfg.ocrUsesLanguageCorrection, forKey: Keys.ocrUsesLanguageCorrection)
+        defaults.set(cfg.ocrCandidateCount, forKey: Keys.ocrCandidateCount)
         // Remote / Federation
         defaults.set(cfg.remoteAccessEnabled, forKey: Keys.remoteAccessEnabled)
         defaults.set(cfg.remoteAccessToken, forKey: Keys.remoteAccessToken)

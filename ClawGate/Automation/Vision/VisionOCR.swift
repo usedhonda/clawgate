@@ -5,6 +5,15 @@ import Vision
 /// Requires Screen Recording permission for CGWindowListCreateImage.
 /// Gracefully returns nil when permission is not granted.
 enum VisionOCR {
+    struct OCRConfig {
+        var confidenceAccept: Float = 0.40
+        var confidenceFallback: Float = 0.25
+        var revision: Int = 0             // 0 = OS default
+        var usesLanguageCorrection: Bool = true
+        var candidateCount: Int = 3
+        static let `default` = OCRConfig()
+    }
+
     struct InboundPreprocessDebug {
         var laneX: Int
         var yCut: Int?
@@ -18,11 +27,11 @@ enum VisionOCR {
     /// Returns nil if Screen Recording permission is missing or OCR fails.
     /// When windowID is provided, captures only that window (immune to occlusion).
     /// When windowID is kCGNullWindowID (default), captures on-screen composite.
-    static func extractText(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> String? {
+    static func extractText(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID, config: OCRConfig = .default) -> String? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
         }
-        return performOCR(on: image)
+        return performOCR(on: image, config: config)
     }
 
     /// OCR for LINE inbound text:
@@ -31,12 +40,13 @@ enum VisionOCR {
     static func extractTextLineInbound(
         from screenRect: CGRect,
         windowID: CGWindowID = kCGNullWindowID,
-        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil
+        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
+        config: OCRConfig = .default
     ) -> String? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
         }
-        return performOCRInbound(on: image, debug: debug)
+        return performOCRInbound(on: image, debug: debug, config: config)
     }
 
     /// Capture raw + preprocessed images for inbound OCR debugging.
@@ -52,11 +62,11 @@ enum VisionOCR {
 
     /// Extract text from multiple screen rectangles merged into one capture (with padding).
     /// More efficient than calling extractText(from:) per-rect: N rects × 300ms → 1 capture × 300ms.
-    static func extractText(from rects: [CGRect], padding: CGFloat = 4, windowID: CGWindowID = kCGNullWindowID) -> String? {
+    static func extractText(from rects: [CGRect], padding: CGFloat = 4, windowID: CGWindowID = kCGNullWindowID, config: OCRConfig = .default) -> String? {
         guard !rects.isEmpty else { return nil }
         let merged = rects.reduce(rects[0]) { $0.union($1) }
         let padded = merged.insetBy(dx: -padding, dy: -padding)
-        return extractText(from: padded, windowID: windowID)
+        return extractText(from: padded, windowID: windowID, config: config)
     }
 
     // MARK: - Private
@@ -82,7 +92,8 @@ enum VisionOCR {
 
     private static func performOCRInbound(
         on image: CGImage,
-        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil
+        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
+        config: OCRConfig = .default
     ) -> String? {
         let preprocessing = preprocessInboundImage(image)
         debug?.pointee = preprocessing.debug
@@ -91,7 +102,15 @@ enum VisionOCR {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["ja-JP", "en-US"]
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = config.usesLanguageCorrection
+
+        if config.revision > 0 {
+            if #available(macOS 14, *), config.revision >= 3 {
+                request.revision = VNRecognizeTextRequestRevision3
+            } else if #available(macOS 13, *), config.revision >= 2 {
+                request.revision = VNRecognizeTextRequestRevision2
+            }
+        }
 
         let handler = VNImageRequestHandler(cgImage: ocrImage, options: [:])
         do {
@@ -103,11 +122,11 @@ enum VisionOCR {
         guard let observations = request.results else { return nil }
 
         let inboundTexts = observations.compactMap { obs -> String? in
-            let candidates = obs.topCandidates(3)
-            if let accepted = candidates.first(where: { $0.confidence >= 0.40 }) {
+            let candidates = obs.topCandidates(config.candidateCount)
+            if let accepted = candidates.first(where: { $0.confidence >= config.confidenceAccept }) {
                 return accepted.string
             }
-            if let best = candidates.first, best.confidence >= 0.25 {
+            if let best = candidates.first, best.confidence >= config.confidenceFallback {
                 return best.string
             }
             return nil
@@ -279,11 +298,19 @@ enum VisionOCR {
         r >= whiteThreshold && g >= whiteThreshold && b >= whiteThreshold
     }
 
-    private static func performOCR(on image: CGImage) -> String? {
+    private static func performOCR(on image: CGImage, config: OCRConfig = .default) -> String? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.recognitionLanguages = ["ja-JP", "en-US"]
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = config.usesLanguageCorrection
+
+        if config.revision > 0 {
+            if #available(macOS 14, *), config.revision >= 3 {
+                request.revision = VNRecognizeTextRequestRevision3
+            } else if #available(macOS 13, *), config.revision >= 2 {
+                request.revision = VNRecognizeTextRequestRevision2
+            }
+        }
 
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         do {
@@ -297,12 +324,11 @@ enum VisionOCR {
         }
 
         let texts = observations.compactMap { observation -> String? in
-            let candidates = observation.topCandidates(3)
-            if let accepted = candidates.first(where: { $0.confidence >= 0.40 }) {
+            let candidates = observation.topCandidates(config.candidateCount)
+            if let accepted = candidates.first(where: { $0.confidence >= config.confidenceAccept }) {
                 return accepted.string
             }
-            // Keep best candidate as fallback only when confidence is reasonable.
-            if let best = candidates.first, best.confidence >= 0.25 {
+            if let best = candidates.first, best.confidence >= config.confidenceFallback {
                 return best.string
             }
             return nil

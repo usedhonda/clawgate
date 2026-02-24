@@ -46,17 +46,27 @@ final class AppRuntime {
         configStore: configStore,
         logger: logger
     )
-    private lazy var inboundWatcher = LINEInboundWatcher(
-        eventBus: eventBus,
-        logger: logger,
-        pollIntervalSeconds: configStore.load().linePollIntervalSeconds,
-        recentSendTracker: recentSendTracker,
-        detectionMode: configStore.load().lineDetectionMode,
-        fusionThreshold: configStore.load().lineFusionThreshold,
-        enablePixelSignal: configStore.load().lineEnablePixelSignal,
-        enableProcessSignal: configStore.load().lineEnableProcessSignal,
-        enableNotificationStoreSignal: configStore.load().lineEnableNotificationStoreSignal
-    )
+    private lazy var inboundWatcher: LINEInboundWatcher = {
+        let cfg = configStore.load()
+        return LINEInboundWatcher(
+            eventBus: eventBus,
+            logger: logger,
+            pollIntervalSeconds: cfg.linePollIntervalSeconds,
+            recentSendTracker: recentSendTracker,
+            detectionMode: cfg.lineDetectionMode,
+            fusionThreshold: cfg.lineFusionThreshold,
+            enablePixelSignal: cfg.lineEnablePixelSignal,
+            enableProcessSignal: cfg.lineEnableProcessSignal,
+            enableNotificationStoreSignal: cfg.lineEnableNotificationStoreSignal,
+            ocrConfig: VisionOCR.OCRConfig(
+                confidenceAccept: Float(cfg.ocrConfidenceAccept),
+                confidenceFallback: Float(cfg.ocrConfidenceFallback),
+                revision: cfg.ocrRevision,
+                usesLanguageCorrection: cfg.ocrUsesLanguageCorrection,
+                candidateCount: cfg.ocrCandidateCount
+            )
+        )
+    }()
     private lazy var notificationBannerWatcher = NotificationBannerWatcher(
         eventBus: eventBus,
         logger: logger,
