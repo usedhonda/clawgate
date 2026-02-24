@@ -14,6 +14,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname, isAbsolute } from "node:path";
@@ -2249,6 +2250,45 @@ function buildRosterPrefix() {
  * @param {string} [defaultConversation] — override for conversation name (LINE Qt always reports "LINE")
  * @returns {object} MsgContext-compatible object
  */
+// ── tproj-msg reverse channel ─────────────────────────────────
+
+const TPROJ_MSG_PATH = join(homedir(), "bin", "tproj-msg");
+
+/**
+ * Parse [tproj-msg:key=val,...] header from the beginning of message text.
+ * Returns { header: { sender, project, workspace, reply }, body: strippedText }
+ * or { header: null, body: originalText } if no header found.
+ */
+function parseTprojMsgHeader(text) {
+  const m = `${text || ""}`.match(/^\[tproj-msg:([^\]]+)\]\s*/);
+  if (!m) return { header: null, body: text };
+  const pairs = m[1].split(",");
+  const header = {};
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf("=");
+    if (eqIdx < 0) continue;
+    header[pair.slice(0, eqIdx).trim()] = pair.slice(eqIdx + 1).trim();
+  }
+  return {
+    header: {
+      sender: header.sender || "",
+      project: header.project || "",
+      workspace: header.workspace || "",
+      reply: header.reply || "",
+    },
+    body: text.slice(m[0].length),
+  };
+}
+
+function execFilePromise(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(cmd, args, { timeout: 10_000, ...opts }, (err, stdout, stderr) => {
+      if (err) return reject(err);
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
 function buildMsgContext(event, accountId, defaultConversation) {
   const payload = event.payload ?? {};
   // LINE Qt window title is always "LINE", so use defaultConversation from config
@@ -2309,6 +2349,23 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   event.payload.trace_id = traceId;
   const ctx = buildMsgContext(event, accountId, defaultConversation);
   const conversation = ctx.ConversationLabel;
+
+  // Parse tproj-msg reverse channel header (if present)
+  const { header: tprojHeader, body: strippedBody } = parseTprojMsgHeader(ctx.Body);
+  if (tprojHeader) {
+    const originalBody = ctx.Body;
+    ctx.Body = strippedBody;
+    ctx.RawBody = strippedBody;
+    ctx.CommandBody = strippedBody;
+    if (ctx.BodyForAgent) {
+      const idx = ctx.BodyForAgent.lastIndexOf(originalBody);
+      if (idx >= 0) {
+        ctx.BodyForAgent = ctx.BodyForAgent.slice(0, idx) + strippedBody;
+      }
+    }
+    log?.info?.(`clawgate: [${accountId}] tproj-msg header detected: sender=${tprojHeader.sender} reply=${tprojHeader.reply} workspace=${tprojHeader.workspace}`);
+  }
+
   traceLog(log, "info", {
     trace_id: traceId,
     stage: "gateway_inbound_received",
@@ -2357,6 +2414,24 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   const deliver = async (payload) => {
     const text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
+
+    // tproj-msg reverse channel: reply via tmux session instead of LINE
+    if (tprojHeader?.reply === "session" && tprojHeader.workspace && tprojHeader.sender) {
+      try {
+        const replyText = `[from:gate] ${text}`;
+        await execFilePromise(TPROJ_MSG_PATH, [
+          "--session", tprojHeader.workspace,
+          tprojHeader.sender,
+          replyText,
+        ]);
+        log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent to ${tprojHeader.sender} via ${tprojHeader.workspace}`);
+      } catch (err) {
+        log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply failed: ${err?.message || err}`);
+        // Fallback to LINE on failure
+        try { await clawgateSend(apiUrl, conversation, text, traceId); recordPluginSend(text); } catch {}
+      }
+      return;
+    }
 
     // Try to extract <cc_answer> first (from AI reply to question)
     const answerResult = await tryExtractAndSendAnswer({ replyText: text, apiUrl, traceId, log });
