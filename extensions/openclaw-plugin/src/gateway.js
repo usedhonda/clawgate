@@ -946,6 +946,19 @@ function recordPluginSend(text) {
   }
 }
 
+// ── Outbound dedup guard ────────────────────────────────────────
+// Prevents sending the exact same text within a short window.
+// Covers LLM-timeout retry storms and Codex loop duplicates.
+const OUTBOUND_DEDUP_WINDOW_MS = 120_000; // 2 minutes
+const OUTBOUND_DEDUP_MIN_LEN = 10;
+
+function isRecentOutboundDuplicate(text) {
+  const normalized = normalizeEchoText(text);
+  if (normalized.length < OUTBOUND_DEDUP_MIN_LEN) return false;
+  const cutoff = Date.now() - OUTBOUND_DEDUP_WINDOW_MS;
+  return recentSends.some(s => s.time >= cutoff && normalizeEchoText(s.text) === normalized);
+}
+
 /**
  * Check if event text looks like an echo of a recently sent message.
  * Uses substring matching since OCR text may be noisy/truncated.
@@ -1101,7 +1114,38 @@ function activeStaleRepeatWindowMs() {
   return ENABLE_INGRESS_DEDUP_TUNE_V2 ? STALE_REPEAT_WINDOW_MS_V2 : STALE_REPEAT_WINDOW_MS;
 }
 
-function isDuplicateInbound(eventText) {
+// --- Fuzzy inbound dedup (OCR re-read suppression) ---
+
+function lcsLength(a, b) {
+  const m = a.length, n = b.length;
+  let prev = new Uint16Array(n + 1);
+  let curr = new Uint16Array(n + 1);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1] + 1
+        : Math.max(prev[j], curr[j - 1]);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+function lcsRatio(a, b) {
+  if (!a || !b) return 0;
+  return (2 * lcsLength(a, b)) / (a.length + b.length);
+}
+
+function isFuzzyInboundMatch(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) < 6) return false;
+  return lcsRatio(a, b) >= 0.60;
+}
+
+// --- End fuzzy inbound dedup helpers ---
+
+function isDuplicateInbound(eventText, conversation) {
   const windowMs = activeDedupWindowMs();
   if (windowMs <= 0) return false;
   const now = Date.now();
@@ -1111,11 +1155,30 @@ function isDuplicateInbound(eventText) {
   }
   const fp = eventFingerprint(eventText);
   if (fp.length < 10) return false; // Too short to compare reliably
-  return recentInbounds.some((r) => r.fingerprint === fp);
+  // Exact fingerprint match (existing)
+  if (recentInbounds.some((r) => r.fingerprint === fp)) return true;
+  // Fuzzy match: catch OCR re-reads of the same message
+  const normalized = normalizeEchoText(eventText);
+  if (normalized.length < 6) return false;
+  const fuzzyMatch = recentInbounds.find((r) => {
+    if (r.conversation !== conversation) return false;
+    return isFuzzyInboundMatch(normalized, r.normalizedText);
+  });
+  if (fuzzyMatch) {
+    const ratio = lcsRatio(normalized, fuzzyMatch.normalizedText);
+    console.info(`[inbound_fuzzy_dedup] suppressed near-duplicate (lcs=${ratio.toFixed(2)}): "${eventText.slice(0, 40)}" ~ "${(fuzzyMatch.normalizedText || "").slice(0, 40)}"`);
+    return true;
+  }
+  return false;
 }
 
-function recordInbound(eventText) {
-  recentInbounds.push({ fingerprint: eventFingerprint(eventText), time: Date.now() });
+function recordInbound(eventText, conversation) {
+  recentInbounds.push({
+    fingerprint: eventFingerprint(eventText),
+    time: Date.now(),
+    normalizedText: normalizeEchoText(eventText),
+    conversation,
+  });
 }
 
 function stableKey(eventText, conversation) {
@@ -2664,37 +2727,44 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
         },
       });
 
-      // Send all collected plain reply blocks as a single LINE message.
-      if (collectedLineBlocks.length > 0) {
-        const combinedText = collectedLineBlocks.join("\n");
-        log?.info?.(`clawgate: [${accountId}] sending reply (${collectedLineBlocks.length} block(s)) to "${conversation}": "${combinedText.slice(0, 80)}"`);
+      // Send each collected reply block as a separate LINE message.
+      for (let bi = 0; bi < collectedLineBlocks.length; bi++) {
+        const blockText = collectedLineBlocks[bi];
+        if (isRecentOutboundDuplicate(blockText)) {
+          log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (reply block ${bi + 1}/${collectedLineBlocks.length}): "${blockText.slice(0, 60)}"`);
+          continue;
+        }
+        log?.info?.(`clawgate: [${accountId}] sending reply block ${bi + 1}/${collectedLineBlocks.length} to "${conversation}": "${blockText.slice(0, 80)}"`);
         traceLog(log, "info", {
           trace_id: traceId,
           stage: "gateway_forward_start",
           action: "line_send",
           status: "start",
           conversation,
+          block: bi + 1,
           blocks: collectedLineBlocks.length,
         });
         try {
-          await clawgateSend(apiUrl, conversation, combinedText, traceId);
-          recordPluginSend(combinedText);
+          await clawgateSend(apiUrl, conversation, blockText, traceId);
+          recordPluginSend(blockText);
           traceLog(log, "info", {
             trace_id: traceId,
             stage: "gateway_forward_ok",
             action: "line_send",
             status: "ok",
             conversation,
+            block: bi + 1,
             blocks: collectedLineBlocks.length,
           });
         } catch (err) {
-          log?.error?.(`clawgate: [${accountId}] send reply failed: ${err}`);
+          log?.error?.(`clawgate: [${accountId}] send reply block ${bi + 1} failed: ${err}`);
           traceLog(log, "error", {
             trace_id: traceId,
             stage: "gateway_forward_failed",
             action: "line_send",
             status: "failed",
             conversation,
+            block: bi + 1,
             error: String(err),
           });
         }
@@ -2883,6 +2953,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   // Helper: send to LINE only when LINE is available
   const sendLine = async (conv, text) => {
     if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
+    if (isRecentOutboundDuplicate(text)) { log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (question): "${text.slice(0, 60)}"`); return; }
     const result = await clawgateSend(apiUrl, conv, text, traceId);
     if (!result?.ok) {
       log?.warn?.(`clawgate: sendLine failed (question): ${JSON.stringify(result?.error || result)}`);
@@ -3231,6 +3302,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   // Helper: send to LINE only when LINE is available
   const sendLine = async (conv, text) => {
     if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
+    if (isRecentOutboundDuplicate(text)) { log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (completion): "${text.slice(0, 60)}"`); return; }
     const result = await clawgateSend(apiUrl, conv, text, traceId);
     if (!result?.ok) {
       log?.warn?.(`clawgate: sendLine failed (completion): ${JSON.stringify(result?.error || result)}`);
@@ -3262,6 +3334,38 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     }
 
     if (interactionPending) {
+      // permission_prompt only: queue <cc_task> for delivery when CC returns to idle.
+      // askuserquestion and other reasons: respect SPEC (advisor-only, no task routing).
+      // See docs/SPEC-messaging.md:627,643 — interactive prompts block cc_task execution.
+      if (interactionPending.reason === "permission_prompt") {
+        const ccTaskMatch = replyText.match(/<cc_task(?:\s+project="([^"]+)")?>([\s\S]*?)<\/cc_task>/i);
+        if (ccTaskMatch) {
+          const taskText = (ccTaskMatch[2] || "").trim();
+          const targetProject = ccTaskMatch[1] || project;
+          // Use the same strict LGTM regex as tryExtractAndSendTask (line 2041)
+          const LOOP_TERMINATE = /^(lgtm|done|approved|no issues|looks good(?: to me)?|ship it)[!?.]*$/i;
+          if (taskText && LOOP_TERMINATE.test(taskText)) {
+            // LGTM during permission_prompt — terminate review loop
+            setReviewDone(project, "lgtm_autonomous");
+            questionRoundMap.delete(project);
+            setAutonomousLoopActive(project, false);
+            log?.info?.(`clawgate: [${accountId}] LGTM during permission_prompt for "${project}" — review-done SET`);
+          } else if (taskText) {
+            // Queue task + advance round counter (preserve 3-round limit)
+            const nextRound = (questionRoundMap.get(project) || 0) + 1;
+            questionRoundMap.set(project, nextRound);
+            const modeLabel = mode.charAt(0).toUpperCase() + mode.slice(1);
+            const prefixedTask = `[from:OpenClaw Agent - ${modeLabel}] ${taskText}`;
+            enqueuePendingTask({ project, targetProject, taskText, prefixedTask, mode, traceId, log });
+            log?.info?.(
+              `clawgate: [${accountId}] permission_prompt: queued cc_task for "${targetProject}" (round=${nextRound}/3, queue=${pendingTaskQueue.size})`
+            );
+          }
+        }
+      }
+      // Strip <cc_task> tags so they don't leak into LINE advisory
+      replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
+
       const hadChoiceTags = hasChoiceTags(replyText);
       replyText = stripChoiceTags(replyText);
       if (hadChoiceTags) {
@@ -4212,7 +4316,7 @@ export async function startAccount(ctx) {
           }
 
           // Cross-source deduplication (AXRow / PixelDiff / NotificationBanner)
-          if (isDuplicateInbound(eventText)) {
+          if (isDuplicateInbound(eventText, conversation)) {
             log?.debug?.(`clawgate: [${accountId}] suppressed duplicate: "${eventText.slice(0, 60)}"`);
             traceLog(log, "info", {
               trace_id: traceId,
@@ -4248,7 +4352,7 @@ export async function startAccount(ctx) {
           }
 
           // Record before dispatch so subsequent duplicates are caught
-          recordInbound(eventText);
+          recordInbound(eventText, conversation);
           recordStableInbound(eventText, conversation);
           recordShortLineIngress(shortLineDedupKey);
           recordCommonIngress(commonDedupKey);
