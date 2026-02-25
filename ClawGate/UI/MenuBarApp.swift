@@ -91,7 +91,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         mainPanelHost = host
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 275, height: 600),
             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
             defer: true
@@ -106,7 +106,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.isOpaque = false
         panel.contentViewController = host
         panel.isReleasedWhenClosed = false
-        panel.minSize = NSSize(width: 380, height: 300)
+        panel.minSize = NSSize(width: 200, height: 300)
         panel.maxSize = NSSize(width: 700, height: 1400)
         mainPanel = panel
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)

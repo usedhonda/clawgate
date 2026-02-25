@@ -55,7 +55,7 @@ struct MainPanelView: View {
             PanelActionButton(title: "Quit", tone: .danger, dense: true, action: onQuit)
         }
         .padding(PanelTheme.padding)
-        .frame(minWidth: 380, maxWidth: 700, minHeight: 400, maxHeight: 1400)
+        .frame(minWidth: 200, maxWidth: 700, minHeight: 400, maxHeight: 1400)
         .background(PanelTheme.background)
         .preferredColorScheme(.dark)
     }
