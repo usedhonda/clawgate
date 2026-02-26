@@ -2420,6 +2420,8 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       try {
         const replyText = `[from:gate] ${text}`;
         await execFilePromise(TPROJ_MSG_PATH, [
+          "--allow-relay", "gate-reverse-channel",
+          "--force",
           "--session", tprojHeader.workspace,
           tprojHeader.sender,
           replyText,
