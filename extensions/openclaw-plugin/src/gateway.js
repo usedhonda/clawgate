@@ -2275,6 +2275,7 @@ function parseTprojMsgHeader(text) {
       project: header.project || "",
       workspace: header.workspace || "",
       reply: header.reply || "",
+      return_url: header.return_url || "",
     },
     body: text.slice(m[0].length),
   };
@@ -2417,20 +2418,45 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
     // tproj-msg reverse channel: reply via tmux session instead of LINE
     if (tprojHeader?.reply === "session" && tprojHeader.workspace && tprojHeader.sender) {
-      try {
-        const replyText = `[from:gate] ${text}`;
-        await execFilePromise(TPROJ_MSG_PATH, [
-          "--allow-relay", "gate-reverse-channel",
-          "--force",
-          "--session", tprojHeader.workspace,
-          tprojHeader.sender,
-          replyText,
-        ]);
-        log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent to ${tprojHeader.sender} via ${tprojHeader.workspace}`);
-      } catch (err) {
-        log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply failed: ${err?.message || err}`);
-        // Fallback to LINE on failure
-        try { await clawgateSend(apiUrl, conversation, text, traceId); recordPluginSend(text); } catch {}
+      const replyText = `[from:gate] ${text}`;
+      const returnUrl = tprojHeader.return_url;
+
+      if (returnUrl) {
+        // Federation-aware: HTTP forward to origin host's /v1/tproj-msg-deliver
+        try {
+          const resp = await fetch(`${returnUrl}/v1/tproj-msg-deliver`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session: tprojHeader.workspace,
+              target: tprojHeader.sender,
+              text: replyText,
+            }),
+            signal: AbortSignal.timeout(15000),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text().catch(() => "")}`);
+          log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent via return_url=${returnUrl} to ${tprojHeader.sender}`);
+        } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply via return_url failed: ${err?.message || err}`);
+          // Fallback to LINE on failure
+          try { await clawgateSend(apiUrl, conversation, text, traceId); recordPluginSend(text); } catch {}
+        }
+      } else {
+        // Local execution fallback (single-host setup)
+        try {
+          await execFilePromise(TPROJ_MSG_PATH, [
+            "--allow-relay", "gate-reverse-channel",
+            "--force",
+            "--session", tprojHeader.workspace,
+            tprojHeader.sender,
+            replyText,
+          ]);
+          log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent to ${tprojHeader.sender} via ${tprojHeader.workspace}`);
+        } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply failed: ${err?.message || err}`);
+          // Fallback to LINE on failure
+          try { await clawgateSend(apiUrl, conversation, text, traceId); recordPluginSend(text); } catch {}
+        }
       }
       return;
     }

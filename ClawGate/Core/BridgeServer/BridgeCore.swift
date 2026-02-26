@@ -502,6 +502,77 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(snapshot))
     }
 
+    func tprojMsgDeliver(body: Data) -> HTTPResult {
+        struct TprojMsgDeliverRequest: Codable {
+            let session: String
+            let target: String
+            let text: String
+        }
+        do {
+            let req = try jsonDecoder.decode(TprojMsgDeliverRequest.self, from: body)
+            let tprojMsgPath = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("bin/tproj-msg").path
+
+            guard FileManager.default.isExecutableFile(atPath: tprojMsgPath) else {
+                logger.log(.error, "tproj-msg-deliver: binary not found at \(tprojMsgPath)")
+                let payload = ErrorPayload(
+                    code: "tproj_msg_not_found",
+                    message: "tproj-msg not found at \(tprojMsgPath)",
+                    retriable: false,
+                    failedStep: "resolve_binary",
+                    details: nil
+                )
+                return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<[String: String]>(ok: false, result: nil, error: payload)))
+            }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            let esc = { (s: String) -> String in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            process.arguments = [
+                "-l", "-c",
+                "\(tprojMsgPath) --allow-relay gate-reverse-channel --force --session \(esc(req.session)) \(esc(req.target)) \(esc(req.text))",
+            ]
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+
+            try process.run()
+            process.waitUntilExit()
+
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+
+            if process.terminationStatus == 0 {
+                logger.log(.info, "tproj-msg-deliver: sent to \(req.target) via session=\(req.session)")
+                let result: [String: String] = [
+                    "status": "sent",
+                    "target": req.target,
+                    "session": req.session,
+                ]
+                return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+            } else {
+                logger.log(.error, "tproj-msg-deliver: failed (exit=\(process.terminationStatus)) output=\(output.prefix(500))")
+                let payload = ErrorPayload(
+                    code: "tproj_msg_failed",
+                    message: "tproj-msg exited with status \(process.terminationStatus)",
+                    retriable: true,
+                    failedStep: "execute",
+                    details: String(output.prefix(500))
+                )
+                return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<[String: String]>(ok: false, result: nil, error: payload)))
+            }
+        } catch {
+            let payload = ErrorPayload(
+                code: "invalid_json",
+                message: "Could not parse tproj-msg-deliver request",
+                retriable: false,
+                failedStep: "decode_request",
+                details: String(describing: error)
+            )
+            return jsonResponse(status: .badRequest, body: encode(APIResponse<[String: String]>(ok: false, result: nil, error: payload)))
+        }
+    }
+
     func debugInject(body: Data) -> HTTPResult {
         struct DebugInjectRequest: Codable {
             let type: String?
