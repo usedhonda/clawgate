@@ -1684,6 +1684,32 @@ function hasChoiceTags(text) {
     || /<cc_answer\s+project="[^"]*">[\s\S]*?<\/cc_answer>/i.test(text);
 }
 
+function isTemplateDraft(text) {
+  const lines = `${text || ""}`.trim().split("\n");
+  // Skip footer lines from the end (shortcut hints, context status, autonomous label, separators)
+  let end = lines.length - 1;
+  while (end >= 0) {
+    const t = lines[end].trim().toLowerCase();
+    if (
+      !t
+      || /\?\s*for shortcuts/i.test(t)
+      || /\d+%\s*context (left|window)/i.test(t)
+      || t.startsWith("autonomous: ")
+      || /^[-\u2500\u2501\u2550]+$/.test(t)
+    ) {
+      end--;
+      continue;
+    }
+    break;
+  }
+  if (end < 0) return false;
+  const last = lines[end].trim();
+  const stripped = last.replace(/^[\u203A\u276F>]\s*/, "").trim().toLowerCase();
+  if (stripped === "implement {feature}") return true;
+  if (stripped === "run /review on my current changes") return true;
+  return false;
+}
+
 function parseInteractivePromptFromText(text) {
   const rawLines = `${text || ""}`.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const lines = rawLines.map((l) => l.trim());
@@ -1693,6 +1719,9 @@ function parseInteractivePromptFromText(text) {
   /** @type {{ text: string, selected: boolean }[]} */
   const options = [];
   let selectedIndex = 0;
+
+  // Numbered lists are only treated as options when a question line is present
+  const hasQuestionLine = nonEmpty.some((l) => /[?？]\s*$/.test(l));
 
   for (const line of nonEmpty) {
     if (/^[❯●○]\s+/.test(line)) {
@@ -1704,7 +1733,7 @@ function parseInteractivePromptFromText(text) {
       }
       continue;
     }
-    if (/^\d+\.\s+/.test(line)) {
+    if (hasQuestionLine && /^\d+\.\s+/.test(line)) {
       const cleaned = line.replace(/^\d+\.\s+/, "").trim();
       if (cleaned) options.push({ text: cleaned, selected: false });
     }
@@ -1738,6 +1767,9 @@ function parseInteractivePromptFromText(text) {
 }
 
 function detectInteractionPendingFromCompletion({ payload, text, project }) {
+  // Template draft (e.g. "implement {feature}") means Codex is idle, not interaction-pending
+  if (isTemplateDraft(text)) return null;
+
   const waitingReason = `${payload?.waiting_reason || payload?.waitingReason || ""}`.toLowerCase();
   const pending = pendingQuestions.get(project);
   const parsed = parseInteractivePromptFromText(text);
