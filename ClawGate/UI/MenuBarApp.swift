@@ -18,12 +18,17 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var mainPanel: NSPanel?
     private var mainPanelHost: NSHostingController<MainPanelView>?
     private var refreshTimer: Timer?
-    private var ghosttyFollowTimer: Timer?
+    private var ghosttyFollowTimer: DispatchSourceTimer?
     private var lastGhosttyFrame: CGRect?
     private var isGhosttySnapped = false
     private var ghosttyDetachCooldownUntil: Date?
     private var ghosttyAnchorSide: GhosttyAnchorSide = .right
     private var ghosttyLastDebugLogAt: Date = .distantPast
+    private var suspendDriftDetection = false
+    private var isCollapsed = false
+    private var normalPanelWidth: CGFloat = 275
+    private var normalPanelOrigin: NSPoint = .zero
+    private static let collapsedWidth: CGFloat = 14
     private var activationObserver: NSObjectProtocol?
     private var lastAppliedPanelLevel: NSWindow.Level?
     private let mainPanelLogLimit = 30
@@ -81,6 +86,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             },
             onSetSessionMode: { [weak self] sessionType, project, mode in
                 self?.setSessionMode(sessionType: sessionType, project: project, next: mode)
+            },
+            onToggleCollapse: { [weak self] in
+                self?.toggleCollapse()
             },
             onQuit: { [weak self] in
                 self?.quit()
@@ -164,6 +172,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Menu bar icon open should always start from expanded mode.
+        prepareExpandedPanelForOpen(panel)
         settingsModel.reload()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
@@ -171,6 +181,27 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         positionPanelBelowStatusItem(panel)
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         panel.makeKeyAndOrderFront(nil)
+    }
+
+    private func prepareExpandedPanelForOpen(_ panel: NSPanel) {
+        guard isCollapsed else { return }
+
+        isCollapsed = false
+        panelModel.isCollapsed = false
+        isCollapseAnimating = false
+        suspendDriftDetection = false
+
+        panel.minSize = NSSize(width: 200, height: panel.minSize.height)
+        setTrafficLightsHidden(false)
+        panel.isMovable = true
+        panel.isMovableByWindowBackground = true
+
+        let targetWidth = min(max(normalPanelWidth, panel.minSize.width), panel.maxSize.width)
+        if abs(panel.frame.width - targetWidth) > 0.5 {
+            var frame = panel.frame
+            frame.size.width = targetWidth
+            panel.setFrame(frame, display: false)
+        }
     }
 
     private func shouldDebugGhosttyFollow() -> Bool {
@@ -344,19 +375,36 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startGhosttyFollow() {
-        ghosttyFollowTimer?.invalidate()
-        ghosttyFollowTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { [weak self] _ in
+        ghosttyFollowTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(16))
+        timer.setEventHandler { [weak self] in
             self?.tickGhosttyFollow()
         }
+        timer.resume()
+        ghosttyFollowTimer = timer
     }
 
     private func stopGhosttyFollow() {
-        ghosttyFollowTimer?.invalidate()
+        ghosttyFollowTimer?.cancel()
         ghosttyFollowTimer = nil
         lastGhosttyFrame = nil
         isGhosttySnapped = false
         ghosttyDetachCooldownUntil = nil
         ghosttyAnchorSide = .right
+    }
+
+    private func updateGhosttyFollowInterval() {
+        guard let timer = ghosttyFollowTimer else { return }
+        let ms: Int
+        if isGhosttySnapped {
+            ms = 16      // 60 fps - smooth follow
+        } else if lastGhosttyFrame != nil {
+            ms = 100     // Ghostty visible - snap detection
+        } else {
+            ms = 500     // Ghostty absent - minimal resource
+        }
+        timer.schedule(deadline: .now() + .milliseconds(ms), repeating: .milliseconds(ms))
     }
 
     private func detectSnapSide(panelFrame: CGRect, ghosttyFrame: CGRect, threshold: CGFloat) -> GhosttyAnchorSide? {
@@ -375,10 +423,14 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         guard let currentGhosttyFrame = findGhosttyFrame() else {
-            logGhosttyFollow("stop follow: ghostty frame unavailable", level: "warning")
-            stopGhosttyFollow()
+            let changed = isGhosttySnapped || lastGhosttyFrame != nil
+            if isGhosttySnapped { isGhosttySnapped = false }
+            lastGhosttyFrame = nil
+            if changed { updateGhosttyFollowInterval() }
             return
         }
+
+        let prevSnapped = isGhosttySnapped
         let previousGhosttyFrame = lastGhosttyFrame
         let currentFrame = panel.frame
         let target = ghosttyAnchoredOrigin(
@@ -389,6 +441,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         let currentOrigin = currentFrame.origin
 
         if isGhosttySnapped {
+            if suspendDriftDetection {
+                lastGhosttyFrame = currentGhosttyFrame
+                return
+            }
+
             let detachDistance = hypot(currentOrigin.x - target.origin.x, currentOrigin.y - target.origin.y)
             let ghostMotion: CGFloat
             if let previousGhosttyFrame {
@@ -404,6 +461,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                 ghosttyDetachCooldownUntil = Date().addingTimeInterval(0.45)
                 lastGhosttyFrame = currentGhosttyFrame
                 logGhosttyFollow("detached from Ghostty manually (distance=\(Int(detachDistance)))")
+                if isGhosttySnapped != prevSnapped { updateGhosttyFollowInterval() }
                 return
             }
 
@@ -433,6 +491,112 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         lastGhosttyFrame = currentGhosttyFrame
+        if isGhosttySnapped != prevSnapped {
+            updateGhosttyFollowInterval()
+        }
+    }
+
+    // MARK: - Collapse / Expand
+
+    private func shouldAnchorLeft() -> Bool {
+        guard let panel = mainPanel, let ghostty = findGhosttyFrame() else { return false }
+        return abs(panel.frame.minX - ghostty.maxX) < abs(panel.frame.maxX - ghostty.minX)
+    }
+
+    private func setTrafficLightsHidden(_ hidden: Bool) {
+        guard let panel = mainPanel else { return }
+        for buttonType: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(buttonType)?.isHidden = hidden
+        }
+    }
+
+    func toggleCollapse() {
+        if isCollapsed {
+            expandPanel()
+        } else {
+            collapsePanel()
+        }
+    }
+
+    private var isCollapseAnimating = false
+
+    private func collapsePanel() {
+        guard let panel = mainPanel, !isCollapseAnimating else { return }
+        isCollapseAnimating = true
+        normalPanelWidth = panel.frame.width
+        normalPanelOrigin = panel.frame.origin
+        suspendDriftDetection = true
+
+        let targetWidth = Self.collapsedWidth
+        panel.minSize = NSSize(width: targetWidth, height: panel.minSize.height)
+
+        let ghostty = findGhosttyFrame()
+        let anchorLeft = shouldAnchorLeft()
+
+        let newX: CGFloat
+        if let g = ghostty {
+            newX = anchorLeft ? g.maxX : g.minX - targetWidth
+        } else {
+            newX = anchorLeft ? panel.frame.origin.x : panel.frame.maxX - targetWidth
+        }
+        let newY: CGFloat
+        if let g = ghostty {
+            newY = g.maxY - panel.frame.height
+        } else {
+            newY = panel.frame.origin.y
+        }
+
+        // Switch to CollapsedBarView BEFORE animation so SwiftUI's minWidth:200 doesn't fight the shrink
+        isCollapsed = true
+        panelModel.isCollapsed = true
+        setTrafficLightsHidden(true)
+        panel.isMovable = false
+        panel.isMovableByWindowBackground = false
+
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.2
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            let newFrame = NSRect(origin: NSPoint(x: newX, y: newY),
+                                  size: NSSize(width: targetWidth, height: panel.frame.height))
+            panel.animator().setFrame(newFrame, display: true)
+        }, completionHandler: { [weak self] in
+            DispatchQueue.main.async {
+                self?.suspendDriftDetection = false
+                self?.isCollapseAnimating = false
+            }
+        })
+    }
+
+    private func expandPanel() {
+        guard let panel = mainPanel, !isCollapseAnimating else { return }
+        isCollapseAnimating = true
+        suspendDriftDetection = true
+
+        let targetWidth = normalPanelWidth
+
+        if normalPanelOrigin == .zero, let g = findGhosttyFrame() {
+            normalPanelOrigin = NSPoint(x: g.minX - targetWidth, y: g.maxY - panel.frame.height)
+        }
+
+        setTrafficLightsHidden(false)
+        panel.isMovable = true
+        panel.isMovableByWindowBackground = true
+
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.2
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            let newFrame = NSRect(origin: normalPanelOrigin,
+                                  size: NSSize(width: targetWidth, height: panel.frame.height))
+            panel.animator().setFrame(newFrame, display: true)
+        }, completionHandler: { [weak self] in
+            DispatchQueue.main.async {
+                panel.minSize = NSSize(width: 200, height: panel.minSize.height)
+                self?.suspendDriftDetection = false
+                self?.isCollapsed = false
+                self?.panelModel.isCollapsed = false
+                self?.isCollapseAnimating = false
+            }
+        })
     }
 
     private func positionPanelBelowStatusItem(_ panel: NSPanel) {
@@ -450,15 +614,27 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        stopGhosttyFollow()
         logGhosttyFollow("Ghostty not found at open; using status-item placement", level: "warning")
 
-        guard let button = statusItem?.button, let buttonWindow = button.window else { return }
-        let buttonRect = button.convert(button.bounds, to: nil)
-        let screenRect = buttonWindow.convertToScreen(buttonRect)
-        let x = screenRect.midX - panelSize.width / 2
-        let y = screenRect.minY - panelSize.height - 4
-        panel.setFrameOrigin(clampPanelOrigin(CGPoint(x: x, y: y), panelSize: panelSize))
+        // Check if current panel position is visible on any screen
+        let currentFrame = panel.frame
+        let isCurrentVisible = NSScreen.screens.map { $0.visibleFrame }.contains { screen in
+            currentFrame.intersects(screen.insetBy(dx: -40, dy: -40))
+        }
+
+        if !isCurrentVisible || currentFrame.origin == .zero {
+            // Fallback: position below status item
+            guard let button = statusItem?.button, let buttonWindow = button.window else { return }
+            let buttonRect = button.convert(button.bounds, to: nil)
+            let screenRect = buttonWindow.convertToScreen(buttonRect)
+            let x = screenRect.midX - panelSize.width / 2
+            let y = screenRect.minY - panelSize.height - 4
+            panel.setFrameOrigin(clampPanelOrigin(CGPoint(x: x, y: y), panelSize: panelSize))
+        }
+
+        // Start follow timer even without Ghostty so we auto-snap when it appears
+        startGhosttyFollow()
+        updateGhosttyFollowInterval()
     }
 
     /// Called by AppRuntime after CCStatusBarClient updates sessions.

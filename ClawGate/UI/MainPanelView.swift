@@ -14,6 +14,7 @@ final class MainPanelModel: ObservableObject {
     @Published var sessionModes: [String: String] = [:]
     @Published var logs: [MainPanelLogLine] = []
     @Published var autonomousStatus: String = "Autonomous: not configured"
+    @Published var isCollapsed = false
 }
 
 struct MainPanelView: View {
@@ -28,12 +29,25 @@ struct MainPanelView: View {
     let modeOrder: [String]
     let modeLabel: (String) -> String
     let onSetSessionMode: (String, String, String) -> Void
+    let onToggleCollapse: () -> Void
     let onQuit: () -> Void
     let logLimit: Int
 
     @State private var selectedTab: Tab = .monitor
 
     var body: some View {
+        if panelModel.isCollapsed {
+            CollapsedBarView(onExpand: onToggleCollapse)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(PanelTheme.background)
+                .preferredColorScheme(.dark)
+        } else {
+            normalContent
+        }
+    }
+
+    @ViewBuilder
+    private var normalContent: some View {
         VStack(alignment: .leading, spacing: PanelTheme.spacing) {
             // Tab bar
             HStack(spacing: 2) {
@@ -45,6 +59,13 @@ struct MainPanelView: View {
                     )
                 }
                 Spacer()
+                Button(action: onToggleCollapse) {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(PanelTheme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("Collapse panel")
             }
             .padding(.bottom, 2)
 
@@ -267,5 +288,30 @@ private struct SessionRowView: View {
     private var dotColor: Color {
         if currentMode == "ignore" { return PanelTheme.textTertiary }
         return PanelTheme.statusColor(session.status)
+    }
+}
+
+// MARK: - Collapsed Bar View
+
+struct CollapsedBarView: View {
+    let onExpand: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Color.clear
+            .overlay {
+                ZStack {
+                    PanelTheme.accentCyan.opacity(isHovered ? 0.5 : 0.3)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(PanelTheme.textSecondary)
+                }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { onExpand() }
+            .onHover { hovering in
+                isHovered = hovering
+                if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
     }
 }
