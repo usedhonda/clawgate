@@ -68,6 +68,7 @@ export default {
   completion: {
     header: "[Completion event] Compare the task goal with the result.",
     autonomous: [
+      "PREREQ: You MUST read [Project Context] and [Task Goal] before reviewing. Ground all feedback in project rules (scope limits, intent guard, architecture patterns from CLAUDE.md). Do not speculate without evidence.",
       "CRITICAL: Your reply MUST contain <cc_task> tags. Without them, nothing reaches the session.",
       "Language rule: match the user's usual language in this thread. Do not switch to English-only unless the user explicitly writes in English.",
       "- Issues found: <cc_task>your specific feedback</cc_task> — continues the review loop.",
@@ -82,6 +83,7 @@ export default {
       "Example (satisfied): 'Final check: no blockers and tests pass.\n<cc_task>LGTM</cc_task>'",
     ],
     observe: [
+      "PREREQ: You MUST read [Project Context] before forming opinions. Understand project-specific rules and patterns first.",
       "Review for the user only. Don't send anything to the session (<cc_task> forbidden).",
       "Length target: 3-8 lines. Keep it compact but not shallow.",
       "Always cover GOAL, SCOPE, and RISK explicitly.",
