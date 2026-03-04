@@ -357,7 +357,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         let rightX = ghosttyFrame.maxX + gap
         let leftX = ghosttyFrame.minX - panelSize.width - gap
-        let y = ghosttyFrame.maxY - panelSize.height
+        let y = ghosttyFrame.maxY - panelSize.height  // always top-align
 
         let fitsRight = visibleFrame.map { rightX + panelSize.width <= $0.maxX - 0.5 } ?? true
         let fitsLeft = visibleFrame.map { leftX >= $0.minX + 0.5 } ?? true
@@ -420,8 +420,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private func updateSnapOffset() {
         guard let panel = mainPanel, let ghosttyFrame = findGhosttyFrame(), isGhosttySnapped else { return }
         lastGhosttyFrame = ghosttyFrame
+        let snapYAlignThreshold: CGFloat = 100
         let target = ghosttyAnchoredOrigin(for: ghosttyFrame, panelSize: panel.frame.size, preferredSide: ghosttyAnchorSide)
-        panel.setFrameOrigin(target.origin)
+        let yFree = (ghosttyFrame.height - panel.frame.size.height) > snapYAlignThreshold
+        let followOrigin = yFree
+            ? CGPoint(x: target.origin.x, y: panel.frame.origin.y)
+            : target.origin
+        panel.setFrameOrigin(followOrigin)
         ghosttyAnchorSide = target.side
     }
 
@@ -440,6 +445,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         let prevSnapped = isGhosttySnapped
         let previousGhosttyFrame = lastGhosttyFrame
+        let snapYAlignThreshold: CGFloat = 100
         let currentFrame = panel.frame
         let target = ghosttyAnchoredOrigin(
             for: currentGhosttyFrame,
@@ -447,6 +453,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             preferredSide: ghosttyAnchorSide
         )
         let currentOrigin = currentFrame.origin
+        let yFree = (currentGhosttyFrame.height - currentFrame.size.height) > snapYAlignThreshold
 
         if isGhosttySnapped {
             if suspendDriftDetection {
@@ -454,7 +461,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            let detachDistance = hypot(currentOrigin.x - target.origin.x, currentOrigin.y - target.origin.y)
+            // When Y is free (large height diff), only X matters for detach
+            let detachDistance: CGFloat
+            if yFree {
+                detachDistance = abs(currentOrigin.x - target.origin.x)
+            } else {
+                detachDistance = hypot(currentOrigin.x - target.origin.x, currentOrigin.y - target.origin.y)
+            }
             let ghostMotion: CGFloat
             if let previousGhosttyFrame {
                 ghostMotion = hypot(
@@ -475,7 +488,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
             ghosttyAnchorSide = target.side
             if detachDistance >= 1.0 {
-                panel.setFrameOrigin(target.origin)
+                let followOrigin = yFree
+                    ? CGPoint(x: target.origin.x, y: currentOrigin.y)
+                    : target.origin
+                panel.setFrameOrigin(followOrigin)
             }
         } else {
             if let cooldownEnd = ghosttyDetachCooldownUntil, Date() < cooldownEnd {
@@ -491,7 +507,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
                     panelSize: currentFrame.size,
                     preferredSide: snapSide
                 )
-                panel.setFrameOrigin(snapTarget.origin)
+                let snapOrigin = yFree
+                    ? CGPoint(x: snapTarget.origin.x, y: currentFrame.origin.y)
+                    : snapTarget.origin
+                panel.setFrameOrigin(snapOrigin)
                 isGhosttySnapped = true
                 ghosttyAnchorSide = snapTarget.side
                 logGhosttyFollow("resnapped to Ghostty side=\(snapTarget.side)")
@@ -547,9 +566,15 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         } else {
             newX = anchorLeft ? panel.frame.origin.x : panel.frame.maxX - targetWidth
         }
+        let snapYAlignThreshold: CGFloat = 100
         let newY: CGFloat
         if let g = ghostty {
-            newY = g.maxY - panel.frame.height
+            let heightDiff = g.height - panel.frame.height
+            if heightDiff <= snapYAlignThreshold {
+                newY = g.maxY - panel.frame.height  // top-align
+            } else {
+                newY = panel.frame.origin.y          // keep current Y
+            }
         } else {
             newY = panel.frame.origin.y
         }
@@ -584,7 +609,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         let targetWidth = normalPanelWidth
 
         if normalPanelOrigin == .zero, let g = findGhosttyFrame() {
-            normalPanelOrigin = NSPoint(x: g.minX - targetWidth, y: g.maxY - panel.frame.height)
+            let snapYAlignThreshold: CGFloat = 100
+            let heightDiff = g.height - panel.frame.height
+            let fallbackY: CGFloat = heightDiff <= snapYAlignThreshold
+                ? g.maxY - panel.frame.height  // top-align
+                : panel.frame.origin.y          // keep current Y
+            normalPanelOrigin = NSPoint(x: g.minX - targetWidth, y: fallbackY)
         }
 
         setTrafficLightsHidden(false)
@@ -593,8 +623,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         let expandOrigin: NSPoint
         if isGhosttySnapped, let g = findGhosttyFrame() {
+            let snapYAlignThreshold: CGFloat = 100
             let target = ghosttyAnchoredOrigin(for: g, panelSize: NSSize(width: targetWidth, height: panel.frame.height), preferredSide: ghosttyAnchorSide)
-            expandOrigin = target.origin
+            let yFree = (g.height - panel.frame.height) > snapYAlignThreshold
+            expandOrigin = yFree
+                ? NSPoint(x: target.origin.x, y: panel.frame.origin.y)
+                : target.origin
         } else {
             expandOrigin = normalPanelOrigin
         }
