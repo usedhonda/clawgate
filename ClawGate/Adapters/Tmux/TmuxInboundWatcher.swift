@@ -162,15 +162,20 @@ final class TmuxInboundWatcher {
                     }
                 } else {
                     // observe / autonomous -> emit to agent with pane context
-                    var questionContext: String? = nil
+                    var aboveContext: String? = nil
+                    var belowContext: String? = nil
                     if let capture = session.paneCapture, !capture.isEmpty {
-                        questionContext = extractQuestionContext(from: capture, questionText: text)
+                        let ctx = extractQuestionContext(from: capture, questionText: text)
+                        aboveContext = ctx.above
+                        belowContext = ctx.below
                     } else if let target = session.tmuxTarget {
                         if let raw = try? TmuxShell.capturePane(target: target, lines: 50) {
-                            questionContext = extractQuestionContext(from: raw, questionText: text)
+                            let ctx = extractQuestionContext(from: raw, questionText: text)
+                            aboveContext = ctx.above
+                            belowContext = ctx.below
                         }
                     }
-                    emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
+                    emitQuestionEvent(session: session, question: question, mode: mode, context: aboveContext, optionsContext: belowContext)
                 }
             } else {
                 // Structured data missing — fall through to captureAndEmit as fallback
@@ -206,8 +211,8 @@ final class TmuxInboundWatcher {
                                                 target: session.tmuxTarget ?? "")
                     } else {
                         // observe / autonomous -> emit to agent with pane context
-                        let questionContext = self.extractQuestionContext(from: output, questionText: question.questionText)
-                        self.emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
+                        let ctx = self.extractQuestionContext(from: output, questionText: question.questionText)
+                        self.emitQuestionEvent(session: session, question: question, mode: mode, context: ctx.above, optionsContext: ctx.below)
                     }
                     return
                 }
@@ -263,9 +268,8 @@ final class TmuxInboundWatcher {
         }
     }
 
-    /// Extract the pane content above the question line as context for the reviewer agent.
-    /// Returns nil if no meaningful context is found.
-    private func extractQuestionContext(from output: String, questionText: String) -> String? {
+    /// Extract pane content around the question line: above (context) and below (option descriptions).
+    private func extractQuestionContext(from output: String, questionText: String) -> (above: String?, below: String?) {
         let lines = output.components(separatedBy: "\n")
         let trimmedQ = questionText.trimmingCharacters(in: .whitespaces)
         // Bottom-up search for the question line
@@ -277,17 +281,30 @@ final class TmuxInboundWatcher {
                 break
             }
         }
-        guard let qIdx = questionLineIndex, qIdx > 0 else { return nil }
-        let context = Array(lines[0..<qIdx])
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard context.count > 10 else { return nil }
-        return context
+        guard let qIdx = questionLineIndex else { return (nil, nil) }
+
+        // Above: existing behavior — pane content before the question line
+        let above: String? = qIdx > 0 ? {
+            let text = Array(lines[0..<qIdx])
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.count > 10 ? text : nil
+        }() : nil
+
+        // Below: question line through end — contains option labels + descriptions
+        let below: String? = {
+            let text = Array(lines[qIdx...])
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.count > 10 ? text : nil
+        }()
+
+        return (above, below)
     }
 
     /// Emit a question event to the EventBus so the reviewer agent can receive it.
     /// Used from both the permission_prompt branch and captureAndEmit.
-    private func emitQuestionEvent(session: CCStatusBarClient.CCSession, question: DetectedQuestion, mode: String, context: String? = nil) {
+    private func emitQuestionEvent(session: CCStatusBarClient.CCSession, question: DetectedQuestion, mode: String, context: String? = nil, optionsContext: String? = nil) {
         // Question fingerprint dedup: suppress re-emit of the same question within 5 minutes.
         // In observe mode no one auto-answers, so the same question can re-trigger on state cycles.
         let fingerprint = (question.questionText + question.options.joined()).hashValue
@@ -318,6 +335,7 @@ final class TmuxInboundWatcher {
             "question_selected": String(question.selectedIndex),
             "question_id": question.questionID,
             "question_context": context ?? "",
+            "question_options_context": optionsContext ?? "",
             "attention_level": "\(session.attentionLevel)",
         ]
         _ = eventBus.append(type: "inbound_message", adapter: "tmux", payload: payload)
@@ -594,8 +612,8 @@ final class TmuxInboundWatcher {
             }
 
             // observe/autonomous: send to agent via EventBus with pane context
-            let questionContext = extractQuestionContext(from: rawOutput, questionText: question.questionText)
-            emitQuestionEvent(session: session, question: question, mode: mode, context: questionContext)
+            let ctx = extractQuestionContext(from: rawOutput, questionText: question.questionText)
+            emitQuestionEvent(session: session, question: question, mode: mode, context: ctx.above, optionsContext: ctx.below)
             return
         }
 

@@ -2936,9 +2936,16 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     return `${marker} ${i + 1}. ${opt}`;
   }).join("\n");
 
+  // Enrich with pane-captured option descriptions (labels alone often lack context)
+  const rawOptionsContext = filterPaneNoise(payload.question_options_context || "");
+  let optionsBlock = numberedOptions;
+  if (rawOptionsContext && rawOptionsContext.length > numberedOptions.length) {
+    optionsBlock = `${numberedOptions}\n\n[Option details from screen]\n${capText(rawOptionsContext, 2000, "head")}`;
+  }
+
   // Question body
   const qbTemplate = mode === "auto" ? _prompts.questionBody.auto : _prompts.questionBody.default;
-  const questionBody = fillTemplate(qbTemplate, { label, project, questionText, numberedOptions });
+  const questionBody = fillTemplate(qbTemplate, { label, project, questionText, numberedOptions: optionsBlock });
   const requiredParts = [guidance, questionBody];
 
   // Apply total message cap with guidance preservation (trim optional context first)
