@@ -548,6 +548,14 @@ final class TmuxAdapter: AdapterProtocol {
         guard let session = candidates.first, let target = session.tmuxTarget else {
             return PromptDraftDetection(state: .unknown, draft: "", reason: "session_not_found")
         }
-        return detectPromptDraftState(target: target)
+        let result = detectPromptDraftState(target: target)
+        // CCSB reports waiting_input → relax prompt_too_far_from_bottom to idle
+        // (AskUserQuestion with many options pushes ❯ far from bottom, but session IS idle)
+        if result.state == .unknown
+            && result.reason == "prompt_too_far_from_bottom"
+            && session.status == "waiting_input" {
+            return PromptDraftDetection(state: .idle, draft: "", reason: "ccsb_waiting_input_override")
+        }
+        return result
     }
 }

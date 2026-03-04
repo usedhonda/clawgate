@@ -1684,23 +1684,22 @@ function hasChoiceTags(text) {
     || /<cc_answer\s+project="[^"]*">[\s\S]*?<\/cc_answer>/i.test(text);
 }
 
+function isFooterLine(line) {
+  const t = (line || "").trim().toLowerCase();
+  if (!t) return true;
+  if (/\?\s*for shortcuts/i.test(t)) return true;
+  if (/\d+%\s*context (left|window)/i.test(t)) return true;
+  if (t.startsWith("autonomous: ")) return true;
+  if (/^[-\u2500\u2501\u2550]+$/.test(t)) return true;
+  return false;
+}
+
 function isTemplateDraft(text) {
   const lines = `${text || ""}`.trim().split("\n");
   // Skip footer lines from the end (shortcut hints, context status, autonomous label, separators)
   let end = lines.length - 1;
-  while (end >= 0) {
-    const t = lines[end].trim().toLowerCase();
-    if (
-      !t
-      || /\?\s*for shortcuts/i.test(t)
-      || /\d+%\s*context (left|window)/i.test(t)
-      || t.startsWith("autonomous: ")
-      || /^[-\u2500\u2501\u2550]+$/.test(t)
-    ) {
-      end--;
-      continue;
-    }
-    break;
+  while (end >= 0 && isFooterLine(lines[end])) {
+    end--;
   }
   if (end < 0) return false;
   const last = lines[end].trim();
@@ -1716,14 +1715,23 @@ function parseInteractivePromptFromText(text) {
   const nonEmpty = lines.filter(Boolean);
   if (nonEmpty.length === 0) return null;
 
+  // Scope scan to tail 20 lines (excluding footer) to avoid stale markers in history
+  let scanEnd = nonEmpty.length - 1;
+  while (scanEnd >= 0 && isFooterLine(nonEmpty[scanEnd])) {
+    scanEnd--;
+  }
+  if (scanEnd < 0) return null;
+  const scanStart = Math.max(0, scanEnd - 19);
+  const scanLines = nonEmpty.slice(scanStart, scanEnd + 1);
+
   /** @type {{ text: string, selected: boolean }[]} */
   const options = [];
   let selectedIndex = 0;
 
   // Numbered lists are only treated as options when a question line is present
-  const hasQuestionLine = nonEmpty.some((l) => /[?？]\s*$/.test(l));
+  const hasQuestionLine = scanLines.some((l) => /[?？]\s*$/.test(l));
 
-  for (const line of nonEmpty) {
+  for (const line of scanLines) {
     if (/^[❯●○]\s+/.test(line)) {
       const selected = /^[❯●]\s+/.test(line);
       const cleaned = line.replace(/^[❯●○]\s+/, "").trim();
@@ -1745,8 +1753,8 @@ function parseInteractivePromptFromText(text) {
   if (options.length < 2 && !hasShortcutFooter) return null;
 
   let questionText = "";
-  for (let i = nonEmpty.length - 1; i >= 0; i--) {
-    const line = nonEmpty[i];
+  for (let i = scanLines.length - 1; i >= 0; i--) {
+    const line = scanLines[i];
     if (/[?？]$/.test(line)) {
       questionText = line;
       break;
@@ -1972,8 +1980,8 @@ async function tryExtractAndSendTask({
   const modeLabel = sourceMode ? sourceMode.charAt(0).toUpperCase() + sourceMode.slice(1) : "Unknown";
   const prefixedTask = `[from:OpenClaw Agent - ${modeLabel}] ${taskText}`;
 
-  // 2 tries total (initial + one retry), 6s total window.
-  const MAX_RETRIES = 1;
+  // 3 tries total (initial + two retries) to absorb federation round-trip instability.
+  const MAX_RETRIES = 2;
   const RETRY_DELAY_MS = 3000;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -2060,6 +2068,14 @@ async function tryExtractAndSendTask({
     } catch (err) {
       const errCode = err?.name || "send_exception";
       const errMessage = `${err?.message || err || ""}`.toLowerCase();
+
+      // AbortError (timeout) — retriable, let the loop retry
+      if (errCode === "AbortError" && attempt < MAX_RETRIES) {
+        log?.info?.(`clawgate: send timeout for "${targetProject}", retry ${attempt + 1}/${MAX_RETRIES} in ${RETRY_DELAY_MS / 1000}s`);
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        continue;
+      }
+
       if (errMessage.includes("currently running") || errMessage.includes("session busy")) {
         const queueResult = enqueuePendingTask({
           project: sourceProject || targetProject,
@@ -3921,6 +3937,18 @@ export async function startAccount(ctx) {
       }
     }
     log?.info?.(`clawgate: [${accountId}] lineAvailable=${lineAvailable}`);
+
+    // Pre-populate sessionModes from ClawGate config so idle sessions start with correct mode
+    if (remoteConfig?.tmux?.sessionModes) {
+      for (const [key, mode] of Object.entries(remoteConfig.tmux.sessionModes)) {
+        const colonIdx = key.indexOf(":");
+        const proj = colonIdx >= 0 ? key.slice(colonIdx + 1) : key;
+        if (proj && mode && mode !== "ignore") {
+          sessionModes.set(proj, mode);
+        }
+      }
+      log?.info?.(`clawgate: [${accountId}] pre-loaded sessionModes from config: ${[...sessionModes.entries()].map(([k, v]) => `${k}=${v}`).join(", ") || "(none)"}`);
+    }
   } catch (err) {
     log?.debug?.(`clawgate: [${accountId}] config fetch failed (using defaults): ${err}`);
   }

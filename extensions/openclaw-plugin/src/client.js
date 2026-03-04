@@ -142,6 +142,7 @@ export async function clawgateTmuxSend(apiUrl, project, text, traceId = "") {
   return request(apiUrl, "/v1/send", {
     method: "POST",
     traceId,
+    timeoutMs: 20_000, // federation forward (15s) + margin
     body: {
       adapter: "tmux",
       action: "send_message",

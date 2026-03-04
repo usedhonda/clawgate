@@ -26,7 +26,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     private var ghosttyLastDebugLogAt: Date = .distantPast
     private var suspendDriftDetection = false
     private var isCollapsed = false
-    private var normalPanelWidth: CGFloat = 275
+    private var normalPanelWidth: CGFloat = 220
     private var normalPanelOrigin: NSPoint = .zero
     private static let collapsedWidth: CGFloat = 14
     private var activationObserver: NSObjectProtocol?
@@ -99,7 +99,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         mainPanelHost = host
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 275, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 220, height: 600),
             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
             defer: true
@@ -417,6 +417,14 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         return rightDistance <= leftDistance ? .right : .left
     }
 
+    private func updateSnapOffset() {
+        guard let panel = mainPanel, let ghosttyFrame = findGhosttyFrame(), isGhosttySnapped else { return }
+        lastGhosttyFrame = ghosttyFrame
+        let target = ghosttyAnchoredOrigin(for: ghosttyFrame, panelSize: panel.frame.size, preferredSide: ghosttyAnchorSide)
+        panel.setFrameOrigin(target.origin)
+        ghosttyAnchorSide = target.side
+    }
+
     private func tickGhosttyFollow() {
         guard let panel = mainPanel, panel.isVisible else {
             stopGhosttyFollow()
@@ -561,6 +569,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             panel.animator().setFrame(newFrame, display: true)
         }, completionHandler: { [weak self] in
             DispatchQueue.main.async {
+                self?.updateSnapOffset()
                 self?.suspendDriftDetection = false
                 self?.isCollapseAnimating = false
             }
@@ -582,15 +591,24 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.isMovable = true
         panel.isMovableByWindowBackground = true
 
+        let expandOrigin: NSPoint
+        if isGhosttySnapped, let g = findGhosttyFrame() {
+            let target = ghosttyAnchoredOrigin(for: g, panelSize: NSSize(width: targetWidth, height: panel.frame.height), preferredSide: ghosttyAnchorSide)
+            expandOrigin = target.origin
+        } else {
+            expandOrigin = normalPanelOrigin
+        }
+
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.2
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            let newFrame = NSRect(origin: normalPanelOrigin,
+            let newFrame = NSRect(origin: expandOrigin,
                                   size: NSSize(width: targetWidth, height: panel.frame.height))
             panel.animator().setFrame(newFrame, display: true)
         }, completionHandler: { [weak self] in
             DispatchQueue.main.async {
                 panel.minSize = NSSize(width: 200, height: panel.minSize.height)
+                self?.updateSnapOffset()
                 self?.suspendDriftDetection = false
                 self?.isCollapsed = false
                 self?.panelModel.isCollapsed = false

@@ -25,9 +25,31 @@ enum TmuxShell {
         // Small delay before Enter: Codex CLI needs time to process pasted text
         // before accepting Enter. CC (readline-based) doesn't need this but it's harmless.
         if enter {
-            Thread.sleep(forTimeInterval: 0.15)
+            // Scale delay with text length (longer pastes need more processing time)
+            let baseDelay = 0.15
+            let extraDelay = min(Double(text.count) / 5000.0, 0.35)
+            Thread.sleep(forTimeInterval: baseDelay + extraDelay)
             let enterOutput = try run(arguments: ["send-keys", "-t", target, "Enter"])
             output += enterOutput
+
+            // Post-send verification: if text is still at the prompt, retry Enter.
+            // This catches cases where the target app didn't accept Enter
+            // (e.g., still processing pasted text, tmux timing race).
+            let snippet = String(text.prefix(40))
+            for retry in 1...2 {
+                Thread.sleep(forTimeInterval: 0.3)
+                guard let pane = try? capturePane(target: target, lines: 5) else { break }
+                let lines = pane.split(separator: "\n", omittingEmptySubsequences: false)
+                // Find the last line starting with a prompt marker (❯ › >)
+                let promptLine = lines.last(where: {
+                    $0.range(of: #"^\s*[\u{203A}\u{276F}>]\s*"#, options: .regularExpression) != nil
+                })
+                guard let promptLine, promptLine.contains(snippet) else { break }
+                // Text still at prompt — retry Enter with increasing delay
+                Thread.sleep(forTimeInterval: 0.15 * Double(retry))
+                let retryOutput = try run(arguments: ["send-keys", "-t", target, "Enter"])
+                output += retryOutput
+            }
         }
 
         return output
