@@ -502,6 +502,7 @@ final class TmuxInboundWatcher {
         let selfPriority = priority[session.status] ?? 0
         let peers = ccClient.sessions(forProject: session.project)
             .filter { $0.sessionType == session.sessionType && $0.id != session.id }
+            .filter { $0.tmuxTarget != nil }  // Exclude stale sessions without tmux target
         return !peers.contains { (priority[$0.status] ?? 0) > selfPriority }
     }
 
