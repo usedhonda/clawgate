@@ -2469,6 +2469,16 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     const text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
 
+    // Route user-facing reply: Telegram for tproj-sourced, LINE otherwise
+    const sendReply = async (replyMsg) => {
+      if (tprojHeader && sendTmuxMessage) {
+        const prefixed = `[${tprojHeader.sender}] ${replyMsg}`;
+        try { await sendTmuxMessage(conversation, prefixed, traceId); } catch {}
+      } else {
+        try { await clawgateSend(apiUrl, conversation, replyMsg, traceId); recordPluginSend(replyMsg); } catch {}
+      }
+    };
+
     // tproj-msg reverse channel: reply via tmux session instead of LINE
     if (tprojHeader?.reply === "session" && tprojHeader.workspace && tprojHeader.sender) {
       const replyText = `[from:gate] ${text}`;
@@ -2529,9 +2539,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     if (answerResult) {
       if (answerResult.error) {
         const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
-        try { await clawgateSend(apiUrl, conversation, msg, traceId); recordPluginSend(msg); } catch {}
+        await sendReply(msg);
       } else if (answerResult.lineText) {
-        try { await clawgateSend(apiUrl, conversation, answerResult.lineText, traceId); recordPluginSend(answerResult.lineText); } catch {}
+        await sendReply(answerResult.lineText);
       }
       return;
     }
@@ -2541,14 +2551,14 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     if (readResult) {
       if (readResult.error) {
         const msg = `[Pane read failed: ${readResult.error.message || readResult.error}]${readResult.lineText ? "\n\n" + readResult.lineText : ""}`;
-        try { await clawgateSend(apiUrl, conversation, msg, traceId); recordPluginSend(msg); } catch {}
+        await sendReply(msg);
       } else {
         const header = `[Pane: ${readResult.project}]`;
         const content = readResult.paneContent || "(empty)";
         const msg = readResult.lineText
           ? `${readResult.lineText}\n\n${header}\n${content}`
           : `${header}\n${content}`;
-        try { await clawgateSend(apiUrl, conversation, msg, traceId); recordPluginSend(msg); } catch {}
+        await sendReply(msg);
       }
       return;
     }
@@ -2573,7 +2583,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
         setReviewDone(proj, "lgtm_inbound");
         log?.info?.(`clawgate: [${accountId}] review-done SET for "${proj}" — LGTM via inbound`);
         if (result.lineText) {
-          try { await clawgateSend(apiUrl, conversation, result.lineText, traceId); recordPluginSend(result.lineText); } catch {}
+          await sendReply(result.lineText);
         }
         return;
       }
@@ -2624,10 +2634,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
               if (shouldNotifyTyping) {
                 const advisory = buildTypingBusyAdvisoryLine(targetProject);
                 try {
-                  await clawgateSend(apiUrl, conversation, advisory, traceId);
-                  recordPluginSend(advisory);
+                  await sendReply(advisory);
                 } catch (err) {
-                  log?.error?.(`clawgate: [${accountId}] send typing-busy advisory to LINE failed: ${err}`);
+                  log?.error?.(`clawgate: [${accountId}] send typing-busy advisory failed: ${err}`);
                 }
               } else {
                 log?.info?.(`clawgate: [${accountId}] typing-busy advisory suppressed (project=${targetProject})`);
@@ -2641,10 +2650,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
             });
             if (shouldForwardLine) {
               try {
-                await clawgateSend(apiUrl, conversation, result.lineText, traceId);
-                recordPluginSend(result.lineText);
+                await sendReply(result.lineText);
               } catch (err) {
-                log?.error?.(`clawgate: [${accountId}] send fallback review text to LINE failed: ${err}`);
+                log?.error?.(`clawgate: [${accountId}] send fallback review text failed: ${err}`);
               }
             } else {
               log?.info?.(`clawgate: [${accountId}] benign failure fallback line suppressed (project=${targetProject}, code=${errorCode})`);
@@ -2657,8 +2665,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
               streakDurationMs: streak.streakDurationMs,
             });
             try {
-              await clawgateSend(apiUrl, conversation, msg, traceId);
-              recordPluginSend(msg);
+              await sendReply(msg);
               traceLog(log, "info", {
                 trace_id: traceId,
                 stage: "task_send_escalated",
@@ -2682,10 +2689,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           if (shouldNotify) {
             const msg = buildTaskFailureMessage(errorMessage, result.lineText, targetProject);
             try {
-              await clawgateSend(apiUrl, conversation, msg, traceId);
-              recordPluginSend(msg);
+              await sendReply(msg);
             } catch (err) {
-              log?.error?.(`clawgate: [${accountId}] send error notice to LINE failed: ${err}`);
+              log?.error?.(`clawgate: [${accountId}] send error notice failed: ${err}`);
             }
           } else {
             log?.info?.(`clawgate: [${accountId}] task send error notice suppressed (project=${targetProject}, code=${errorCode})`);
@@ -2693,10 +2699,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
         }
       } else if (result.lineText) {
         try {
-          await clawgateSend(apiUrl, conversation, result.lineText, traceId);
-          recordPluginSend(result.lineText);
+          await sendReply(result.lineText);
         } catch (err) {
-          log?.error?.(`clawgate: [${accountId}] send line reply failed: ${err}`);
+          log?.error?.(`clawgate: [${accountId}] send reply failed: ${err}`);
         }
       }
       return;
@@ -2738,9 +2743,10 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           blocks: collectedLineBlocks.length,
         });
         if (tprojHeader && sendTmuxMessage) {
-          // tproj-sourced: route to Telegram (not LINE)
+          // tproj-sourced: route to Telegram (not LINE), with session prefix
+          const prefixedBlock = `[${tprojHeader.sender}] ${blockText}`;
           try {
-            await sendTmuxMessage(conversation, blockText, traceId);
+            await sendTmuxMessage(conversation, prefixedBlock, traceId);
             traceLog(log, "info", {
               trace_id: traceId,
               stage: "gateway_forward_ok",
