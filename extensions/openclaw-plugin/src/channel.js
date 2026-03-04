@@ -13,8 +13,8 @@ export const clawgatePlugin = {
   meta: {
     id: "clawgate",
     label: "ClawGate",
-    selectionLabel: "ClawGate (LINE)",
-    blurb: "LINE messaging via ClawGate AX bridge.",
+    selectionLabel: "ClawGate (Telegram/LINE)",
+    blurb: "Dev reviews via Telegram, general messaging via LINE.",
   },
 
   capabilities: {

@@ -30,6 +30,7 @@ import {
   clawgateTmuxRead,
   clawgateTmuxPromptState,
   setClawgateAuthToken,
+  telegramSend,
 } from "./client.js";
 import { setActiveProject, getActiveProject, clearActiveProject } from "./shared-state.js";
 import defaultPrompts from "./prompts.js";
@@ -58,6 +59,9 @@ import { createProjectViewReader } from "./project-view.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
 let _runtime = null;
+
+/** @type {"line"|"telegram"} Active messenger for tmux outbound — set by startAccount() */
+let _activeMessenger = "line";
 
 export function setGatewayRuntime(runtime) {
   _runtime = runtime;
@@ -1645,12 +1649,13 @@ function normalizeLineReplyText(text, { project = "", sessionType = "claude_code
     .replace(/\s+\n/g, "\n")
     .trim();
 
-  // Add blank line before bold section headers, then strip the bold markers.
-  // (Fallback: AI may still use bold even when told not to.)
+  // Add blank line before bold section headers.
   result = result.replace(/(?<=\S)\n(\*\*.+?\*\*)/g, "\n\n$1");
-  result = result.replace(/\*\*(.+?)\*\*/g, "$1");
-  // Strip Markdown heading markers.
-  result = result.replace(/^#{1,6}\s+/gm, "");
+  // Strip Markdown formatting only for LINE (Telegram handles Markdown natively).
+  if (_activeMessenger === "line") {
+    result = result.replace(/\*\*(.+?)\*\*/g, "$1");
+    result = result.replace(/^#{1,6}\s+/gm, "");
+  }
   // Ensure blank line before known review section labels (SCOPE:, RISK:, etc.)
   // so the output is readable even when AI forgets to add spacing.
   result = result.replace(/(?<=\S)\n((?:GOAL|SCOPE|RISK|ARCHITECTURE|MISSING|SUMMARY|VERDICT):)/g, "\n\n$1");
@@ -2774,7 +2779,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
  * Dispatches the question + options to AI, which can answer via <cc_answer>.
  * @param {object} params
  */
-async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable = true }) {
+async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable = true, sendTmuxMessage }) {
   const runtime = getRuntime();
   const traceId = makeTraceId("tmux-question", event);
   const payload = event.payload ?? {};
@@ -2928,15 +2933,10 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options, prompt=${_promptMeta.hash})`);
 
-  // Helper: send to LINE only when LINE is available
+  // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
-    if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
     if (isRecentOutboundDuplicate(text)) { log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (question): "${text.slice(0, 60)}"`); return; }
-    const result = await clawgateSend(apiUrl, conv, text, traceId);
-    if (!result?.ok) {
-      log?.warn?.(`clawgate: sendLine failed (question): ${JSON.stringify(result?.error || result)}`);
-    }
-    recordPluginSend(text);
+    return sendTmuxMessage(conv, text, traceId);
   };
 
   // Deliver reply — parse <cc_answer> (auto mode only) and route answer, or forward to LINE
@@ -3063,7 +3063,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
  * Dispatches the completion summary to AI, which then reports to LINE.
  * @param {object} params
  */
-async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable = true }) {
+async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable = true, sendTmuxMessage }) {
   const runtime = getRuntime();
   const traceId = makeTraceId("tmux-completion", event);
   const payload = event.payload ?? {};
@@ -3277,18 +3277,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}, prompt=${_promptMeta.hash}): "${text.slice(0, 80)}"`);
 
-  // Helper: send to LINE only when LINE is available
+  // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
-    if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (lineAvailable=false)`); return; }
     if (isRecentOutboundDuplicate(text)) { log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (completion): "${text.slice(0, 60)}"`); return; }
-    const result = await clawgateSend(apiUrl, conv, text, traceId);
-    if (!result?.ok) {
-      log?.warn?.(`clawgate: sendLine failed (completion): ${JSON.stringify(result?.error || result)}`);
-    }
-    recordPluginSend(text);
+    return sendTmuxMessage(conv, text, traceId);
   };
 
-  // Dispatch to AI — the AI will summarize and reply via LINE
+  // Dispatch to AI — the AI will summarize and reply
   // In autonomous mode, parse <cc_task> tags and route tasks to Claude Code
   const deliver = async (replyPayload) => {
     let replyText = extractReplyText(replyPayload, log, "tmux_completion");
@@ -3938,6 +3933,12 @@ export async function startAccount(ctx) {
     }
     log?.info?.(`clawgate: [${accountId}] lineAvailable=${lineAvailable}`);
 
+    // Resolve messenger for tmux outbound (Telegram or LINE)
+    const messenger = account.messenger || "line";
+    const useTelegram = messenger === "telegram" && !!account.telegramBotToken && !!account.telegramChatId;
+    _activeMessenger = useTelegram ? "telegram" : "line";
+    log?.info?.(`clawgate: [${accountId}] messenger=${messenger} useTelegram=${useTelegram}`);
+
     // Pre-populate sessionModes from ClawGate config so idle sessions start with correct mode
     if (remoteConfig?.tmux?.sessionModes) {
       for (const [key, mode] of Object.entries(remoteConfig.tmux.sessionModes)) {
@@ -3964,6 +3965,22 @@ export async function startAccount(ctx) {
   } catch (err) {
     log?.warn?.(`clawgate: [${accountId}] initial poll failed: ${err}`);
   }
+
+  // Unified tmux outbound: Telegram (preferred) or LINE fallback
+  const sendTmuxMessage = async (conv, text, traceId = "") => {
+    if (useTelegram) {
+      const result = await telegramSend(account.telegramBotToken, account.telegramChatId, text, { traceId });
+      if (!result?.ok) log?.warn?.(`clawgate: [${accountId}] telegram send failed: ${JSON.stringify(result?.error)}`);
+      recordPluginSend(text);
+      return result;
+    }
+    // LINE fallback (existing behavior)
+    if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip`); return { ok: false }; }
+    const result = await clawgateSend(apiUrl, conv, text, traceId);
+    if (!result?.ok) log?.warn?.(`clawgate: [${accountId}] sendLine failed: ${JSON.stringify(result?.error || result)}`);
+    recordPluginSend(text);
+    return result;
+  };
 
   const enableLineBurstCoalesce = ENABLE_LINE_BURST_COALESCE && LINE_BURST_COALESCE_WINDOW_MS > 0;
   /** @type {Map<string, { conversation: string, firstAt: number, lastAt: number, timer: any, entries: Array<{ event: any, eventText: string, traceId: string, upstreamEventId: string, source: string, latencyFields: Record<string, number> }> }>} */
@@ -4185,7 +4202,7 @@ export async function startAccount(ctx) {
           // Handle tmux question events (AskUserQuestion)
           if (event.adapter === "tmux" && event.payload?.source === "question") {
             try {
-              await handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable });
+              await handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable, sendTmuxMessage });
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] handleTmuxQuestion failed: ${err}`);
               traceLog(log, "error", {
@@ -4202,7 +4219,7 @@ export async function startAccount(ctx) {
           // Handle tmux completion events separately
           if (event.adapter === "tmux" && event.payload?.source === "completion") {
             try {
-              await handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable });
+              await handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConversation, log, lineAvailable, sendTmuxMessage });
             } catch (err) {
               log?.error?.(`clawgate: [${accountId}] handleTmuxCompletion failed: ${err}`);
               traceLog(log, "error", {

@@ -205,6 +205,24 @@ export async function clawgateTmuxPromptState(apiUrl, project, traceId = "") {
  * @param {string} tmuxTarget — tmux target pane (e.g. "clawgate:0.0")
  * @returns {string|null} — absolute path or null on failure
  */
+/**
+ * POST https://api.telegram.org/bot<token>/sendMessage — send a message via Telegram Bot API.
+ * @param {string} botToken
+ * @param {string} chatId
+ * @param {string} text
+ * @param {object} [opts]
+ * @returns {Promise<{ok: boolean, result?: {message_id: string, timestamp: string}, error?: {message: string, code: number}}>}
+ */
+export async function telegramSend(botToken, chatId, text, opts = {}) {
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const body = { chat_id: chatId, text };
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const json = await res.json();
+  return json.ok
+    ? { ok: true, result: { message_id: String(json.result?.message_id ?? ""), timestamp: new Date().toISOString() } }
+    : { ok: false, error: { message: json.description || "Telegram API error", code: json.error_code } };
+}
+
 export function resolveTmuxWorkingDir(tmuxTarget) {
   try {
     return execSync(

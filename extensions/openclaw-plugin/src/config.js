@@ -19,6 +19,10 @@
  * No token needed — ClawGate binds to 127.0.0.1 only (no auth required).
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+
 const DEFAULTS = {
   apiUrl: "http://127.0.0.1:8765",
   pollIntervalMs: 1500,
@@ -42,6 +46,18 @@ export function listAccountIds(cfg) {
  */
 export function resolveAccount(cfg, accountId) {
   const section = cfg?.channels?.clawgate?.[accountId] ?? {};
+  // Resolve telegramChatId: explicit config > credentials file fallback
+  let telegramChatId = section.telegramChatId || "";
+  if (!telegramChatId) {
+    try {
+      const credPath = join(homedir(), ".openclaw", "credentials", "telegram-default-allowFrom.json");
+      const cred = JSON.parse(readFileSync(credPath, "utf-8"));
+      telegramChatId = String(cred?.allowFrom?.[0] || "");
+    } catch {
+      // No credentials file — telegramChatId stays empty
+    }
+  }
+
   return {
     accountId,
     enabled: section.enabled !== false,
@@ -50,6 +66,9 @@ export function resolveAccount(cfg, accountId) {
     defaultConversation: section.defaultConversation || DEFAULTS.defaultConversation,
     token: section.token || "",
     lineNotify: section.lineNotify,   // undefined = auto-detect from /v1/config; true/false = override
+    messenger: section.messenger || "line",
+    telegramBotToken: section.telegramBotToken || cfg?.channels?.telegram?.botToken || "",
+    telegramChatId,
     config: section,
   };
 }
