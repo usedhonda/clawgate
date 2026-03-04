@@ -99,7 +99,7 @@ final class TmuxInboundWatcher {
         // Skip non-representative sessions: only the most-active session per project+type
         // triggers automation. Others are effectively ignored.
         guard isRepresentativeSession(session) else {
-            debugLog("skip non-rep: \(session.project) id=\(session.id)")
+            debugLog("skip non-rep: \(session.project) sessionType=\(session.sessionType) id=\(session.id)")
             return
         }
 
@@ -560,7 +560,7 @@ final class TmuxInboundWatcher {
     }
 
     private func captureAndEmit(session: CCStatusBarClient.CCSession, mode: String) {
-        debugLog("START project=\(session.project) mode=\(mode) tmuxTarget=\(session.tmuxTarget ?? "nil")")
+        debugLog("START project=\(session.project) sessionType=\(session.sessionType) mode=\(mode) tmuxTarget=\(session.tmuxTarget ?? "nil")")
 
         guard let target = session.tmuxTarget else {
             debugLog("BAIL: no tmux target")
