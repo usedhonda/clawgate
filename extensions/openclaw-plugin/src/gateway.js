@@ -2492,7 +2492,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply via return_url failed: ${err?.message || err}`);
           // Fallback: prefer Telegram (sendTmuxMessage) over LINE, with redirect prefix
-          const fallbackText = `[Redirected: tproj-msg delivery failed]\n${text}`;
+          const fallbackText = `[redirect: ->${tprojHeader.sender}]\n${text}`;
           if (sendTmuxMessage) {
             try { await sendTmuxMessage(conversation, fallbackText, traceId); } catch {}
           } else {
@@ -2513,7 +2513,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply failed: ${err?.message || err}`);
           // Fallback: prefer Telegram (sendTmuxMessage) over LINE, with redirect prefix
-          const fallbackText2 = `[Redirected: tproj-msg delivery failed]\n${text}`;
+          const fallbackText2 = `[redirect: ->${tprojHeader.sender}]\n${text}`;
           if (sendTmuxMessage) {
             try { await sendTmuxMessage(conversation, fallbackText2, traceId); } catch {}
           } else {
