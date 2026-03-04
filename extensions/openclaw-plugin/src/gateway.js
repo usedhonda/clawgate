@@ -3933,12 +3933,6 @@ export async function startAccount(ctx) {
     }
     log?.info?.(`clawgate: [${accountId}] lineAvailable=${lineAvailable}`);
 
-    // Resolve messenger for tmux outbound (Telegram or LINE)
-    const messenger = account.messenger || "line";
-    const useTelegram = messenger === "telegram" && !!account.telegramBotToken && !!account.telegramChatId;
-    _activeMessenger = useTelegram ? "telegram" : "line";
-    log?.info?.(`clawgate: [${accountId}] messenger=${messenger} useTelegram=${useTelegram}`);
-
     // Pre-populate sessionModes from ClawGate config so idle sessions start with correct mode
     if (remoteConfig?.tmux?.sessionModes) {
       for (const [key, mode] of Object.entries(remoteConfig.tmux.sessionModes)) {
@@ -3953,6 +3947,13 @@ export async function startAccount(ctx) {
   } catch (err) {
     log?.debug?.(`clawgate: [${accountId}] config fetch failed (using defaults): ${err}`);
   }
+
+  // Resolve messenger for tmux outbound (Telegram or LINE)
+  // Declared outside try block so sendTmuxMessage closure can access it.
+  const messenger = account.messenger || "line";
+  const useTelegram = messenger === "telegram" && !!account.telegramBotToken && !!account.telegramChatId;
+  _activeMessenger = useTelegram ? "telegram" : "line";
+  log?.info?.(`clawgate: [${accountId}] messenger=${messenger} useTelegram=${useTelegram}`);
 
   // Get initial cursor
   let cursor = 0;
