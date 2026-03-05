@@ -54,17 +54,21 @@ CGWindowListCreateImage(screenRect, .optionIncludingWindow, windowID, [.bestReso
 LINE のチャット画面を前提とした固定レーン方式:
 
 ```
-画像右端から 38px の垂直ライン（3px幅）でピクセル分類
+画像右端から幅の 4.5% の垂直ライン（3px幅）でピクセル分類
   ├─ 緑ピクセル → 自分（送信済み）のバブル行
   └─ 白ピクセル → 入力欄・セパレータ
 ```
 
+> **詳細仕様**: [SPEC-green-bubble-masking.md](SPEC-green-bubble-masking.md) を参照。
+> 特に色空間とレーンオフセットの不変条件は必読。
+
 **処理手順**:
-1. 各行を白/緑/その他に分類（多数決: 2/3px が閾値を超えたら確定）
-2. `findBottomCutY`: 画面下部の連続白行 (≥8行) を入力欄セパレータと判定 → そこ以降を除去
+1. CGContext を**画像のオリジナル色空間** (`image.colorSpace`) で作成（deviceRGB 変換禁止）
+2. 各行を白/緑/その他に分類（多数決: 2/3px が閾値を超えたら確定）
+3. `findBottomCutY`: 画面下部の連続白行 (≥8行) を入力欄セパレータと判定 → そこ以降を除去
    - `minAcceptedCutRatioFromTop = 0.84`: 上から 84% 未満の位置のカットは誤検知防止でスキップ
-3. 緑行とその前後 ±3px をマスク（白で塗りつぶし）
-4. マスク済み画像で Vision OCR を実行
+4. 緑行とその前後 ±3px をマスク（白で塗りつぶし）
+5. マスク済み画像で Vision OCR を実行
 
 **OCR 設定**:
 ```swift
