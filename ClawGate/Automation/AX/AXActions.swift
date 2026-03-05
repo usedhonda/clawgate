@@ -306,7 +306,7 @@ enum AXActions {
         let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1920, height: 1055)
         // visibleFrame excludes menu bar and Dock, but uses bottom-left origin.
         // AX uses top-left origin. Convert.
-        let screenTop = (NSScreen.main?.frame.height ?? 1080) - screen.maxY  // menu bar height
+        let screenTop = (NSScreen.screens.first?.frame.height ?? 1080) - screen.maxY  // menu bar height
         let width = min(1200, screen.width * 0.65)
         let height = min(900, screen.height * 0.85)
         let x = screen.origin.x + 60  // slight offset from left edge
