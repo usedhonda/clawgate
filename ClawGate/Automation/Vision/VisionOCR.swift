@@ -139,7 +139,7 @@ enum VisionOCR {
 
     private static let laneOffsetRatio: Double = 0.045  // 4.5% from right edge (anchor crop basis)
     private static let laneHalfWidth = 1  // 3px lane
-    private static let greenExpandRows = 3
+    private static let greenRowThreshold = 10  // min green pixels in a row for full-width scan
     private static let whiteThreshold = 238
     private static let minBottomWhiteRun = 8
     /// Guard against false cut detection in the middle of chat history.
@@ -153,9 +153,9 @@ enum VisionOCR {
     }
 
     /// Fixed-lane preprocessing for inbound OCR:
-    /// 1) uses right-offset lane to classify rows (white/green/other),
-    /// 2) finds bottom white run as Y cut,
-    /// 3) masks all green rows (+/- expand),
+    /// 1) full-width scan classifies rows with green pixels as outbound,
+    /// 2) right-offset lane classifies remaining rows as white/other (for yCut),
+    /// 3) masks all green rows (no expansion),
     /// 4) drops everything at/below Y cut.
     private static func preprocessInboundImage(_ image: CGImage) -> (image: CGImage?, debug: InboundPreprocessDebug) {
         let width = image.width
@@ -197,47 +197,40 @@ enum VisionOCR {
         var greenRows = 0
         for y in 0..<height {
             let rowOffset = y * bytesPerRow
-            var greenVotes = 0
-            var whiteVotes = 0
-            for x in laneRange {
+            var greenCount = 0
+            for x in 0..<width {
                 let i = rowOffset + x * 4
                 let r = Int(buffer[i])
                 let g = Int(buffer[i + 1])
                 let b = Int(buffer[i + 2])
                 if isOutgoingGreenPixel(r: r, g: g, b: b) {
-                    greenVotes += 1
-                } else if isNearWhitePixel(r: r, g: g, b: b) {
-                    whiteVotes += 1
+                    greenCount += 1
+                    if greenCount >= greenRowThreshold { break }
                 }
             }
 
-            if greenVotes >= voteThreshold {
+            if greenCount >= greenRowThreshold {
                 rowClasses[y] = .green
                 greenRows += 1
-            } else if whiteVotes >= voteThreshold {
-                rowClasses[y] = .white
             } else {
-                rowClasses[y] = .other
+                // White row detection stays lane-based (for yCut)
+                var whiteVotes = 0
+                for x in laneRange {
+                    let i = rowOffset + x * 4
+                    let r = Int(buffer[i])
+                    let g = Int(buffer[i + 1])
+                    let b = Int(buffer[i + 2])
+                    if isNearWhitePixel(r: r, g: g, b: b) { whiteVotes += 1 }
+                }
+                rowClasses[y] = whiteVotes >= voteThreshold ? .white : .other
             }
         }
 
         let yCut = findBottomCutY(rowClasses: rowClasses)
 
-        var expandedMask = [Bool](repeating: false, count: height)
-        if greenRows > 0 {
-            for y in 0..<height where rowClasses[y] == .green {
-                let start = max(0, y - greenExpandRows)
-                let end = min(height - 1, y + greenExpandRows)
-                for yy in start...end {
-                    expandedMask[yy] = true
-                }
-            }
-        }
-        let expandedGreenRows = expandedMask.reduce(0) { $0 + ($1 ? 1 : 0) }
-
         var changed = false
         for y in 0..<height {
-            let shouldWhiteRow = expandedMask[y] || {
+            let shouldWhiteRow = rowClasses[y] == .green || {
                 guard let cutY = yCut else { return false }
                 return y >= cutY
             }()
@@ -257,7 +250,7 @@ enum VisionOCR {
                 laneX: laneX,
                 yCut: yCut,
                 greenRows: greenRows,
-                expandedGreenRows: expandedGreenRows,
+                expandedGreenRows: greenRows,
                 cutApplied: yCut != nil,
                 frameSkippedNoCut: yCut == nil
             )
