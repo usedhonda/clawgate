@@ -137,7 +137,7 @@ enum VisionOCR {
 
     // MARK: - Inbound preprocessing (fixed right lane)
 
-    private static let laneOffsetFromRight = 38
+    private static let laneOffsetRatio: Double = 0.045  // 4.5% from right edge (anchor crop basis)
     private static let laneHalfWidth = 1  // 3px lane
     private static let greenExpandRows = 3
     private static let whiteThreshold = 238
@@ -160,15 +160,16 @@ enum VisionOCR {
     private static func preprocessInboundImage(_ image: CGImage) -> (image: CGImage?, debug: InboundPreprocessDebug) {
         let width = image.width
         let height = image.height
+        let fallbackOffset = max(16, Int(Double(width) * laneOffsetRatio))
         let fallbackDebug = InboundPreprocessDebug(
-            laneX: max(0, width - laneOffsetFromRight),
+            laneX: max(0, width - fallbackOffset),
             yCut: nil,
             greenRows: 0,
             expandedGreenRows: 0,
             cutApplied: false,
             frameSkippedNoCut: true
         )
-        guard width > (laneOffsetFromRight + laneHalfWidth), height > 0 else {
+        guard width > (16 + laneHalfWidth), height > 0 else {
             return (nil, fallbackDebug)
         }
 
@@ -180,14 +181,15 @@ enum VisionOCR {
             height: height,
             bitsPerComponent: 8,
             bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
+            space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else {
             return (nil, fallbackDebug)
         }
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
 
-        let laneX = max(laneHalfWidth, min(width - 1 - laneHalfWidth, width - laneOffsetFromRight))
+        let dynamicOffset = max(16, Int(Double(width) * laneOffsetRatio))
+        let laneX = max(laneHalfWidth, min(width - 1 - laneHalfWidth, width - dynamicOffset))
         let laneRange = (laneX - laneHalfWidth)...(laneX + laneHalfWidth)
         let voteThreshold = laneRange.count / 2 + 1
 
@@ -291,7 +293,7 @@ enum VisionOCR {
     }
 
     private static func isOutgoingGreenPixel(r: Int, g: Int, b: Int) -> Bool {
-        g > 130 && g > r + 8 && g > b + 12
+        g > 130 && g > r + 10 && g > b + 16
     }
 
     private static func isNearWhitePixel(r: Int, g: Int, b: Int) -> Bool {
