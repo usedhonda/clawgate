@@ -320,6 +320,13 @@ final class LINEAdapter: AdapterProtocol {
             return true
         }
 
+        // Dismiss search mode after successful send so sidebar returns to conversation list.
+        // This prevents stale search text from polluting OCR on subsequent inbound polls.
+        if !canSkipNavigation {
+            AXActions.sendEscape()
+            usleep(100_000)
+        }
+
         lastConversationHint = payload.conversationHint
         logger.log(.info, "LINE send flow finished for \(payload.conversationHint)")
         recentSendTracker.recordSend(conversation: payload.conversationHint, text: payload.text)
