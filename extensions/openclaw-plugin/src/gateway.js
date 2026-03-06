@@ -1326,17 +1326,17 @@ function inferIngressOrigin(adapter, source) {
 
 /**
  * Resolve which outbound channel (LINE or Telegram) to use for a message.
- * Priority: ingress adapter (reply routing) > tproj header > dev mode > default (LINE).
+ * Priority: ingress adapter (reply routing) > tproj header > default (LINE).
+ * Telegram is only used when the ingress was Telegram or message came via tproj-msg.
+ * Chi can explicitly route to Telegram using <send_telegram> tags.
  */
-function resolveOutboundChannel({ ingressAdapter, mode, tprojHeader } = {}) {
+function resolveOutboundChannel({ ingressAdapter, tprojHeader } = {}) {
   // 1. Reply: send back to originating channel
   if (ingressAdapter === "telegram") return "telegram";
   if (ingressAdapter === "line") return "line";
   // 2. tproj-msg sourced -> Telegram (dev context)
   if (tprojHeader) return "telegram";
-  // 3. Dev modes -> Telegram
-  if (["autonomous", "observe", "auto"].includes(mode)) return "telegram";
-  // 4. Secretary/default -> LINE
+  // 3. Default -> LINE
   return "line";
 }
 
@@ -1693,6 +1693,7 @@ function stripChoiceTags(text) {
   let result = `${text || ""}`.trim();
   if (!result) return "";
   result = result
+    .replace(/<send_telegram>([\s\S]*?)<\/send_telegram>/gi, "")
     .replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "")
     .replace(/<cc_answer\s+project="[^"]*">([\s\S]*?)<\/cc_answer>/gi, "")
     .replace(/<cc_read\s+project="[^"]+"\s*\/?>(?:<\/cc_read>)?/gi, "")
@@ -1941,6 +1942,22 @@ async function inspectTmuxDraftBeforeTaskSend({ apiUrl, project, traceId, log })
     log?.warn?.(`clawgate: typing guard exception for "${project}": ${err?.message}`);
     return { blocked: true, reason: "pane_read_exception", message: "prompt state unknown" };
   }
+}
+
+// ── <send_telegram> explicit routing ──────────────────────────
+
+/**
+ * Extract <send_telegram>...</send_telegram> blocks from text.
+ * Returns { telegramTexts: string[], remaining: string } if any blocks found, else null.
+ */
+function extractSendTelegramBlocks(text) {
+  const blocks = [];
+  const remaining = text.replace(/<send_telegram>([\s\S]*?)<\/send_telegram>/gi, (_, content) => {
+    const trimmed = content.trim();
+    if (trimmed) blocks.push(trimmed);
+    return "";
+  });
+  return blocks.length > 0 ? { telegramTexts: blocks, remaining: remaining.trim() } : null;
 }
 
 // ── Autonomous task chaining ──────────────────────────────────
@@ -2308,8 +2325,11 @@ function buildRosterPrefix() {
   // Read hint is always available when sessions exist
   const readHint = _prompts.rosterFooter.readHint || "";
 
+  // <send_telegram> hint — shown when sessions exist
+  const sendTelegramHint = _prompts.rosterFooter.sendTelegramHint || "";
+
   const sessionCount = sessionModes.size;
-  return `[Active Claude Code Projects: ${sessionCount} session${sessionCount !== 1 ? "s" : ""}]\n${roster}${taskHint}${answerHint}${readHint}`;
+  return `[Active Claude Code Projects: ${sessionCount} session${sessionCount !== 1 ? "s" : ""}]\n${roster}${taskHint}${answerHint}${readHint}${sendTelegramHint}`;
 }
 
 /**
@@ -2486,8 +2506,21 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
   const deliver = async (payload) => {
-    const text = extractReplyText(payload, log, "line_inbound_dispatch");
+    let text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
+
+    // Extract <send_telegram> blocks — send those parts to Telegram, continue with remainder
+    const telegramExtract = extractSendTelegramBlocks(text);
+    if (telegramExtract) {
+      for (const tgText of telegramExtract.telegramTexts) {
+        try { await sendTmuxMessage(conversation, tgText, traceId, { channel: "telegram" }); } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send_telegram block send failed (line_inbound): ${err}`);
+        }
+      }
+      text = telegramExtract.remaining;
+      if (!text) return;
+    }
+
     const sendReply = async (replyMsg) => {
       if (tprojHeader) {
         const prefixed = `[${tprojHeader.sender}] ${replyMsg}`;
@@ -2968,8 +3001,8 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options, prompt=${_promptMeta.hash})`);
 
-  // Resolve outbound channel for question responses (dev modes -> Telegram)
-  const questionChannel = resolveOutboundChannel({ mode });
+  // Resolve outbound channel for question responses (default -> LINE)
+  const questionChannel = resolveOutboundChannel();
 
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
@@ -2979,8 +3012,20 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   // Deliver reply — parse <cc_answer> (auto mode only) and route answer, or forward to LINE
   const deliver = async (replyPayload) => {
-    const replyText = extractReplyText(replyPayload, log, "tmux_question");
+    let replyText = extractReplyText(replyPayload, log, "tmux_question");
     if (!replyText.trim()) return;
+
+    // Extract <send_telegram> blocks — send those parts to Telegram, continue with remainder
+    const telegramExtract = extractSendTelegramBlocks(replyText);
+    if (telegramExtract) {
+      for (const tgText of telegramExtract.telegramTexts) {
+        try { await sendTmuxMessage(defaultConversation || project, tgText, traceId, { channel: "telegram" }); } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send_telegram block send failed (question): ${err}`);
+        }
+      }
+      replyText = telegramExtract.remaining;
+      if (!replyText) return;
+    }
 
     // Auto mode only: try <cc_answer> to auto-select
     if (mode === "auto") {
@@ -3315,8 +3360,8 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}, prompt=${_promptMeta.hash}): "${text.slice(0, 80)}"`);
 
-  // Resolve outbound channel for completion responses (dev modes -> Telegram)
-  const completionChannel = resolveOutboundChannel({ mode });
+  // Resolve outbound channel for completion responses (default -> LINE)
+  const completionChannel = resolveOutboundChannel();
 
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
@@ -3345,6 +3390,18 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         try { await sendLine(defaultConversation || project, msg); } catch {}
       }
       return;
+    }
+
+    // Extract <send_telegram> blocks — send those parts to Telegram, continue with remainder
+    const telegramExtract = extractSendTelegramBlocks(replyText);
+    if (telegramExtract) {
+      for (const tgText of telegramExtract.telegramTexts) {
+        try { await sendTmuxMessage(defaultConversation || project, tgText, traceId, { channel: "telegram" }); } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send_telegram block send failed: ${err}`);
+        }
+      }
+      replyText = telegramExtract.remaining;
+      if (!replyText) return;
     }
 
     if (interactionPending) {

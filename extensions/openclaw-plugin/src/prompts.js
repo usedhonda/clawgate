@@ -59,6 +59,7 @@ export default {
     "  CRITICAL: You MUST include <cc_task> tags in your reply. Without them, nothing reaches the session.",
     "  - Issues found: <cc_task>your specific feedback</cc_task>",
     "  - Satisfied / no issues: <cc_task>LGTM</cc_task> — this ends the review loop and sends your summary (text outside tags) to the user.",
+    "  LINE is the default destination. To send to Telegram, wrap content in <send_telegram>text</send_telegram> tags.",
     "  Messenger updates are milestone-based only: blocking risk, interaction-pending advisories, and final wrap-up.",
     "  Kickoff/mid-loop chatter must stay in-session (not the messenger).",
     "- OBSERVE: Review for the user only. 3-8 lines, cover GOAL/SCOPE/RISK every time. Mention ARCHITECTURE/MISSING when relevant. Never use <cc_task> or <cc_answer>.",
@@ -78,7 +79,7 @@ export default {
       "Ground your feedback in project docs/context first; avoid speculation when evidence is missing.",
       "Do not finalize high-impact choices yourself. Recommend, then leave final go/no-go to explicit user GO.",
       "Your primary audience is CC/Codex. Put substantive feedback inside <cc_task> tags.",
-      "Text outside tags is for user-facing milestone summaries only (risk/interaction_pending/final). Never send one-word acknowledgements.",
+      "Text outside tags goes to LINE (user-facing milestone summaries: risk/interaction_pending/final only). To send to Telegram, use <send_telegram>text</send_telegram>. Never send one-word acknowledgements.",
       "Example (issues): 'Potential regression risk: retry path can double-send.\n<cc_task>Retry handling in sendMessage() can double-send after timeout; make retry idempotent and add a regression test.</cc_task>'",
       "Example (satisfied): 'Final check: no blockers and tests pass.\n<cc_task>LGTM</cc_task>'",
     ],
@@ -126,14 +127,16 @@ export default {
   // ── Question body templates ─────────────────────────────────────
   // Placeholders: {label}, {project}, {questionText}, {numberedOptions}
   questionBody: {
-    auto: '[{label} {project}] Claude Code is asking a question:\n\n{questionText}\n\nOptions:\n{numberedOptions}\n\n[To answer, include <cc_answer project="{project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to the user.]',
+    auto: '[{label} {project}] Claude Code is asking a question:\n\n{questionText}\n\nOptions:\n{numberedOptions}\n\n[To answer, include <cc_answer project="{project}">{option number}</cc_answer> in your reply. Use 1-based numbering (1 = first option). Text outside the tag goes to LINE.]',
     default: "[{label} {project}] Claude Code is asking a question:\n\n{questionText}\n\nOptions:\n{numberedOptions}\n\n[Analyze the options and send your recommendation to the user. Do NOT use <cc_answer>.]",
   },
 
   // ── Roster footer hints ─────────────────────────────────────────
   rosterFooter: {
     taskHint:
-      "\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to the user.",
+      "\nYou can send tasks to autonomous projects by including <cc_task>your task</cc_task> in your reply. Text outside the tags goes to LINE.",
+    sendTelegramHint:
+      "\nTo send content to Telegram, wrap it in <send_telegram>text</send_telegram> tags. Text outside tags goes to LINE.",
     answerHint:
       '\nTo answer a pending question, include <cc_answer project="name">{option number}</cc_answer> in your reply.',
     readHint:
