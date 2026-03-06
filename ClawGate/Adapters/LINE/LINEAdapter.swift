@@ -121,6 +121,8 @@ final class LINEAdapter: AdapterProtocol {
 
         // Same-conversation cache: skip search if already in the right conversation
         var canSkipNavigation = false
+        var sidebarDetectedAfterSearch = false
+        var clickedSidebarResultRow = false
         if let lastHint = lastConversationHint, lastHint == payload.conversationHint {
             let wfNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
             if (SelectorResolver.resolve(
@@ -197,15 +199,21 @@ final class LINEAdapter: AdapterProtocol {
             AXActions.sendSearchEnter()
             usleep(400_000) // 400ms for search results to populate after Enter
 
-            // 6. Click first conversation result row (height > 40, skip header rows ~34px)
+            // 6. Click the first visible row from the sidebar result list only.
             let freshNodes = AXQuery.descendants(of: rootWindow)
-            let resultRow = freshNodes.first { node in
-                node.role == "AXRow"
-                    && (node.frame?.height ?? 0) > 40
-                    && (node.frame?.width ?? 0) > 0
-            }
-            if let row = resultRow {
-                AXActions.clickAtCenter(row.element)
+            let freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+            if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame) {
+                sidebarDetectedAfterSearch = true
+                logger.log(.debug, "LINE search sidebar detected rows=\(sidebar.visibleRows.count)")
+                if let row = sidebar.visibleRows.first {
+                    clickedSidebarResultRow = true
+                    logger.log(.info, "LINE search result click row_y=\(Int(row.frame.minY)) rows=\(sidebar.visibleRows.count)")
+                    _ = AXActions.clickAtCenter(row.element)
+                } else {
+                    logger.log(.warning, "LINE search sidebar found but no clickable rows")
+                }
+            } else {
+                logger.log(.warning, "LINE search sidebar not found after Enter")
             }
             // If no row found, Enter may have already navigated (v4 behavior)
             return true
@@ -224,6 +232,15 @@ final class LINEAdapter: AdapterProtocol {
             }
             if found {
                 return freshNodes
+            }
+            if sidebarDetectedAfterSearch && !clickedSidebarResultRow {
+                throw BridgeRuntimeError(
+                    code: "search_result_not_found",
+                    message: "No clickable search result row found",
+                    retriable: true,
+                    failedStep: "rescan_after_navigation",
+                    details: "sidebar_detected=true"
+                )
             }
             throw BridgeRuntimeError(
                 code: "rescan_timeout",
@@ -379,66 +396,68 @@ final class LINEAdapter: AdapterProtocol {
 
     func getConversations(limit: Int) throws -> ConversationList {
         try withLINEWindow { rootWindow, windowFrame, nodes in
-            let sidebarNodes = nodes.filter { node in
-                guard node.role == "AXStaticText", let frame = node.frame else { return false }
-                let relX = Double(frame.midX - windowFrame.origin.x) / Double(windowFrame.width)
-                let relY = Double(frame.midY - windowFrame.origin.y) / Double(windowFrame.height)
-                let geo = LineSelectors.conversationNameU.geometryHint!
-                return geo.regionX.contains(relX) && geo.regionY.contains(relY)
-            }
-
-            guard !sidebarNodes.isEmpty else {
+            guard let sidebar = LineSidebarDiscovery.findSidebarList(in: nodes, windowFrame: windowFrame) else {
+                logger.log(.warning, "LINE sidebar discovery failed: sidebar list not visible")
                 throw BridgeRuntimeError(
                     code: "sidebar_not_visible",
                     message: "Sidebar is not visible",
                     retriable: true,
                     failedStep: "get_conversations",
-                    details: nil
+                    details: "sidebar_list_not_found"
                 )
             }
 
             let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+            logger.log(.info, "LINE sidebar list found rows=\(sidebar.visibleRows.count)")
 
-            struct SidebarItem {
-                let text: String
-                let frame: CGRect
-            }
+            let axCandidates = LineSidebarDiscovery.extractAXConversationCandidates(
+                from: sidebar.visibleRows,
+                nodes: nodes,
+                windowTitle: windowTitle
+            )
+            logger.log(.info, "LINE sidebar names ax=\(axCandidates.count) rows=\(sidebar.visibleRows.count)")
 
-            let items: [SidebarItem] = sidebarNodes.compactMap { node in
-                let text = node.value ?? node.title ?? node.description
-                guard let t = text, !t.isEmpty, let frame = node.frame else { return nil }
-                guard !LINEAdapter.isUIChrome(t, windowTitle: windowTitle) else { return nil }
-                return SidebarItem(text: t, frame: frame)
-            }.sorted { $0.frame.origin.y < $1.frame.origin.y }
-
-            // Group by Y proximity (< 10px = same conversation)
-            var groups: [[SidebarItem]] = []
-            for item in items {
-                if let lastGroup = groups.last, let lastItem = lastGroup.last,
-                   abs(item.frame.origin.y - lastItem.frame.origin.y) < 10 {
-                    groups[groups.count - 1].append(item)
+            var ocrCandidates: [LineSidebarDiscovery.SidebarConversationCandidate] = []
+            var failureReason = "sidebar_rows_visible_but_names_missing"
+            if axCandidates.count < min(limit, sidebar.visibleRows.count) {
+                if let pid = AXQuery.pid(of: rootWindow), let windowID = AXActions.findWindowID(pid: pid) {
+                    ocrCandidates = LineSidebarDiscovery.extractOCRConversationCandidates(
+                        from: sidebar.visibleRows,
+                        windowID: windowID,
+                        config: .default,
+                        windowTitle: windowTitle
+                    )
+                    logger.log(.info, "LINE sidebar names ocr=\(ocrCandidates.count) rows=\(sidebar.visibleRows.count)")
+                    if ocrCandidates.isEmpty && axCandidates.isEmpty {
+                        failureReason = "ocr_unavailable_or_empty"
+                    }
                 } else {
-                    groups.append([item])
+                    failureReason = "ocr_window_id_missing"
+                    logger.log(.warning, "LINE sidebar OCR fallback unavailable: missing window ID")
                 }
             }
 
-            // Detect unread: a digit-only text node to the right of the conversation name
-            let digitNodes = sidebarNodes.filter { node in
-                let text = node.value ?? node.title ?? node.description
-                guard let t = text, !t.isEmpty else { return false }
-                return t.trimmingCharacters(in: .whitespacesAndNewlines).allSatisfy(\.isNumber)
-            }
+            let unreadFrames = LineSidebarDiscovery.extractUnreadIndicatorFrames(
+                from: nodes,
+                sidebarFrame: sidebar.frame
+            )
+            let conversations = LineSidebarDiscovery.buildConversationEntries(
+                axCandidates: axCandidates,
+                ocrCandidates: ocrCandidates,
+                unreadFrames: unreadFrames,
+                limit: limit
+            )
 
-            let conversations: [ConversationEntry] = groups.prefix(limit).enumerated().map { index, group in
-                let convName = group.max(by: { $0.text.count < $1.text.count })?.text ?? ""
-                let mainFrame = group.first?.frame
-                let hasUnread = mainFrame.map { mf in
-                    digitNodes.contains { digit in
-                        guard let df = digit.frame else { return false }
-                        return df.origin.x > mf.origin.x && abs(df.midY - mf.midY) < 15
-                    }
-                } ?? false
-                return ConversationEntry(name: convName, yOrder: index, hasUnread: hasUnread)
+            guard !conversations.isEmpty else {
+                let details = "\(failureReason) row_count=\(sidebar.visibleRows.count) ax_names=\(axCandidates.count) ocr_names=\(ocrCandidates.count)"
+                logger.log(.warning, "LINE sidebar discovery failed: \(details)")
+                throw BridgeRuntimeError(
+                    code: "sidebar_not_visible",
+                    message: "Sidebar is not visible",
+                    retriable: true,
+                    failedStep: "get_conversations",
+                    details: details
+                )
             }
 
             return ConversationList(

@@ -179,7 +179,9 @@ Error:
 | `ax_permission_missing` | 400 | false | Accessibility not granted |
 | `line_not_running` | 503 | true | LINE app not running |
 | `line_window_not_found` | 503 | true | LINE window not accessible |
+| `sidebar_not_visible` | 503 | true | Sidebar list exists but names cannot be recovered |
 | `message_input_not_found` | 503 | true | Chat input field not found |
+| `search_result_not_found` | 503 | true | Search sidebar is visible but no clickable result row exists |
 | `browser_origin_rejected` | 403 | false | Origin header present on POST request |
 | `axdump_failed` | 503 | true | AX tree dump failed |
 | `not_supported` | 400 | false | Adapter doesn't implement method |
@@ -411,6 +413,20 @@ Response:
 #### `GET /v1/conversations[?adapter=line&limit=50]`
 Offloaded to BlockingWork.queue. Requires AX permission.
 
+Discovery order:
+1. Find the left sidebar `AXList`
+2. Recover conversation names from AX text nodes inside visible sidebar rows
+3. If AX rows are textless, OCR the visible sidebar rows and merge the names
+
+Failure compatibility:
+- If the sidebar list itself is missing, or rows are visible but names still cannot be recovered,
+  the endpoint returns `503 sidebar_not_visible`
+- `error.details` may include:
+  - `sidebar_list_not_found`
+  - `sidebar_rows_visible_but_names_missing row_count=... ax_names=... ocr_names=...`
+  - `ocr_window_id_missing row_count=... ax_names=... ocr_names=...`
+  - `ocr_unavailable_or_empty row_count=... ax_names=... ocr_names=...`
+
 Response:
 ```json
 {
@@ -457,6 +473,10 @@ Validation:
 - `action` must be `"send_message"` (only supported action)
 - `conversation_hint` must be non-empty
 - `text` must be non-empty
+
+Possible retriable adapter errors:
+- `search_result_not_found`: search sidebar was visible, but no clickable conversation result row was available
+- `rescan_timeout`: search/navigation did not reach a chat input within the retry window
 
 Response:
 ```json

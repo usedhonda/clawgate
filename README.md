@@ -168,6 +168,8 @@ All endpoints return JSON (`{"ok": true, "result": {...}}` or `{"ok": false, "er
 Local mode requires no authentication. Remote mode requires `Authorization: Bearer <token>`.
 POST requests with an `Origin` header are rejected (CSRF protection).
 
+For `adapter=line`, `GET /v1/conversations` uses AX text first and falls back to OCR on visible sidebar rows when the current LINE AX tree exposes textless `AXRow`s only.
+
 ### Tmux Session Mode API
 
 `session_type` is `claude_code` or `codex`.
@@ -354,6 +356,7 @@ ClawGate/
   Adapters/
     LINE/
       LINEAdapter.swift                   # Messenger AX automation (LINE adapter)
+      LineSidebarDiscovery.swift          # Sidebar AX/OCR discovery helpers
       LINEInboundWatcher.swift            # AX polling for inbound detection
       NotificationBannerWatcher.swift     # Event-driven banner detection
       Detection/                          # Multi-signal fusion engine
