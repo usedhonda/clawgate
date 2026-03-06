@@ -98,5 +98,19 @@ echo "[remote] health + gateway:"
 ssh "$REMOTE_HOST" "launchctl list | grep ai.openclaw.gateway || true; curl -sS -m 3 http://127.0.0.1:8765/v1/health || true; echo; curl -sS -m 3 http://127.0.0.1:8765/v1/doctor || true"
 echo
 
+echo "[remote] LINE conversation ensure:"
+LINE_CONV=$(ssh "$REMOTE_HOST" "curl -fsS -m 3 http://127.0.0.1:8765/v1/config 2>/dev/null" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('line',{}).get('default_conversation',''))" 2>/dev/null || true)
+if [[ -n "$LINE_CONV" ]]; then
+  ENSURE_RESULT=$(ssh "$REMOTE_HOST" "curl -fsS -m 10 -X POST http://127.0.0.1:8765/v1/line/ensure-conversation -H 'Content-Type: application/json' -d '{\"conversation\":\"$LINE_CONV\"}'" 2>/dev/null || true)
+  ENSURE_OK=$(echo "$ENSURE_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "False")
+  if [[ "$ENSURE_OK" == "True" ]]; then
+    echo "ok (navigated to '$LINE_CONV')"
+  else
+    echo "WARN: LINE conversation navigation failed: $ENSURE_RESULT" >&2
+  fi
+else
+  echo "WARN: defaultConversation not configured, skipping LINE nav" >&2
+fi
+
 echo "Done."
 ops_log info "stack_restart_ok" "stack restart finished"

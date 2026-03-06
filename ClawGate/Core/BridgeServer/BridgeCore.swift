@@ -384,6 +384,19 @@ final class BridgeCore {
                     details: nil
                 )
             }
+            // Reject conversation hints that are clearly not real conversation names.
+            // These pollute the LINE search field when external agents send garbage values.
+            let hintLower = request.payload.conversationHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let blockedHints = ["heartbeat", "line", "ping", "test", "health", "status"]
+            if request.adapter == "line" && blockedHints.contains(hintLower) {
+                throw BridgeRuntimeError(
+                    code: "invalid_conversation_hint",
+                    message: "conversation_hint '\(request.payload.conversationHint)' is not a valid conversation name",
+                    retriable: false,
+                    failedStep: "validate_request",
+                    details: "blocked_hint"
+                )
+            }
             guard !request.payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw BridgeRuntimeError(
                     code: "invalid_text",
@@ -1534,6 +1547,62 @@ final class BridgeCore {
         headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
         headers.add(name: "Content-Length", value: "\(data.count)")
         return HTTPResult(status: status, headers: headers, body: data)
+    }
+
+    // MARK: - LINE Ensure Conversation
+
+    func ensureLineConversation(body: Data) -> HTTPResult {
+        struct EnsureRequest: Decodable {
+            let conversation: String?
+        }
+        let conversation: String
+        if let req = try? jsonDecoder.decode(EnsureRequest.self, from: body), let c = req.conversation, !c.isEmpty {
+            conversation = c
+        } else {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(APIResponse<String>(
+                    ok: false, result: nil,
+                    error: ErrorPayload(code: "missing_conversation", message: "conversation field required", retriable: false, failedStep: "parse", details: nil)
+                ))
+            )
+        }
+
+        guard let line = registry.adapter(for: "line") as? LINEAdapter else {
+            return jsonResponse(
+                status: .internalServerError,
+                body: encode(APIResponse<String>(
+                    ok: false, result: nil,
+                    error: ErrorPayload(code: "line_adapter_unavailable", message: "LINE adapter not registered", retriable: false, failedStep: "adapter_lookup", details: nil)
+                ))
+            )
+        }
+
+        do {
+            let success = try line.navigateToConversation(hint: conversation)
+            if success {
+                logger.log(.info, "ensureLineConversation: navigated to '\(conversation)'")
+                return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: "navigated", error: nil)))
+            } else {
+                logger.log(.warning, "ensureLineConversation: navigation failed for '\(conversation)'")
+                return jsonResponse(
+                    status: .ok,
+                    body: encode(APIResponse<String>(
+                        ok: false, result: nil,
+                        error: ErrorPayload(code: "navigation_failed", message: "Could not navigate to conversation '\(conversation)'", retriable: true, failedStep: "navigate", details: nil)
+                    ))
+                )
+            }
+        } catch {
+            logger.log(.warning, "ensureLineConversation error: \(error)")
+            return jsonResponse(
+                status: .internalServerError,
+                body: encode(APIResponse<String>(
+                    ok: false, result: nil,
+                    error: ErrorPayload(code: "navigation_error", message: "\(error)", retriable: true, failedStep: "navigate", details: nil)
+                ))
+            )
+        }
     }
 
     private func buildTmuxConversationListFromEventBus(limit: Int) -> ConversationList {

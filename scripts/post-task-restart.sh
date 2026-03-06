@@ -71,6 +71,20 @@ echo "[verify] Host A gateway"
 ssh "$REMOTE_HOST" "launchctl list | grep ai.openclaw.gateway >/dev/null"
 echo "ok"
 
+echo "[verify] Host A LINE conversation"
+LINE_CONV=$(ssh "$REMOTE_HOST" "curl -fsS -m 3 http://127.0.0.1:8765/v1/config 2>/dev/null" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('line',{}).get('default_conversation',''))" 2>/dev/null || true)
+if [[ -n "$LINE_CONV" ]]; then
+  ENSURE_RESULT=$(ssh "$REMOTE_HOST" "curl -fsS -m 10 -X POST http://127.0.0.1:8765/v1/line/ensure-conversation -H 'Content-Type: application/json' -d '{\"conversation\":\"$LINE_CONV\"}'" 2>/dev/null || true)
+  ENSURE_OK=$(echo "$ENSURE_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "False")
+  if [[ "$ENSURE_OK" == "True" ]]; then
+    echo "ok (navigated to '$LINE_CONV')"
+  else
+    echo "WARN: LINE conversation navigation failed: $ENSURE_RESULT" >&2
+  fi
+else
+  echo "WARN: defaultConversation not configured, skipping LINE nav" >&2
+fi
+
 if [[ "$REQUIRE_HOSTA_LOCAL_SIGN" == "true" ]]; then
   echo "[verify] Host A local-sign stamp"
   REMOTE_HEAD="$(ssh "$REMOTE_HOST" "cd '$PROJECT_PATH' && git rev-parse HEAD 2>/dev/null || echo unknown" | tr -d '\r')"

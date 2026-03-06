@@ -38,6 +38,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/tmux/prompt-state"),
         (.POST, "/v1/tproj-msg-deliver"),
         (.GET, "/v1/project-context-read"),
+        (.POST, "/v1/line/ensure-conversation"),
     ]
 
     private var requestHead: HTTPRequestHead?
@@ -207,6 +208,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 let federation = components?.queryItems?.first(where: { $0.name == "federation" })?.value == "1"
                 let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
                 result = core.projectContextRead(cmd: cmd, arg: arg, federation: federation, project: project)
+            } else if method == .POST && path == "/v1/line/ensure-conversation" {
+                result = core.ensureLineConversation(body: bodyData)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()

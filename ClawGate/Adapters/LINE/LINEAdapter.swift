@@ -552,6 +552,127 @@ final class LINEAdapter: AdapterProtocol {
         return SelectorCandidate(node: node, confidence: 0.3, matchedLayer: 1)
     }
 
+    // MARK: - Navigate to conversation (no send)
+
+    /// Navigate LINE to the given conversation without sending a message.
+    /// Returns true if the input field is present after navigation.
+    func navigateToConversation(hint: String) throws -> Bool {
+        let app: NSRunningApplication = try {
+            guard let running = NSRunningApplication.runningApplications(
+                withBundleIdentifier: bundleIdentifier
+            ).first else {
+                throw BridgeRuntimeError(
+                    code: "line_not_running",
+                    message: "LINE is not running",
+                    retriable: false, failedStep: "ensure_line_running", details: nil
+                )
+            }
+            return running
+        }()
+
+        let pid = app.processIdentifier
+        let appElement = AXQuery.applicationElement(pid: pid)
+        guard let rootWindow = AXActions.ensureWindow(
+            app: app, appElement: appElement, bundleID: bundleIdentifier
+        ) else {
+            throw BridgeRuntimeError(
+                code: "window_not_found",
+                message: "LINE window not found",
+                retriable: true, failedStep: "find_window", details: nil
+            )
+        }
+
+        let windowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? .zero
+        let nodes = AXQuery.descendants(of: rootWindow)
+
+        // Already in chat view with input field?
+        if (SelectorResolver.resolve(
+            selector: LineSelectors.messageInputU, in: nodes, windowFrame: windowFrame
+        ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)) != nil {
+            logger.log(.info, "ensureConversation: already in chat view")
+            lastConversationHint = hint
+            return true
+        }
+
+        // Navigate: search -> click
+        guard let searchField = SelectorResolver.resolve(
+            selector: LineSelectors.searchFieldU, in: nodes, windowFrame: windowFrame
+        ) ?? legacyResolve(LineSelectors.searchField, in: nodes) else {
+            throw BridgeRuntimeError(
+                code: "search_field_not_found",
+                message: "Search field not found",
+                retriable: true, failedStep: "ensure_conversation", details: nil
+            )
+        }
+
+        let activateDone = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            app.activate(options: [.activateIgnoringOtherApps])
+            activateDone.signal()
+        }
+        activateDone.wait()
+        usleep(150_000)
+
+        AXActions.setFocused(searchField.node.element)
+        usleep(100_000)
+
+        guard AXActions.setValue(hint, on: searchField.node.element) else {
+            throw BridgeRuntimeError(
+                code: "search_set_failed",
+                message: "Failed to set search field value",
+                retriable: true, failedStep: "ensure_conversation", details: nil
+            )
+        }
+
+        let verified = AXActions.poll(intervalMs: 30, timeoutMs: 500) {
+            let val = AXQuery.copyStringAttribute(searchField.node.element, attribute: kAXValueAttribute as String) ?? ""
+            return !val.isEmpty
+        }
+        guard verified else {
+            throw BridgeRuntimeError(
+                code: "search_value_empty",
+                message: "Search field value empty after setValue",
+                retriable: true, failedStep: "ensure_conversation", details: nil
+            )
+        }
+
+        AXActions.sendSearchEnter()
+        usleep(400_000)
+
+        let freshNodes = AXQuery.descendants(of: rootWindow)
+        let freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+        if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame),
+           let row = sidebar.visibleRows.first {
+            logger.log(.info, "ensureConversation: clicking sidebar row")
+            _ = AXActions.clickAtCenter(row.element)
+        }
+
+        // Poll for messageInput to confirm navigation succeeded
+        let found = AXActions.poll(intervalMs: 100, timeoutMs: 3000) {
+            let n = AXQuery.descendants(of: rootWindow)
+            let wf = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+            return (SelectorResolver.resolve(
+                selector: LineSelectors.messageInputU, in: n, windowFrame: wf
+            ) ?? self.legacyResolve(LineSelectors.messageInput, in: n)) != nil
+        }
+
+        if !found {
+            AXActions.sendEscape()
+            usleep(100_000)
+            logger.log(.warning, "ensureConversation: navigation failed, sent Escape")
+            return false
+        }
+
+        // Dismiss search mode after successful navigation to prevent stale search text
+        // from polluting the search field (e.g. "heartbeat" written by external agents)
+        AXActions.sendEscape()
+        usleep(100_000)
+
+        lastConversationHint = hint
+        logger.log(.info, "ensureConversation: navigated to '\(hint)'")
+        return true
+    }
+
     private func step<T>(
         _ name: String,
         logger: StepLogger,
