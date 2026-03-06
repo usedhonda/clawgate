@@ -108,7 +108,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .normal
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = false
         panel.animationBehavior = .utilityWindow
         panel.backgroundColor = PanelTheme.backgroundNSColor
         panel.isOpaque = false
@@ -194,7 +194,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.minSize = NSSize(width: 200, height: panel.minSize.height)
         setTrafficLightsHidden(false)
         panel.isMovable = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = false
 
         let targetWidth = min(max(normalPanelWidth, panel.minSize.width), panel.maxSize.width)
         if abs(panel.frame.width - targetWidth) > 0.5 {
@@ -606,7 +606,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         setTrafficLightsHidden(false)
         panel.isMovable = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = false
 
         let expandOrigin: NSPoint
         if isGhosttySnapped, let g = findGhosttyFrame() {

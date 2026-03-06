@@ -49,6 +49,8 @@ struct MainPanelView: View {
     @ViewBuilder
     private var normalContent: some View {
         VStack(alignment: .leading, spacing: PanelTheme.spacing) {
+            PanelWindowDragHandle()
+
             // Tab bar
             HStack(spacing: 2) {
                 ForEach(Tab.allCases, id: \.rawValue) { tab in
@@ -160,12 +162,9 @@ struct MainPanelView: View {
                     .font(PanelTheme.smallFont)
                     .foregroundStyle(PanelTheme.textTertiary)
             } else {
-                ForEach(panelModel.logs) { row in
-                    Text(row.text)
-                        .font(PanelTheme.smallFont)
-                        .foregroundStyle(logColor(from: row.color))
-                        .lineLimit(1)
-                }
+                Text(opsLogsAttributedText())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -192,6 +191,20 @@ struct MainPanelView: View {
         return Color(red: Double(r), green: Double(g), blue: Double(b))
     }
 
+    private func opsLogsAttributedText() -> AttributedString {
+        var result = AttributedString()
+        for (index, row) in panelModel.logs.enumerated() {
+            var line = AttributedString(row.text)
+            line.font = PanelTheme.smallFont
+            line.foregroundColor = logColor(from: row.color)
+            result.append(line)
+            if index < panelModel.logs.count - 1 {
+                result.append(AttributedString("\n"))
+            }
+        }
+        return result
+    }
+
     // MARK: - VibeTerm
 
     private var vibetermSection: some View {
@@ -211,6 +224,59 @@ struct MainPanelView: View {
             QRCodeView()
                 .frame(maxWidth: .infinity, alignment: .center)
         }
+    }
+}
+
+private struct PanelWindowDragHandle: View {
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
+                .fill(PanelTheme.backgroundCard.opacity(0.88))
+                .overlay(
+                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
+                        .stroke(PanelTheme.cardBorder.opacity(1.0), lineWidth: 1)
+                )
+
+            HStack(spacing: 6) {
+                Image(systemName: "hand.draw")
+                    .font(.system(size: 10, weight: .medium))
+                Text("Drag Panel")
+                    .font(PanelTheme.smallFont)
+            }
+            .foregroundStyle(PanelTheme.textTertiary)
+            .allowsHitTesting(false)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 18)
+        .overlay {
+            PanelWindowDragRegion()
+        }
+        .help("Drag panel")
+    }
+}
+
+private struct PanelWindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> PanelWindowDragRegionView {
+        PanelWindowDragRegionView()
+    }
+
+    func updateNSView(_ nsView: PanelWindowDragRegionView, context: Context) {}
+}
+
+private final class PanelWindowDragRegionView: NSView {
+    override var isOpaque: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
     }
 }
 
