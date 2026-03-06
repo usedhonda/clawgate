@@ -34,7 +34,7 @@ export const outbound = {
     // LINE via ClawGate does not support media — send text fallback
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
-    const conversationHint = (to === "default" || to.includes(":"))
+    const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
       ? (account.defaultConversation || to)
       : to;
     const caption = text || (mediaUrl ? `[media: ${mediaUrl}]` : "[media]");
@@ -56,7 +56,7 @@ export const outbound = {
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
     // Account-format targets (e.g. "default", "clawgate:default") -> use defaultConversation
-    const conversationHint = (to === "default" || to.includes(":"))
+    const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
       ? (account.defaultConversation || to)
       : to;
     const { project, sessionType } = getActiveProject(conversationHint);

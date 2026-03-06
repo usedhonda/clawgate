@@ -46,6 +46,19 @@ enum AXActions {
               pid, downResult.rawValue, upResult.rawValue)
     }
 
+    /// Send Escape via CGEvent at HID level to dismiss search mode.
+    static func sendEscape() {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+            NSLog("[AXActions] sendEscape: no CGEventSource")
+            return
+        }
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: true)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: false)
+        keyDown?.post(tap: .cghidEventTap)
+        keyUp?.post(tap: .cghidEventTap)
+        NSLog("[AXActions] sendEscape: HID Escape posted")
+    }
+
     /// Send Enter via CGEvent at HID level for search field navigation.
     /// This is specifically for LINE's search: setValue + HID Enter navigates to the first
     /// matching conversation. Unlike sendEnter(pid:) which uses AXPostKeyboardEvent (PID-targeted),

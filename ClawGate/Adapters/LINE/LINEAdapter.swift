@@ -136,6 +136,7 @@ final class LINEAdapter: AdapterProtocol {
         }
 
         if !canSkipNavigation {
+        do {
         // Stage 2: Search -> click result row to navigate to matching conversation
         _ = try step("open_conversation", logger: stepLogger) {
             let candidate = SelectorResolver.resolve(
@@ -249,6 +250,13 @@ final class LINEAdapter: AdapterProtocol {
                 failedStep: "rescan_after_navigation",
                 details: "messageInput not found after 3s polling"
             )
+        }
+        } catch {
+            // Dismiss search mode to prevent stale query from polluting sidebar/OCR
+            AXActions.sendEscape()
+            usleep(100_000)
+            logger.log(.warning, "Navigation failed, sent Escape to clear search: \(error)")
+            throw error
         }
         } // end if !canSkipNavigation
 
