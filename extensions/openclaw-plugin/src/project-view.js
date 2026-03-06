@@ -13,6 +13,7 @@ const DEFAULT_COMMAND = "project-context-read";
 const DEFAULT_ROOT_PREFIX = `${homedir()}/projects`;
 const DEFAULT_FILES = ["AGENTS.md", "CLAUDE.md", "README.md"];
 const DEFAULT_TIMEOUT_MS = 2000;
+const DEFAULT_FEDERATION_TIMEOUT_MS = 5000;
 const DEFAULT_TTL_MS = 90_000;
 const DEFAULT_MAX_FILE_CHARS = 1600;
 const DEFAULT_MAX_TOTAL_CHARS = 5000;
@@ -165,23 +166,44 @@ export function createProjectViewReader(rawConfig = {}, log) {
     }
   };
 
+  const readOneFileFederation = async (root, relPath, { apiUrl, project }) => {
+    const normalizedRel = `${relPath || ""}`.trim().replace(/^\/+/, "");
+    if (!normalizedRel) return "";
+    const full = `${root}/${normalizedRel}`.replace(/\/+/g, "/");
+    try {
+      const url = new URL("/v1/project-context-read", apiUrl);
+      url.searchParams.set("cmd", "read");
+      url.searchParams.set("arg", full);
+      url.searchParams.set("federation", "1");
+      url.searchParams.set("project", project);
+      const resp = await fetch(url, { signal: AbortSignal.timeout(DEFAULT_FEDERATION_TIMEOUT_MS) });
+      if (!resp.ok) return "";
+      const raw = await resp.text();
+      return sanitizeText(raw);
+    } catch {
+      return "";
+    }
+  };
+
   return {
     /**
      * Build a read-only context block for Observe/Autonomous dispatch.
      * Returns empty string when unavailable.
+     * When isFederation=true, reads files via HTTP from the federation client (Host B).
      *
      * @param {object} params
      * @param {string} params.project
      * @param {string} params.mode
      * @param {string} [params.resolvedProjectPath]
      * @param {boolean} [params.hasStableContext]
-     * @returns {string}
+     * @param {boolean} [params.isFederation]
+     * @param {string} [params.apiUrl]
+     * @returns {string|Promise<string>}
      */
-    getContextBlock({ project, mode, resolvedProjectPath = "", hasStableContext = false }) {
+    getContextBlock({ project, mode, resolvedProjectPath = "", hasStableContext = false, isFederation = false, apiUrl = "" }) {
       const normalizedMode = `${mode || ""}`.toLowerCase();
       if (normalizedMode !== "observe" && normalizedMode !== "autonomous") return "";
       if (hasStableContext && !forceWhenStableExists) return "";
-      if (!ensureCommandAvailable()) return "";
 
       const root = resolveProjectRoot({ project, resolvedProjectPath });
       if (!root) {
@@ -197,10 +219,38 @@ export function createProjectViewReader(rawConfig = {}, log) {
 
       const files = resolveProjectFiles(project);
       if (!files.length) return "";
-      const cacheKey = `${project}::${root}::${files.join(",")}`;
+      const cacheKey = `${isFederation ? "fed:" : ""}${project}::${root}::${files.join(",")}`;
       const now = Date.now();
       const cached = cache.get(cacheKey);
       if (cached && cached.expiresAt > now) return cached.block;
+
+      // Federation path: read files via HTTP (async)
+      if (isFederation && apiUrl) {
+        return (async () => {
+          let remaining = maxTotalChars;
+          const sections = [];
+          for (const file of files) {
+            if (remaining < 120) break;
+            const content = await readOneFileFederation(root, file, { apiUrl, project });
+            if (!content) continue;
+            const capped = capText(content, Math.min(maxFileChars, remaining - 40));
+            const section = `### ${file}\n${capped}`;
+            sections.push(section);
+            remaining -= section.length + 2;
+          }
+          if (!sections.length) return "";
+          const block = [
+            `[Project View Snapshot]`,
+            `source=federation root=${root}`,
+            sections.join("\n\n"),
+          ].join("\n");
+          cache.set(cacheKey, { block, expiresAt: now + ttlMs });
+          return block;
+        })();
+      }
+
+      // Local path: requires command available
+      if (!ensureCommandAvailable()) return "";
 
       let remaining = maxTotalChars;
       const sections = [];

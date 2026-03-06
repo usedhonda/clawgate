@@ -1108,6 +1108,10 @@ final class BridgeCore {
             result = doctor()
         case (.GET, "/v1/openclaw-info"):
             result = openclawInfo()
+        case (.GET, "/v1/project-context-read"):
+            let cmd = components?.queryItems?.first(where: { $0.name == "cmd" })?.value ?? "list"
+            let arg = components?.queryItems?.first(where: { $0.name == "arg" })?.value ?? ""
+            result = runLocalProjectContextRead(cmd: cmd, arg: arg)
         default:
             let notFound = ErrorPayload(code: "not_found", message: "not found", retriable: false, failedStep: "routing", details: nil)
             result = jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: notFound)))
@@ -1427,6 +1431,109 @@ final class BridgeCore {
             messageCount: messages.count,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
+    }
+
+    // MARK: - Project Context Read
+
+    func projectContextRead(cmd: String, arg: String, federation: Bool, project: String) -> HTTPResult {
+        // federation=true -> forward to Host B via FederationServer
+        if federation, let fedServer = federationServer, fedServer.hasConnectedClient() {
+            return forwardProjectContextRead(cmd: cmd, arg: arg, project: project, fedServer: fedServer)
+        }
+        // Local execution
+        return runLocalProjectContextRead(cmd: cmd, arg: arg)
+    }
+
+    func runLocalProjectContextRead(cmd: String, arg: String) -> HTTPResult {
+        let command = "\(NSHomeDirectory())/.local/bin/project-context-read"
+        var args = [cmd]
+        if !arg.isEmpty {
+            args.append(arg)
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command)
+        process.arguments = args
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            logger.log(.warning, "project-context-read exec failed: \(error)")
+            return textResponse(status: .internalServerError, text: "exec_failed: \(error.localizedDescription)")
+        }
+
+        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: outData, encoding: .utf8) ?? ""
+
+        if process.terminationStatus != 0 {
+            let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+            let errOutput = String(data: errData, encoding: .utf8) ?? ""
+            logger.log(.warning, "project-context-read exit=\(process.terminationStatus): \(errOutput)")
+            return textResponse(status: .internalServerError, text: "exit_\(process.terminationStatus): \(errOutput)")
+        }
+
+        return textResponse(status: .ok, text: output)
+    }
+
+    private func forwardProjectContextRead(cmd: String, arg: String, project: String, fedServer: FederationServer) -> HTTPResult {
+        var queryItems = "cmd=\(cmd)"
+        if !arg.isEmpty {
+            let encodedArg = arg.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? arg
+            queryItems += "&arg=\(encodedArg)"
+        }
+        let path = "/v1/project-context-read?\(queryItems)"
+
+        let command = FederationCommandPayload(
+            id: UUID().uuidString,
+            method: "GET",
+            path: path,
+            headers: [:],
+            body: nil
+        )
+
+        logger.log(.info, "Forwarding project-context-read to federation client (cmd=\(cmd) project=\(project))")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var federationResult: Result<FederationResponsePayload, Error>?
+
+        fedServer.sendCommand(forProject: project, command).whenComplete { result in
+            federationResult = result
+            semaphore.signal()
+        }
+
+        let timeoutResult = semaphore.wait(timeout: .now() + 10)
+        guard timeoutResult == .success, let result = federationResult else {
+            logger.log(.warning, "project-context-read federation timeout")
+            return textResponse(status: .gatewayTimeout, text: "federation_timeout")
+        }
+
+        do {
+            let response = try result.get()
+            var headers = HTTPHeaders()
+            for (key, value) in response.headers {
+                headers.add(name: key, value: value)
+            }
+            let responseBody = Data(response.body.utf8)
+            let status = HTTPResponseStatus(statusCode: response.status)
+            return HTTPResult(status: status, headers: headers, body: responseBody)
+        } catch {
+            logger.log(.warning, "project-context-read federation error: \(error)")
+            return textResponse(status: .badGateway, text: "federation_error: \(error)")
+        }
+    }
+
+    private func textResponse(status: HTTPResponseStatus, text: String) -> HTTPResult {
+        let data = Data(text.utf8)
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
+        headers.add(name: "Content-Length", value: "\(data.count)")
+        return HTTPResult(status: status, headers: headers, body: data)
     }
 
     private func buildTmuxConversationListFromEventBus(limit: Int) -> ConversationList {

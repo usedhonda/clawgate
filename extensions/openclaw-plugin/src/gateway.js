@@ -1326,17 +1326,19 @@ function inferIngressOrigin(adapter, source) {
 
 /**
  * Resolve which outbound channel (LINE or Telegram) to use for a message.
- * Priority: ingress adapter (reply routing) > tproj header > default (LINE).
- * Telegram is only used when the ingress was Telegram or message came via tproj-msg.
+ * Priority: ingress adapter (reply routing) > tproj header > observe mode > default (LINE).
+ * Telegram is used when: ingress was Telegram, message came via tproj-msg, or mode is observe.
  * Chi can explicitly route to Telegram using <send_telegram> tags.
  */
-function resolveOutboundChannel({ ingressAdapter, tprojHeader } = {}) {
+function resolveOutboundChannel({ ingressAdapter, tprojHeader, mode } = {}) {
   // 1. Reply: send back to originating channel
   if (ingressAdapter === "telegram") return "telegram";
   if (ingressAdapter === "line") return "line";
   // 2. tproj-msg sourced -> Telegram (dev context)
   if (tprojHeader) return "telegram";
-  // 3. Default -> LINE
+  // 3. Observe mode -> Telegram (dev-only output, not for end users)
+  if (mode === "observe") return "telegram";
+  // 4. Default -> LINE
   return "line";
 }
 
@@ -2901,11 +2903,13 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     );
   }
 
-  const projectView = getProjectViewReader(accountId, log).getContextBlock({
+  const projectView = await getProjectViewReader(accountId, log).getContextBlock({
     project,
     mode,
     resolvedProjectPath,
     hasStableContext: !!stable?.context,
+    isFederation: payload._from_federation === "1",
+    apiUrl,
   });
   if (projectView) {
     optionalParts.push(projectView);
@@ -3001,8 +3005,8 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options, prompt=${_promptMeta.hash})`);
 
-  // Resolve outbound channel for question responses (default -> LINE)
-  const questionChannel = resolveOutboundChannel();
+  // Resolve outbound channel for question responses (default -> LINE, observe -> Telegram)
+  const questionChannel = resolveOutboundChannel({ mode });
 
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
@@ -3254,11 +3258,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     );
   }
 
-  const projectView = getProjectViewReader(accountId, log).getContextBlock({
+  const projectView = await getProjectViewReader(accountId, log).getContextBlock({
     project,
     mode,
     resolvedProjectPath,
     hasStableContext: !!stable?.context,
+    isFederation: payload._from_federation === "1",
+    apiUrl,
   });
   if (projectView) {
     optionalParts.push(projectView);
@@ -3361,8 +3367,8 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}, prompt=${_promptMeta.hash}): "${text.slice(0, 80)}"`);
 
-  // Resolve outbound channel for completion responses (default -> LINE)
-  const completionChannel = resolveOutboundChannel();
+  // Resolve outbound channel for completion responses (default -> LINE, observe -> Telegram)
+  const completionChannel = resolveOutboundChannel({ mode });
 
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
