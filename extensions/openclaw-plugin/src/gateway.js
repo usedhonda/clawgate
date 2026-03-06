@@ -1324,6 +1324,22 @@ function inferIngressOrigin(adapter, source) {
   return `${normalizedAdapter}_${normalizedSource}`;
 }
 
+/**
+ * Resolve which outbound channel (LINE or Telegram) to use for a message.
+ * Priority: ingress adapter (reply routing) > tproj header > dev mode > default (LINE).
+ */
+function resolveOutboundChannel({ ingressAdapter, mode, tprojHeader } = {}) {
+  // 1. Reply: send back to originating channel
+  if (ingressAdapter === "telegram") return "telegram";
+  if (ingressAdapter === "line") return "line";
+  // 2. tproj-msg sourced -> Telegram (dev context)
+  if (tprojHeader) return "telegram";
+  // 3. Dev modes -> Telegram
+  if (["autonomous", "observe", "auto"].includes(mode)) return "telegram";
+  // 4. Secretary/default -> LINE
+  return "line";
+}
+
 function parseOptionalMs(value) {
   const parsed = Number.parseInt(`${value ?? ""}`, 10);
   return Number.isFinite(parsed) ? parsed : undefined;
@@ -2373,6 +2389,7 @@ function buildMsgContext(event, accountId, defaultConversation) {
     OriginatingChannel: "clawgate",
     OriginatingTo: conversation,
     _clawgateSource: source,
+    _ingressAdapter: event.adapter || "line",
   };
 
   // Build BodyForAgent with location + project roster prefixes
@@ -2461,6 +2478,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   // Clear active project so outbound.sendText doesn't leak tmux prefixes into messenger replies.
   clearActiveProject(conversationKey);
 
+  // Resolve outbound channel once for the entire inbound message handling
+  const replyChannel = resolveOutboundChannel({ ingressAdapter: ctx._ingressAdapter, tprojHeader });
+
   // Collect plain reply blocks so multi-block AI responses are sent as a single LINE message.
   const collectedLineBlocks = [];
 
@@ -2468,14 +2488,12 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   const deliver = async (payload) => {
     const text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
-
-    // Route user-facing reply: Telegram for tproj-sourced, LINE otherwise
     const sendReply = async (replyMsg) => {
-      if (tprojHeader && sendTmuxMessage) {
+      if (tprojHeader) {
         const prefixed = `[${tprojHeader.sender}] ${replyMsg}`;
-        try { await sendTmuxMessage(conversation, prefixed, traceId); } catch {}
+        try { await sendTmuxMessage(conversation, prefixed, traceId, { channel: replyChannel }); } catch {}
       } else {
-        try { await clawgateSend(apiUrl, conversation, replyMsg, traceId); recordPluginSend(replyMsg); } catch {}
+        try { await sendTmuxMessage(conversation, replyMsg, traceId, { channel: replyChannel }); } catch {}
       }
     };
 
@@ -2501,13 +2519,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent via return_url=${returnUrl} to ${tprojHeader.sender}`);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply via return_url failed: ${err?.message || err}`);
-          // Fallback: prefer Telegram (sendTmuxMessage) over LINE, with redirect prefix
+          // Fallback: route to originating channel with redirect prefix
           const fallbackText = `[redirect: ->${tprojHeader.sender}]\n${text}`;
-          if (sendTmuxMessage) {
-            try { await sendTmuxMessage(conversation, fallbackText, traceId); } catch {}
-          } else {
-            try { await clawgateSend(apiUrl, conversation, fallbackText, traceId); recordPluginSend(fallbackText); } catch {}
-          }
+          try { await sendTmuxMessage(conversation, fallbackText, traceId, { channel: replyChannel }); } catch {}
         }
       } else {
         // Local execution fallback (single-host setup)
@@ -2522,13 +2536,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent to ${tprojHeader.sender} via ${tprojHeader.workspace}`);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply failed: ${err?.message || err}`);
-          // Fallback: prefer Telegram (sendTmuxMessage) over LINE, with redirect prefix
+          // Fallback: route to originating channel with redirect prefix
           const fallbackText2 = `[redirect: ->${tprojHeader.sender}]\n${text}`;
-          if (sendTmuxMessage) {
-            try { await sendTmuxMessage(conversation, fallbackText2, traceId); } catch {}
-          } else {
-            try { await clawgateSend(apiUrl, conversation, fallbackText2, traceId); recordPluginSend(fallbackText2); } catch {}
-          }
+          try { await sendTmuxMessage(conversation, fallbackText2, traceId, { channel: replyChannel }); } catch {}
         }
       }
       return;
@@ -2742,57 +2752,32 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           block: bi + 1,
           blocks: collectedLineBlocks.length,
         });
-        if (tprojHeader && sendTmuxMessage) {
-          // tproj-sourced: route to Telegram (not LINE), with session prefix
-          const prefixedBlock = `[${tprojHeader.sender}] ${blockText}`;
-          try {
-            await sendTmuxMessage(conversation, prefixedBlock, traceId);
-            traceLog(log, "info", {
-              trace_id: traceId,
-              stage: "gateway_forward_ok",
-              action: "telegram_send_tproj",
-              status: "ok",
-              conversation,
-              block: bi + 1,
-              blocks: collectedLineBlocks.length,
-            });
-          } catch (err) {
-            log?.error?.(`clawgate: [${accountId}] sendTmuxMessage for tproj reply block ${bi + 1} failed: ${err}`);
-            traceLog(log, "error", {
-              trace_id: traceId,
-              stage: "gateway_forward_failed",
-              action: "telegram_send_tproj",
-              status: "failed",
-              conversation,
-              block: bi + 1,
-              error: String(err),
-            });
-          }
-        } else {
-          try {
-            await clawgateSend(apiUrl, conversation, blockText, traceId);
-            recordPluginSend(blockText);
-            traceLog(log, "info", {
-              trace_id: traceId,
-              stage: "gateway_forward_ok",
-              action: "line_send",
-              status: "ok",
-              conversation,
-              block: bi + 1,
-              blocks: collectedLineBlocks.length,
-            });
-          } catch (err) {
-            log?.error?.(`clawgate: [${accountId}] send reply block ${bi + 1} failed: ${err}`);
-            traceLog(log, "error", {
-              trace_id: traceId,
-              stage: "gateway_forward_failed",
-              action: "line_send",
-              status: "failed",
-              conversation,
-              block: bi + 1,
-              error: String(err),
-            });
-          }
+        const outBlock = tprojHeader ? `[${tprojHeader.sender}] ${blockText}` : blockText;
+        const outAction = replyChannel === "telegram" ? "telegram_send" : "line_send";
+        try {
+          await sendTmuxMessage(conversation, outBlock, traceId, { channel: replyChannel });
+          traceLog(log, "info", {
+            trace_id: traceId,
+            stage: "gateway_forward_ok",
+            action: outAction,
+            status: "ok",
+            conversation,
+            channel: replyChannel,
+            block: bi + 1,
+            blocks: collectedLineBlocks.length,
+          });
+        } catch (err) {
+          log?.error?.(`clawgate: [${accountId}] send reply block ${bi + 1} (${replyChannel}) failed: ${err}`);
+          traceLog(log, "error", {
+            trace_id: traceId,
+            stage: "gateway_forward_failed",
+            action: outAction,
+            status: "failed",
+            conversation,
+            channel: replyChannel,
+            block: bi + 1,
+            error: String(err),
+          });
         }
       }
 
@@ -2983,10 +2968,13 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options, prompt=${_promptMeta.hash})`);
 
+  // Resolve outbound channel for question responses (dev modes -> Telegram)
+  const questionChannel = resolveOutboundChannel({ mode });
+
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
     if (isRecentOutboundDuplicate(text)) { log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (question): "${text.slice(0, 60)}"`); return; }
-    return sendTmuxMessage(conv, text, traceId);
+    return sendTmuxMessage(conv, text, traceId, { channel: questionChannel });
   };
 
   // Deliver reply — parse <cc_answer> (auto mode only) and route answer, or forward to LINE
@@ -3327,10 +3315,13 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}, prompt=${_promptMeta.hash}): "${text.slice(0, 80)}"`);
 
+  // Resolve outbound channel for completion responses (dev modes -> Telegram)
+  const completionChannel = resolveOutboundChannel({ mode });
+
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
   const sendLine = async (conv, text) => {
     if (isRecentOutboundDuplicate(text)) { log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (completion): "${text.slice(0, 60)}"`); return; }
-    return sendTmuxMessage(conv, text, traceId);
+    return sendTmuxMessage(conv, text, traceId, { channel: completionChannel });
   };
 
   // Dispatch to AI — the AI will summarize and reply
@@ -4001,9 +3992,10 @@ export async function startAccount(ctx) {
   // Resolve messenger for tmux outbound (Telegram or LINE)
   // Declared outside try block so sendTmuxMessage closure can access it.
   const messenger = account.messenger || "line";
-  const useTelegram = messenger === "telegram" && !!account.telegramBotToken && !!account.telegramChatId;
+  const hasTelegram = !!account.telegramBotToken && !!account.telegramChatId;
+  const useTelegram = messenger === "telegram" && hasTelegram;
   _activeMessenger = useTelegram ? "telegram" : "line";
-  log?.info?.(`clawgate: [${accountId}] messenger=${messenger} useTelegram=${useTelegram}`);
+  log?.info?.(`clawgate: [${accountId}] messenger=${messenger} useTelegram=${useTelegram} hasTelegram=${hasTelegram}`);
 
   // Get initial cursor
   let cursor = 0;
@@ -4017,20 +4009,42 @@ export async function startAccount(ctx) {
     log?.warn?.(`clawgate: [${accountId}] initial poll failed: ${err}`);
   }
 
-  // Unified tmux outbound: Telegram (preferred) or LINE fallback
-  const sendTmuxMessage = async (conv, text, traceId = "") => {
-    if (useTelegram) {
-      const result = await telegramSend(account.telegramBotToken, account.telegramChatId, text, { traceId });
-      if (!result?.ok) log?.warn?.(`clawgate: [${accountId}] telegram send failed: ${JSON.stringify(result?.error)}`);
+  // Channel-explicit send helpers
+  const sendViaTelegram = async (text, traceId = "") => {
+    if (!hasTelegram) {
+      // Telegram unavailable — fall back to LINE
+      if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip (telegram fallback)`); return { ok: false }; }
+      const result = await clawgateSend(apiUrl, defaultConversation || "", text, traceId);
+      if (!result?.ok) log?.warn?.(`clawgate: [${accountId}] sendLine (telegram fallback) failed: ${JSON.stringify(result?.error || result)}`);
       recordPluginSend(text);
       return result;
     }
-    // LINE fallback (existing behavior)
-    if (!lineAvailable) { log?.debug?.(`clawgate: [${accountId}] LINE skip`); return { ok: false }; }
+    const result = await telegramSend(account.telegramBotToken, account.telegramChatId, text, { traceId });
+    if (!result?.ok) log?.warn?.(`clawgate: [${accountId}] telegram send failed: ${JSON.stringify(result?.error)}`);
+    recordPluginSend(text);
+    return result;
+  };
+
+  const sendViaLine = async (conv, text, traceId = "") => {
+    if (!lineAvailable) {
+      // LINE unavailable — fall back to Telegram
+      if (hasTelegram) return sendViaTelegram(text, traceId);
+      log?.debug?.(`clawgate: [${accountId}] LINE skip`);
+      return { ok: false };
+    }
     const result = await clawgateSend(apiUrl, conv, text, traceId);
     if (!result?.ok) log?.warn?.(`clawgate: [${accountId}] sendLine failed: ${JSON.stringify(result?.error || result)}`);
     recordPluginSend(text);
     return result;
+  };
+
+  // Unified tmux outbound: supports explicit channel override
+  const sendTmuxMessage = async (conv, text, traceId = "", { channel } = {}) => {
+    if (channel === "telegram") return sendViaTelegram(text, traceId);
+    if (channel === "line") return sendViaLine(conv, text, traceId);
+    // No explicit channel — use global messenger preference (backward compat)
+    if (useTelegram) return sendViaTelegram(text, traceId);
+    return sendViaLine(conv, text, traceId);
   };
 
   const enableLineBurstCoalesce = ENABLE_LINE_BURST_COALESCE && LINE_BURST_COALESCE_WINDOW_MS > 0;
