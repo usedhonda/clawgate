@@ -42,6 +42,56 @@ jobs:
       - name: Test
         run: swift test
 
+  line-smoke:
+    runs-on: macos-15
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.changed_files_url, 'LINE') ||
+      true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check LINE-related changes
+        id: line-check
+        run: |
+          LINE_PATTERNS="ClawGate/Adapters/LINE/ ClawGate/Automation/AX/ extensions/openclaw-plugin/src/outbound.js extensions/openclaw-plugin/src/gateway.js extensions/openclaw-plugin/src/client.js extensions/openclaw-plugin/src/channel.js"
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          HAS_LINE=false
+          for pattern in $LINE_PATTERNS; do
+            if echo "$CHANGED" | grep -q "$pattern"; then
+              HAS_LINE=true
+              break
+            fi
+          done
+          echo "has_line_changes=$HAS_LINE" >> "$GITHUB_OUTPUT"
+
+      - name: Select Xcode 16
+        if: steps.line-check.outputs.has_line_changes == 'true'
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+
+      - name: Cache SPM
+        if: steps.line-check.outputs.has_line_changes == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: Run LINE-specific Swift tests
+        if: steps.line-check.outputs.has_line_changes == 'true'
+        run: swift test --filter "LINE|LINEAdapter|LineSidebar|LineTextSanitizer"
+
+      - name: Run outbound.js mapping tests
+        if: steps.line-check.outputs.has_line_changes == 'true'
+        run: node --experimental-test-module-mocks --test extensions/openclaw-plugin/src/__tests__/outbound.test.js
+
+      - name: Skip (no LINE changes)
+        if: steps.line-check.outputs.has_line_changes != 'true'
+        run: echo "No LINE-related files changed — skipping smoke test"
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -52,4 +102,7 @@ jobs:
         run: shellcheck -S warning scripts/*.sh
 
       - name: JS syntax check
-        run: find extensions -name '*.js' -exec node --check {} +
+        run: find extensions -name '*.js' -not -path '*__tests__*' -exec node --check {} +
+
+      - name: Run plugin tests
+        run: node --experimental-test-module-mocks --test extensions/openclaw-plugin/src/__tests__/*.test.js
