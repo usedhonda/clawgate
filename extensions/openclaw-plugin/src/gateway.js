@@ -2532,7 +2532,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
     // tproj-msg reverse channel: reply via tmux session instead of LINE
     if (tprojHeader?.reply === "session" && tprojHeader.workspace && tprojHeader.sender) {
-      const replyText = `[from:gate] ${text}`;
+      const replyText = text;
       const returnUrl = tprojHeader.return_url;
 
       if (returnUrl) {
