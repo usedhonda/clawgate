@@ -3083,16 +3083,17 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
         return;
       }
       try {
-        await sendLine(defaultConversation || project, advisory);
+        // Autonomous question advisory → Telegram (dev context, not user-facing)
+        await sendTmuxMessage(defaultConversation || project, advisory, traceId, { channel: "telegram" });
         logAutonomousLineEvent(log, {
           accountId,
           project,
           reason: "interaction_pending",
           status: "sent",
-          detail: "question_advisory",
+          detail: "question_advisory_telegram",
         });
       } catch (err) {
-        log?.error?.(`clawgate: [${accountId}] send autonomous question advisory failed: ${err}`);
+        log?.error?.(`clawgate: [${accountId}] send autonomous question advisory to Telegram failed: ${err}`);
         logAutonomousLineEvent(log, {
           accountId,
           project,
@@ -3470,16 +3471,17 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         return;
       }
       try {
-        await sendLine(defaultConversation || project, advisory);
+        // Interaction-pending advisory → Telegram (dev context, not user-facing)
+        await sendTmuxMessage(defaultConversation || project, advisory, traceId, { channel: "telegram" });
         logAutonomousLineEvent(log, {
           accountId,
           project,
           reason: "interaction_pending",
           status: "sent",
-          detail: interactionPending.reason,
+          detail: `${interactionPending.reason}_telegram`,
         });
       } catch (err) {
-        log?.error?.(`clawgate: [${accountId}] interaction pending advisory send failed: ${err}`);
+        log?.error?.(`clawgate: [${accountId}] interaction pending advisory send to Telegram failed: ${err}`);
         logAutonomousLineEvent(log, {
           accountId,
           project,
