@@ -64,7 +64,7 @@ struct MainPanelView: View {
                 Button(action: onToggleCollapse) {
                     Image(systemName: "sidebar.left")
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(PanelTheme.textTertiary)
+                        .foregroundStyle(PanelTheme.textSecondary)
                 }
                 .buttonStyle(.plain)
                 .help("Collapse panel")
@@ -243,7 +243,7 @@ private struct PanelWindowDragHandle: View {
                 Text("Drag Panel")
                     .font(PanelTheme.smallFont)
             }
-            .foregroundStyle(PanelTheme.textTertiary)
+            .foregroundStyle(PanelTheme.textSecondary)
             .allowsHitTesting(false)
         }
         .frame(maxWidth: .infinity)

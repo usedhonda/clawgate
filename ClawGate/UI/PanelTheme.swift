@@ -11,8 +11,12 @@ enum PanelTheme {
     static let cardBorder = theme.cardBorder
 
     static let textPrimary = theme.textPrimary
-    static let textSecondary = theme.foreground.opacity(0.78)
-    static let textTertiary = theme.foreground.opacity(0.50)
+    static let textSecondary = theme.foreground.brighten(0.12).opacity(0.92)
+    static let textTertiary = theme.foreground.brighten(0.08).opacity(0.72)
+    static let controlSurface = backgroundCard.brighten(0.04)
+    static let controlSurfaceHover = backgroundCard.brighten(0.07)
+    static let controlBorder = theme.foreground.opacity(0.16)
+    static let controlBorderStrong = theme.foreground.opacity(0.24)
 
     static let accentCyan = theme.accentCyan
     static let accentGreen = theme.accentGreen

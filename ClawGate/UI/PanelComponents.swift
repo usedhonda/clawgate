@@ -52,19 +52,42 @@ struct PanelPill: View {
     /// When true, pill renders as a solid lit badge with glow.
     var lit: Bool = false
 
+    private var labelColor: Color {
+        lit ? .white : color.brighten(0.12).opacity(0.96)
+    }
+
+    private var fillColor: Color {
+        if lit { return color.opacity(0.85) }
+        return PanelTheme.controlSurface
+    }
+
+    private var tintColor: Color {
+        if lit { return .clear }
+        return color.opacity(0.10)
+    }
+
+    private var strokeColor: Color {
+        if lit { return color }
+        return color.opacity(0.30)
+    }
+
     var body: some View {
         Text(text)
             .font(PanelTheme.font(size: fontSize, weight: lit ? .bold : .semibold))
-            .foregroundStyle(lit ? .white : color)
+            .foregroundStyle(labelColor)
             .padding(.horizontal, lit ? 6 : 5)
             .padding(.vertical, lit ? 2 : 1)
             .background(
                 RoundedRectangle(cornerRadius: PanelTheme.pillRadius)
-                    .fill(lit ? color.opacity(0.85) : color.opacity(0.12))
+                    .fill(fillColor)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: PanelTheme.pillRadius)
+                            .fill(tintColor)
+                    )
             )
             .overlay(
                 RoundedRectangle(cornerRadius: PanelTheme.pillRadius)
-                    .stroke(lit ? color : color.opacity(0.20), lineWidth: lit ? 1 : 0.5)
+                    .stroke(strokeColor, lineWidth: lit ? 1 : 0.75)
             )
             .shadow(color: lit ? color.opacity(0.65) : .clear, radius: 4, x: 0, y: 0)
     }
@@ -146,20 +169,20 @@ struct PanelTabButton: View {
         Button(action: action) {
             Text(title)
                 .font(PanelTheme.font(size: 11, weight: isSelected ? .bold : .medium))
-                .foregroundStyle(isSelected ? PanelTheme.accentCyan : PanelTheme.textSecondary)
+                .foregroundStyle(isSelected ? PanelTheme.accentCyan : PanelTheme.textPrimary.opacity(0.88))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(
                     RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
                         .fill(isSelected
                               ? PanelTheme.accentCyan.opacity(0.12)
-                              : (isHovered ? PanelTheme.textPrimary.opacity(0.06) : Color.clear))
+                              : (isHovered ? PanelTheme.controlSurfaceHover : PanelTheme.controlSurface))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
                         .stroke(isSelected
                                 ? PanelTheme.accentCyan.opacity(0.25)
-                                : (isHovered ? PanelTheme.textPrimary.opacity(0.10) : Color.clear),
+                                : (isHovered ? PanelTheme.controlBorderStrong : PanelTheme.controlBorder),
                                 lineWidth: 1)
                 )
         }
