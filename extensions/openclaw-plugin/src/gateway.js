@@ -1877,6 +1877,93 @@ function buildPairingGuidance({ project = "", mode = "", eventKind = "", session
   return parts.join("\n");
 }
 
+function buildFederatedRepoProvenanceBlock({ resolvedProjectPath = "", hasProjectView = false } = {}) {
+  const remoteRootHint = resolvedProjectPath ? "available" : "unavailable";
+  const lines = [
+    "[Federated Review Provenance]",
+    "source=federation",
+    "host_a_local_repo_state=ignored",
+    `remote_root_hint=${remoteRootHint}`,
+  ];
+  if (hasProjectView) {
+    lines.push("repo_grounding=project_view_snapshot_only");
+    lines.push("trusted_sources=pane_output,progress_trail,task_goal,project_view_snapshot");
+    lines.push("instruction=Do not infer git/file state beyond [Project View Snapshot].");
+  } else {
+    lines.push("repo_grounding=unavailable");
+    lines.push("trusted_sources=pane_output,progress_trail,task_goal");
+    lines.push("instruction=Remote repo state is unavailable. Do not infer branch/commit/diff/file state.");
+  }
+  return lines.join("\n");
+}
+
+async function buildReviewRepoContext({
+  accountId,
+  apiUrl,
+  log,
+  project,
+  mode,
+  tmuxTarget,
+  resolvedProjectPath = "",
+  isFederation = false,
+}) {
+  const optionalParts = [];
+
+  if (isFederation) {
+    log?.info?.(`clawgate: [${accountId}] federated review grounding for "${project}" — Host A local repo context disabled`);
+    const projectView = await getProjectViewReader(accountId, log).getContextBlock({
+      project,
+      mode,
+      resolvedProjectPath,
+      hasStableContext: false,
+      isFederation: true,
+      apiUrl,
+    });
+    optionalParts.push(
+      buildFederatedRepoProvenanceBlock({
+        resolvedProjectPath,
+        hasProjectView: !!projectView,
+      })
+    );
+    if (projectView) {
+      optionalParts.push(projectView);
+    }
+    return { optionalParts, stable: null, dynamic: null };
+  }
+
+  const stable = getStableContext(project, tmuxTarget);
+  const dynamic = getDynamicEnvelope(project, tmuxTarget);
+
+  if (stable && stable.isNew && stable.context) {
+    optionalParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
+    if (_ccKnowledge) {
+      optionalParts.push(_ccKnowledge);
+    }
+  } else if (stable && stable.hash) {
+    optionalParts.push(
+      `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
+    );
+  }
+
+  const projectView = await getProjectViewReader(accountId, log).getContextBlock({
+    project,
+    mode,
+    resolvedProjectPath,
+    hasStableContext: !!stable?.context,
+    isFederation: false,
+    apiUrl,
+  });
+  if (projectView) {
+    optionalParts.push(projectView);
+  }
+
+  if (dynamic && dynamic.envelope) {
+    optionalParts.push(`[Current State]\n${dynamic.envelope}`);
+  }
+
+  return { optionalParts, stable, dynamic };
+}
+
 // ── Task failure message enrichment ───────────────────────────
 
 /**
@@ -2881,50 +2968,28 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   setInteractionPending(project, "question_event", { questionText, questionId, options, selectedIndex });
 
   const resolvedProjectPath = tmuxTarget ? (resolveProjectPath(project, tmuxTarget) || "") : "";
+  const isFederation = payload._from_federation === "1";
 
   // Invalidate context cache (files may have changed while CC was working)
   invalidateProject(project);
 
   // --- Context layers (parallel to handleTmuxCompletion) ---
-  const stable = getStableContext(project, tmuxTarget);
-  const dynamic = getDynamicEnvelope(project, tmuxTarget);
-
-  const optionalParts = [];
-
-  // Stable project context
-  if (stable && stable.isNew && stable.context) {
-    optionalParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
-    if (_ccKnowledge) {
-      optionalParts.push(_ccKnowledge);
-    }
-  } else if (stable && stable.hash) {
-    optionalParts.push(
-      `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
-    );
-  }
-
-  const projectView = await getProjectViewReader(accountId, log).getContextBlock({
+  const { optionalParts } = await buildReviewRepoContext({
+    accountId,
+    apiUrl,
+    log,
     project,
     mode,
+    tmuxTarget,
     resolvedProjectPath,
-    hasStableContext: !!stable?.context,
-    isFederation: payload._from_federation === "1",
-    apiUrl,
+    isFederation,
   });
-  if (projectView) {
-    optionalParts.push(projectView);
-  }
 
   // Task goal (what the reviewer agent asked CC to do — helps the agent understand what the question is about)
   // Note: DON'T clearTaskGoal here — question doesn't end the task
   const taskGoal = getTaskGoal(project);
   if (taskGoal) {
     optionalParts.push(`[Task Goal]\n${taskGoal}`);
-  }
-
-  // Dynamic envelope (git state)
-  if (dynamic && dynamic.envelope) {
-    optionalParts.push(`[Current State]\n${dynamic.envelope}`);
   }
 
   // Pane context (output above the question — may contain plan content)
@@ -3237,38 +3302,22 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   // Resolve project path and register for roster
   const resolvedProjectPath = tmuxTarget ? (resolveProjectPath(project, tmuxTarget) || "") : "";
+  const isFederation = payload._from_federation === "1";
 
   // Invalidate context cache (files may have changed during the task)
   invalidateProject(project);
 
   // Build two-layer context (stable + dynamic)
-  const stable = getStableContext(project, tmuxTarget);
-  const dynamic = getDynamicEnvelope(project, tmuxTarget);
-
-  const optionalParts = [];
-
-  if (stable && stable.isNew && stable.context) {
-    optionalParts.push(`[Project Context (hash: ${stable.hash})]\n${stable.context}`);
-    if (_ccKnowledge) {
-      optionalParts.push(_ccKnowledge);
-    }
-  } else if (stable && stable.hash) {
-    optionalParts.push(
-      `[Project Context unchanged (hash: ${stable.hash}) - see earlier in conversation]`
-    );
-  }
-
-  const projectView = await getProjectViewReader(accountId, log).getContextBlock({
+  const { optionalParts } = await buildReviewRepoContext({
+    accountId,
+    apiUrl,
+    log,
     project,
     mode,
+    tmuxTarget,
     resolvedProjectPath,
-    hasStableContext: !!stable?.context,
-    isFederation: payload._from_federation === "1",
-    apiUrl,
+    isFederation,
   });
-  if (projectView) {
-    optionalParts.push(projectView);
-  }
 
   // Task goal (what the reviewer agent asked CC to do — enables goal vs result comparison)
   const taskGoal = getTaskGoal(project);
@@ -3276,10 +3325,6 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     optionalParts.push(`[Task Goal]\n${taskGoal}`);
   }
   clearTaskGoal(project);
-
-  if (dynamic && dynamic.envelope) {
-    optionalParts.push(`[Current State]\n${dynamic.envelope}`);
-  }
 
   // Filter noise from completion text (CC UI chrome: bars, spinners, etc.)
   const cleanedText = filterPaneNoise(text);
