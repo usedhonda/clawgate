@@ -284,6 +284,33 @@ final class AppRuntime {
 }
 
 let app = NSApplication.shared
+
+// Singleton guard: use fcntl F_SETLK to ensure only one ClawGate runs at a time
+let singletonLockFD: Int32 = {
+    let path = "/tmp/clawgate-singleton.lock"
+    let fd = Darwin.open(path, O_CREAT | O_RDWR, 0o644)
+    guard fd >= 0 else {
+        fputs("ClawGate: cannot open lock file. Exiting.\n", stderr)
+        Darwin.exit(1)
+    }
+    var lock = Darwin.flock()
+    lock.l_type = Int16(F_WRLCK)
+    lock.l_whence = Int16(SEEK_SET)
+    lock.l_start = 0
+    lock.l_len = 0
+    if fcntl(fd, F_SETLK, &lock) == -1 {
+        fputs("ClawGate: another instance already running. Exiting.\n", stderr)
+        Darwin.exit(0)
+    }
+    _ = Darwin.ftruncate(fd, 0)
+    let pid = "\(ProcessInfo.processInfo.processIdentifier)"
+    pid.utf8CString.withUnsafeBufferPointer { buf in
+        _ = Darwin.write(fd, buf.baseAddress!, buf.count - 1)
+    }
+    return fd
+}()
+_ = singletonLockFD  // keep FD open for process lifetime
+
 let runtime = AppRuntime()
 let delegate = MenuBarAppDelegate(runtime: runtime, statsCollector: runtime.statsCollector, opsLogStore: runtime.opsLogStore)
 runtime.menuBarDelegate = delegate
