@@ -8,6 +8,12 @@ import Foundation
 /// - `source: "completion"` — task completed, Claude Code is idle
 /// - `source: "question"` — AskUserQuestion displayed, includes structured question data
 final class TmuxInboundWatcher {
+    private static let settledTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "HH:mm:ss"
+        return formatter
+    }()
 
     /// Parsed question from capture-pane output.
     struct DetectedQuestion {
@@ -107,24 +113,20 @@ final class TmuxInboundWatcher {
         let config = configStore.load()
         let mode = config.tmuxSessionModes[modeKey] ?? "ignore"
 
+        let promptState = promptStateFor(newStatus: newStatus, waitingReason: session.waitingReason)
+
         // Write prompt state for any recognized status transition.
         // This is unconditional — mode does not restrict state visibility.
         if let target = session.tmuxTarget {
-            let promptState: String
-            switch newStatus {
-            case "running":
-                promptState = "typing"
-            case "waiting_input" where session.waitingReason == "askUserQuestion"
-                                    || session.waitingReason == "permission_prompt":
-                promptState = "suggestion"
-            case "waiting_input":
-                promptState = "idle"
-            default:
-                promptState = "unknown"
-            }
             let tgt = target
+            let shouldWriteSettledAt = oldStatus == "running"
+                && newStatus == "waiting_input"
+                && isSettledPromptState(promptState)
             BlockingWork.queue.async { [weak self] in
                 self?.writePromptState(target: tgt, state: promptState, project: session.project)
+                if shouldWriteSettledAt {
+                    self?.writeLastSettledTimestamp(target: tgt, project: session.project)
+                }
             }
         }
 
@@ -422,6 +424,30 @@ final class TmuxInboundWatcher {
         TmuxShell.setPaneOption(target: target, name: "@prompt_state_src", value: "clawgate")
         TmuxShell.setPaneOption(target: target, name: "@prompt_state_ts", value: ts)
         logger.log(.debug, "TmuxInboundWatcher: prompt_state=\(state) src=clawgate ts=\(ts) target=\(target) project=\(project)")
+    }
+
+    private func writeLastSettledTimestamp(target: String, project: String) {
+        let settledAt = Self.settledTimeFormatter.string(from: Date())
+        TmuxShell.setPaneOption(target: target, name: "@last_settled_at", value: settledAt)
+        logger.log(.debug, "TmuxInboundWatcher: last_settled_at=\(settledAt) target=\(target) project=\(project)")
+    }
+
+    private func promptStateFor(newStatus: String, waitingReason: String?) -> String {
+        switch newStatus {
+        case "running":
+            return "typing"
+        case "waiting_input" where waitingReason == "askUserQuestion"
+                                || waitingReason == "permission_prompt":
+            return "suggestion"
+        case "waiting_input":
+            return "idle"
+        default:
+            return "unknown"
+        }
+    }
+
+    private func isSettledPromptState(_ state: String) -> Bool {
+        state == "idle" || state == "suggestion"
     }
 
     /// Set all currently known sessions to `unknown` at startup.
