@@ -530,7 +530,7 @@ final class LINEInboundWatcher {
         }
         return segments
             .map { normalizeForDuplicateFingerprint($0) }
-            .filter { $0.count >= 4 }
+            .filter { $0.count >= 2 }
     }
 
     private func lineSeenPreviously(normalizedLine: String, conversation: String) -> Bool {
