@@ -515,6 +515,15 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(snapshot))
     }
 
+    func resetLineBaseline() -> HTTPResult {
+        guard let watcher = lineInboundWatcher else {
+            let payload = ErrorPayload(code: "no_watcher", message: "LINE inbound watcher not initialized", retriable: false, failedStep: "reset_baseline", details: "")
+            return jsonResponse(status: .internalServerError, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+        }
+        watcher.resetBaseline()
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: "baseline_reset", error: nil)))
+    }
+
     func tprojMsgDeliver(body: Data) -> HTTPResult {
         struct TprojMsgDeliverRequest: Codable {
             let session: String

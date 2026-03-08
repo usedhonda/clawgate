@@ -39,6 +39,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.POST, "/v1/tproj-msg-deliver"),
         (.GET, "/v1/project-context-read"),
         (.POST, "/v1/line/ensure-conversation"),
+        (.POST, "/v1/debug/reset-line-baseline"),
     ]
 
     private var requestHead: HTTPRequestHead?
@@ -210,6 +211,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.projectContextRead(cmd: cmd, arg: arg, federation: federation, project: project)
             } else if method == .POST && path == "/v1/line/ensure-conversation" {
                 result = core.ensureLineConversation(body: bodyData)
+            } else if method == .POST && path == "/v1/debug/reset-line-baseline" {
+                result = core.resetLineBaseline()
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()

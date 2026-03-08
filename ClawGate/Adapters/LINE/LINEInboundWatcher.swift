@@ -58,6 +58,10 @@ final class LINEInboundWatcher {
     /// lineSeenPreviously でマッチした行の先頭。shouldSuppressDuplicateInbound 内で参照する。
     private var lastMatchedLineHead: String = ""
 
+    /// Signal diagnostics: written by each collect*Signal, read by doPoll for pipeline JSON
+    private var lastStructuralDiag: [String: String] = [:]
+    private var lastPixelDiag: [String: String] = [:]
+
     /// Text cursor: bottom N lines of last emitted OCR poll, used to skip already-seen content on next poll
     private var lastEmittedTextCursor: [String] = []
     private let textCursorLineCount = 4
@@ -308,7 +312,7 @@ final class LINEInboundWatcher {
         let fusionDoneAt = Date()
 
         func buildTimingFields(now: Date, dropStage: String, dropReason: String) -> [String: String] {
-            [
+            var fields: [String: String] = [
                 "poll_started_at": isoString(pollStartedAt),
                 "capture_done_at": isoString(captureDoneAt),
                 "signal_collect_done_at": isoString(signalCollectDoneAt),
@@ -320,6 +324,9 @@ final class LINEInboundWatcher {
                 "drop_stage": dropStage,
                 "drop_reason_detail": dropReason,
             ]
+            fields.merge(lastStructuralDiag) { _, new in new }
+            fields.merge(lastPixelDiag) { _, new in new }
+            return fields
         }
 
         lastSignalNames = decision.signals
@@ -601,7 +608,10 @@ final class LINEInboundWatcher {
         let rowFrames = rowEntries.map(\.frame)
 
         let currentCount = rowFrames.count
-        guard currentCount > 0 else { return nil }
+        guard currentCount > 0 else {
+            lastStructuralDiag = ["structural_row_count": "0", "structural_previous_count": "\(lastRowCount)", "structural_signal_result": "nil_no_rows"]
+            return nil
+        }
 
         let previousCount = lastRowCount
         let previousFrames = lastRowSnapshot
@@ -612,6 +622,7 @@ final class LINEInboundWatcher {
 
         guard previousCount > 0 else {
             logger.log(.debug, "LINEInboundWatcher: baseline captured (\(currentCount) rows)")
+            lastStructuralDiag = ["structural_row_count": "\(currentCount)", "structural_previous_count": "0", "structural_signal_result": "nil_baseline"]
             return nil
         }
 
@@ -624,7 +635,10 @@ final class LINEInboundWatcher {
             bottomChanged = false
         }
 
-        guard countChanged || bottomChanged else { return nil }
+        guard countChanged || bottomChanged else {
+            lastStructuralDiag = ["structural_row_count": "\(currentCount)", "structural_previous_count": "\(previousCount)", "structural_signal_result": "nil_unchanged"]
+            return nil
+        }
 
         let newRowCount = max(0, currentCount - previousCount)
         let newRowElements: [AXUIElement]
@@ -644,6 +658,7 @@ final class LINEInboundWatcher {
         let incomingFrames = incomingCandidates.map(\.1)
         let hasOnlyOutgoingRows = !newRowFrames.isEmpty && incomingFrames.isEmpty
         if hasOnlyOutgoingRows {
+            lastStructuralDiag = ["structural_row_count": "\(currentCount)", "structural_previous_count": "\(previousCount)", "structural_signal_result": "nil_outgoing_only"]
             return nil
         }
 
@@ -667,6 +682,8 @@ final class LINEInboundWatcher {
             [ocrText, anchorAreaText, axFallbackText, structuralFallbackOCR]
         )
         mergedText = mergedCandidates
+
+        lastStructuralDiag = ["structural_row_count": "\(currentCount)", "structural_previous_count": "\(previousCount)", "structural_signal_result": "fired"]
 
         return LineDetectionSignal(
             name: "ax_structure",
@@ -880,15 +897,23 @@ final class LINEInboundWatcher {
     private func collectPixelSignal(chatList: AXUIElement, nodes: [AXNode], windowFrame: CGRect, lineWindowID: CGWindowID, conversation: String) -> LineDetectionSignal? {
         guard !recentSendTracker.isSending else {
             logger.log(.debug, "LINEInboundWatcher: pixel signal skipped (sending)")
+            lastPixelDiag = ["pixel_baseline_captured": "\(baselineCaptured)", "pixel_hash_changed": "n/a", "pixel_signal_result": "nil_sending"]
             return nil
         }
-        guard let chatListFrame = AXQuery.copyFrameAttribute(chatList) else { return nil }
-        guard windowFrame.width > 10, windowFrame.height > 10 else { return nil }
+        guard let chatListFrame = AXQuery.copyFrameAttribute(chatList) else {
+            lastPixelDiag = ["pixel_baseline_captured": "\(baselineCaptured)", "pixel_hash_changed": "n/a", "pixel_signal_result": "nil_no_frame"]
+            return nil
+        }
+        guard windowFrame.width > 10, windowFrame.height > 10 else {
+            lastPixelDiag = ["pixel_baseline_captured": "\(baselineCaptured)", "pixel_hash_changed": "n/a", "pixel_signal_result": "nil_window_too_small"]
+            return nil
+        }
 
         let captureOptions: CGWindowListOption = lineWindowID != kCGNullWindowID
             ? .optionIncludingWindow : .optionOnScreenOnly
 
         guard let image = CGWindowListCreateImage(windowFrame, captureOptions, lineWindowID, [.bestResolution]) else {
+            lastPixelDiag = ["pixel_baseline_captured": "\(baselineCaptured)", "pixel_hash_changed": "n/a", "pixel_signal_result": "nil_capture_fail"]
             return nil
         }
 
@@ -924,10 +949,14 @@ final class LINEInboundWatcher {
             lastOCRText = ""  // force textChanged=true on first poll after baseline
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash), lane=\(baseline.laneXDescription), y_cut=\(baseline.cutYDescription), text_head=[\(baselineHead)])")
+            lastPixelDiag = ["pixel_baseline_captured": "true", "pixel_hash_changed": "n/a", "pixel_hash": "\(hash)", "pixel_ocr_text_head": baselineHead, "pixel_signal_result": "nil_baseline"]
             return nil
         }
 
-        guard hash != lastImageHash else { return nil }
+        guard hash != lastImageHash else {
+            lastPixelDiag = ["pixel_baseline_captured": "true", "pixel_hash_changed": "false", "pixel_hash": "\(hash)", "pixel_signal_result": "nil_hash_unchanged"]
+            return nil
+        }
         let previousHash = lastImageHash
         lastImageHash = hash
 
@@ -957,6 +986,15 @@ final class LINEInboundWatcher {
         }
         let cursorAdjustedText = applyCursorTruncation(to: pixelOCRText, conversation: conversation)
         let deltaText = textChanged ? extractDeltaText(previous: previousOCRText, current: cursorAdjustedText) : ""
+
+        let ocrHead = String(pixelOCRText.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
+        lastPixelDiag = [
+            "pixel_baseline_captured": "true",
+            "pixel_hash_changed": "true",
+            "pixel_hash": "\(hash)",
+            "pixel_ocr_text_head": ocrHead,
+            "pixel_signal_result": textChanged ? "fired_text_changed" : "fired_text_same",
+        ]
 
         return LineDetectionSignal(
             name: "pixel_diff",
