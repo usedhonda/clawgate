@@ -2974,7 +2974,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   invalidateProject(project);
 
   // --- Context layers (parallel to handleTmuxCompletion) ---
-  const { optionalParts } = await buildReviewRepoContext({
+  const { optionalParts, stable } = await buildReviewRepoContext({
     accountId,
     apiUrl,
     log,
@@ -3308,7 +3308,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   invalidateProject(project);
 
   // Build two-layer context (stable + dynamic)
-  const { optionalParts } = await buildReviewRepoContext({
+  const { optionalParts, stable, dynamic } = await buildReviewRepoContext({
     accountId,
     apiUrl,
     log,
