@@ -336,14 +336,12 @@ struct InlineSettingsView: View {
     private var launchAtLoginBinding: Binding<Bool> {
         Binding(
             get: {
-                SMAppService.mainApp.status == .enabled
+                LaunchAtLoginManager.shared.isEnabled
             },
             set: { newValue in
                 do {
-                    if newValue {
-                        try SMAppService.mainApp.register()
-                    } else {
-                        try SMAppService.mainApp.unregister()
+                    try LaunchAtLoginManager.shared.setEnabled(newValue) { level, message in
+                        print("[\(level.rawValue.uppercased())] \(message)")
                     }
                 } catch {
                     print("[ERROR] Launch at login \(newValue ? "register" : "unregister") failed: \(error)")

@@ -311,6 +311,12 @@ let singletonLockFD: Int32 = {
 }()
 _ = singletonLockFD  // keep FD open for process lifetime
 
+if #available(macOS 13.0, *) {
+    LaunchAtLoginManager.shared.migrateLegacyLaunchAgentIfNeeded { level, message in
+        fputs("ClawGate startup [\(level.rawValue.uppercased())] \(message)\n", stderr)
+    }
+}
+
 let runtime = AppRuntime()
 let delegate = MenuBarAppDelegate(runtime: runtime, statsCollector: runtime.statsCollector, opsLogStore: runtime.opsLogStore)
 runtime.menuBarDelegate = delegate
