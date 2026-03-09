@@ -119,35 +119,29 @@ textChanged = (currentOCRText != lastOCRText)
 
 ---
 
-## 3. Text Cursor Truncation（新機能）
+## 3. Text Cursor Truncation
 
-**目的**: baseline reset をまたいで「既に見たテキスト」の再 emit を防止。
-
-**課題**: LINE 画面には過去の会話がすべて表示されたまま残る。Watcher が起動/リセットした後に最初の poll をすると、画面上の既存テキストを全行 delta として拾ってしまう。これが Chi の応答が数十分後に「再送」されるように見える問題の根本。
+**目的**: 直前に emit したテキストより前を切り落とし、新しい末尾だけを Pixel Signal に渡す。
 
 **実装** (`applyCursorTruncation`):
 
 ```
-前回 emit 時の OCR テキスト末尾 4行 を「カーソル」として保持
+前回 emit 時のテキスト末尾 4行 をカーソルとして保持
   ↓
 次回 poll の OCR テキストでカーソル行を fuzzy マッチで探す
   ↓
-見つかった最後の位置より後ろだけを extractDeltaText に渡す
+見つかった最後の位置より後ろだけを delta 候補として返す
 ```
 
-**エッジケース**:
+**カーソル結果**:
 
-| 状況 | 挙動 |
-|------|------|
-| カーソル未設定（初回） | truncation なし → 全テキスト処理 |
-| conversation 変更 | カーソル無視 → 全テキスト処理 |
-| カーソル行が OCR に見つからない | truncation なし（スクロールで消えた） |
-| カーソル以降が空 | `cursorAdjustedText = ""` → delta なし |
-| **baseline reset 後に旧テキスト再描画** | カーソルは維持 → 旧テキストをスキップ ✓ |
-| **Chi 応答が 22分後に再検出** | カーソルがカバーしていれば防止 ✓ |
+| 状況 | `pixel_cursor_status` | 挙動 |
+|------|-----------------------|------|
+| カーソル未設定 / conversation 変更 | `not_applicable` | 全テキストを候補として返す |
+| カーソル行が見つかった | `applied` | カーソル以後のみ返す |
+| カーソル行が見つからない | `not_found` | **空文字を返す（fail-neutral）** |
 
-カーソルは **baseline reset ではリセットしない**（これが核心）。
-conversation が変わったときだけリセットする。
+`cursor_not_found` で全文を再処理しないのが今回の重要点。これでスクロールや anchor loss 時に古い画面全文を再 emit しなくなる。
 
 ---
 
@@ -158,6 +152,8 @@ previousLines (Set) と currentLines の差分を取る
   → delta が空 → OCR の行分割ドリフト対策で currentLines 全体を返す
   → delta あり → 差分行のみ返す
 ```
+
+`applyCursorTruncation` が `not_found` を返した場合は current が空なので、ここでも fail-open しない。
 
 ---
 
@@ -181,30 +177,55 @@ echo チェック（RecentSendTracker）も fusion 前に走る。echo と判定
 
 ## 6. Swift 側 Dedup (`shouldSuppressDuplicateInbound`)
 
-Fusion 通過後の重複除外。
+Fusion 通過後の重複除外。現行ポリシーは **fresh-evidence first**。
 
-### 6-1. Fingerprint Dedup
+### 6-1. 判定順序
+
+```
+1. fingerprint_window hit               -> suppress
+2. primary fresh evidence exists        -> emit
+3. cursor_not_found and no fresh signal -> suppress (fail-neutral)
+4. content_memory hit                   -> suppress (assist only)
+5. otherwise                            -> emit
+```
+
+### 6-2. Fingerprint Window
 
 ```
 fingerprint = "会話名|正規化テキスト"
-同一 fingerprint が windowSeconds 以内にあれば drop
+同一 fingerprint が short window 内にあれば suppress
 ```
 
 `windowSeconds` = V2 有効時は `inboundDedupWindowSecondsV2`、無効時は 20秒。
+短時間の二重配送だけを止める一次防波堤。
 
-### 6-2. Line Memory Dedup
+### 6-3. Primary Fresh Evidence
 
-テキストを行単位に分解し、過去 75秒以内に見た行が**1行も新規でない**場合に drop。
+以下のどれかが立てば、`content_memory` より優先して emit する。
+
+- `incoming_rows > 0`
+- `pixel_post_cursor_novel_lines > 0`
+- `ax_bottom_changed=1 && newest_slice_used=1 && pixel_text_changed=1`
+- `pixel_cursor_status=not_applicable && pixel_text_changed=1`
+
+これで「13分後の同文面再送」のようなケースを stale memory だけで落とさない。
+
+### 6-4. Content Memory Assist
+
+テキストを行単位に分解し、conversation ごとに短命メモリへ積む。
 
 ```
-normalizedLines = テキストを句読点で追加分割 → 4文字以上を対象
-  全行が lineSeenRecently → suppressed
-  1行でも新規 → 通過
+normalizedLines = テキストを句読点で追加分割 → 2文字以上を対象
+TTL = 90秒
+maxSeenLinesPerConversation = 240
 ```
 
-記憶上限: 240エントリ（古い順に削除）。
+**使い方**:
+- primary evidence がないときだけ suppress 判定に参加する
+- 同じ行を再受理した場合は `seenAt` を更新する
+- TTL を超えた行は判定前に prune する
 
-### 6-3. Fuzzy Dedup (`linesLikelyEquivalent`)
+### 6-5. Fuzzy Dedup (`linesLikelyEquivalent`)
 
 行メモリ検索時に厳密一致ではなく近似一致を使う:
 
@@ -220,6 +241,16 @@ F1-like: 2 * |common_trigrams| / (|lhs_trigrams| + |rhs_trigrams|)
 ```
 
 ヒット時: `fuzzy_dedup_hit query=[...] matched=[...]` としてデバッグログに記録。
+
+### 6-6. Debug Reasons
+
+`/v1/debug/line-dedup` の pipeline reason は次を返す:
+
+- `suppressed_fingerprint_window`
+- `accepted_primary_evidence`
+- `suppressed_cursor_neutral`
+- `suppressed_content_memory_assist`
+- `accepted`
 
 ---
 

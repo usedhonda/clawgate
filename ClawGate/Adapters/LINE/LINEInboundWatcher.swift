@@ -2,6 +2,96 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+struct LineSeenEntry {
+    let normalizedLine: String
+    let seenAt: Date
+}
+
+enum LineCursorStatus: String {
+    case applied = "applied"
+    case notFound = "not_found"
+    case notApplicable = "not_applicable"
+}
+
+struct LineCursorTruncationResult {
+    let text: String
+    let status: LineCursorStatus
+    let discardedLineCount: Int
+    let keptLineCount: Int
+    let postCursorNovelLineCount: Int
+}
+
+struct LineInboundFreshnessEvidence {
+    let incomingRows: Int
+    let bottomChanged: Bool
+    let newestSliceUsed: Bool
+    let cursorStatus: LineCursorStatus
+    let postCursorNovelLineCount: Int
+    let pixelTextChanged: Bool
+
+    var hasPrimaryEvidence: Bool {
+        incomingRows > 0
+            || postCursorNovelLineCount > 0
+            || (bottomChanged && newestSliceUsed && pixelTextChanged)
+            || (cursorStatus == .notApplicable && pixelTextChanged)
+    }
+
+    var primaryReason: String {
+        if incomingRows > 0 { return "incoming_rows" }
+        if postCursorNovelLineCount > 0 { return "post_cursor_novel_lines" }
+        if bottomChanged && newestSliceUsed && pixelTextChanged { return "bottom_changed_newest_slice" }
+        if cursorStatus == .notApplicable && pixelTextChanged { return "pixel_text_changed_no_cursor" }
+        return "none"
+    }
+}
+
+struct LineInboundDedupDecisionResult {
+    let shouldSuppress: Bool
+    let reason: String
+}
+
+struct LineInboundDedupDecisionEngine {
+    static func prune(entries: [LineSeenEntry], now: Date, ttl: TimeInterval) -> [LineSeenEntry] {
+        let cutoff = now.addingTimeInterval(-ttl)
+        return entries.filter { $0.seenAt >= cutoff }
+    }
+
+    static func decide(
+        fingerprintHit: Bool,
+        contentMemoryHit: Bool,
+        freshness: LineInboundFreshnessEvidence
+    ) -> LineInboundDedupDecisionResult {
+        if fingerprintHit {
+            return LineInboundDedupDecisionResult(
+                shouldSuppress: true,
+                reason: "suppressed_fingerprint_window"
+            )
+        }
+        if freshness.hasPrimaryEvidence {
+            return LineInboundDedupDecisionResult(
+                shouldSuppress: false,
+                reason: "accepted_primary_evidence"
+            )
+        }
+        if freshness.cursorStatus == .notFound {
+            return LineInboundDedupDecisionResult(
+                shouldSuppress: true,
+                reason: "suppressed_cursor_neutral"
+            )
+        }
+        if contentMemoryHit {
+            return LineInboundDedupDecisionResult(
+                shouldSuppress: true,
+                reason: "suppressed_content_memory_assist"
+            )
+        }
+        return LineInboundDedupDecisionResult(
+            shouldSuppress: false,
+            reason: "accepted"
+        )
+    }
+}
+
 final class LINEInboundWatcher {
     private let eventBus: EventBus
     private let logger: AppLogger
@@ -41,9 +131,10 @@ final class LINEInboundWatcher {
     private var lastInboundFingerprint: String = ""
     private var lastInboundAt: Date = .distantPast
     /// Content-based seen-line registry per conversation.
-    /// Never expires by time; entries age out only by size cap.
-    private var seenLinesByConversation: [String: [String]] = [:]
+    /// Entries expire by TTL and are additionally bounded by size cap.
+    private var seenLinesByConversation: [String: [LineSeenEntry]] = [:]
     private let maxSeenLinesPerConversation = 240
+    private let contentMemoryTTLSeconds: TimeInterval = 90
     private let inboundDedupWindowSeconds: TimeInterval = 20
     private let inboundDedupWindowSecondsV2: TimeInterval
     private let ingressDedupTuneV2Enabled: Bool
@@ -173,6 +264,8 @@ final class LINEInboundWatcher {
         lastSeparatorAnchorY = nil
         lastSeparatorAnchorConfidence = 0
         lastSeparatorAnchorMethod = "none"
+        lastEmittedTextCursor = []
+        lastEmittedTextCursorConversation = ""
     }
 
     private func poll() {
@@ -362,7 +455,11 @@ final class LINEInboundWatcher {
             )
             return
         }
-        if shouldSuppressDuplicateInbound(text: filteredDecisionText, conversation: decision.conversation) {
+        if shouldSuppressDuplicateInbound(
+            text: filteredDecisionText,
+            conversation: decision.conversation,
+            details: decision.details
+        ) {
             logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window")
             savePipelineResult(
                 decision: decision,
@@ -401,6 +498,7 @@ final class LINEInboundWatcher {
         }
 
         _ = eventBus.append(type: decision.eventType, adapter: "line", payload: payload)
+        recordEmittedTextCursor(text: filteredDecisionText, conversation: decision.conversation)
         logger.log(.debug, "LINEInboundWatcher: \(decision.eventType) via fusion score=\(decision.score), conf=\(decision.confidence), signals=\(decision.signals.joined(separator: ","))")
         savePipelineResult(
             decision: decision,
@@ -414,7 +512,7 @@ final class LINEInboundWatcher {
     private func emitFromSignal(_ signal: LineDetectionSignal) {
         let filtered = LineTextSanitizer.sanitize(signal.text)
         guard !filtered.isEmpty else { return }
-        if shouldSuppressDuplicateInbound(text: filtered, conversation: signal.conversation) {
+        if shouldSuppressDuplicateInbound(text: filtered, conversation: signal.conversation, details: signal.details) {
             logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window (legacy)")
             return
         }
@@ -435,12 +533,13 @@ final class LINEInboundWatcher {
         }
 
         _ = eventBus.append(type: eventType, adapter: "line", payload: payload)
+        recordEmittedTextCursor(text: filtered, conversation: signal.conversation)
         lastSignalNames = [signal.name]
         lastScore = signal.score
         lastConfidence = payload["confidence"] ?? "low"
     }
 
-    private func shouldSuppressDuplicateInbound(text: String, conversation: String) -> Bool {
+    private func shouldSuppressDuplicateInbound(text: String, conversation: String, details: [String: String] = [:]) -> Bool {
         let normalized = normalizeForDuplicateFingerprint(text)
         guard !normalized.isEmpty else { return false }
         if ingressDedupTuneV2Enabled, normalized.count < 6 { return false }
@@ -450,53 +549,45 @@ final class LINEInboundWatcher {
         let now = Date()
         let windowSeconds = ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds
         let textHead = String(text.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
+        pruneExpiredSeenLines(conversation: normalizedConversation, now: now)
 
         let normalizedLines = normalizedInboundLinesForDedup(text)
+        let freshness = freshnessEvidence(from: details)
+        let fingerprintHit = fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < windowSeconds
+        var contentMemoryHit = false
         if !normalizedLines.isEmpty {
             lastMatchedLineHead = ""
-            let hasNovelLine = normalizedLines.contains { normalizedLine in
-                !lineSeenPreviously(normalizedLine: normalizedLine, conversation: normalizedConversation)
-            }
-            if !hasNovelLine {
-                logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound by content memory")
-                appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
-                    ts: isoString(now),
-                    result: "suppressed",
-                    reason: "content_memory",
-                    matchedLineHead: lastMatchedLineHead,
-                    conversation: normalizedConversation,
-                    textHead: textHead,
-                    emitted: false
-                ))
-                return true
+            contentMemoryHit = normalizedLines.allSatisfy { normalizedLine in
+                lineSeenPreviously(normalizedLine: normalizedLine, conversation: normalizedConversation)
             }
         }
 
-        if fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < windowSeconds {
-            appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
-                ts: isoString(now),
-                result: "suppressed",
-                reason: "fingerprint_window",
-                matchedLineHead: "",
-                conversation: normalizedConversation,
-                textHead: textHead,
-                emitted: false
-            ))
+        let decision = LineInboundDedupDecisionEngine.decide(
+            fingerprintHit: fingerprintHit,
+            contentMemoryHit: contentMemoryHit,
+            freshness: freshness
+        )
+        let isSuppressed = decision.shouldSuppress
+        let matchedHead = isSuppressed ? lastMatchedLineHead : ""
+        if isSuppressed {
+            logger.log(.debug, "LINEInboundWatcher: dedup suppressed reason=\(decision.reason)")
+        }
+        appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
+            ts: isoString(now),
+            result: isSuppressed ? "suppressed" : "passed",
+            reason: decision.reason,
+            matchedLineHead: matchedHead,
+            conversation: normalizedConversation,
+            textHead: textHead,
+            emitted: !isSuppressed
+        ))
+        if isSuppressed {
             return true
         }
 
         lastInboundFingerprint = fingerprint
         lastInboundAt = now
-        recordInboundLines(normalizedLines, conversation: normalizedConversation)
-        appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
-            ts: isoString(now),
-            result: "passed",
-            reason: "accepted",
-            matchedLineHead: "",
-            conversation: normalizedConversation,
-            textHead: textHead,
-            emitted: true
-        ))
+        recordInboundLines(normalizedLines, conversation: normalizedConversation, now: now)
         return false
     }
 
@@ -540,11 +631,32 @@ final class LINEInboundWatcher {
             .filter { $0.count >= 2 }
     }
 
+    private func freshnessEvidence(from details: [String: String]) -> LineInboundFreshnessEvidence {
+        LineInboundFreshnessEvidence(
+            incomingRows: Int(details["incoming_rows"] ?? "") ?? 0,
+            bottomChanged: details["ax_bottom_changed"] == "1",
+            newestSliceUsed: details["newest_slice_used"] == "1",
+            cursorStatus: LineCursorStatus(rawValue: details["pixel_cursor_status"] ?? "") ?? .notApplicable,
+            postCursorNovelLineCount: Int(details["pixel_post_cursor_novel_lines"] ?? "") ?? 0,
+            pixelTextChanged: details["pixel_text_changed"] == "1"
+        )
+    }
+
+    private func recordEmittedTextCursor(text: String, conversation: String) {
+        let lines = LineTextSanitizer.sanitize(text)
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return }
+        lastEmittedTextCursor = Array(lines.suffix(textCursorLineCount))
+        lastEmittedTextCursorConversation = conversation
+    }
+
     private func lineSeenPreviously(normalizedLine: String, conversation: String) -> Bool {
         guard let lines = seenLinesByConversation[conversation] else { return false }
         for seen in lines {
-            if linesLikelyEquivalent(normalizedLine, seen) {
-                let matchedHead = String(seen.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
+            if linesLikelyEquivalent(normalizedLine, seen.normalizedLine) {
+                let matchedHead = String(seen.normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
                 let queryHead = String(normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
                 logger.log(.debug, "LINEInboundWatcher: fuzzy_dedup_hit query=[\(queryHead)] matched=[\(matchedHead)]")
                 lastMatchedLineHead = matchedHead
@@ -554,12 +666,26 @@ final class LINEInboundWatcher {
         return false
     }
 
-    private func recordInboundLines(_ normalizedLines: [String], conversation: String) {
+    private func pruneExpiredSeenLines(conversation: String, now: Date) {
+        guard var seen = seenLinesByConversation[conversation] else { return }
+        seen = LineInboundDedupDecisionEngine.prune(entries: seen, now: now, ttl: contentMemoryTTLSeconds)
+        if seen.isEmpty {
+            seenLinesByConversation.removeValue(forKey: conversation)
+        } else {
+            seenLinesByConversation[conversation] = seen
+        }
+    }
+
+    private func recordInboundLines(_ normalizedLines: [String], conversation: String, now: Date) {
         guard !normalizedLines.isEmpty else { return }
         var seen = seenLinesByConversation[conversation] ?? []
         var addedInBatch = Set<String>()
-        for line in normalizedLines where addedInBatch.insert(line).inserted && !seen.contains(line) {
-            seen.append(line)
+        for line in normalizedLines where addedInBatch.insert(line).inserted {
+            if let existingIndex = seen.firstIndex(where: { $0.normalizedLine == line }) {
+                seen[existingIndex] = LineSeenEntry(normalizedLine: line, seenAt: now)
+            } else {
+                seen.append(LineSeenEntry(normalizedLine: line, seenAt: now))
+            }
         }
         if seen.count > maxSeenLinesPerConversation {
             seen.removeFirst(seen.count - maxSeenLinesPerConversation)
@@ -668,6 +794,7 @@ final class LINEInboundWatcher {
             countChanged: countChanged,
             newRowCount: newRowCount
         )
+        let newestSliceUsed = ocrFrames.contains { Int($0.origin.y) == Int(newestSliceRect(for: lastFrame).origin.y) && Int($0.height) == Int(newestSliceRect(for: lastFrame).height) }
         let ocrText = extractInboundOCRText(from: ocrFrames, lineWindowID: lineWindowID)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let anchorAreaText = collectAnchorAreaOCR(chatList: chatList, lineWindowID: lineWindowID)
@@ -695,6 +822,7 @@ final class LINEInboundWatcher {
                 "total_rows": String(currentCount),
                 "ax_bottom_changed": bottomChanged ? "1" : "0",
                 "incoming_rows": String(incomingFrames.count),
+                "newest_slice_used": newestSliceUsed ? "1" : "0",
                 "ocr_empty_fallback_ax": ocrText.isEmpty ? "1" : "0",
                 "ocr_text_len": String(ocrText.count),
                 "anchor_area_text_len": String(anchorAreaText.count),
@@ -974,18 +1102,9 @@ final class LINEInboundWatcher {
         }
         if textChanged {
             lastOCRText = pixelOCRText
-            // Update text cursor with bottom N lines of current OCR output
-            let cursorLines = pixelOCRText
-                .split(separator: "\n", omittingEmptySubsequences: true)
-                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            if !cursorLines.isEmpty {
-                lastEmittedTextCursor = Array(cursorLines.suffix(textCursorLineCount))
-                lastEmittedTextCursorConversation = conversation
-            }
         }
-        let cursorAdjustedText = applyCursorTruncation(to: pixelOCRText, conversation: conversation)
-        let deltaText = textChanged ? extractDeltaText(previous: previousOCRText, current: cursorAdjustedText) : ""
+        let cursorResult = applyCursorTruncation(to: pixelOCRText, conversation: conversation)
+        let deltaText = textChanged ? extractDeltaText(previous: previousOCRText, current: cursorResult.text) : ""
 
         let ocrHead = String(pixelOCRText.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
         lastPixelDiag = [
@@ -994,6 +1113,8 @@ final class LINEInboundWatcher {
             "pixel_hash": "\(hash)",
             "pixel_ocr_text_head": ocrHead,
             "pixel_signal_result": textChanged ? "fired_text_changed" : "fired_text_same",
+            "pixel_cursor_status": cursorResult.status.rawValue,
+            "pixel_post_cursor_novel_lines": String(cursorResult.postCursorNovelLineCount),
         ]
 
         return LineDetectionSignal(
@@ -1013,6 +1134,10 @@ final class LINEInboundWatcher {
                 "pixel_green_rows": burst.greenRowsDescription,
                 "pixel_green_rows_expanded": burst.expandedGreenRowsDescription,
                 "pixel_frame_skipped_no_cut": burst.frameSkippedNoCutDescription,
+                "pixel_cursor_status": cursorResult.status.rawValue,
+                "pixel_post_cursor_novel_lines": String(cursorResult.postCursorNovelLineCount),
+                "pixel_cursor_discarded_lines": String(cursorResult.discardedLineCount),
+                "pixel_cursor_kept_lines": String(cursorResult.keptLineCount),
                 "frame_action": "processed",
             ]
         )
@@ -1043,16 +1168,36 @@ final class LINEInboundWatcher {
         return delta.joined(separator: "\n")
     }
 
-    /// Truncates `text` to lines after the last known cursor position, preventing re-emission
-    /// of already-seen content across baseline resets and long-delayed re-renders.
-    private func applyCursorTruncation(to text: String, conversation: String) -> String {
+    /// Truncates `text` to lines after the last emitted cursor position.
+    /// If the cursor is not found, this is fail-neutral and returns no text.
+    private func applyCursorTruncation(to text: String, conversation: String) -> LineCursorTruncationResult {
         guard !lastEmittedTextCursor.isEmpty,
-              lastEmittedTextCursorConversation == conversation else { return text }
+              lastEmittedTextCursorConversation == conversation else {
+            let lines = text
+                .split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return LineCursorTruncationResult(
+                text: text,
+                status: .notApplicable,
+                discardedLineCount: 0,
+                keptLineCount: lines.count,
+                postCursorNovelLineCount: lines.count
+            )
+        }
         let lines = text
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard !lines.isEmpty else { return text }
+        guard !lines.isEmpty else {
+            return LineCursorTruncationResult(
+                text: "",
+                status: .applied,
+                discardedLineCount: 0,
+                keptLineCount: 0,
+                postCursorNovelLineCount: 0
+            )
+        }
 
         // Find the last position where any cursor line matches in the current OCR output
         var cursorEndIndex: Int? = nil
@@ -1066,13 +1211,24 @@ final class LINEInboundWatcher {
 
         guard let endIdx = cursorEndIndex else {
             logger.log(.debug, "LINEInboundWatcher: cursor_not_found (scrolled far or cleared)")
-            return text  // cursor not visible -> no truncation, process full text
+            return LineCursorTruncationResult(
+                text: "",
+                status: .notFound,
+                discardedLineCount: 0,
+                keptLineCount: 0,
+                postCursorNovelLineCount: 0
+            )
         }
 
         let afterCursor = Array(lines[(endIdx + 1)...])
         logger.log(.debug, "LINEInboundWatcher: cursor_truncation discarded=\(endIdx + 1) kept=\(afterCursor.count)")
-        if afterCursor.isEmpty { return "" }
-        return afterCursor.joined(separator: "\n")
+        return LineCursorTruncationResult(
+            text: afterCursor.joined(separator: "\n"),
+            status: .applied,
+            discardedLineCount: endIdx + 1,
+            keptLineCount: afterCursor.count,
+            postCursorNovelLineCount: afterCursor.count
+        )
     }
 
     private func collectProcessSignal(app: NSRunningApplication, conversation: String) -> LineDetectionSignal? {
