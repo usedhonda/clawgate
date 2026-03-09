@@ -1326,8 +1326,8 @@ function inferIngressOrigin(adapter, source) {
 
 /**
  * Resolve which outbound channel (LINE or Telegram) to use for a message.
- * Priority: ingress adapter (reply routing) > tproj header > observe mode > default (LINE).
- * Telegram is used when: ingress was Telegram, message came via tproj-msg, or mode is observe.
+ * Priority: ingress adapter (secretary reply routing) > tproj header > dev-session messaging > default (Telegram).
+ * Telegram is the default for CC/Cdx development traffic; LINE is reserved for normal secretary workflows.
  * Chi can explicitly route to Telegram using <send_telegram> tags.
  */
 function resolveOutboundChannel({ ingressAdapter, tprojHeader, mode } = {}) {
@@ -1336,10 +1336,10 @@ function resolveOutboundChannel({ ingressAdapter, tprojHeader, mode } = {}) {
   if (ingressAdapter === "line") return "line";
   // 2. tproj-msg sourced -> Telegram (dev context)
   if (tprojHeader) return "telegram";
-  // 3. Observe mode -> Telegram (dev-only output, not for end users)
-  if (mode === "observe") return "telegram";
-  // 4. Default -> LINE
-  return "line";
+  // 3. Development-session messaging -> Telegram
+  if (mode === "observe" || mode === "autonomous" || mode === "auto") return "telegram";
+  // 4. Failsafe default -> Telegram
+  return "telegram";
 }
 
 function parseOptionalMs(value) {
@@ -3070,7 +3070,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
   log?.info?.(`clawgate: [${accountId}] tmux question from "${project}": "${questionText.slice(0, 80)}" (${options.length} options, prompt=${_promptMeta.hash})`);
 
-  // Resolve outbound channel for question responses (default -> LINE, observe -> Telegram)
+  // Resolve outbound channel for question responses (development traffic defaults to Telegram)
   const questionChannel = resolveOutboundChannel({ mode });
 
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
@@ -3079,7 +3079,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     return sendTmuxMessage(conv, text, traceId, { channel: questionChannel });
   };
 
-  // Deliver reply — parse <cc_answer> (auto mode only) and route answer, or forward to LINE
+  // Deliver reply — parse <cc_answer> (auto mode only) and route answer, or forward to the development messenger
   const deliver = async (replyPayload) => {
     let replyText = extractReplyText(replyPayload, log, "tmux_question");
     if (!replyText.trim()) return;
@@ -3103,21 +3103,21 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
         if (answerResult.error) {
           const msg = `[Answer send failed: ${answerResult.error.message || answerResult.error}]\n\n${answerResult.lineText}`;
           try { await sendLine(defaultConversation || project, msg); } catch (err) {
-            log?.error?.(`clawgate: [${accountId}] send answer error notice to LINE failed: ${err}`);
+            log?.error?.(`clawgate: [${accountId}] send answer error notice to ${questionChannel.toUpperCase()} failed: ${err}`);
           }
         } else if (answerResult.lineText) {
           const normalized = normalizeLineReplyText(answerResult.lineText, { project, sessionType, eventKind: "question" });
           try { await sendLine(defaultConversation || project, normalized); } catch (err) {
-            log?.error?.(`clawgate: [${accountId}] send answer line text to LINE failed: ${err}`);
+            log?.error?.(`clawgate: [${accountId}] send answer line text to ${questionChannel.toUpperCase()} failed: ${err}`);
           }
         }
         return;
       }
     }
 
-    // Default: forward to LINE (observe + auto fallback).
+    // Default: forward to the development messenger (Telegram by policy).
     // Autonomous question events are user-decision checkpoints:
-    // recommendation to LINE is allowed, but task/answer tags must not execute.
+    // recommendation to Telegram is allowed, but task/answer tags must not execute.
     if (mode === "autonomous") {
       const hadChoiceTags = hasChoiceTags(replyText);
       const advisoryRaw = stripChoiceTags(replyText);
@@ -3162,7 +3162,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
           detail: "question_advisory_telegram",
         });
       } catch (err) {
-        log?.error?.(`clawgate: [${accountId}] send autonomous question advisory to Telegram failed: ${err}`);
+        log?.error?.(`clawgate: [${accountId}] send autonomous question advisory to TELEGRAM failed: ${err}`);
         logAutonomousLineEvent(log, {
           accountId,
           project,
@@ -3176,11 +3176,11 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
 
     // Observe + auto fallback
     const lineText = normalizeLineReplyText(replyText, { project, sessionType, eventKind: "question" });
-    log?.info?.(`clawgate: [${accountId}] sending question reply to LINE: "${lineText.slice(0, 80)}"`);
+    log?.info?.(`clawgate: [${accountId}] sending question reply to ${questionChannel.toUpperCase()}: "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);
     } catch (err) {
-      log?.error?.(`clawgate: [${accountId}] send question reply to LINE failed: ${err}`);
+      log?.error?.(`clawgate: [${accountId}] send question reply to ${questionChannel.toUpperCase()} failed: ${err}`);
     }
   };
 
@@ -3412,7 +3412,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
 
   log?.info?.(`clawgate: [${accountId}] tmux completion from "${project}" (mode=${mode}, prompt=${_promptMeta.hash}): "${text.slice(0, 80)}"`);
 
-  // Resolve outbound channel for completion responses (default -> LINE, observe -> Telegram)
+  // Resolve outbound channel for completion responses (development traffic defaults to Telegram)
   const completionChannel = resolveOutboundChannel({ mode });
 
   // Helper: send to messenger (Telegram or LINE) with outbound dedup
@@ -3486,7 +3486,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           }
         }
       }
-      // Strip <cc_task> tags so they don't leak into LINE advisory
+      // Strip <cc_task> tags so they don't leak into Telegram advisory
       replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
 
       const hadChoiceTags = hasChoiceTags(replyText);
@@ -3562,7 +3562,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
             setAutonomousLoopActive(project, false);
             setReviewDone(project, "lgtm_autonomous");
             log?.info?.(`clawgate: [${accountId}] review-done SET for "${project}" — completions suppressed until next task`);
-            // Forward the review summary (lineText) to LINE as final milestone.
+            // Forward the review summary (lineText) to Telegram as the final development milestone.
             if (result.lineText) {
               const normalized = normalizeLineReplyText(result.lineText, { project, sessionType, eventKind: "completion" });
               if (shouldSuppressAutonomousLine(normalized)) {
@@ -3806,14 +3806,14 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
           return;
         }
       }
-      // No <cc_task> or max rounds reached — reset counter, strip tags, fall through to LINE
+      // No <cc_task> or max rounds reached — reset counter, strip tags, and fall through to Telegram
       questionRoundMap.delete(project);
       setAutonomousLoopActive(project, false);
       log?.info?.(`clawgate: [${accountId}] autonomous loop reset for "${project}" — max rounds reached or no cc_task`);
-      // Strip any <cc_task> tags so they don't leak raw into LINE
+      // Strip any <cc_task> tags so they don't leak raw into Telegram
       replyText = replyText.replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "").trim();
-      // Canonical autonomous policy: avoid sending free-form fallback chatter to LINE.
-      // Only milestone-based LINE updates are allowed (risk / interaction_pending / final).
+      // Canonical autonomous policy: avoid sending free-form fallback chatter to Telegram.
+      // Only milestone-based development updates are allowed (risk / interaction_pending / final).
       logAutonomousLineEvent(log, {
         accountId,
         project,
@@ -3951,7 +3951,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       // No <cc_task> found — fall through to normal delivery
     }
 
-    // Default: forward all to LINE
+    // Default: forward all tmux development output to Telegram
     const lineText = normalizeLineReplyText(replyText, { project, sessionType, eventKind: "completion" });
     if (mode === "autonomous" && shouldSuppressAutonomousLine(lineText)) {
       logAutonomousLineEvent(log, {
@@ -3963,7 +3963,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
       });
       return;
     }
-    log?.info?.(`clawgate: [${accountId}] sending tmux result to LINE "${defaultConversation}": "${lineText.slice(0, 80)}"`);
+    log?.info?.(`clawgate: [${accountId}] sending tmux result to ${completionChannel.toUpperCase()} "${defaultConversation}": "${lineText.slice(0, 80)}"`);
     try {
       await sendLine(defaultConversation || project, lineText);
       if (mode === "autonomous") {
@@ -3975,7 +3975,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
         });
       }
     } catch (err) {
-      log?.error?.(`clawgate: [${accountId}] send tmux result to LINE failed: ${err}`);
+      log?.error?.(`clawgate: [${accountId}] send tmux result to ${completionChannel.toUpperCase()} failed: ${err}`);
       if (mode === "autonomous") {
         logAutonomousLineEvent(log, {
           accountId,
