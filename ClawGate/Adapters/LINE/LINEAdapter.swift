@@ -2,6 +2,24 @@ import AppKit
 import Foundation
 
 final class LINEAdapter: AdapterProtocol {
+    private struct SendSurfaceAssessment {
+        let hasSearchField: Bool
+        let searchFieldValue: String
+        let hasMessageInput: Bool
+        let hasGreenSignal: Bool
+        let hasTextSignal: Bool
+        let matchesExpectedConversation: Bool
+        let windowTitle: String?
+        let reason: String
+
+        var isAbnormal: Bool {
+            !hasSearchField
+                || !hasMessageInput
+                || !searchFieldValue.isEmpty
+                || (!hasGreenSignal && !hasTextSignal)
+        }
+    }
+
     let name = "line"
     let bundleIdentifier = "jp.naver.line.mac"
 
@@ -119,11 +137,17 @@ final class LINEAdapter: AdapterProtocol {
             AXQuery.descendants(of: rootWindow)
         }
 
+        let defaultConversation = configuredDefaultConversation()
+        let isDefaultConversationSend =
+            !defaultConversation.isEmpty
+            && LineSidebarDiscovery.normalizeConversationKey(payload.conversationHint)
+                == LineSidebarDiscovery.normalizeConversationKey(defaultConversation)
+
         // Same-conversation cache: skip search if already in the right conversation
         var canSkipNavigation = false
         var sidebarDetectedAfterSearch = false
         var clickedSidebarResultRow = false
-        if let lastHint = lastConversationHint, lastHint == payload.conversationHint {
+        if !isDefaultConversationSend, let lastHint = lastConversationHint, lastHint == payload.conversationHint {
             let wfNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
             if (SelectorResolver.resolve(
                 selector: LineSelectors.messageInputU, in: nodes, windowFrame: wfNow
@@ -136,128 +160,153 @@ final class LINEAdapter: AdapterProtocol {
         }
 
         if !canSkipNavigation {
-        do {
-        // Stage 2: Search -> click result row to navigate to matching conversation
-        _ = try step("open_conversation", logger: stepLogger) {
-            let candidate = SelectorResolver.resolve(
-                selector: LineSelectors.searchFieldU, in: nodes, windowFrame: windowFrame
-            ) ?? legacyResolve(LineSelectors.searchField, in: nodes)
-
-            guard let searchField = candidate else {
-                throw BridgeRuntimeError(
-                    code: "search_field_not_found",
-                    message: "Search field not found",
-                    retriable: true,
-                    failedStep: "open_conversation",
-                    details: "selectors=LineSelectors.searchFieldU"
+            if isDefaultConversationSend {
+                let preflight = try step("preflight_send_surface", logger: stepLogger) {
+                    try assessSendSurface(
+                        rootWindow: rootWindow,
+                        windowFrame: windowFrame,
+                        nodes: nodes,
+                        expectedConversation: defaultConversation
+                    )
+                }
+                logger.log(
+                    .info,
+                    "LINE default send preflight abnormal=\(preflight.isAbnormal) reason=\(preflight.reason) search='\(preflight.searchFieldValue)' green=\(preflight.hasGreenSignal) text=\(preflight.hasTextSignal) input=\(preflight.hasMessageInput)"
                 )
-            }
-
-            // 1. Activate LINE
-            let activateDone = DispatchSemaphore(value: 0)
-            DispatchQueue.main.async {
-                app.activate(options: [.activateIgnoringOtherApps])
-                activateDone.signal()
-            }
-            activateDone.wait()
-            usleep(150_000)
-
-            // 2. Focus search field
-            AXActions.setFocused(searchField.node.element)
-            usleep(100_000)
-
-            // 3. Set search text via AX API (not pasteText)
-            guard AXActions.setValue(payload.conversationHint, on: searchField.node.element) else {
-                throw BridgeRuntimeError(
-                    code: "search_set_failed",
-                    message: "Failed to set search field value",
-                    retriable: true,
-                    failedStep: "open_conversation",
-                    details: nil
-                )
-            }
-
-            // 4. Verify value was set
-            let verified = AXActions.poll(intervalMs: 30, timeoutMs: 500) {
-                let val = AXQuery.copyStringAttribute(
-                    searchField.node.element, attribute: kAXValueAttribute as String
-                ) ?? ""
-                return !val.isEmpty
-            }
-            guard verified else {
-                throw BridgeRuntimeError(
-                    code: "search_value_empty",
-                    message: "Search field value empty after setValue",
-                    retriable: true,
-                    failedStep: "open_conversation",
-                    details: nil
-                )
-            }
-
-            // 5. HID Enter to confirm search (triggers Qt search execution)
-            // setValue alone doesn't fire Qt's textEdited signal, so search doesn't run.
-            // HID Enter confirms the search query and populates result rows.
-            AXActions.sendSearchEnter()
-            usleep(400_000) // 400ms for search results to populate after Enter
-
-            // 6. Click the first visible row from the sidebar result list only.
-            let freshNodes = AXQuery.descendants(of: rootWindow)
-            let freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
-            if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame) {
-                sidebarDetectedAfterSearch = true
-                logger.log(.debug, "LINE search sidebar detected rows=\(sidebar.visibleRows.count)")
-                if let row = sidebar.visibleRows.first {
-                    clickedSidebarResultRow = true
-                    logger.log(.info, "LINE search result click row_y=\(Int(row.frame.minY)) rows=\(sidebar.visibleRows.count)")
-                    _ = AXActions.clickAtCenter(row.element)
+                if preflight.isAbnormal {
+                    nodes = try step("recover_default_conversation", logger: stepLogger) {
+                        try recoverDefaultConversationSurface(
+                            app: app,
+                            rootWindow: rootWindow,
+                            windowFrame: windowFrame,
+                            nodes: nodes,
+                            defaultConversation: defaultConversation
+                        )
+                    }
                 } else {
-                    logger.log(.warning, "LINE search sidebar found but no clickable rows")
+                    stepLogger.record(step: "open_conversation", start: Date(), success: true, details: "skipped (default conversation clean surface)")
+                    stepLogger.record(step: "rescan_after_navigation", start: Date(), success: true, details: "skipped (default conversation clean surface)")
                 }
             } else {
-                logger.log(.warning, "LINE search sidebar not found after Enter")
-            }
-            // If no row found, Enter may have already navigated (v4 behavior)
-            return true
-        }
+                do {
+                    _ = try step("open_conversation", logger: stepLogger) {
+                        let candidate = SelectorResolver.resolve(
+                            selector: LineSelectors.searchFieldU, in: nodes, windowFrame: windowFrame
+                        ) ?? legacyResolve(LineSelectors.searchField, in: nodes)
 
-        // Wait for navigation: poll for messageInput to appear
-        nodes = try step("rescan_after_navigation", logger: stepLogger) {
-            var freshNodes: [AXNode] = []
-            let found = AXActions.poll(intervalMs: 100, timeoutMs: 3000) {
-                freshNodes = AXQuery.descendants(of: rootWindow)
-                let windowFrameNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
-                let match = SelectorResolver.resolve(
-                    selector: LineSelectors.messageInputU, in: freshNodes, windowFrame: windowFrameNow
-                ) ?? self.legacyResolve(LineSelectors.messageInput, in: freshNodes)
-                return match != nil
+                        guard let searchField = candidate else {
+                            throw BridgeRuntimeError(
+                                code: "search_field_not_found",
+                                message: "Search field not found",
+                                retriable: true,
+                                failedStep: "open_conversation",
+                                details: "selectors=LineSelectors.searchFieldU"
+                            )
+                        }
+
+                        let activateDone = DispatchSemaphore(value: 0)
+                        DispatchQueue.main.async {
+                            app.activate(options: [.activateIgnoringOtherApps])
+                            activateDone.signal()
+                        }
+                        activateDone.wait()
+                        usleep(150_000)
+
+                        AXActions.setFocused(searchField.node.element)
+                        usleep(100_000)
+
+                        guard AXActions.setValue(payload.conversationHint, on: searchField.node.element) else {
+                            throw BridgeRuntimeError(
+                                code: "search_set_failed",
+                                message: "Failed to set search field value",
+                                retriable: true,
+                                failedStep: "open_conversation",
+                                details: nil
+                            )
+                        }
+
+                        let verified = AXActions.poll(intervalMs: 30, timeoutMs: 500) {
+                            let val = AXQuery.copyStringAttribute(
+                                searchField.node.element, attribute: kAXValueAttribute as String
+                            ) ?? ""
+                            return !val.isEmpty
+                        }
+                        guard verified else {
+                            throw BridgeRuntimeError(
+                                code: "search_value_empty",
+                                message: "Search field value empty after setValue",
+                                retriable: true,
+                                failedStep: "open_conversation",
+                                details: nil
+                            )
+                        }
+
+                        AXActions.sendSearchEnter()
+                        usleep(400_000)
+
+                        let freshNodes = AXQuery.descendants(of: rootWindow)
+                        let freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+                        if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame) {
+                            sidebarDetectedAfterSearch = true
+                            logger.log(.debug, "LINE search sidebar detected rows=\(sidebar.visibleRows.count)")
+                            let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+                            let windowID = AXQuery.pid(of: rootWindow).flatMap { AXActions.findWindowID(pid: $0) }
+                            if let row = LineSidebarDiscovery.findConversationRow(
+                                named: payload.conversationHint,
+                                in: sidebar,
+                                nodes: freshNodes,
+                                windowTitle: windowTitle,
+                                windowID: windowID
+                            ) {
+                                clickedSidebarResultRow = true
+                                logger.log(.info, "LINE search result click row_y=\(Int(row.frame.minY)) rows=\(sidebar.visibleRows.count)")
+                                _ = AXActions.clickAtCenter(row.element)
+                            } else {
+                                logger.log(.warning, "LINE search sidebar found but no matching clickable row")
+                            }
+                        } else {
+                            logger.log(.warning, "LINE search sidebar not found after Enter")
+                        }
+                        return true
+                    }
+
+                    nodes = try step("rescan_after_navigation", logger: stepLogger) {
+                        var freshNodes: [AXNode] = []
+                        let found = AXActions.poll(intervalMs: 100, timeoutMs: 3000) {
+                            freshNodes = AXQuery.descendants(of: rootWindow)
+                            let windowFrameNow = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+                            let match = SelectorResolver.resolve(
+                                selector: LineSelectors.messageInputU, in: freshNodes, windowFrame: windowFrameNow
+                            ) ?? self.legacyResolve(LineSelectors.messageInput, in: freshNodes)
+                            return match != nil
+                        }
+                        if found {
+                            return freshNodes
+                        }
+                        if sidebarDetectedAfterSearch && !clickedSidebarResultRow {
+                            throw BridgeRuntimeError(
+                                code: "search_result_not_found",
+                                message: "No clickable search result row found",
+                                retriable: true,
+                                failedStep: "rescan_after_navigation",
+                                details: "sidebar_detected=true"
+                            )
+                        }
+                        throw BridgeRuntimeError(
+                            code: "rescan_timeout",
+                            message: "Could not detect navigation to conversation",
+                            retriable: true,
+                            failedStep: "rescan_after_navigation",
+                            details: "messageInput not found after 3s polling"
+                        )
+                    }
+                } catch {
+                    AXActions.sendEscape()
+                    usleep(100_000)
+                    logger.log(.warning, "Navigation failed, sent Escape to clear search: \(error)")
+                    throw error
+                }
             }
-            if found {
-                return freshNodes
-            }
-            if sidebarDetectedAfterSearch && !clickedSidebarResultRow {
-                throw BridgeRuntimeError(
-                    code: "search_result_not_found",
-                    message: "No clickable search result row found",
-                    retriable: true,
-                    failedStep: "rescan_after_navigation",
-                    details: "sidebar_detected=true"
-                )
-            }
-            throw BridgeRuntimeError(
-                code: "rescan_timeout",
-                message: "Could not detect navigation to conversation",
-                retriable: true,
-                failedStep: "rescan_after_navigation",
-                details: "messageInput not found after 3s polling"
-            )
-        }
-        } catch {
-            // Dismiss search mode to prevent stale query from polluting sidebar/OCR
-            AXActions.sendEscape()
-            usleep(100_000)
-            logger.log(.warning, "Navigation failed, sent Escape to clear search: \(error)")
-            throw error
-        }
         } // end if !canSkipNavigation
 
         // Stage 2+3: Focus input -> setValue -> verify
@@ -322,7 +371,7 @@ final class LINEAdapter: AdapterProtocol {
 
         // Dismiss search mode after successful send so sidebar returns to conversation list.
         // This prevents stale search text from polluting OCR on subsequent inbound polls.
-        if !canSkipNavigation {
+        if !canSkipNavigation && !isDefaultConversationSend {
             AXActions.sendEscape()
             usleep(100_000)
         }
@@ -552,6 +601,320 @@ final class LINEAdapter: AdapterProtocol {
         return SelectorCandidate(node: node, confidence: 0.3, matchedLayer: 1)
     }
 
+    private func configuredDefaultConversation() -> String {
+        ConfigStore().load().lineDefaultConversation.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func assessSendSurface(
+        rootWindow: AXUIElement,
+        windowFrame: CGRect,
+        nodes: [AXNode],
+        expectedConversation: String? = nil
+    ) throws -> SendSurfaceAssessment {
+        let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+        let searchField = SelectorResolver.resolve(
+            selector: LineSelectors.searchFieldU, in: nodes, windowFrame: windowFrame
+        ) ?? legacyResolve(LineSelectors.searchField, in: nodes)
+        let searchFieldValue = searchField.flatMap {
+            AXQuery.copyStringAttribute($0.node.element, attribute: kAXValueAttribute as String)
+        }?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasMessageInput = (SelectorResolver.resolve(
+            selector: LineSelectors.messageInputU, in: nodes, windowFrame: windowFrame
+        ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)) != nil
+
+        let hasVisibleMessageText = nodes.contains { node in
+            guard node.role == "AXStaticText", let frame = node.frame else { return false }
+            let relX = Double(frame.midX - windowFrame.origin.x) / Double(windowFrame.width)
+            let relY = Double(frame.midY - windowFrame.origin.y) / Double(windowFrame.height)
+            guard let geo = LineSelectors.messageTextU.geometryHint,
+                  geo.regionX.contains(relX),
+                  geo.regionY.contains(relY) else {
+                return false
+            }
+            let text = (node.value ?? node.title ?? node.description ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return !text.isEmpty && !Self.isUIChrome(text, windowTitle: windowTitle)
+        }
+
+        let hasSidebarTextSignal: Bool = {
+            guard let sidebar = LineSidebarDiscovery.findSidebarList(in: nodes, windowFrame: windowFrame) else {
+                return false
+            }
+            let axCandidates = LineSidebarDiscovery.extractAXConversationCandidates(
+                from: sidebar.visibleRows,
+                nodes: nodes,
+                windowTitle: windowTitle
+            )
+            if !axCandidates.isEmpty {
+                return true
+            }
+            guard let pid = AXQuery.pid(of: rootWindow),
+                  let windowID = AXActions.findWindowID(pid: pid) else {
+                return false
+            }
+            let ocrCandidates = LineSidebarDiscovery.extractOCRConversationCandidates(
+                from: sidebar.visibleRows,
+                windowID: windowID,
+                config: .default,
+                windowTitle: windowTitle
+            )
+            return !ocrCandidates.isEmpty
+        }()
+
+        let hasConversationTitleSignal: Bool = {
+            guard let title = windowTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !title.isEmpty else {
+                return false
+            }
+            return title.caseInsensitiveCompare("LINE") != .orderedSame
+                && !Self.isUIChrome(title, windowTitle: nil)
+        }()
+
+        let hasTextSignal = hasVisibleMessageText || hasSidebarTextSignal || hasConversationTitleSignal
+        let matchesExpectedConversation: Bool = {
+            let expected = expectedConversation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !expected.isEmpty else { return true }
+            guard let title = windowTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+                return false
+            }
+            return LineSidebarDiscovery.normalizeConversationKey(title)
+                == LineSidebarDiscovery.normalizeConversationKey(expected)
+        }()
+        let hasGreenSignal: Bool = {
+            guard let pid = AXQuery.pid(of: rootWindow),
+                  let windowID = AXActions.findWindowID(pid: pid) else {
+                return false
+            }
+            return detectGreenSignal(in: messageSignalRect(for: windowFrame), windowID: windowID)
+        }()
+
+        let reason: String
+        if searchField == nil {
+            reason = "search_field_missing"
+        } else if !searchFieldValue.isEmpty {
+            reason = "search_field_dirty"
+        } else if !hasMessageInput {
+            reason = "message_input_missing"
+        } else if !hasGreenSignal && !hasTextSignal {
+            reason = "no_green_or_text_signal"
+        } else {
+            reason = "ok"
+        }
+
+        return SendSurfaceAssessment(
+            hasSearchField: searchField != nil,
+            searchFieldValue: searchFieldValue,
+            hasMessageInput: hasMessageInput,
+            hasGreenSignal: hasGreenSignal,
+            hasTextSignal: hasTextSignal,
+            matchesExpectedConversation: matchesExpectedConversation,
+            windowTitle: windowTitle,
+            reason: reason
+        )
+    }
+
+    private func recoverDefaultConversationSurface(
+        app: NSRunningApplication,
+        rootWindow: AXUIElement,
+        windowFrame: CGRect,
+        nodes: [AXNode],
+        defaultConversation: String
+    ) throws -> [AXNode] {
+        activate(app: app)
+
+        if let searchField = SelectorResolver.resolve(
+            selector: LineSelectors.searchFieldU, in: nodes, windowFrame: windowFrame
+        ) ?? legacyResolve(LineSelectors.searchField, in: nodes) {
+            let searchValue = AXQuery.copyStringAttribute(
+                searchField.node.element,
+                attribute: kAXValueAttribute as String
+            )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !searchValue.isEmpty {
+                AXActions.setFocused(searchField.node.element)
+                usleep(80_000)
+                AXActions.sendEscape()
+                usleep(140_000)
+            }
+        }
+
+        let initialAssessment = try assessSendSurface(
+            rootWindow: rootWindow,
+            windowFrame: windowFrame,
+            nodes: nodes,
+            expectedConversation: defaultConversation
+        )
+        if !initialAssessment.hasGreenSignal && !initialAssessment.hasTextSignal {
+            let didClickPane = clickChatRailPoint(in: windowFrame)
+            logger.log(.info, "LINE default recovery pane_click=\(didClickPane)")
+            if didClickPane {
+                usleep(180_000)
+            }
+        }
+
+        var freshNodes = AXQuery.descendants(of: rootWindow)
+        let freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+        guard let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame) else {
+            throw BridgeRuntimeError(
+                code: "sidebar_not_visible",
+                message: "Sidebar is not visible during default conversation recovery",
+                retriable: true,
+                failedStep: "recover_default_conversation",
+                details: "sidebar_list_not_found"
+            )
+        }
+
+        let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+        let windowID = AXQuery.pid(of: rootWindow).flatMap { AXActions.findWindowID(pid: $0) }
+        guard let row = LineSidebarDiscovery.findConversationRow(
+            named: defaultConversation,
+            in: sidebar,
+            nodes: freshNodes,
+            windowTitle: windowTitle,
+            windowID: windowID
+        ) else {
+            throw BridgeRuntimeError(
+                code: "default_conversation_not_found",
+                message: "Default conversation row not found",
+                retriable: true,
+                failedStep: "recover_default_conversation",
+                details: defaultConversation
+            )
+        }
+
+        _ = AXActions.clickAtCenter(row.element)
+        usleep(250_000)
+
+        let found = AXActions.poll(intervalMs: 100, timeoutMs: 3000) {
+            let currentNodes = AXQuery.descendants(of: rootWindow)
+            let currentFrame = AXQuery.copyFrameAttribute(rootWindow) ?? freshWindowFrame
+            return (SelectorResolver.resolve(
+                selector: LineSelectors.messageInputU, in: currentNodes, windowFrame: currentFrame
+            ) ?? self.legacyResolve(LineSelectors.messageInput, in: currentNodes)) != nil
+        }
+
+        freshNodes = AXQuery.descendants(of: rootWindow)
+        let recoveredFrame = AXQuery.copyFrameAttribute(rootWindow) ?? freshWindowFrame
+        let recoveredAssessment = try assessSendSurface(
+            rootWindow: rootWindow,
+            windowFrame: recoveredFrame,
+            nodes: freshNodes,
+            expectedConversation: defaultConversation
+        )
+        logger.log(
+            .info,
+            "LINE default recovery rerun abnormal=\(recoveredAssessment.isAbnormal) reason=\(recoveredAssessment.reason) search='\(recoveredAssessment.searchFieldValue)' green=\(recoveredAssessment.hasGreenSignal) text=\(recoveredAssessment.hasTextSignal)"
+        )
+        guard found, !recoveredAssessment.isAbnormal else {
+            throw BridgeRuntimeError(
+                code: "default_surface_recovery_failed",
+                message: "Default conversation surface remained abnormal after recovery",
+                retriable: true,
+                failedStep: "recover_default_conversation",
+                details: "reason=\(recoveredAssessment.reason)"
+            )
+        }
+
+        return freshNodes
+    }
+
+    private func activate(app: NSRunningApplication) {
+        let activateDone = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            app.activate(options: [.activateIgnoringOtherApps])
+            activateDone.signal()
+        }
+        activateDone.wait()
+        usleep(150_000)
+    }
+
+    private func messageSignalRect(for windowFrame: CGRect) -> CGRect {
+        CGRect(
+            x: windowFrame.minX + windowFrame.width * 0.24,
+            y: windowFrame.minY + windowFrame.height * 0.08,
+            width: windowFrame.width * 0.72,
+            height: windowFrame.height * 0.70
+        ).integral
+    }
+
+    private func detectGreenSignal(in screenRect: CGRect, windowID: CGWindowID) -> Bool {
+        guard screenRect.width > 20, screenRect.height > 20,
+              let rawImage = VisionOCR.captureInboundDebugImages(from: screenRect, windowID: windowID)?.raw,
+              let rgba = rgbaBuffer(from: rawImage) else {
+            return false
+        }
+
+        let minGreenPixelsPerRow = max(8, rgba.width / 28)
+        var greenRows = 0
+        for y in 0..<rgba.height {
+            let rowStart = y * rgba.bytesPerRow
+            var rowGreen = 0
+            for x in 0..<rgba.width {
+                let i = rowStart + x * 4
+                let r = Int(rgba.data[i])
+                let g = Int(rgba.data[i + 1])
+                let b = Int(rgba.data[i + 2])
+                if isLikelyLineGreen(r: r, g: g, b: b) {
+                    rowGreen += 1
+                    if rowGreen >= minGreenPixelsPerRow {
+                        greenRows += 1
+                        break
+                    }
+                }
+            }
+            if greenRows >= 4 {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func rgbaBuffer(from image: CGImage) -> (data: [UInt8], width: Int, height: Int, bytesPerRow: Int)? {
+        let width = image.width
+        let height = image.height
+        let bytesPerRow = width * 4
+        var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
+        guard let ctx = CGContext(
+            data: &buffer,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return (buffer, width, height, bytesPerRow)
+    }
+
+    private func isLikelyLineGreen(r: Int, g: Int, b: Int) -> Bool {
+        g >= 165 && r >= 150 && b <= 190 && (g - r) >= 12 && (g - b) >= 18
+    }
+
+    private func clickChatRailPoint(in windowFrame: CGRect) -> Bool {
+        let x = windowFrame.minX + min(max(22, windowFrame.width * 0.03), 34)
+        let y = windowFrame.minY + min(max(150, windowFrame.height * 0.18), 210)
+        return click(point: CGPoint(x: x, y: y))
+    }
+
+    @discardableResult
+    private func click(point: CGPoint, restoreCursor: Bool = true) -> Bool {
+        let savedPos = restoreCursor ? CGEvent(source: nil)?.location : nil
+        let moveEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)
+        let downEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
+        let upEvent = CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+        moveEvent?.post(tap: .cghidEventTap)
+        usleep(20_000)
+        downEvent?.post(tap: .cghidEventTap)
+        usleep(20_000)
+        upEvent?.post(tap: .cghidEventTap)
+        if let savedPos {
+            let restoreEvent = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: savedPos, mouseButton: .left)
+            restoreEvent?.post(tap: .cghidEventTap)
+        }
+        return downEvent != nil && upEvent != nil
+    }
+
     // MARK: - Navigate to conversation (no send)
 
     /// Navigate LINE to the given conversation without sending a message.
@@ -583,15 +946,46 @@ final class LINEAdapter: AdapterProtocol {
         }
 
         let windowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? .zero
-        let nodes = AXQuery.descendants(of: rootWindow)
+        var nodes = AXQuery.descendants(of: rootWindow)
+        let defaultConversation = configuredDefaultConversation()
+        let isDefaultConversationHint =
+            !defaultConversation.isEmpty
+            && LineSidebarDiscovery.normalizeConversationKey(hint)
+                == LineSidebarDiscovery.normalizeConversationKey(defaultConversation)
 
         // Already in chat view with input field?
-        if (SelectorResolver.resolve(
+        if !isDefaultConversationHint, (SelectorResolver.resolve(
             selector: LineSelectors.messageInputU, in: nodes, windowFrame: windowFrame
         ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)) != nil {
             logger.log(.info, "ensureConversation: already in chat view")
             lastConversationHint = hint
             return true
+        }
+
+        if isDefaultConversationHint {
+            let assessment = try assessSendSurface(
+                rootWindow: rootWindow,
+                windowFrame: windowFrame,
+                nodes: nodes,
+                expectedConversation: defaultConversation
+            )
+            logger.log(.info, "ensureConversation default preflight abnormal=\(assessment.isAbnormal) reason=\(assessment.reason) search='\(assessment.searchFieldValue)'")
+            if !assessment.isAbnormal {
+                lastConversationHint = hint
+                return assessment.hasMessageInput
+            }
+
+            nodes = try recoverDefaultConversationSurface(
+                app: app,
+                rootWindow: rootWindow,
+                windowFrame: windowFrame,
+                nodes: nodes,
+                defaultConversation: defaultConversation
+            )
+            lastConversationHint = hint
+            return (SelectorResolver.resolve(
+                selector: LineSelectors.messageInputU, in: nodes, windowFrame: AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+            ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)) != nil
         }
 
         // Navigate: search -> click
@@ -641,8 +1035,16 @@ final class LINEAdapter: AdapterProtocol {
 
         let freshNodes = AXQuery.descendants(of: rootWindow)
         let freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+        let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+        let windowID = AXQuery.pid(of: rootWindow).flatMap { AXActions.findWindowID(pid: $0) }
         if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame),
-           let row = sidebar.visibleRows.first {
+           let row = LineSidebarDiscovery.findConversationRow(
+               named: hint,
+               in: sidebar,
+               nodes: freshNodes,
+               windowTitle: windowTitle,
+               windowID: windowID
+           ) {
             logger.log(.info, "ensureConversation: clicking sidebar row")
             _ = AXActions.clickAtCenter(row.element)
         }

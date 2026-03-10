@@ -173,14 +173,32 @@ enum LineSidebarDiscovery {
         windowTitle: String?
     ) -> [SidebarConversationCandidate] {
         rows.compactMap { row in
+            if let titleName = ocrConversationName(
+                in: sidebarTitleOCRRect(for: row.frame),
+                windowID: windowID,
+                config: config,
+                windowTitle: windowTitle,
+                preferFirstLine: true
+            ) {
+                return SidebarConversationCandidate(
+                    name: titleName,
+                    frame: row.frame,
+                    yOrder: row.yOrder,
+                    source: .ocr
+                )
+            }
+
             let crop = sidebarOCRRect(for: row.frame)
-            guard crop.width >= 40, crop.height >= 18 else { return nil }
-            guard let raw = VisionOCR.extractText(from: crop, windowID: windowID, config: config) else {
+            guard let name = ocrConversationName(
+                in: crop,
+                windowID: windowID,
+                config: config,
+                windowTitle: windowTitle,
+                preferFirstLine: false
+            ) else {
                 return nil
             }
-            guard let name = normalizedOCRText(raw, windowTitle: windowTitle) else {
-                return nil
-            }
+
             return SidebarConversationCandidate(
                 name: name,
                 frame: row.frame,
@@ -228,12 +246,54 @@ enum LineSidebarDiscovery {
         return entries
     }
 
+    static func findConversationRow(
+        named conversationName: String,
+        in sidebar: SidebarListCandidate,
+        nodes: [AXNode],
+        windowTitle: String?,
+        windowID: CGWindowID?,
+        ocrConfig: VisionOCR.OCRConfig = .default
+    ) -> SidebarRowCandidate? {
+        let targetKey = normalizeConversationKey(conversationName)
+        guard !targetKey.isEmpty else { return nil }
+
+        let rowsByOrder = Dictionary(uniqueKeysWithValues: sidebar.visibleRows.map { ($0.yOrder, $0) })
+
+        let axMatch = extractAXConversationCandidates(
+            from: sidebar.visibleRows,
+            nodes: nodes,
+            windowTitle: windowTitle
+        ).first { normalizeConversationKey($0.name) == targetKey }
+        if let axMatch, let row = rowsByOrder[axMatch.yOrder] {
+            return row
+        }
+
+        guard let windowID else { return nil }
+        let ocrMatch = extractOCRConversationCandidates(
+            from: sidebar.visibleRows,
+            windowID: windowID,
+            config: ocrConfig,
+            windowTitle: windowTitle
+        ).first { normalizeConversationKey($0.name) == targetKey }
+        guard let ocrMatch else { return nil }
+        return rowsByOrder[ocrMatch.yOrder]
+    }
+
     static func sidebarOCRRect(for rowFrame: CGRect) -> CGRect {
         CGRect(
             x: rowFrame.minX + rowFrame.width * 0.20,
             y: rowFrame.minY + rowFrame.height * 0.18,
             width: rowFrame.width * 0.58,
             height: rowFrame.height * 0.64
+        ).integral
+    }
+
+    static func sidebarTitleOCRRect(for rowFrame: CGRect) -> CGRect {
+        CGRect(
+            x: rowFrame.minX + rowFrame.width * 0.22,
+            y: rowFrame.minY + rowFrame.height * 0.06,
+            width: rowFrame.width * 0.62,
+            height: max(22, rowFrame.height * 0.36)
         ).integral
     }
 
@@ -265,15 +325,48 @@ enum LineSidebarDiscovery {
         return normalizeConversationName(raw, windowTitle: windowTitle)
     }
 
-    private static func normalizedOCRText(_ raw: String, windowTitle: String?) -> String? {
+    private static func ocrConversationName(
+        in crop: CGRect,
+        windowID: CGWindowID,
+        config: VisionOCR.OCRConfig,
+        windowTitle: String?,
+        preferFirstLine: Bool
+    ) -> String? {
+        guard crop.width >= 40, crop.height >= 18 else { return nil }
+        guard let raw = VisionOCR.extractText(from: crop, windowID: windowID, config: config) else {
+            return nil
+        }
+        return normalizedOCRText(raw, windowTitle: windowTitle, preferFirstLine: preferFirstLine)
+    }
+
+    private static func normalizedOCRText(
+        _ raw: String,
+        windowTitle: String?,
+        preferFirstLine: Bool
+    ) -> String? {
         let lines = raw
             .split(whereSeparator: \.isNewline)
             .map { normalizeWhitespace(String($0)) }
             .filter { !$0.isEmpty }
-        guard let best = lines.max(by: { $0.count < $1.count }) else {
+        guard !lines.isEmpty else {
             return nil
         }
-        return normalizeConversationName(best, windowTitle: windowTitle)
+
+        if preferFirstLine {
+            for line in lines {
+                if let normalized = normalizeConversationName(line, windowTitle: windowTitle) {
+                    return normalized
+                }
+            }
+        }
+
+        for line in lines.sorted(by: { $0.count > $1.count }) {
+            if let normalized = normalizeConversationName(line, windowTitle: windowTitle) {
+                return normalized
+            }
+        }
+
+        return nil
     }
 
     private static func normalizeConversationName(_ raw: String, windowTitle: String?) -> String? {
@@ -289,7 +382,7 @@ enum LineSidebarDiscovery {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func normalizeConversationKey(_ text: String) -> String {
+    static func normalizeConversationKey(_ text: String) -> String {
         normalizeWhitespace(text).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
     }
 }

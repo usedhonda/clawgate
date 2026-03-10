@@ -387,7 +387,16 @@ final class BridgeCore {
             // Reject conversation hints that are clearly not real conversation names.
             // These pollute the LINE search field when external agents send garbage values.
             let hintLower = request.payload.conversationHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let blockedHints = ["heartbeat", "line", "ping", "test", "health", "status"]
+            let blockedHints = [
+                "heartbeat",
+                "line",
+                "ping",
+                "test",
+                "health",
+                "status",
+                "default",
+                "clawgate:default"
+            ]
             if request.adapter == "line" && blockedHints.contains(hintLower) {
                 throw BridgeRuntimeError(
                     code: "invalid_conversation_hint",
