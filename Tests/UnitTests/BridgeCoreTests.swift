@@ -91,7 +91,7 @@ final class BridgeCoreTests: XCTestCase {
     func testSendReturnsUnsupportedAction() {
         let core = makeCore()
         let json = """
-        {"adapter":"line","action":"delete_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
+        {"adapter":"line","action":"delete_message","payload":{"conversation_hint":"TestUser","text":"hello","enter_to_send":true}}
         """
         let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
@@ -111,7 +111,7 @@ final class BridgeCoreTests: XCTestCase {
     func testSendReturnsInvalidText() {
         let core = makeCore()
         let json = """
-        {"adapter":"line","action":"send_message","payload":{"conversation_hint":"test","text":" ","enter_to_send":true}}
+        {"adapter":"line","action":"send_message","payload":{"conversation_hint":"TestUser","text":" ","enter_to_send":true}}
         """
         let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .badRequest)
@@ -128,7 +128,7 @@ final class BridgeCoreTests: XCTestCase {
     func testSendReturnsRetriableError() {
         let core = makeCoreWithFailingAdapter()
         let json = """
-        {"adapter":"failing","action":"send_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
+        {"adapter":"failing","action":"send_message","payload":{"conversation_hint":"TestUser","text":"hello","enter_to_send":true}}
         """
         let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .serviceUnavailable)
@@ -204,6 +204,17 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertNil(result)
     }
 
+    func testLineHealthDebugReturnsSnapshotEnvelope() throws {
+        let core = makeCore()
+        let response = core.handleLineHealthDebug()
+        XCTAssertEqual(response.status, .ok)
+
+        let parsed = try JSONDecoder().decode(LineHealthDebugSnapshot.self, from: response.body)
+        XCTAssertNil(parsed.watcher)
+        XCTAssertNil(parsed.caretaker)
+        XCTAssertFalse(parsed.timestamp.isEmpty)
+    }
+
     func testAuthorizationDisabledByDefault() {
         let core = makeCore()
         let result = core.checkAuthorization(headers: HTTPHeaders())
@@ -274,7 +285,7 @@ final class BridgeCoreTests: XCTestCase {
             statsCollector: StatsCollector(filePath: statsFile)
         )
         let json = """
-        {"adapter":"line","action":"send_message","payload":{"conversation_hint":"test","text":"hello","enter_to_send":true}}
+        {"adapter":"line","action":"send_message","payload":{"conversation_hint":"TestUser","text":"hello","enter_to_send":true}}
         """
         let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .forbidden)

@@ -35,6 +35,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/events"),
         (.POST, "/v1/debug/inject"),
         (.GET, "/v1/debug/line-dedup"),
+        (.GET, "/v1/debug/line-health"),
         (.GET, "/v1/tmux/prompt-state"),
         (.POST, "/v1/tproj-msg-deliver"),
         (.GET, "/v1/project-context-read"),
@@ -93,7 +94,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         }
 
         // Track meaningful API requests (exclude high-frequency polling/monitoring)
-        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs", "/v1/autonomous/status", "/v1/debug/line-dedup"]
+        let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs", "/v1/autonomous/status", "/v1/debug/line-dedup", "/v1/debug/line-health"]
         if !noTrack.contains(path) {
             core.statsCollector.increment("api_requests", adapter: "system")
         }
@@ -168,6 +169,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
 
             if method == .GET && path == "/v1/debug/line-dedup" {
                 result = core.handleLineDedupDebug()
+            } else if method == .GET && path == "/v1/debug/line-health" {
+                result = core.handleLineHealthDebug()
             } else if method == .POST && path == "/v1/debug/inject" {
                 result = core.debugInject(body: bodyData)
             } else if method == .POST && path == "/v1/send" {

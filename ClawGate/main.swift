@@ -67,6 +67,13 @@ final class AppRuntime {
             )
         )
     }()
+    private lazy var lineHealthCaretaker = LineHealthCaretaker(
+        lineAdapter: lineAdapter,
+        inboundWatcher: inboundWatcher,
+        recentSendTracker: recentSendTracker,
+        configStore: configStore,
+        logger: logger
+    )
     private lazy var notificationBannerWatcher = NotificationBannerWatcher(
         eventBus: eventBus,
         logger: logger,
@@ -133,9 +140,11 @@ final class AppRuntime {
 
         // Connect lineInboundWatcher to core for /v1/debug/line-dedup endpoint
         core.lineInboundWatcher = inboundWatcher
+        core.lineHealthCaretaker = lineHealthCaretaker
 
         if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
             inboundWatcher.start()
+            lineHealthCaretaker.start()
             notificationBannerWatcher.start()
         } else {
             logger.log(.info, "LINE subsystems are disabled (nodeRole=client or lineEnabled=false)")
@@ -170,6 +179,7 @@ final class AppRuntime {
     func stopServer() {
         if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
             notificationBannerWatcher.stop()
+            lineHealthCaretaker.stop()
             inboundWatcher.stop()
         }
         tmuxInboundWatcher.stop()

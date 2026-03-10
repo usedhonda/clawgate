@@ -130,6 +130,7 @@ final class LINEInboundWatcher {
     private var lastConfidence: String = "low"
     private var lastInboundFingerprint: String = ""
     private var lastInboundAt: Date = .distantPast
+    private var lastCompletedPollAt: Date = .distantPast
     /// Content-based seen-line registry per conversation.
     /// Entries expire by TTL and are additionally bounded by size cap.
     private var seenLinesByConversation: [String: [LineSeenEntry]] = [:]
@@ -234,7 +235,12 @@ final class LINEInboundWatcher {
     }
 
     func snapshotState() -> LineDetectionStateSnapshot {
-        LineDetectionStateSnapshot(
+        stateLock.lock()
+        let polling = isPolling
+        let timeoutCount = consecutiveTimeouts
+        let skipped = skippedPollCount
+        stateLock.unlock()
+        return LineDetectionStateSnapshot(
             mode: detectionMode,
             threshold: fusionEngine.threshold,
             baselineCaptured: baselineCaptured,
@@ -244,6 +250,11 @@ final class LINEInboundWatcher {
             lastSignals: lastSignalNames,
             lastScore: lastScore,
             lastConfidence: lastConfidence,
+            lastCompletedPollAt: lastCompletedPollAt == .distantPast ? "never" : isoString(lastCompletedPollAt),
+            lastAcceptedAt: lastInboundAt == .distantPast ? "never" : isoString(lastInboundAt),
+            isPolling: polling,
+            consecutiveTimeouts: timeoutCount,
+            skippedPollCount: skipped,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
     }
@@ -327,6 +338,7 @@ final class LINEInboundWatcher {
         activePollID = nil
         consecutiveTimeouts = 0
         skippedPollCount = 0
+        lastCompletedPollAt = Date()
         stateLock.unlock()
     }
 

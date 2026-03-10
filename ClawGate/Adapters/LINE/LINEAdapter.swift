@@ -27,6 +27,10 @@ final class LINEAdapter: AdapterProtocol {
     private let retry = RetryPolicy(maxAttempts: 2, initialDelayMs: 120)
     private let recentSendTracker: RecentSendTracker
     private var lastConversationHint: String?
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        return formatter
+    }()
 
     init(logger: AppLogger, recentSendTracker: RecentSendTracker) {
         self.logger = logger
@@ -599,6 +603,143 @@ final class LINEAdapter: AdapterProtocol {
     private func legacyResolve(_ selector: LineSelector, in nodes: [AXNode]) -> SelectorCandidate? {
         guard let node = AXQuery.bestMatch(selector: selector, in: nodes) else { return nil }
         return SelectorCandidate(node: node, confidence: 0.3, matchedLayer: 1)
+    }
+
+    private func isoString(_ date: Date) -> String {
+        Self.isoFormatter.string(from: date)
+    }
+
+    private func lineRunningApp() -> NSRunningApplication? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first
+    }
+
+    private func currentRootWindow(app: NSRunningApplication, allowActivation: Bool) -> AXUIElement? {
+        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        if allowActivation {
+            return AXActions.ensureWindow(app: app, appElement: appElement, bundleID: bundleIdentifier)
+        }
+        return AXQuery.focusedWindow(appElement: appElement) ?? AXQuery.windows(appElement: appElement).first
+    }
+
+    private func surfaceContext(
+        app: NSRunningApplication,
+        allowActivation: Bool,
+        expectedConversation: String
+    ) throws -> (rootWindow: AXUIElement, windowFrame: CGRect, nodes: [AXNode], assessment: SendSurfaceAssessment) {
+        guard let rootWindow = currentRootWindow(app: app, allowActivation: allowActivation) else {
+            throw BridgeRuntimeError(
+                code: "line_window_missing",
+                message: "LINE window not found",
+                retriable: true,
+                failedStep: allowActivation ? "surface_line" : "probe_surface",
+                details: "allow_activation=\(allowActivation)"
+            )
+        }
+        guard let windowFrame = AXQuery.copyFrameAttribute(rootWindow) else {
+            throw BridgeRuntimeError(
+                code: "window_frame_missing",
+                message: "Could not retrieve LINE window frame",
+                retriable: true,
+                failedStep: allowActivation ? "surface_line" : "probe_surface",
+                details: nil
+            )
+        }
+        let nodes = AXQuery.descendants(of: rootWindow)
+        let assessment = try assessSendSurface(
+            rootWindow: rootWindow,
+            windowFrame: windowFrame,
+            nodes: nodes,
+            expectedConversation: expectedConversation
+        )
+        return (rootWindow, windowFrame, nodes, assessment)
+    }
+
+    private func makeSurfaceSnapshot(
+        assessment: SendSurfaceAssessment,
+        conversation: String,
+        timestamp: Date = Date()
+    ) -> LineSurfaceHealthSnapshot {
+        LineSurfaceHealthSnapshot(
+            conversation: conversation,
+            hasSearchField: assessment.hasSearchField,
+            searchFieldValue: assessment.searchFieldValue,
+            hasMessageInput: assessment.hasMessageInput,
+            hasGreenSignal: assessment.hasGreenSignal,
+            hasTextSignal: assessment.hasTextSignal,
+            matchesExpectedConversation: assessment.matchesExpectedConversation,
+            windowTitle: assessment.windowTitle,
+            reason: assessment.reason,
+            abnormal: assessment.isAbnormal,
+            timestamp: isoString(timestamp)
+        )
+    }
+
+    func probeDefaultConversationSurface() throws -> LineSurfaceHealthSnapshot {
+        let defaultConversation = configuredDefaultConversation()
+        guard !defaultConversation.isEmpty else {
+            throw BridgeRuntimeError(
+                code: "default_conversation_missing",
+                message: "LINE default conversation is not configured",
+                retriable: false,
+                failedStep: "probe_surface",
+                details: nil
+            )
+        }
+        guard let app = lineRunningApp() else {
+            throw BridgeRuntimeError(
+                code: "line_not_running",
+                message: "LINE is not running",
+                retriable: true,
+                failedStep: "probe_surface",
+                details: nil
+            )
+        }
+        let context = try surfaceContext(app: app, allowActivation: false, expectedConversation: defaultConversation)
+        return makeSurfaceSnapshot(assessment: context.assessment, conversation: defaultConversation)
+    }
+
+    func ensureDefaultConversationSurface(forceRecover: Bool) throws -> LineSurfaceHealthSnapshot {
+        let defaultConversation = configuredDefaultConversation()
+        guard !defaultConversation.isEmpty else {
+            throw BridgeRuntimeError(
+                code: "default_conversation_missing",
+                message: "LINE default conversation is not configured",
+                retriable: false,
+                failedStep: "recover_default_conversation",
+                details: nil
+            )
+        }
+        guard let app = lineRunningApp() else {
+            throw BridgeRuntimeError(
+                code: "line_not_running",
+                message: "LINE is not running",
+                retriable: true,
+                failedStep: "recover_default_conversation",
+                details: nil
+            )
+        }
+
+        let context = try surfaceContext(app: app, allowActivation: true, expectedConversation: defaultConversation)
+        let initialSnapshot = makeSurfaceSnapshot(assessment: context.assessment, conversation: defaultConversation)
+        if !forceRecover && !initialSnapshot.abnormal {
+            return initialSnapshot
+        }
+
+        let recoveredNodes = try recoverDefaultConversationSurface(
+            app: app,
+            rootWindow: context.rootWindow,
+            windowFrame: context.windowFrame,
+            nodes: context.nodes,
+            defaultConversation: defaultConversation
+        )
+        let recoveredFrame = AXQuery.copyFrameAttribute(context.rootWindow) ?? context.windowFrame
+        let recoveredAssessment = try assessSendSurface(
+            rootWindow: context.rootWindow,
+            windowFrame: recoveredFrame,
+            nodes: recoveredNodes,
+            expectedConversation: defaultConversation
+        )
+        return makeSurfaceSnapshot(assessment: recoveredAssessment, conversation: defaultConversation)
     }
 
     private func configuredDefaultConversation() -> String {

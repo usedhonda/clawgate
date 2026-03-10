@@ -11,6 +11,7 @@ final class BridgeCore {
 
     /// Set by main.swift to enable /v1/debug/line-dedup endpoint
     var lineInboundWatcher: LINEInboundWatcher?
+    var lineHealthCaretaker: LineHealthCaretaker?
 
     private let registry: AdapterRegistry
     private let logger: AppLogger
@@ -18,6 +19,10 @@ final class BridgeCore {
     private let configStore: ConfigStore
     private let jsonDecoder = JSONDecoder()
     private let jsonEncoder = JSONEncoder()
+    private static let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        return formatter
+    }()
     private let autonomousStatusLock = NSLock()
     private var reportedAutonomousStalledTraceIDs: Set<String> = []
     private let autonomousStallThresholdSeconds: TimeInterval = 120
@@ -524,6 +529,15 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(snapshot))
     }
 
+    func handleLineHealthDebug() -> HTTPResult {
+        let snapshot = LineHealthDebugSnapshot(
+            watcher: lineInboundWatcher?.snapshotState(),
+            caretaker: lineHealthCaretaker?.snapshot(),
+            timestamp: Self.isoFormatter.string(from: Date())
+        )
+        return jsonResponse(status: .ok, body: encode(snapshot))
+    }
+
     func resetLineBaseline() -> HTTPResult {
         guard let watcher = lineInboundWatcher else {
             let payload = ErrorPayload(code: "no_watcher", message: "LINE inbound watcher not initialized", retriable: false, failedStep: "reset_baseline", details: "")
@@ -1011,7 +1025,13 @@ final class BridgeCore {
             details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : "Enable Messenger (LINE) in Settings when needed"
         ))
 
-        // Check 4: LINE window accessible (only if LINE is running and AX is trusted)
+        // Check 4: LINE inbound watcher freshness
+        checks.append(lineWatcherFreshnessCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
+
+        // Check 5: LINE caretaker state
+        checks.append(lineCaretakerStateCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
+
+        // Check 6: LINE window accessible (only if LINE is running and AX is trusted)
         if lineEnabled && axTrusted && lineRunning {
             let windowCheck = checkLINEWindowAccessible()
             checks.append(windowCheck)
@@ -1024,7 +1044,7 @@ final class BridgeCore {
             ))
         }
 
-        // Check 5: Port 8765 (we're already listening, so this is informational)
+        // Check 7: Port 8765 (we're already listening, so this is informational)
         let portDetails = cfg.remoteAccessEnabled ? "0.0.0.0:8765 (remote access)" : "127.0.0.1:8765"
         let federationSuffix = (cfg.nodeRole == .server && cfg.federationEnabled) ? " + ws:/federation" : ""
         checks.append(DoctorCheck(
@@ -1034,7 +1054,7 @@ final class BridgeCore {
             details: portDetails + federationSuffix
         ))
 
-        // Check 6: Screen Recording permission (for Vision OCR)
+        // Check 8: Screen Recording permission (for Vision OCR)
         let screenOk = CGPreflightScreenCaptureAccess()
         checks.append(DoctorCheck(
             name: "screen_recording_permission",
@@ -1043,7 +1063,7 @@ final class BridgeCore {
             details: screenOk ? nil : "System Settings > Privacy > Screen Recording"
         ))
 
-        // Check 7: Federation status
+        // Check 9: Federation status
         if cfg.nodeRole == .server && cfg.federationEnabled {
             let clientCount = federationServer?.clientCount() ?? 0
             checks.append(DoctorCheck(
@@ -1236,6 +1256,102 @@ final class BridgeCore {
             message: "App is not signed with ClawGate Dev",
             details: detail
         )
+    }
+
+    private func lineWatcherFreshnessCheck(lineEnabled: Bool, lineRunning: Bool) -> DoctorCheck {
+        guard lineEnabled else {
+            return DoctorCheck(
+                name: "line_inbound_watcher_freshness",
+                status: "ok",
+                message: "LINE watcher freshness check skipped",
+                details: "nodeRole=client or lineEnabled=false"
+            )
+        }
+        guard lineRunning else {
+            return DoctorCheck(
+                name: "line_inbound_watcher_freshness",
+                status: "warning",
+                message: "LINE watcher freshness unavailable because LINE is not running",
+                details: "Launch LINE to resume inbound polling"
+            )
+        }
+        guard let snapshot = lineInboundWatcher?.snapshotState() else {
+            return DoctorCheck(
+                name: "line_inbound_watcher_freshness",
+                status: "warning",
+                message: "LINE watcher snapshot unavailable",
+                details: "lineInboundWatcher not initialized"
+            )
+        }
+        guard let lastCompleted = parseISODate(snapshot.lastCompletedPollAt) else {
+            return DoctorCheck(
+                name: "line_inbound_watcher_freshness",
+                status: "warning",
+                message: "LINE watcher has not completed a poll yet",
+                details: "isPolling=\(snapshot.isPolling) skipped=\(snapshot.skippedPollCount)"
+            )
+        }
+        let ageSeconds = Int(max(0, Date().timeIntervalSince(lastCompleted)))
+        let status = ageSeconds > 60 ? "warning" : "ok"
+        let message = status == "ok"
+            ? "LINE watcher freshness is healthy"
+            : "LINE watcher freshness is stale"
+        let details = "age_seconds=\(ageSeconds) isPolling=\(snapshot.isPolling) timeouts=\(snapshot.consecutiveTimeouts) skipped=\(snapshot.skippedPollCount)"
+        return DoctorCheck(name: "line_inbound_watcher_freshness", status: status, message: message, details: details)
+    }
+
+    private func lineCaretakerStateCheck(lineEnabled: Bool, lineRunning: Bool) -> DoctorCheck {
+        guard lineEnabled else {
+            return DoctorCheck(
+                name: "line_caretaker_state",
+                status: "ok",
+                message: "LINE caretaker check skipped",
+                details: "nodeRole=client or lineEnabled=false"
+            )
+        }
+        guard let snapshot = lineHealthCaretaker?.snapshot() else {
+            return DoctorCheck(
+                name: "line_caretaker_state",
+                status: "warning",
+                message: "LINE caretaker snapshot unavailable",
+                details: "lineHealthCaretaker not initialized"
+            )
+        }
+        if !lineRunning {
+            return DoctorCheck(
+                name: "line_caretaker_state",
+                status: "warning",
+                message: "LINE caretaker is idle because LINE is not running",
+                details: "assessment=\(snapshot.lastAssessmentReason)"
+            )
+        }
+        if snapshot.lastProbeAt == "never" {
+            return DoctorCheck(
+                name: "line_caretaker_state",
+                status: "warning",
+                message: "LINE caretaker has not probed the surface yet",
+                details: "assessment=\(snapshot.lastAssessmentReason)"
+            )
+        }
+        if snapshot.lastRepairSucceeded == false {
+            return DoctorCheck(
+                name: "line_caretaker_state",
+                status: "warning",
+                message: "LINE caretaker recently failed to repair the surface",
+                details: "assessment=\(snapshot.lastAssessmentReason) repair_reason=\(snapshot.lastRepairReason)"
+            )
+        }
+        return DoctorCheck(
+            name: "line_caretaker_state",
+            status: "ok",
+            message: "LINE caretaker is active",
+            details: "assessment=\(snapshot.lastAssessmentReason) next_forced=\(snapshot.nextForcedRepairDueAt)"
+        )
+    }
+
+    private func parseISODate(_ raw: String) -> Date? {
+        guard raw != "never" else { return nil }
+        return Self.isoFormatter.date(from: raw)
     }
 
     private func runProcess(executable: String, arguments: [String]) -> String? {

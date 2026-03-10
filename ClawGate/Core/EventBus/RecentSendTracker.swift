@@ -10,6 +10,7 @@ final class RecentSendTracker {
     private var entries: [(conversation: String, text: String, timestamp: Date)] = []
     private let windowSeconds: TimeInterval
     private var _isSending = false
+    private var _lastSendAt: Date?
 
     init(windowSeconds: TimeInterval = 120.0) {
         self.windowSeconds = windowSeconds
@@ -18,12 +19,15 @@ final class RecentSendTracker {
     func beginSending() { lock.lock(); _isSending = true; lock.unlock() }
     func endSending() { lock.lock(); _isSending = false; lock.unlock() }
     var isSending: Bool { lock.lock(); defer { lock.unlock() }; return _isSending }
+    var lastSendAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastSendAt }
 
     func recordSend(conversation: String, text: String) {
         lock.lock()
         defer { lock.unlock() }
         purgeStale()
-        entries.append((conversation: conversation, text: text, timestamp: Date()))
+        let now = Date()
+        entries.append((conversation: conversation, text: text, timestamp: now))
+        _lastSendAt = now
     }
 
     func isLikelyEcho() -> Bool {
@@ -60,5 +64,10 @@ final class RecentSendTracker {
     private func purgeStale() {
         let cutoff = Date().addingTimeInterval(-windowSeconds)
         entries.removeAll { $0.timestamp < cutoff }
+        if let last = entries.last?.timestamp {
+            _lastSendAt = last
+        } else {
+            _lastSendAt = nil
+        }
     }
 }
