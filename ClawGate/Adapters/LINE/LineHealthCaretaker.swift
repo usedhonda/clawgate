@@ -3,11 +3,11 @@ import Foundation
 
 final class LineHealthCaretaker {
     private enum Constants {
-        static let probeInterval: TimeInterval = 60
+        static let tickInterval: TimeInterval = 60
         static let watcherStaleThreshold: TimeInterval = 60
         static let forcedRepairInterval: TimeInterval = 600
         static let repairCooldown: TimeInterval = 180
-        static let repairQuietPeriodAfterSend: TimeInterval = 60
+        static let recentSendQuietPeriod: TimeInterval = 60
     }
 
     private let lineAdapter: LINEAdapter
@@ -15,6 +15,7 @@ final class LineHealthCaretaker {
     private let recentSendTracker: RecentSendTracker
     private let configStore: ConfigStore
     private let logger: AppLogger
+    private let nowProvider: () -> Date
 
     private let timerQueue = DispatchQueue(label: "com.clawgate.line.health-caretaker", qos: .utility)
     private let stateLock = NSLock()
@@ -24,7 +25,7 @@ final class LineHealthCaretaker {
     private var lastProbeAt: Date = .distantPast
     private var lastAssessmentReason = "never_started"
     private var lastRepairAt: Date = .distantPast
-    private var lastRepairReason = "never"
+    private var lastRepairReason = "none"
     private var lastRepairSucceeded: Bool?
     private var nextForcedRepairDueAt: Date
     private var cooldownUntil: Date = .distantPast
@@ -40,26 +41,28 @@ final class LineHealthCaretaker {
         inboundWatcher: LINEInboundWatcher,
         recentSendTracker: RecentSendTracker,
         configStore: ConfigStore,
-        logger: AppLogger
+        logger: AppLogger,
+        nowProvider: @escaping () -> Date = Date.init
     ) {
         self.lineAdapter = lineAdapter
         self.inboundWatcher = inboundWatcher
         self.recentSendTracker = recentSendTracker
         self.configStore = configStore
         self.logger = logger
-        self.nextForcedRepairDueAt = Date().addingTimeInterval(Constants.forcedRepairInterval)
+        self.nowProvider = nowProvider
+        self.nextForcedRepairDueAt = nowProvider().addingTimeInterval(Constants.forcedRepairInterval)
     }
 
     func start() {
         stateLock.lock()
-        if timer != nil {
+        guard timer == nil else {
             stateLock.unlock()
             return
         }
         let source = DispatchSource.makeTimerSource(queue: timerQueue)
         source.schedule(
-            deadline: .now() + Constants.probeInterval,
-            repeating: Constants.probeInterval,
+            deadline: .now() + Constants.tickInterval,
+            repeating: Constants.tickInterval,
             leeway: .seconds(5)
         )
         source.setEventHandler { [weak self] in
@@ -69,19 +72,21 @@ final class LineHealthCaretaker {
         stateLock.unlock()
 
         source.resume()
-        logger.log(.info, "LineHealthCaretaker started (probe=\(Int(Constants.probeInterval))s forced=\(Int(Constants.forcedRepairInterval))s cooldown=\(Int(Constants.repairCooldown))s)")
-        scheduleTick(trigger: "startup")
+        logger.log(
+            .info,
+            "LineHealthCaretaker started (tick=\(Int(Constants.tickInterval))s cooldown=\(Int(Constants.repairCooldown))s forced=\(Int(Constants.forcedRepairInterval))s)"
+        )
     }
 
     func stop() {
         stateLock.lock()
-        let current = timer
+        let currentTimer = timer
         timer = nil
         tickInFlight = false
         stateLock.unlock()
 
-        current?.setEventHandler {}
-        current?.cancel()
+        currentTimer?.setEventHandler {}
+        currentTimer?.cancel()
         logger.log(.info, "LineHealthCaretaker stopped")
     }
 
@@ -97,13 +102,13 @@ final class LineHealthCaretaker {
             nextForcedRepairDueAt: isoString(nextForcedRepairDueAt),
             cooldownUntil: isoString(cooldownUntil),
             lastSurface: lastSurface,
-            timestamp: isoString(Date())
+            timestamp: isoString(nowProvider())
         )
     }
 
     private func scheduleTick(trigger: String) {
         stateLock.lock()
-        if tickInFlight {
+        guard !tickInFlight else {
             stateLock.unlock()
             return
         }
@@ -120,122 +125,113 @@ final class LineHealthCaretaker {
     }
 
     private func runTick(trigger: String) {
-        let now = Date()
-        updateState(lastProbeAt: now, lastAssessmentReason: "probe_started_\(trigger)")
+        let now = nowProvider()
+        updateState(lastProbeAt: now, lastAssessmentReason: "tick_\(trigger)")
 
-        let cfg = configStore.load()
-        let defaultConversation = cfg.lineDefaultConversation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cfg.nodeRole != .client, cfg.lineEnabled else {
-            updateState(lastAssessmentReason: "line_disabled")
+        let config = configStore.load()
+        let defaultConversation = config.lineDefaultConversation.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard config.nodeRole != .client, config.lineEnabled else {
+            updateState(lastAssessmentReason: "inactive_line_disabled")
             return
         }
         guard !defaultConversation.isEmpty else {
-            updateState(lastAssessmentReason: "default_conversation_missing")
-            return
-        }
-        guard NSRunningApplication.runningApplications(withBundleIdentifier: lineAdapter.bundleIdentifier).first != nil else {
-            updateState(lastAssessmentReason: "line_not_running")
-            return
-        }
-        if recentSendTracker.isSending {
-            updateState(lastAssessmentReason: "send_in_flight")
+            updateState(lastAssessmentReason: "inactive_default_conversation_missing")
             return
         }
 
-        let watcher = inboundWatcher.snapshotState()
-        let watcherStale = isWatcherStale(watcher, now: now)
-        let forcedDue = now >= snapshot().nextForcedRepairDueAtDate
-
-        var surface: LineSurfaceHealthSnapshot?
-        var probeErrorCode: String?
+        let watcherSnapshot = inboundWatcher.snapshotState()
+        let surfaceSnapshot: LineSurfaceHealthSnapshot?
         do {
-            surface = try lineAdapter.probeDefaultConversationSurface()
-            updateState(lastSurface: surface)
-        } catch let err as BridgeRuntimeError {
-            probeErrorCode = err.code
-            logger.log(.warning, "LineHealthCaretaker probe failed code=\(err.code) step=\(err.failedStep ?? "-")")
+            surfaceSnapshot = try lineAdapter.probeDefaultConversationSurface()
+            updateState(lastSurface: surfaceSnapshot)
+        } catch let error as BridgeRuntimeError {
+            if error.code == "line_not_running" {
+                updateState(lastAssessmentReason: "line_not_running")
+                logger.log(.warning, "LineHealthCaretaker: LINE not running, skipping repair")
+                return
+            }
+            surfaceSnapshot = nil
+            logger.log(
+                .warning,
+                "LineHealthCaretaker: probe failed code=\(error.code) step=\(error.failedStep ?? "-")"
+            )
         } catch {
-            probeErrorCode = "probe_unknown_error"
-            logger.log(.warning, "LineHealthCaretaker probe failed error=\(error)")
+            surfaceSnapshot = nil
+            logger.log(.warning, "LineHealthCaretaker: probe failed error=\(error)")
         }
 
-        let surfaceAbnormal = surface?.abnormal ?? true
-        let shouldRepair = watcherStale || surfaceAbnormal || forcedDue
-        if !shouldRepair {
-            updateState(lastAssessmentReason: "probe_ok")
+        let decision = LineCaretakerDecisionEngine.decide(
+            LineCaretakerDecisionInput(
+                isSending: recentSendTracker.isSending,
+                sentRecently: recentSendTracker.sentWithin(seconds: Constants.recentSendQuietPeriod),
+                inCooldown: now < currentCooldownUntil(),
+                lineRunning: true,
+                watcherStale: isWatcherStale(watcherSnapshot, now: now),
+                surfaceAbnormal: surfaceSnapshot?.abnormal ?? true,
+                forcedReanchorDue: now >= currentForcedRepairDueAt()
+            )
+        )
+
+        updateState(lastAssessmentReason: decision.assessmentReason)
+        guard decision.shouldRepair, let mode = decision.mode, let repairReason = decision.repairReason else {
             return
         }
 
-        let repairReason: String
-        if watcherStale {
-            repairReason = "watcher_stale"
-        } else if forcedDue {
-            repairReason = "forced_reanchor"
-        } else if let reason = surface?.reason {
-            repairReason = "surface_\(reason)"
-        } else if let probeErrorCode {
-            repairReason = "probe_error_\(probeErrorCode)"
-        } else {
-            repairReason = "surface_unknown"
-        }
-
-        let lastSendAge = recentSendTracker.lastSendAt.map { now.timeIntervalSince($0) }
-        if let lastSendAge, lastSendAge < Constants.repairQuietPeriodAfterSend {
-            updateState(lastAssessmentReason: "repair_deferred_recent_send_\(repairReason)")
-            return
-        }
-
-        stateLock.lock()
-        let cooldown = cooldownUntil
-        stateLock.unlock()
-        if now < cooldown {
-            updateState(lastAssessmentReason: "repair_deferred_cooldown_\(repairReason)")
-            return
-        }
-
-        let frontmost = NSWorkspace.shared.frontmostApplication
+        let previousFrontmostApp = NSWorkspace.shared.frontmostApplication
         do {
-            let recovered = try lineAdapter.ensureDefaultConversationSurface(forceRecover: forcedDue || watcherStale)
+            let recoveredSnapshot: LineSurfaceHealthSnapshot
+            switch mode {
+            case .probeOnly:
+                recoveredSnapshot = try lineAdapter.probeDefaultConversationSurface()
+            case .recoverIfNeeded:
+                recoveredSnapshot = try lineAdapter.recoverDefaultConversationSurfaceIfNeeded()
+            case .forceRecover:
+                recoveredSnapshot = try lineAdapter.forceRecoverDefaultConversationSurface()
+            }
+
             updateState(
-                lastAssessmentReason: "repair_ok_\(repairReason)",
+                lastAssessmentReason: decision.assessmentReason,
                 lastRepairAt: now,
                 lastRepairReason: repairReason,
-                lastRepairSucceeded: true,
-                lastSurface: recovered,
+                lastRepairSucceeded: !recoveredSnapshot.abnormal,
+                lastSurface: recoveredSnapshot,
                 nextForcedRepairDueAt: now.addingTimeInterval(Constants.forcedRepairInterval),
                 cooldownUntil: now.addingTimeInterval(Constants.repairCooldown)
             )
-            logger.log(.info, "LineHealthCaretaker repaired LINE surface reason=\(repairReason) abnormal_after=\(recovered.abnormal)")
-        } catch let err as BridgeRuntimeError {
+            logger.log(
+                .info,
+                "LineHealthCaretaker: repaired surface reason=\(repairReason) mode=\(mode.rawValue) abnormal_after=\(recoveredSnapshot.abnormal)"
+            )
+        } catch let error as BridgeRuntimeError {
             updateState(
-                lastAssessmentReason: "repair_failed_\(repairReason)",
+                lastAssessmentReason: decision.assessmentReason,
                 lastRepairAt: now,
                 lastRepairReason: repairReason,
                 lastRepairSucceeded: false,
                 nextForcedRepairDueAt: now.addingTimeInterval(Constants.forcedRepairInterval),
                 cooldownUntil: now.addingTimeInterval(Constants.repairCooldown)
             )
-            logger.log(.warning, "LineHealthCaretaker repair failed code=\(err.code) reason=\(repairReason)")
+            logger.log(
+                .warning,
+                "LineHealthCaretaker: repair failed code=\(error.code) reason=\(repairReason)"
+            )
         } catch {
             updateState(
-                lastAssessmentReason: "repair_failed_\(repairReason)",
+                lastAssessmentReason: decision.assessmentReason,
                 lastRepairAt: now,
                 lastRepairReason: repairReason,
                 lastRepairSucceeded: false,
                 nextForcedRepairDueAt: now.addingTimeInterval(Constants.forcedRepairInterval),
                 cooldownUntil: now.addingTimeInterval(Constants.repairCooldown)
             )
-            logger.log(.warning, "LineHealthCaretaker repair failed reason=\(repairReason) error=\(error)")
+            logger.log(.warning, "LineHealthCaretaker: repair failed reason=\(repairReason) error=\(error)")
         }
 
-        restoreFrontmostApplication(frontmost)
+        restoreFrontmostApplication(previousFrontmostApp)
     }
 
     private func isWatcherStale(_ snapshot: LineDetectionStateSnapshot, now: Date) -> Bool {
-        guard snapshot.lastCompletedPollAt != "never" else {
-            return true
-        }
-        guard let lastCompleted = Self.isoFormatter.date(from: snapshot.lastCompletedPollAt) else {
+        guard let lastCompleted = parseISODate(snapshot.lastCompletedPollAt) else {
             return true
         }
         return now.timeIntervalSince(lastCompleted) > Constants.watcherStaleThreshold
@@ -246,18 +242,34 @@ final class LineHealthCaretaker {
               app.bundleIdentifier != lineAdapter.bundleIdentifier else {
             return
         }
+
         let semaphore = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
             _ = app.activate(options: [.activateIgnoringOtherApps])
             semaphore.signal()
         }
-        semaphore.wait()
+        _ = semaphore.wait(timeout: .now() + 1)
+    }
+
+    private func currentForcedRepairDueAt() -> Date {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return nextForcedRepairDueAt
+    }
+
+    private func currentCooldownUntil() -> Date {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cooldownUntil
+    }
+
+    private func parseISODate(_ value: String) -> Date? {
+        guard value != "never" else { return nil }
+        return Self.isoFormatter.date(from: value)
     }
 
     private func isoString(_ date: Date) -> String {
-        if date == .distantPast {
-            return "never"
-        }
+        guard date != .distantPast else { return "never" }
         return Self.isoFormatter.string(from: date)
     }
 
@@ -281,15 +293,5 @@ final class LineHealthCaretaker {
         if let lastSurface { self.lastSurface = lastSurface }
         if let nextForcedRepairDueAt { self.nextForcedRepairDueAt = nextForcedRepairDueAt }
         if let cooldownUntil { self.cooldownUntil = cooldownUntil }
-    }
-}
-
-private extension LineCaretakerSnapshot {
-    var nextForcedRepairDueAtDate: Date {
-        guard nextForcedRepairDueAt != "never",
-              let date = ISO8601DateFormatter().date(from: nextForcedRepairDueAt) else {
-            return .distantPast
-        }
-        return date
     }
 }

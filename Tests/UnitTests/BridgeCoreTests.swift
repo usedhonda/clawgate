@@ -210,9 +210,18 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(response.status, .ok)
 
         let parsed = try JSONDecoder().decode(LineHealthDebugSnapshot.self, from: response.body)
-        XCTAssertNil(parsed.watcher)
-        XCTAssertNil(parsed.caretaker)
+        XCTAssertEqual(parsed.watcher.lastCompletedPollAt, "never")
+        XCTAssertEqual(parsed.caretaker.lastAssessmentReason, "inactive")
         XCTAssertFalse(parsed.timestamp.isEmpty)
+    }
+
+    func testDoctorIncludesLineHealthChecks() throws {
+        let core = makeCore()
+        let response = core.doctor()
+        let parsed = try JSONDecoder().decode(DoctorReport.self, from: response.body)
+
+        XCTAssertTrue(parsed.checks.contains(where: { $0.name == "line_inbound_watcher_freshness" }))
+        XCTAssertTrue(parsed.checks.contains(where: { $0.name == "line_caretaker_state" }))
     }
 
     func testAuthorizationDisabledByDefault() {

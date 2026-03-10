@@ -55,6 +55,12 @@ struct LineDetectionStateSnapshot: Codable {
     }
 }
 
+enum LineDefaultConversationSurfaceMode: String, Codable {
+    case probeOnly = "probe_only"
+    case recoverIfNeeded = "recover_if_needed"
+    case forceRecover = "force_recover"
+}
+
 struct LineSurfaceHealthSnapshot: Codable {
     let conversation: String
     let hasSearchField: Bool
@@ -83,6 +89,90 @@ struct LineSurfaceHealthSnapshot: Codable {
     }
 }
 
+struct LineCaretakerDecisionInput {
+    let isSending: Bool
+    let sentRecently: Bool
+    let inCooldown: Bool
+    let lineRunning: Bool
+    let watcherStale: Bool
+    let surfaceAbnormal: Bool
+    let forcedReanchorDue: Bool
+}
+
+struct LineCaretakerDecisionResult {
+    let shouldRepair: Bool
+    let mode: LineDefaultConversationSurfaceMode?
+    let assessmentReason: String
+    let repairReason: String?
+}
+
+enum LineCaretakerDecisionEngine {
+    static func decide(_ input: LineCaretakerDecisionInput) -> LineCaretakerDecisionResult {
+        if input.isSending {
+            return LineCaretakerDecisionResult(
+                shouldRepair: false,
+                mode: nil,
+                assessmentReason: "recent_send_guard",
+                repairReason: nil
+            )
+        }
+        if input.sentRecently {
+            return LineCaretakerDecisionResult(
+                shouldRepair: false,
+                mode: nil,
+                assessmentReason: "recent_send_guard",
+                repairReason: nil
+            )
+        }
+        if !input.lineRunning {
+            return LineCaretakerDecisionResult(
+                shouldRepair: false,
+                mode: nil,
+                assessmentReason: "line_not_running",
+                repairReason: nil
+            )
+        }
+        if input.inCooldown {
+            return LineCaretakerDecisionResult(
+                shouldRepair: false,
+                mode: nil,
+                assessmentReason: "cooldown_active",
+                repairReason: nil
+            )
+        }
+        if input.forcedReanchorDue {
+            return LineCaretakerDecisionResult(
+                shouldRepair: true,
+                mode: .forceRecover,
+                assessmentReason: "forced_reanchor_due",
+                repairReason: "forced_reanchor_due"
+            )
+        }
+        if input.surfaceAbnormal {
+            return LineCaretakerDecisionResult(
+                shouldRepair: true,
+                mode: .recoverIfNeeded,
+                assessmentReason: "surface_abnormal",
+                repairReason: "surface_abnormal"
+            )
+        }
+        if input.watcherStale {
+            return LineCaretakerDecisionResult(
+                shouldRepair: true,
+                mode: .recoverIfNeeded,
+                assessmentReason: "watcher_stale",
+                repairReason: "watcher_stale"
+            )
+        }
+        return LineCaretakerDecisionResult(
+            shouldRepair: false,
+            mode: nil,
+            assessmentReason: "surface_ok",
+            repairReason: nil
+        )
+    }
+}
+
 struct LineCaretakerSnapshot: Codable {
     let lastProbeAt: String
     let lastAssessmentReason: String
@@ -108,8 +198,8 @@ struct LineCaretakerSnapshot: Codable {
 }
 
 struct LineHealthDebugSnapshot: Codable {
-    let watcher: LineDetectionStateSnapshot?
-    let caretaker: LineCaretakerSnapshot?
+    let watcher: LineDetectionStateSnapshot
+    let caretaker: LineCaretakerSnapshot
     let timestamp: String
 }
 

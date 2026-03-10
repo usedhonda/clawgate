@@ -9,6 +9,26 @@ import XCTest
 ///   - echo detection for sent messages
 ///   - search cleanup sanitization
 final class LINEAdapterTests: XCTestCase {
+    func testProbeOnlyNeverRequestsRecovery() {
+        XCTAssertFalse(
+            LINEAdapter.shouldRecoverDefaultConversationSurface(mode: .probeOnly, isAbnormal: true)
+        )
+    }
+
+    func testRecoverIfNeededRepairsOnlyAbnormalSurface() {
+        XCTAssertTrue(
+            LINEAdapter.shouldRecoverDefaultConversationSurface(mode: .recoverIfNeeded, isAbnormal: true)
+        )
+        XCTAssertFalse(
+            LINEAdapter.shouldRecoverDefaultConversationSurface(mode: .recoverIfNeeded, isAbnormal: false)
+        )
+    }
+
+    func testForceRecoverRepairsEvenWhenSurfaceIsClean() {
+        XCTAssertTrue(
+            LINEAdapter.shouldRecoverDefaultConversationSurface(mode: .forceRecover, isAbnormal: false)
+        )
+    }
 
     // MARK: - canSkipNavigation decision table
 

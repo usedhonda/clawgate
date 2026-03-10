@@ -34,18 +34,30 @@ final class RecentSendTrackerTests: XCTestCase {
     }
 
     func testLastSendAtTracksLatestRecordedSend() {
-        let tracker = RecentSendTracker()
+        var now = Date(timeIntervalSince1970: 1_000)
+        let tracker = RecentSendTracker(nowProvider: { now })
         XCTAssertNil(tracker.lastSendAt)
 
         tracker.recordSend(conversation: "User1", text: "First")
         let first = tracker.lastSendAt
         XCTAssertNotNil(first)
 
-        Thread.sleep(forTimeInterval: 0.01)
+        now = now.addingTimeInterval(15)
         tracker.recordSend(conversation: "User2", text: "Second")
         let second = tracker.lastSendAt
         XCTAssertNotNil(second)
         XCTAssertTrue((second ?? .distantPast) >= (first ?? .distantPast))
+    }
+
+    func testSentWithinUsesLastRecordedSendTime() {
+        var now = Date(timeIntervalSince1970: 2_000)
+        let tracker = RecentSendTracker(nowProvider: { now })
+
+        tracker.recordSend(conversation: "User1", text: "First")
+        XCTAssertTrue(tracker.sentWithin(seconds: 60))
+
+        now = now.addingTimeInterval(61)
+        XCTAssertFalse(tracker.sentWithin(seconds: 60))
     }
 
     func testConcurrentAccessDoesNotCrash() {

@@ -165,28 +165,29 @@ final class LINEAdapter: AdapterProtocol {
 
         if !canSkipNavigation {
             if isDefaultConversationSend {
-                let preflight = try step("preflight_send_surface", logger: stepLogger) {
-                    try assessSendSurface(
+                let surface = try step("preflight_send_surface", logger: stepLogger) {
+                    try defaultConversationSurface(
+                        mode: .recoverIfNeeded,
+                        app: app,
                         rootWindow: rootWindow,
                         windowFrame: windowFrame,
                         nodes: nodes,
-                        expectedConversation: defaultConversation
+                        defaultConversation: defaultConversation
                     )
                 }
                 logger.log(
                     .info,
-                    "LINE default send preflight abnormal=\(preflight.isAbnormal) reason=\(preflight.reason) search='\(preflight.searchFieldValue)' green=\(preflight.hasGreenSignal) text=\(preflight.hasTextSignal) input=\(preflight.hasMessageInput)"
+                    "LINE default send preflight abnormal=\(surface.snapshot.abnormal) reason=\(surface.snapshot.reason) search='\(surface.snapshot.searchFieldValue)' green=\(surface.snapshot.hasGreenSignal) text=\(surface.snapshot.hasTextSignal) input=\(surface.snapshot.hasMessageInput)"
                 )
-                if preflight.isAbnormal {
-                    nodes = try step("recover_default_conversation", logger: stepLogger) {
-                        try recoverDefaultConversationSurface(
-                            app: app,
-                            rootWindow: rootWindow,
-                            windowFrame: windowFrame,
-                            nodes: nodes,
-                            defaultConversation: defaultConversation
-                        )
-                    }
+                nodes = surface.nodes
+                if surface.snapshot.abnormal {
+                    throw BridgeRuntimeError(
+                        code: "default_surface_recovery_failed",
+                        message: "Default conversation surface remained abnormal after recovery",
+                        retriable: true,
+                        failedStep: "preflight_send_surface",
+                        details: "reason=\(surface.snapshot.reason)"
+                    )
                 } else {
                     stepLogger.record(step: "open_conversation", start: Date(), success: true, details: "skipped (default conversation clean surface)")
                     stepLogger.record(step: "rescan_after_navigation", start: Date(), success: true, details: "skipped (default conversation clean surface)")
@@ -674,6 +675,70 @@ final class LINEAdapter: AdapterProtocol {
         )
     }
 
+    static func shouldRecoverDefaultConversationSurface(
+        mode: LineDefaultConversationSurfaceMode,
+        isAbnormal: Bool
+    ) -> Bool {
+        switch mode {
+        case .probeOnly:
+            return false
+        case .recoverIfNeeded:
+            return isAbnormal
+        case .forceRecover:
+            return true
+        }
+    }
+
+    private func defaultConversationSurface(
+        mode: LineDefaultConversationSurfaceMode,
+        app: NSRunningApplication,
+        rootWindow: AXUIElement,
+        windowFrame: CGRect,
+        nodes: [AXNode],
+        defaultConversation: String
+    ) throws -> (snapshot: LineSurfaceHealthSnapshot, nodes: [AXNode]) {
+        let initialAssessment = try assessSendSurface(
+            rootWindow: rootWindow,
+            windowFrame: windowFrame,
+            nodes: nodes,
+            expectedConversation: defaultConversation
+        )
+        let initialSnapshot = makeSurfaceSnapshot(
+            assessment: initialAssessment,
+            conversation: defaultConversation
+        )
+
+        guard Self.shouldRecoverDefaultConversationSurface(
+            mode: mode,
+            isAbnormal: initialSnapshot.abnormal
+        ) else {
+            return (initialSnapshot, nodes)
+        }
+
+        let recoveredNodes = try recoverDefaultConversationSurface(
+            app: app,
+            rootWindow: rootWindow,
+            windowFrame: windowFrame,
+            nodes: nodes,
+            defaultConversation: defaultConversation,
+            forcePaneReanchor: mode == .forceRecover
+        )
+        let recoveredFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+        let recoveredAssessment = try assessSendSurface(
+            rootWindow: rootWindow,
+            windowFrame: recoveredFrame,
+            nodes: recoveredNodes,
+            expectedConversation: defaultConversation
+        )
+        return (
+            makeSurfaceSnapshot(
+                assessment: recoveredAssessment,
+                conversation: defaultConversation
+            ),
+            recoveredNodes
+        )
+    }
+
     func probeDefaultConversationSurface() throws -> LineSurfaceHealthSnapshot {
         let defaultConversation = configuredDefaultConversation()
         guard !defaultConversation.isEmpty else {
@@ -695,10 +760,17 @@ final class LINEAdapter: AdapterProtocol {
             )
         }
         let context = try surfaceContext(app: app, allowActivation: false, expectedConversation: defaultConversation)
-        return makeSurfaceSnapshot(assessment: context.assessment, conversation: defaultConversation)
+        return try defaultConversationSurface(
+            mode: .probeOnly,
+            app: app,
+            rootWindow: context.rootWindow,
+            windowFrame: context.windowFrame,
+            nodes: context.nodes,
+            defaultConversation: defaultConversation
+        ).snapshot
     }
 
-    func ensureDefaultConversationSurface(forceRecover: Bool) throws -> LineSurfaceHealthSnapshot {
+    func recoverDefaultConversationSurfaceIfNeeded() throws -> LineSurfaceHealthSnapshot {
         let defaultConversation = configuredDefaultConversation()
         guard !defaultConversation.isEmpty else {
             throw BridgeRuntimeError(
@@ -720,26 +792,45 @@ final class LINEAdapter: AdapterProtocol {
         }
 
         let context = try surfaceContext(app: app, allowActivation: true, expectedConversation: defaultConversation)
-        let initialSnapshot = makeSurfaceSnapshot(assessment: context.assessment, conversation: defaultConversation)
-        if !forceRecover && !initialSnapshot.abnormal {
-            return initialSnapshot
-        }
-
-        let recoveredNodes = try recoverDefaultConversationSurface(
+        return try defaultConversationSurface(
+            mode: .recoverIfNeeded,
             app: app,
             rootWindow: context.rootWindow,
             windowFrame: context.windowFrame,
             nodes: context.nodes,
             defaultConversation: defaultConversation
-        )
-        let recoveredFrame = AXQuery.copyFrameAttribute(context.rootWindow) ?? context.windowFrame
-        let recoveredAssessment = try assessSendSurface(
+        ).snapshot
+    }
+
+    func forceRecoverDefaultConversationSurface() throws -> LineSurfaceHealthSnapshot {
+        let defaultConversation = configuredDefaultConversation()
+        guard !defaultConversation.isEmpty else {
+            throw BridgeRuntimeError(
+                code: "default_conversation_missing",
+                message: "LINE default conversation is not configured",
+                retriable: false,
+                failedStep: "recover_default_conversation",
+                details: nil
+            )
+        }
+        guard let app = lineRunningApp() else {
+            throw BridgeRuntimeError(
+                code: "line_not_running",
+                message: "LINE is not running",
+                retriable: true,
+                failedStep: "recover_default_conversation",
+                details: nil
+            )
+        }
+        let context = try surfaceContext(app: app, allowActivation: true, expectedConversation: defaultConversation)
+        return try defaultConversationSurface(
+            mode: .forceRecover,
+            app: app,
             rootWindow: context.rootWindow,
-            windowFrame: recoveredFrame,
-            nodes: recoveredNodes,
-            expectedConversation: defaultConversation
-        )
-        return makeSurfaceSnapshot(assessment: recoveredAssessment, conversation: defaultConversation)
+            windowFrame: context.windowFrame,
+            nodes: context.nodes,
+            defaultConversation: defaultConversation
+        ).snapshot
     }
 
     private func configuredDefaultConversation() -> String {
@@ -858,7 +949,8 @@ final class LINEAdapter: AdapterProtocol {
         rootWindow: AXUIElement,
         windowFrame: CGRect,
         nodes: [AXNode],
-        defaultConversation: String
+        defaultConversation: String,
+        forcePaneReanchor: Bool
     ) throws -> [AXNode] {
         activate(app: app)
 
@@ -883,7 +975,7 @@ final class LINEAdapter: AdapterProtocol {
             nodes: nodes,
             expectedConversation: defaultConversation
         )
-        if !initialAssessment.hasGreenSignal && !initialAssessment.hasTextSignal {
+        if forcePaneReanchor || (!initialAssessment.hasGreenSignal && !initialAssessment.hasTextSignal) {
             let didClickPane = clickChatRailPoint(in: windowFrame)
             logger.log(.info, "LINE default recovery pane_click=\(didClickPane)")
             if didClickPane {
@@ -1104,26 +1196,21 @@ final class LINEAdapter: AdapterProtocol {
         }
 
         if isDefaultConversationHint {
-            let assessment = try assessSendSurface(
-                rootWindow: rootWindow,
-                windowFrame: windowFrame,
-                nodes: nodes,
-                expectedConversation: defaultConversation
-            )
-            logger.log(.info, "ensureConversation default preflight abnormal=\(assessment.isAbnormal) reason=\(assessment.reason) search='\(assessment.searchFieldValue)'")
-            if !assessment.isAbnormal {
-                lastConversationHint = hint
-                return assessment.hasMessageInput
-            }
-
-            nodes = try recoverDefaultConversationSurface(
+            let surface = try defaultConversationSurface(
+                mode: .recoverIfNeeded,
                 app: app,
                 rootWindow: rootWindow,
                 windowFrame: windowFrame,
                 nodes: nodes,
                 defaultConversation: defaultConversation
             )
+            logger.log(.info, "ensureConversation default preflight abnormal=\(surface.snapshot.abnormal) reason=\(surface.snapshot.reason) search='\(surface.snapshot.searchFieldValue)'")
+            if !surface.snapshot.abnormal {
+                lastConversationHint = hint
+                return surface.snapshot.hasMessageInput
+            }
             lastConversationHint = hint
+            nodes = surface.nodes
             return (SelectorResolver.resolve(
                 selector: LineSelectors.messageInputU, in: nodes, windowFrame: AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
             ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)) != nil

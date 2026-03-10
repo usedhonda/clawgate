@@ -531,8 +531,8 @@ final class BridgeCore {
 
     func handleLineHealthDebug() -> HTTPResult {
         let snapshot = LineHealthDebugSnapshot(
-            watcher: lineInboundWatcher?.snapshotState(),
-            caretaker: lineHealthCaretaker?.snapshot(),
+            watcher: lineInboundWatcher?.snapshotState() ?? defaultLineWatcherSnapshot(),
+            caretaker: lineHealthCaretaker?.snapshot() ?? defaultLineCaretakerSnapshot(),
             timestamp: Self.isoFormatter.string(from: Date())
         )
         return jsonResponse(status: .ok, body: encode(snapshot))
@@ -1270,19 +1270,12 @@ final class BridgeCore {
         guard lineRunning else {
             return DoctorCheck(
                 name: "line_inbound_watcher_freshness",
-                status: "warning",
-                message: "LINE watcher freshness unavailable because LINE is not running",
-                details: "Launch LINE to resume inbound polling"
+                status: "ok",
+                message: "LINE watcher freshness check skipped",
+                details: "LINE is not running"
             )
         }
-        guard let snapshot = lineInboundWatcher?.snapshotState() else {
-            return DoctorCheck(
-                name: "line_inbound_watcher_freshness",
-                status: "warning",
-                message: "LINE watcher snapshot unavailable",
-                details: "lineInboundWatcher not initialized"
-            )
-        }
+        let snapshot = lineInboundWatcher?.snapshotState() ?? defaultLineWatcherSnapshot()
         guard let lastCompleted = parseISODate(snapshot.lastCompletedPollAt) else {
             return DoctorCheck(
                 name: "line_inbound_watcher_freshness",
@@ -1309,31 +1302,18 @@ final class BridgeCore {
                 details: "nodeRole=client or lineEnabled=false"
             )
         }
-        guard let snapshot = lineHealthCaretaker?.snapshot() else {
-            return DoctorCheck(
-                name: "line_caretaker_state",
-                status: "warning",
-                message: "LINE caretaker snapshot unavailable",
-                details: "lineHealthCaretaker not initialized"
-            )
-        }
+        let snapshot = lineHealthCaretaker?.snapshot() ?? defaultLineCaretakerSnapshot()
         if !lineRunning {
             return DoctorCheck(
                 name: "line_caretaker_state",
-                status: "warning",
-                message: "LINE caretaker is idle because LINE is not running",
+                status: "ok",
+                message: "LINE caretaker is idle",
                 details: "assessment=\(snapshot.lastAssessmentReason)"
             )
         }
-        if snapshot.lastProbeAt == "never" {
-            return DoctorCheck(
-                name: "line_caretaker_state",
-                status: "warning",
-                message: "LINE caretaker has not probed the surface yet",
-                details: "assessment=\(snapshot.lastAssessmentReason)"
-            )
-        }
-        if snapshot.lastRepairSucceeded == false {
+        if snapshot.lastRepairSucceeded == false,
+           let cooldownUntil = parseISODate(snapshot.cooldownUntil),
+           cooldownUntil > Date() {
             return DoctorCheck(
                 name: "line_caretaker_state",
                 status: "warning",
@@ -1344,8 +1324,42 @@ final class BridgeCore {
         return DoctorCheck(
             name: "line_caretaker_state",
             status: "ok",
-            message: "LINE caretaker is active",
+            message: "LINE caretaker is healthy",
             details: "assessment=\(snapshot.lastAssessmentReason) next_forced=\(snapshot.nextForcedRepairDueAt)"
+        )
+    }
+
+    private func defaultLineWatcherSnapshot() -> LineDetectionStateSnapshot {
+        LineDetectionStateSnapshot(
+            mode: "unknown",
+            threshold: 0,
+            baselineCaptured: false,
+            lastRowCount: 0,
+            lastImageHash: 0,
+            lastOCRText: "",
+            lastSignals: [],
+            lastScore: 0,
+            lastConfidence: "low",
+            lastCompletedPollAt: "never",
+            lastAcceptedAt: "never",
+            isPolling: false,
+            consecutiveTimeouts: 0,
+            skippedPollCount: 0,
+            timestamp: Self.isoFormatter.string(from: Date())
+        )
+    }
+
+    private func defaultLineCaretakerSnapshot() -> LineCaretakerSnapshot {
+        LineCaretakerSnapshot(
+            lastProbeAt: "never",
+            lastAssessmentReason: "inactive",
+            lastRepairAt: "never",
+            lastRepairReason: "none",
+            lastRepairSucceeded: nil,
+            nextForcedRepairDueAt: "never",
+            cooldownUntil: "never",
+            lastSurface: nil,
+            timestamp: Self.isoFormatter.string(from: Date())
         )
     }
 
