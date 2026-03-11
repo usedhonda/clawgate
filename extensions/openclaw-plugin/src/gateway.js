@@ -1433,6 +1433,7 @@ function isUiChromeLine(line) {
   if (/^未読$/.test(s)) return true;
   if (/^ここから未読メッセージ$/.test(s)) return true;
   if (/^LINE$/.test(s)) return true;
+  if (/友だち検索|おすすめ公式アカウント|トークを始めよう|検索結果がありません/u.test(s)) return true;
   // Owner's display name — treated as noise in AX tree parsing (configurable via filterDisplayName)
   if (_filterDisplayName && s.startsWith(_filterDisplayName) && (s.length === _filterDisplayName.length || /\W/.test(s[_filterDisplayName.length]))) return true;
   if (/^(午前|午後)\s*\d{1,2}:\d{2}$/.test(s)) return true;
@@ -1442,6 +1443,40 @@ function isUiChromeLine(line) {
   // NOTE: Do not use \W here; in JS it classifies Japanese text as non-word.
   if (/^[\p{P}\p{S}\s_]+$/u.test(s)) return true;
   return false;
+}
+
+function normalizeCompactLine(text) {
+  return `${text || ""}`.replace(/\s+/g, " ").trim();
+}
+
+function looksLikeShortOcrGarbage(text) {
+  const s = normalizeCompactLine(text);
+  if (!s) return true;
+  if (isUiChromeLine(s)) return true;
+  if (s.length <= 12 && !/[。！？!?]/u.test(s)) return true;
+  return false;
+}
+
+function stripDisplayNameNoisePrefix(line) {
+  let s = normalizeCompactLine(line);
+  const displayName = normalizeCompactLine(_filterDisplayName);
+  if (!s || !displayName) return s;
+
+  let stripped = false;
+  while (s.startsWith(displayName)) {
+    stripped = true;
+    s = normalizeCompactLine(s.slice(displayName.length));
+    s = s
+      .replace(/^[0-9０-９]+\s*/u, "")
+      .replace(/^[A-Za-z]\s*/u, "")
+      .replace(/^[ァ-ヶー]{1,3}\s*/u, "");
+    s = normalizeCompactLine(s);
+    if (!s) return "";
+  }
+
+  if (!stripped) return normalizeCompactLine(line);
+  if (looksLikeShortOcrGarbage(s)) return "";
+  return s;
 }
 
 function normalizeInboundText(rawText, source) {
@@ -1455,7 +1490,7 @@ function normalizeInboundText(rawText, source) {
 
   let lines = text
     .split("\n")
-    .map((l) => l.replace(/\s+/g, " ").trim())
+    .map((l) => stripDisplayNameNoisePrefix(l))
     .filter((l) => l.length > 0)
     .filter((l) => !isUiChromeLine(l));
 
@@ -1470,7 +1505,10 @@ function normalizeInboundText(rawText, source) {
       .map((l) => l.replace(/\s+/g, " ").trim())
       .filter((l) => l.length > 0);
     if (rawLines.length > 0) {
-      lines = [rawLines[rawLines.length - 1]];
+      const fallbackLine = stripDisplayNameNoisePrefix(rawLines[rawLines.length - 1]);
+      if (fallbackLine && !isUiChromeLine(fallbackLine)) {
+        lines = [fallbackLine];
+      }
     }
   }
 
@@ -2529,6 +2567,19 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   event.payload.trace_id = traceId;
   const ctx = buildMsgContext(event, accountId, defaultConversation);
   const conversation = ctx.ConversationLabel;
+  if (!`${ctx.Body || ""}`.trim()) {
+    traceLog(log, "info", {
+      trace_id: traceId,
+      stage: "gateway_inbound_suppressed",
+      action: "dispatch_inbound_message",
+      status: "suppressed",
+      reason: "noise_only_after_normalization",
+      source: event.payload?.source || "poll",
+      adapter: event.adapter || "line",
+    });
+    log?.info?.(`clawgate: [${accountId}] inbound suppressed as noise-only after normalization`);
+    return;
+  }
 
   // Parse tproj-msg reverse channel header (if present)
   const { header: tprojHeader, body: strippedBody } = parseTprojMsgHeader(ctx.Body);
