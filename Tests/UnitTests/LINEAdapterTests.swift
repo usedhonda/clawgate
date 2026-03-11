@@ -30,6 +30,46 @@ final class LINEAdapterTests: XCTestCase {
         )
     }
 
+    func testMissingSearchFieldAloneDoesNotMakeDefaultSurfaceAbnormal() {
+        XCTAssertFalse(
+            LINEAdapter.isDefaultConversationSurfaceAbnormal(
+                searchFieldValue: "",
+                hasMessageInput: true,
+                hasGreenSignal: true,
+                hasTextSignal: true
+            )
+        )
+        XCTAssertEqual(
+            LINEAdapter.defaultConversationSurfaceReason(
+                searchFieldValue: "",
+                hasMessageInput: true,
+                hasGreenSignal: true,
+                hasTextSignal: true
+            ),
+            "ok"
+        )
+    }
+
+    func testMissingMessageInputStillMakesDefaultSurfaceAbnormal() {
+        XCTAssertTrue(
+            LINEAdapter.isDefaultConversationSurfaceAbnormal(
+                searchFieldValue: "",
+                hasMessageInput: false,
+                hasGreenSignal: true,
+                hasTextSignal: true
+            )
+        )
+        XCTAssertEqual(
+            LINEAdapter.defaultConversationSurfaceReason(
+                searchFieldValue: "",
+                hasMessageInput: false,
+                hasGreenSignal: true,
+                hasTextSignal: true
+            ),
+            "message_input_missing"
+        )
+    }
+
     // MARK: - canSkipNavigation decision table
 
     /// canSkipNavigation = (lastHint == currentHint) AND inputFieldExists.

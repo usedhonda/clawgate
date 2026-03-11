@@ -13,10 +13,12 @@ final class LINEAdapter: AdapterProtocol {
         let reason: String
 
         var isAbnormal: Bool {
-            !hasSearchField
-                || !hasMessageInput
-                || !searchFieldValue.isEmpty
-                || (!hasGreenSignal && !hasTextSignal)
+            LINEAdapter.isDefaultConversationSurfaceAbnormal(
+                searchFieldValue: searchFieldValue,
+                hasMessageInput: hasMessageInput,
+                hasGreenSignal: hasGreenSignal,
+                hasTextSignal: hasTextSignal
+            )
         }
     }
 
@@ -837,6 +839,35 @@ final class LINEAdapter: AdapterProtocol {
         ConfigStore().load().lineDefaultConversation.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func isDefaultConversationSurfaceAbnormal(
+        searchFieldValue: String,
+        hasMessageInput: Bool,
+        hasGreenSignal: Bool,
+        hasTextSignal: Bool
+    ) -> Bool {
+        !searchFieldValue.isEmpty
+            || !hasMessageInput
+            || (!hasGreenSignal && !hasTextSignal)
+    }
+
+    static func defaultConversationSurfaceReason(
+        searchFieldValue: String,
+        hasMessageInput: Bool,
+        hasGreenSignal: Bool,
+        hasTextSignal: Bool
+    ) -> String {
+        if !searchFieldValue.isEmpty {
+            return "search_field_dirty"
+        }
+        if !hasMessageInput {
+            return "message_input_missing"
+        }
+        if !hasGreenSignal && !hasTextSignal {
+            return "no_green_or_text_signal"
+        }
+        return "ok"
+    }
+
     private func assessSendSurface(
         rootWindow: AXUIElement,
         windowFrame: CGRect,
@@ -919,18 +950,12 @@ final class LINEAdapter: AdapterProtocol {
             return detectGreenSignal(in: messageSignalRect(for: windowFrame), windowID: windowID)
         }()
 
-        let reason: String
-        if searchField == nil {
-            reason = "search_field_missing"
-        } else if !searchFieldValue.isEmpty {
-            reason = "search_field_dirty"
-        } else if !hasMessageInput {
-            reason = "message_input_missing"
-        } else if !hasGreenSignal && !hasTextSignal {
-            reason = "no_green_or_text_signal"
-        } else {
-            reason = "ok"
-        }
+        let reason = Self.defaultConversationSurfaceReason(
+            searchFieldValue: searchFieldValue,
+            hasMessageInput: hasMessageInput,
+            hasGreenSignal: hasGreenSignal,
+            hasTextSignal: hasTextSignal
+        )
 
         return SendSurfaceAssessment(
             hasSearchField: searchField != nil,
