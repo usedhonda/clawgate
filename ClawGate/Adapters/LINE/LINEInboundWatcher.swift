@@ -130,12 +130,14 @@ struct LineInboundDedupDecisionEngine {
         }
 
         let collapsed = collapseObservedFragments(fragments)
+        let originalTracker = tracker
         var updatedTracker = tracker
+        var currentPollBottomYByLine: [String: Int] = [:]
         var accepted: [LineObservedFragment] = []
         var matchedLineHead = ""
 
         for fragment in collapsed {
-            if let seen = updatedTracker[fragment.normalizedLine] {
+            if let seen = originalTracker[fragment.normalizedLine] {
                 if fragment.observedY > seen.latestSeenY {
                     accepted.append(fragment)
                 } else if matchedLineHead.isEmpty {
@@ -144,10 +146,14 @@ struct LineInboundDedupDecisionEngine {
             } else {
                 accepted.append(fragment)
             }
+            let currentBottom = currentPollBottomYByLine[fragment.normalizedLine] ?? Int.min
+            currentPollBottomYByLine[fragment.normalizedLine] = max(currentBottom, fragment.observedY)
+        }
 
-            updatedTracker[fragment.normalizedLine] = LineSeenPositionEntry(
-                normalizedLine: fragment.normalizedLine,
-                latestSeenY: fragment.observedY,
+        for (normalizedLine, bottomY) in currentPollBottomYByLine {
+            updatedTracker[normalizedLine] = LineSeenPositionEntry(
+                normalizedLine: normalizedLine,
+                latestSeenY: bottomY,
                 lastSeenAt: now
             )
         }

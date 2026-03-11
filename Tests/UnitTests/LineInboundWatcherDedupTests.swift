@@ -89,6 +89,33 @@ final class LineInboundWatcherDedupTests: XCTestCase {
         XCTAssertEqual(updatedTracker["same line"]?.latestSeenY, 620)
     }
 
+    func testScrolledUpDuplicatesDoNotFalseAcceptWhenSameLineAppearsTwice() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let tracker = [
+            "same line": LineSeenPositionEntry(
+                normalizedLine: "same line",
+                latestSeenY: 620,
+                lastSeenAt: now.addingTimeInterval(-10)
+            )
+        ]
+
+        let (evaluation, updatedTracker) = LineInboundDedupDecisionEngine.decide(
+            fingerprintHit: false,
+            fragments: [
+                fragment("same line", display: "Same line", y: 480, order: 0),
+                fragment("same line", display: "Same line", y: 600, order: 1),
+            ],
+            tracker: tracker,
+            freshness: noFreshness(),
+            now: now
+        )
+
+        XCTAssertTrue(evaluation.shouldSuppress)
+        XCTAssertEqual(evaluation.reason, "suppressed_same_or_above_y")
+        XCTAssertEqual(evaluation.acceptedLineCount, 0)
+        XCTAssertEqual(updatedTracker["same line"]?.latestSeenY, 600)
+    }
+
     func testMixedOldAndNewLinesEmitOnlyNovelLowerLine() {
         let now = Date(timeIntervalSince1970: 1_000)
         let tracker = [
