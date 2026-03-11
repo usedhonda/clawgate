@@ -279,6 +279,34 @@ enum LineSidebarDiscovery {
         return rowsByOrder[ocrMatch.yOrder]
     }
 
+    static func defaultConversationSearchResultRows(
+        in sidebar: SidebarListCandidate,
+        searchFieldFrame: CGRect
+    ) -> [SidebarRowCandidate] {
+        // Measured on macmini LINE window:
+        // - search field: x=122 y=78 w=264 h=38
+        // - section header: y=203 h=34
+        // - LINE row: y=237 h=57
+        // - target person row: y=294 h=57
+        // We only want the actual result rows beneath the header/profile block.
+        let minResultY = searchFieldFrame.maxY + 118
+        return sidebar.visibleRows.filter { row in
+            row.frame.minY >= minResultY && row.frame.height >= 48
+        }
+    }
+
+    static func defaultConversationSecondResultRow(
+        in sidebar: SidebarListCandidate,
+        searchFieldFrame: CGRect
+    ) -> SidebarRowCandidate? {
+        let rows = defaultConversationSearchResultRows(
+            in: sidebar,
+            searchFieldFrame: searchFieldFrame
+        )
+        guard rows.count >= 2 else { return nil }
+        return rows[1]
+    }
+
     static func sidebarOCRRect(for rowFrame: CGRect) -> CGRect {
         CGRect(
             x: rowFrame.minX + rowFrame.width * 0.20,

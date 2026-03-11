@@ -34,17 +34,17 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertFalse(
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "",
+                expectedConversation: "Yuzuru Honda",
                 hasMessageInput: true,
-                hasGreenSignal: true,
-                hasTextSignal: true
+                hasConversationSurfaceSignal: true
             )
         )
         XCTAssertEqual(
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "",
+                expectedConversation: "Yuzuru Honda",
                 hasMessageInput: true,
-                hasGreenSignal: true,
-                hasTextSignal: true
+                hasConversationSurfaceSignal: true
             ),
             "ok"
         )
@@ -54,36 +54,105 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertTrue(
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "",
+                expectedConversation: "Yuzuru Honda",
                 hasMessageInput: false,
-                hasGreenSignal: true,
-                hasTextSignal: true
+                hasConversationSurfaceSignal: true
             )
         )
         XCTAssertEqual(
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "",
+                expectedConversation: "Yuzuru Honda",
                 hasMessageInput: false,
-                hasGreenSignal: true,
-                hasTextSignal: true
+                hasConversationSurfaceSignal: true
             ),
             "message_input_missing"
         )
     }
 
-    func testDefaultConversationRailClickPointTargetsTopButtonBand() {
-        let frame = CGRect(x: 60, y: 45, width: 1200, height: 859)
-        let point = LINEAdapter.defaultConversationRailClickPoint(for: frame)
-
-        XCTAssertEqual(point.x, 94, accuracy: 0.5)
-        XCTAssertEqual(point.y, 92.245, accuracy: 1.0)
-        XCTAssertLessThan(point.y - frame.minY, 70, "rail click must stay in the top-button band")
+    func testMatchingSearchValueIsAllowedWhenConversationSurfaceIsVisible() {
+        XCTAssertFalse(
+            LINEAdapter.isDefaultConversationSurfaceAbnormal(
+                searchFieldValue: "Yuzuru Honda",
+                expectedConversation: "Yuzuru Honda",
+                hasMessageInput: true,
+                hasConversationSurfaceSignal: true
+            )
+        )
     }
 
-    func testDefaultConversationRailClickPointStaysAboveLowerRailButtonsOnTallWindows() {
-        let frame = CGRect(x: 100, y: 20, width: 1280, height: 1200)
-        let point = LINEAdapter.defaultConversationRailClickPoint(for: frame)
+    func testUnexpectedSearchValueStillMarksDefaultSurfaceDirty() {
+        XCTAssertEqual(
+            LINEAdapter.defaultConversationSurfaceReason(
+                searchFieldValue: "heartbeat",
+                expectedConversation: "Yuzuru Honda",
+                hasMessageInput: true,
+                hasConversationSurfaceSignal: true
+            ),
+            "search_field_dirty"
+        )
+    }
 
-        XCTAssertLessThan(point.y - frame.minY, 70, "rail click must never drift into the lower buttons")
+    func testMissingConversationSurfaceKeepsDefaultSurfaceAbnormal() {
+        XCTAssertEqual(
+            LINEAdapter.defaultConversationSurfaceReason(
+                searchFieldValue: "Yuzuru Honda",
+                expectedConversation: "Yuzuru Honda",
+                hasMessageInput: true,
+                hasConversationSurfaceSignal: false
+            ),
+            "conversation_surface_missing"
+        )
+    }
+
+    func testDefaultConversationSecondResultRowSkipsProfileAndHeader() {
+        let searchFieldFrame = CGRect(x: 122, y: 78, width: 264, height: 38)
+        let rows = [
+            LineSidebarDiscovery.SidebarRowCandidate(
+                element: AXUIElementCreateSystemWide(),
+                frame: CGRect(x: 122, y: 116, width: 302, height: 87),
+                yOrder: 0
+            ),
+            LineSidebarDiscovery.SidebarRowCandidate(
+                element: AXUIElementCreateSystemWide(),
+                frame: CGRect(x: 122, y: 203, width: 302, height: 34),
+                yOrder: 1
+            ),
+            LineSidebarDiscovery.SidebarRowCandidate(
+                element: AXUIElementCreateSystemWide(),
+                frame: CGRect(x: 122, y: 237, width: 302, height: 57),
+                yOrder: 2
+            ),
+            LineSidebarDiscovery.SidebarRowCandidate(
+                element: AXUIElementCreateSystemWide(),
+                frame: CGRect(x: 122, y: 294, width: 302, height: 57),
+                yOrder: 3
+            ),
+        ]
+        let sidebar = LineSidebarDiscovery.SidebarListCandidate(
+            node: AXNode(
+                element: AXUIElementCreateSystemWide(),
+                role: "AXList",
+                subrole: nil,
+                title: nil,
+                description: nil,
+                identifier: nil,
+                roleDescription: nil,
+                frame: CGRect(x: 122, y: 116, width: 302, height: 787),
+                actions: [],
+                settableAttributes: [],
+                value: nil
+            ),
+            frame: CGRect(x: 122, y: 116, width: 302, height: 787),
+            visibleRows: rows
+        )
+
+        let row = LineSidebarDiscovery.defaultConversationSecondResultRow(
+            in: sidebar,
+            searchFieldFrame: searchFieldFrame
+        )
+
+        XCTAssertEqual(row?.frame, CGRect(x: 122, y: 294, width: 302, height: 57))
     }
 
     // MARK: - canSkipNavigation decision table
