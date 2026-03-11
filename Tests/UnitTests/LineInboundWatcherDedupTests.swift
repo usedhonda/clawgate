@@ -49,14 +49,44 @@ final class LineInboundWatcherDedupTests: XCTestCase {
         XCTAssertEqual(updatedTracker["same line"]?.latestSeenY, 650)
     }
 
-    func testBottomMostYWinsWhenSameLineAppearsTwiceInOnePoll() {
+    func testBottomMostYWinsWithinSameYBucket() {
+        let collapsed = LineInboundDedupDecisionEngine.collapseObservedFragments([
+            fragment("same line", display: "Same line", y: 420, order: 1),
+            fragment("same line", display: "Same line", y: 449, order: 2),
+        ])
+
+        XCTAssertEqual(collapsed.count, 1)
+        XCTAssertEqual(collapsed.first?.observedY, 449)
+    }
+
+    func testSameLineInDifferentYBucketsStaysAsTwoFragments() {
         let collapsed = LineInboundDedupDecisionEngine.collapseObservedFragments([
             fragment("same line", display: "Same line", y: 420, order: 1),
             fragment("same line", display: "Same line", y: 610, order: 2),
         ])
 
-        XCTAssertEqual(collapsed.count, 1)
-        XCTAssertEqual(collapsed.first?.observedY, 610)
+        XCTAssertEqual(collapsed.count, 2)
+        XCTAssertEqual(collapsed.map(\.observedY), [420, 610])
+    }
+
+    func testSameLineTwiceInOnePollCanEmitTwiceWhenFarApart() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        let (evaluation, updatedTracker) = LineInboundDedupDecisionEngine.decide(
+            fingerprintHit: false,
+            fragments: [
+                fragment("same line", display: "Same line", y: 500, order: 0),
+                fragment("same line", display: "Same line", y: 620, order: 1),
+            ],
+            tracker: [:],
+            freshness: noFreshness(),
+            now: now
+        )
+
+        XCTAssertFalse(evaluation.shouldSuppress)
+        XCTAssertEqual(evaluation.acceptedLineCount, 2)
+        XCTAssertEqual(evaluation.emittedText, "Same line\nSame line")
+        XCTAssertEqual(updatedTracker["same line"]?.latestSeenY, 620)
     }
 
     func testMixedOldAndNewLinesEmitOnlyNovelLowerLine() {

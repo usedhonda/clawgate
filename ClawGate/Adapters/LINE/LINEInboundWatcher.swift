@@ -73,6 +73,8 @@ struct LineInboundDedupEvaluation {
 }
 
 struct LineInboundDedupDecisionEngine {
+    private static let collapseYBucketPx = 50
+
     static func prune(entries: [String: LineSeenPositionEntry], now: Date, ttl: TimeInterval) -> [String: LineSeenPositionEntry] {
         let cutoff = now.addingTimeInterval(-ttl)
         return entries.filter { $0.value.lastSeenAt >= cutoff }
@@ -82,14 +84,15 @@ struct LineInboundDedupDecisionEngine {
         var collapsed: [String: LineObservedFragment] = [:]
         for fragment in fragments {
             guard !fragment.normalizedLine.isEmpty else { continue }
-            if let existing = collapsed[fragment.normalizedLine] {
+            let collapseKey = "\(fragment.normalizedLine)|\(yBucket(for: fragment.observedY))"
+            if let existing = collapsed[collapseKey] {
                 if fragment.observedY > existing.observedY
                     || (fragment.observedY == existing.observedY && fragment.order < existing.order)
                     || (fragment.observedY == existing.observedY && fragment.displayText.count > existing.displayText.count) {
-                    collapsed[fragment.normalizedLine] = fragment
+                    collapsed[collapseKey] = fragment
                 }
             } else {
-                collapsed[fragment.normalizedLine] = fragment
+                collapsed[collapseKey] = fragment
             }
         }
         return collapsed.values.sorted {
@@ -98,6 +101,10 @@ struct LineInboundDedupDecisionEngine {
             }
             return $0.observedY < $1.observedY
         }
+    }
+
+    private static func yBucket(for observedY: Int) -> Int {
+        observedY / collapseYBucketPx
     }
 
     static func decide(
