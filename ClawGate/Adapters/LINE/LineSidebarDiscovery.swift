@@ -284,18 +284,19 @@ enum LineSidebarDiscovery {
         searchFieldFrame: CGRect
     ) -> [SidebarRowCandidate] {
         // Measured on macmini LINE window:
-        // - search field: x=122 y=78 w=264 h=38
-        // - section header: y=203 h=34
-        // - LINE row: y=237 h=57
-        // - target person row: y=294 h=57
-        // We only want the actual result rows beneath the header/profile block.
-        let minResultY = searchFieldFrame.maxY + 118
+        // - search field: x=134 y=78 w=264 h=38
+        // - search-state header row: y=116 h=34
+        // - first actual result row: y=150 h=57
+        // Screenshot evidence can show two visual results, but Host A AX search-state
+        // currently exposes a single actual result row beneath the header. Keep the
+        // filter loose enough to include that row while still excluding the header.
+        let minResultY = searchFieldFrame.maxY + 24
         return sidebar.visibleRows.filter { row in
             row.frame.minY >= minResultY && row.frame.height >= 48
         }
     }
 
-    static func defaultConversationSecondResultRow(
+    static func defaultConversationTargetResultRow(
         in sidebar: SidebarListCandidate,
         searchFieldFrame: CGRect
     ) -> SidebarRowCandidate? {
@@ -303,8 +304,12 @@ enum LineSidebarDiscovery {
             in: sidebar,
             searchFieldFrame: searchFieldFrame
         )
-        guard rows.count >= 2 else { return nil }
-        return rows[1]
+        guard !rows.isEmpty else { return nil }
+        // Preferred behavior remains "second actual result row" when the search surface
+        // exposes both LINE and the person entry. On Host A's real AX tree, only one
+        // actual result row is often exposed after the header, and that row is the
+        // selectable conversation. Fall back to the first actual result row in that case.
+        return rows.count >= 2 ? rows[1] : rows[0]
     }
 
     static func sidebarOCRRect(for rowFrame: CGRect) -> CGRect {

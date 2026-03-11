@@ -105,7 +105,47 @@ final class LINEAdapterTests: XCTestCase {
         )
     }
 
-    func testDefaultConversationSecondResultRowSkipsProfileAndHeader() {
+    func testDefaultConversationTargetResultRowFallsBackToFirstActualResult() {
+        let searchFieldFrame = CGRect(x: 134, y: 78, width: 264, height: 38)
+        let rows = [
+            LineSidebarDiscovery.SidebarRowCandidate(
+                element: AXUIElementCreateSystemWide(),
+                frame: CGRect(x: 122, y: 116, width: 302, height: 34),
+                yOrder: 0
+            ),
+            LineSidebarDiscovery.SidebarRowCandidate(
+                element: AXUIElementCreateSystemWide(),
+                frame: CGRect(x: 122, y: 150, width: 302, height: 57),
+                yOrder: 1
+            ),
+        ]
+        let sidebar = LineSidebarDiscovery.SidebarListCandidate(
+            node: AXNode(
+                element: AXUIElementCreateSystemWide(),
+                role: "AXList",
+                subrole: nil,
+                title: nil,
+                description: nil,
+                identifier: nil,
+                roleDescription: nil,
+                frame: CGRect(x: 122, y: 116, width: 302, height: 787),
+                actions: [],
+                settableAttributes: [],
+                value: nil
+            ),
+            frame: CGRect(x: 122, y: 116, width: 302, height: 787),
+            visibleRows: rows
+        )
+
+        let row = LineSidebarDiscovery.defaultConversationTargetResultRow(
+            in: sidebar,
+            searchFieldFrame: searchFieldFrame
+        )
+
+        XCTAssertEqual(row?.frame, CGRect(x: 122, y: 150, width: 302, height: 57))
+    }
+
+    func testDefaultConversationTargetResultRowUsesSecondActualResultWhenPresent() {
         let searchFieldFrame = CGRect(x: 122, y: 78, width: 264, height: 38)
         let rows = [
             LineSidebarDiscovery.SidebarRowCandidate(
@@ -147,7 +187,7 @@ final class LINEAdapterTests: XCTestCase {
             visibleRows: rows
         )
 
-        let row = LineSidebarDiscovery.defaultConversationSecondResultRow(
+        let row = LineSidebarDiscovery.defaultConversationTargetResultRow(
             in: sidebar,
             searchFieldFrame: searchFieldFrame
         )

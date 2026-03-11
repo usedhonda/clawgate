@@ -1052,7 +1052,7 @@ final class LINEAdapter: AdapterProtocol {
 
         var freshNodes: [AXNode] = []
         var freshWindowFrame = workingWindowFrame
-        var secondResultRow: LineSidebarDiscovery.SidebarRowCandidate?
+        var targetResultRow: LineSidebarDiscovery.SidebarRowCandidate?
         let resultFound = AXActions.poll(intervalMs: 100, timeoutMs: 2000) {
             freshNodes = AXQuery.descendants(of: rootWindow)
             freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? workingWindowFrame
@@ -1064,19 +1064,19 @@ final class LINEAdapter: AdapterProtocol {
                     in: freshNodes,
                     windowFrame: freshWindowFrame
                   ),
-                  let row = LineSidebarDiscovery.defaultConversationSecondResultRow(
+                  let row = LineSidebarDiscovery.defaultConversationTargetResultRow(
                     in: sidebar,
                     searchFieldFrame: searchFieldFrame
                   ) else {
                 return false
             }
-            secondResultRow = row
+            targetResultRow = row
             return true
         }
-        guard resultFound, let row = secondResultRow else {
+        guard resultFound, let row = targetResultRow else {
             throw BridgeRuntimeError(
                 code: "default_conversation_not_found",
-                message: "Default conversation second result row not found",
+                message: "Default conversation target result row not found",
                 retriable: true,
                 failedStep: "recover_default_conversation",
                 details: defaultConversation
