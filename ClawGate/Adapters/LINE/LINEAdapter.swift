@@ -1149,10 +1149,16 @@ final class LINEAdapter: AdapterProtocol {
         g >= 165 && r >= 150 && b <= 190 && (g - r) >= 12 && (g - b) >= 18
     }
 
-    private func clickChatRailPoint(in windowFrame: CGRect) -> Bool {
+    static func defaultConversationRailClickPoint(for windowFrame: CGRect) -> CGPoint {
         let x = windowFrame.minX + min(max(22, windowFrame.width * 0.03), 34)
-        let y = windowFrame.minY + min(max(150, windowFrame.height * 0.18), 210)
-        return click(point: CGPoint(x: x, y: y))
+        // Only the top rail button is safe to touch here. The lower buttons can
+        // switch LINE into non-chat views and break conversation recovery.
+        let y = windowFrame.minY + min(max(42, windowFrame.height * 0.055), 60)
+        return CGPoint(x: x, y: y)
+    }
+
+    private func clickChatRailPoint(in windowFrame: CGRect) -> Bool {
+        click(point: Self.defaultConversationRailClickPoint(for: windowFrame))
     }
 
     @discardableResult

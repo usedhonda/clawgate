@@ -70,6 +70,22 @@ final class LINEAdapterTests: XCTestCase {
         )
     }
 
+    func testDefaultConversationRailClickPointTargetsTopButtonBand() {
+        let frame = CGRect(x: 60, y: 45, width: 1200, height: 859)
+        let point = LINEAdapter.defaultConversationRailClickPoint(for: frame)
+
+        XCTAssertEqual(point.x, 94, accuracy: 0.5)
+        XCTAssertEqual(point.y, 92.245, accuracy: 1.0)
+        XCTAssertLessThan(point.y - frame.minY, 70, "rail click must stay in the top-button band")
+    }
+
+    func testDefaultConversationRailClickPointStaysAboveLowerRailButtonsOnTallWindows() {
+        let frame = CGRect(x: 100, y: 20, width: 1280, height: 1200)
+        let point = LINEAdapter.defaultConversationRailClickPoint(for: frame)
+
+        XCTAssertLessThan(point.y - frame.minY, 70, "rail click must never drift into the lower buttons")
+    }
+
     // MARK: - canSkipNavigation decision table
 
     /// canSkipNavigation = (lastHint == currentHint) AND inputFieldExists.
