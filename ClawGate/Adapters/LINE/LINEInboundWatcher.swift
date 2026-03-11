@@ -2,9 +2,26 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-struct LineSeenEntry {
+struct LineSeenPositionEntry {
     let normalizedLine: String
-    let seenAt: Date
+    let latestSeenY: Int
+    let lastSeenAt: Date
+}
+
+struct LineObservedFragment: Codable, Equatable {
+    let normalizedLine: String
+    let displayText: String
+    let observedY: Int
+    let source: String
+    let order: Int
+
+    enum CodingKeys: String, CodingKey {
+        case normalizedLine = "normalized_line"
+        case displayText = "display_text"
+        case observedY = "observed_y"
+        case source
+        case order
+    }
 }
 
 enum LineCursorStatus: String {
@@ -45,49 +62,168 @@ struct LineInboundFreshnessEvidence {
     }
 }
 
-struct LineInboundDedupDecisionResult {
+struct LineInboundDedupEvaluation {
     let shouldSuppress: Bool
     let reason: String
+    let emittedText: String
+    let matchedLineHead: String
+    let observedLineCount: Int
+    let acceptedLineCount: Int
+    let primaryReason: String
 }
 
 struct LineInboundDedupDecisionEngine {
-    static func prune(entries: [LineSeenEntry], now: Date, ttl: TimeInterval) -> [LineSeenEntry] {
+    static func prune(entries: [String: LineSeenPositionEntry], now: Date, ttl: TimeInterval) -> [String: LineSeenPositionEntry] {
         let cutoff = now.addingTimeInterval(-ttl)
-        return entries.filter { $0.seenAt >= cutoff }
+        return entries.filter { $0.value.lastSeenAt >= cutoff }
+    }
+
+    static func collapseObservedFragments(_ fragments: [LineObservedFragment]) -> [LineObservedFragment] {
+        var collapsed: [String: LineObservedFragment] = [:]
+        for fragment in fragments {
+            guard !fragment.normalizedLine.isEmpty else { continue }
+            if let existing = collapsed[fragment.normalizedLine] {
+                if fragment.observedY > existing.observedY
+                    || (fragment.observedY == existing.observedY && fragment.order < existing.order)
+                    || (fragment.observedY == existing.observedY && fragment.displayText.count > existing.displayText.count) {
+                    collapsed[fragment.normalizedLine] = fragment
+                }
+            } else {
+                collapsed[fragment.normalizedLine] = fragment
+            }
+        }
+        return collapsed.values.sorted {
+            if $0.observedY == $1.observedY {
+                return $0.order < $1.order
+            }
+            return $0.observedY < $1.observedY
+        }
     }
 
     static func decide(
         fingerprintHit: Bool,
-        contentMemoryHit: Bool,
-        freshness: LineInboundFreshnessEvidence
-    ) -> LineInboundDedupDecisionResult {
+        fragments: [LineObservedFragment],
+        tracker: [String: LineSeenPositionEntry],
+        freshness: LineInboundFreshnessEvidence,
+        now: Date
+    ) -> (evaluation: LineInboundDedupEvaluation, updatedTracker: [String: LineSeenPositionEntry]) {
         if fingerprintHit {
-            return LineInboundDedupDecisionResult(
-                shouldSuppress: true,
-                reason: "suppressed_fingerprint_window"
+            return (
+                LineInboundDedupEvaluation(
+                    shouldSuppress: true,
+                    reason: "suppressed_fingerprint_window",
+                    emittedText: "",
+                    matchedLineHead: "",
+                    observedLineCount: 0,
+                    acceptedLineCount: 0,
+                    primaryReason: freshness.primaryReason
+                ),
+                tracker
             )
         }
-        if freshness.hasPrimaryEvidence {
-            return LineInboundDedupDecisionResult(
-                shouldSuppress: false,
-                reason: "accepted_primary_evidence"
+
+        let collapsed = collapseObservedFragments(fragments)
+        var updatedTracker = tracker
+        var accepted: [LineObservedFragment] = []
+        var matchedLineHead = ""
+
+        for fragment in collapsed {
+            if let seen = updatedTracker[fragment.normalizedLine] {
+                if fragment.observedY > seen.latestSeenY {
+                    accepted.append(fragment)
+                } else if matchedLineHead.isEmpty {
+                    matchedLineHead = String(fragment.displayText.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
+                }
+            } else {
+                accepted.append(fragment)
+            }
+
+            updatedTracker[fragment.normalizedLine] = LineSeenPositionEntry(
+                normalizedLine: fragment.normalizedLine,
+                latestSeenY: fragment.observedY,
+                lastSeenAt: now
             )
         }
+
+        if !accepted.isEmpty {
+            return (
+                LineInboundDedupEvaluation(
+                    shouldSuppress: false,
+                    reason: "accepted_line_y_progress",
+                    emittedText: accepted
+                        .sorted {
+                            if $0.observedY == $1.observedY {
+                                return $0.order < $1.order
+                            }
+                            return $0.observedY < $1.observedY
+                        }
+                        .map(\.displayText)
+                        .joined(separator: "\n"),
+                    matchedLineHead: "",
+                    observedLineCount: collapsed.count,
+                    acceptedLineCount: accepted.count,
+                    primaryReason: freshness.primaryReason
+                ),
+                updatedTracker
+            )
+        }
+
+        if !collapsed.isEmpty {
+            return (
+                LineInboundDedupEvaluation(
+                    shouldSuppress: true,
+                    reason: "suppressed_same_or_above_y",
+                    emittedText: "",
+                    matchedLineHead: matchedLineHead,
+                    observedLineCount: collapsed.count,
+                    acceptedLineCount: 0,
+                    primaryReason: freshness.primaryReason
+                ),
+                updatedTracker
+            )
+        }
+
         if freshness.cursorStatus == .notFound {
-            return LineInboundDedupDecisionResult(
-                shouldSuppress: true,
-                reason: "suppressed_cursor_neutral"
+            return (
+                LineInboundDedupEvaluation(
+                    shouldSuppress: true,
+                    reason: "suppressed_cursor_neutral",
+                    emittedText: "",
+                    matchedLineHead: "",
+                    observedLineCount: 0,
+                    acceptedLineCount: 0,
+                    primaryReason: freshness.primaryReason
+                ),
+                updatedTracker
             )
         }
-        if contentMemoryHit {
-            return LineInboundDedupDecisionResult(
-                shouldSuppress: true,
-                reason: "suppressed_content_memory_assist"
+
+        if freshness.hasPrimaryEvidence {
+            return (
+                LineInboundDedupEvaluation(
+                    shouldSuppress: true,
+                    reason: "suppressed_primary_without_position",
+                    emittedText: "",
+                    matchedLineHead: "",
+                    observedLineCount: 0,
+                    acceptedLineCount: 0,
+                    primaryReason: freshness.primaryReason
+                ),
+                updatedTracker
             )
         }
-        return LineInboundDedupDecisionResult(
-            shouldSuppress: false,
-            reason: "accepted"
+
+        return (
+            LineInboundDedupEvaluation(
+                shouldSuppress: true,
+                reason: "suppressed_no_positioned_lines",
+                emittedText: "",
+                matchedLineHead: "",
+                observedLineCount: 0,
+                acceptedLineCount: 0,
+                primaryReason: freshness.primaryReason
+            ),
+            updatedTracker
         )
     }
 }
@@ -131,11 +267,11 @@ final class LINEInboundWatcher {
     private var lastInboundFingerprint: String = ""
     private var lastInboundAt: Date = .distantPast
     private var lastCompletedPollAt: Date = .distantPast
-    /// Content-based seen-line registry per conversation.
-    /// Entries expire by TTL and are additionally bounded by size cap.
-    private var seenLinesByConversation: [String: [LineSeenEntry]] = [:]
+    /// Per-line Y tracker per conversation.
+    /// Entries are pruned by a long GC TTL, but Y progress — not TTL — governs emit decisions.
+    private var seenLinesByConversation: [String: [String: LineSeenPositionEntry]] = [:]
     private let maxSeenLinesPerConversation = 240
-    private let contentMemoryTTLSeconds: TimeInterval = 90
+    private let seenLinePositionGCSeconds: TimeInterval = 24 * 60 * 60
     private let inboundDedupWindowSeconds: TimeInterval = 20
     private let inboundDedupWindowSecondsV2: TimeInterval
     private let ingressDedupTuneV2Enabled: Bool
@@ -147,8 +283,6 @@ final class LINEInboundWatcher {
     /// Dedup pipeline history ring buffer (最新 20 件、デバッグエンドポイント用)
     private var pipelineHistory: [LineInboundDedupSnapshot.PipelineEntry] = []
     private let maxPipelineHistory = 20
-    /// lineSeenPreviously でマッチした行の先頭。shouldSuppressDuplicateInbound 内で参照する。
-    private var lastMatchedLineHead: String = ""
 
     /// Signal diagnostics: written by each collect*Signal, read by doPoll for pipeline JSON
     private var lastStructuralDiag: [String: String] = [:]
@@ -467,26 +601,29 @@ final class LINEInboundWatcher {
             )
             return
         }
-        if shouldSuppressDuplicateInbound(
+        let dedupEvaluation = evaluateInboundDedup(
             text: filteredDecisionText,
             conversation: decision.conversation,
             details: decision.details
-        ) {
-            logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window")
+        )
+        if dedupEvaluation.shouldSuppress {
+            logger.log(.debug, "LINEInboundWatcher: suppressed inbound reason=\(dedupEvaluation.reason)")
             savePipelineResult(
                 decision: decision,
                 sanitizedText: filteredDecisionText,
                 dedupResult: "suppressed",
                 emitted: false,
-                extra: buildTimingFields(now: Date(), dropStage: "dedup", dropReason: "line_memory_or_window")
+                extra: buildTimingFields(now: Date(), dropStage: "dedup", dropReason: dedupEvaluation.reason)
+                    .merging(dedupExtraFields(dedupEvaluation)) { _, new in new }
             )
             return
         }
+        let emittedText = dedupEvaluation.emittedText.isEmpty ? filteredDecisionText : dedupEvaluation.emittedText
 
         let eventAppendAt = Date()
         let timingFields = buildTimingFields(now: eventAppendAt, dropStage: "none", dropReason: "accepted")
         var payload: [String: String] = [
-            "text": filteredDecisionText,
+            "text": emittedText,
             "conversation": decision.conversation,
             "source": "hybrid_fusion",
             "confidence": decision.confidence,
@@ -505,34 +642,36 @@ final class LINEInboundWatcher {
             "line_watch_drop_stage": "none",
             "line_watch_drop_reason": "accepted",
         ]
-        for (k, v) in decision.details {
+        for (k, v) in decision.details where k != "observed_fragments_json" {
             payload[k] = v
         }
 
         _ = eventBus.append(type: decision.eventType, adapter: "line", payload: payload)
-        recordEmittedTextCursor(text: filteredDecisionText, conversation: decision.conversation)
+        recordEmittedTextCursor(text: emittedText, conversation: decision.conversation)
         logger.log(.debug, "LINEInboundWatcher: \(decision.eventType) via fusion score=\(decision.score), conf=\(decision.confidence), signals=\(decision.signals.joined(separator: ","))")
         savePipelineResult(
             decision: decision,
-            sanitizedText: filteredDecisionText,
+            sanitizedText: emittedText,
             dedupResult: "passed",
             emitted: true,
-            extra: timingFields
+            extra: timingFields.merging(dedupExtraFields(dedupEvaluation)) { _, new in new }
         )
     }
 
     private func emitFromSignal(_ signal: LineDetectionSignal) {
         let filtered = LineTextSanitizer.sanitize(signal.text)
         guard !filtered.isEmpty else { return }
-        if shouldSuppressDuplicateInbound(text: filtered, conversation: signal.conversation, details: signal.details) {
-            logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound within dedup window (legacy)")
+        let dedupEvaluation = evaluateInboundDedup(text: filtered, conversation: signal.conversation, details: signal.details)
+        if dedupEvaluation.shouldSuppress {
+            logger.log(.debug, "LINEInboundWatcher: suppressed duplicate inbound (legacy) reason=\(dedupEvaluation.reason)")
             return
         }
+        let emittedText = dedupEvaluation.emittedText.isEmpty ? filtered : dedupEvaluation.emittedText
         let isEcho = recentSendTracker.isLikelyEcho(text: filtered)
         let eventType = isEcho ? "echo_message" : "inbound_message"
 
         var payload: [String: String] = [
-            "text": filtered,
+            "text": emittedText,
             "conversation": signal.conversation,
             "source": signal.name,
             "confidence": signal.score >= 80 ? "high" : (signal.score >= 50 ? "medium" : "low"),
@@ -540,21 +679,41 @@ final class LINEInboundWatcher {
             "signals": signal.name,
             "pipeline_version": "line-legacy-v2",
         ]
-        for (k, v) in signal.details {
+        for (k, v) in signal.details where k != "observed_fragments_json" {
             payload[k] = v
         }
 
         _ = eventBus.append(type: eventType, adapter: "line", payload: payload)
-        recordEmittedTextCursor(text: filtered, conversation: signal.conversation)
+        recordEmittedTextCursor(text: emittedText, conversation: signal.conversation)
         lastSignalNames = [signal.name]
         lastScore = signal.score
         lastConfidence = payload["confidence"] ?? "low"
     }
 
-    private func shouldSuppressDuplicateInbound(text: String, conversation: String, details: [String: String] = [:]) -> Bool {
+    private func evaluateInboundDedup(text: String, conversation: String, details: [String: String] = [:]) -> LineInboundDedupEvaluation {
         let normalized = normalizeForDuplicateFingerprint(text)
-        guard !normalized.isEmpty else { return false }
-        if ingressDedupTuneV2Enabled, normalized.count < 6 { return false }
+        guard !normalized.isEmpty else {
+            return LineInboundDedupEvaluation(
+                shouldSuppress: false,
+                reason: "accepted_empty_bypass",
+                emittedText: text,
+                matchedLineHead: "",
+                observedLineCount: 0,
+                acceptedLineCount: 0,
+                primaryReason: "none"
+            )
+        }
+        if ingressDedupTuneV2Enabled, normalized.count < 6 {
+            return LineInboundDedupEvaluation(
+                shouldSuppress: false,
+                reason: "accepted_short_text_bypass",
+                emittedText: text,
+                matchedLineHead: "",
+                observedLineCount: 0,
+                acceptedLineCount: 0,
+                primaryReason: "none"
+            )
+        }
 
         let normalizedConversation = conversation.lowercased()
         let fingerprint = "\(normalizedConversation)|\(normalized)"
@@ -563,44 +722,34 @@ final class LINEInboundWatcher {
         let textHead = String(text.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
         pruneExpiredSeenLines(conversation: normalizedConversation, now: now)
 
-        let normalizedLines = normalizedInboundLinesForDedup(text)
         let freshness = freshnessEvidence(from: details)
         let fingerprintHit = fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < windowSeconds
-        var contentMemoryHit = false
-        if !normalizedLines.isEmpty {
-            lastMatchedLineHead = ""
-            contentMemoryHit = normalizedLines.allSatisfy { normalizedLine in
-                lineSeenPreviously(normalizedLine: normalizedLine, conversation: normalizedConversation)
-            }
-        }
+        let fragments = observedFragmentsForDedup(from: details)
+        let existingTracker = seenLinesByConversation[normalizedConversation] ?? [:]
 
-        let decision = LineInboundDedupDecisionEngine.decide(
+        let (evaluation, updatedTracker) = LineInboundDedupDecisionEngine.decide(
             fingerprintHit: fingerprintHit,
-            contentMemoryHit: contentMemoryHit,
-            freshness: freshness
+            fragments: fragments,
+            tracker: existingTracker,
+            freshness: freshness,
+            now: now
         )
-        let isSuppressed = decision.shouldSuppress
-        let matchedHead = isSuppressed ? lastMatchedLineHead : ""
-        if isSuppressed {
-            logger.log(.debug, "LINEInboundWatcher: dedup suppressed reason=\(decision.reason)")
-        }
+
+        storeSeenLineTracker(updatedTracker, conversation: normalizedConversation)
         appendPipelineEntry(LineInboundDedupSnapshot.PipelineEntry(
             ts: isoString(now),
-            result: isSuppressed ? "suppressed" : "passed",
-            reason: decision.reason,
-            matchedLineHead: matchedHead,
+            result: evaluation.shouldSuppress ? "suppressed" : "passed",
+            reason: evaluation.reason,
+            matchedLineHead: evaluation.matchedLineHead,
             conversation: normalizedConversation,
             textHead: textHead,
-            emitted: !isSuppressed
+            emitted: !evaluation.shouldSuppress
         ))
-        if isSuppressed {
-            return true
-        }
+        if evaluation.shouldSuppress { return evaluation }
 
         lastInboundFingerprint = fingerprint
         lastInboundAt = now
-        recordInboundLines(normalizedLines, conversation: normalizedConversation, now: now)
-        return false
+        return evaluation
     }
 
     private func normalizeForDuplicateFingerprint(_ text: String) -> String {
@@ -614,35 +763,6 @@ final class LINEInboundWatcher {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func normalizedInboundLinesForDedup(_ text: String) -> [String] {
-        let sanitized = LineTextSanitizer.sanitize(text)
-        guard !sanitized.isEmpty else { return [] }
-        let lines = sanitized
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        var segments: [String] = []
-        for line in lines {
-            segments.append(line)
-            let punctuated = line
-                .replacingOccurrences(of: "•", with: "\n")
-                .replacingOccurrences(of: "・", with: "\n")
-                .replacingOccurrences(of: "。", with: "\n")
-                .replacingOccurrences(of: "！", with: "\n")
-                .replacingOccurrences(of: "？", with: "\n")
-                .replacingOccurrences(of: "!", with: "\n")
-                .replacingOccurrences(of: "?", with: "\n")
-            let parts = punctuated
-                .split(separator: "\n", omittingEmptySubsequences: true)
-                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            segments.append(contentsOf: parts)
-        }
-        return segments
-            .map { normalizeForDuplicateFingerprint($0) }
-            .filter { $0.count >= 2 }
-    }
-
     private func freshnessEvidence(from details: [String: String]) -> LineInboundFreshnessEvidence {
         LineInboundFreshnessEvidence(
             incomingRows: Int(details["incoming_rows"] ?? "") ?? 0,
@@ -652,6 +772,43 @@ final class LINEInboundWatcher {
             postCursorNovelLineCount: Int(details["pixel_post_cursor_novel_lines"] ?? "") ?? 0,
             pixelTextChanged: details["pixel_text_changed"] == "1"
         )
+    }
+
+    private func dedupExtraFields(_ evaluation: LineInboundDedupEvaluation) -> [String: String] {
+        [
+            "dedup_reason": evaluation.reason,
+            "dedup_primary_reason": evaluation.primaryReason,
+            "dedup_observed_line_count": String(evaluation.observedLineCount),
+            "dedup_accepted_line_count": String(evaluation.acceptedLineCount),
+            "dedup_matched_line_head": evaluation.matchedLineHead,
+            "dedup_emitted_text_head": textHeadForLog(evaluation.emittedText),
+        ]
+    }
+
+    private func observedFragmentsForDedup(from details: [String: String]) -> [LineObservedFragment] {
+        guard let encoded = details["observed_fragments_json"],
+              let data = encoded.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([LineObservedFragment].self, from: data) else {
+            return []
+        }
+        return LineInboundDedupDecisionEngine.collapseObservedFragments(decoded)
+    }
+
+    private func storeSeenLineTracker(_ tracker: [String: LineSeenPositionEntry], conversation: String) {
+        if tracker.isEmpty {
+            seenLinesByConversation.removeValue(forKey: conversation)
+            return
+        }
+        let trimmed = tracker
+            .sorted { lhs, rhs in
+                if lhs.value.lastSeenAt == rhs.value.lastSeenAt {
+                    return lhs.key < rhs.key
+                }
+                return lhs.value.lastSeenAt > rhs.value.lastSeenAt
+            }
+            .prefix(maxSeenLinesPerConversation)
+            .map { ($0.key, $0.value) }
+        seenLinesByConversation[conversation] = Dictionary(uniqueKeysWithValues: trimmed)
     }
 
     private func recordEmittedTextCursor(text: String, conversation: String) {
@@ -664,45 +821,14 @@ final class LINEInboundWatcher {
         lastEmittedTextCursorConversation = conversation
     }
 
-    private func lineSeenPreviously(normalizedLine: String, conversation: String) -> Bool {
-        guard let lines = seenLinesByConversation[conversation] else { return false }
-        for seen in lines {
-            if linesLikelyEquivalent(normalizedLine, seen.normalizedLine) {
-                let matchedHead = String(seen.normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
-                let queryHead = String(normalizedLine.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
-                logger.log(.debug, "LINEInboundWatcher: fuzzy_dedup_hit query=[\(queryHead)] matched=[\(matchedHead)]")
-                lastMatchedLineHead = matchedHead
-                return true
-            }
-        }
-        return false
-    }
-
     private func pruneExpiredSeenLines(conversation: String, now: Date) {
         guard var seen = seenLinesByConversation[conversation] else { return }
-        seen = LineInboundDedupDecisionEngine.prune(entries: seen, now: now, ttl: contentMemoryTTLSeconds)
+        seen = LineInboundDedupDecisionEngine.prune(entries: seen, now: now, ttl: seenLinePositionGCSeconds)
         if seen.isEmpty {
             seenLinesByConversation.removeValue(forKey: conversation)
         } else {
             seenLinesByConversation[conversation] = seen
         }
-    }
-
-    private func recordInboundLines(_ normalizedLines: [String], conversation: String, now: Date) {
-        guard !normalizedLines.isEmpty else { return }
-        var seen = seenLinesByConversation[conversation] ?? []
-        var addedInBatch = Set<String>()
-        for line in normalizedLines where addedInBatch.insert(line).inserted {
-            if let existingIndex = seen.firstIndex(where: { $0.normalizedLine == line }) {
-                seen[existingIndex] = LineSeenEntry(normalizedLine: line, seenAt: now)
-            } else {
-                seen.append(LineSeenEntry(normalizedLine: line, seenAt: now))
-            }
-        }
-        if seen.count > maxSeenLinesPerConversation {
-            seen.removeFirst(seen.count - maxSeenLinesPerConversation)
-        }
-        seenLinesByConversation[conversation] = seen
     }
 
     private func linesLikelyEquivalent(_ lhs: String, _ rhs: String) -> Bool {
@@ -807,7 +933,8 @@ final class LINEInboundWatcher {
             newRowCount: newRowCount
         )
         let newestSliceUsed = ocrFrames.contains { Int($0.origin.y) == Int(newestSliceRect(for: lastFrame).origin.y) && Int($0.height) == Int(newestSliceRect(for: lastFrame).height) }
-        let ocrText = extractInboundOCRText(from: ocrFrames, lineWindowID: lineWindowID)
+        let ocrRowResults = extractInboundOCRRows(from: ocrFrames, lineWindowID: lineWindowID)
+        let ocrText = ocrRowResults.map(\.text).joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let anchorAreaText = collectAnchorAreaOCR(chatList: chatList, lineWindowID: lineWindowID)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -815,6 +942,15 @@ final class LINEInboundWatcher {
         let structuralFallbackOCR = collectStructuralFallbackOCR(
             lastFrame: lastFrame,
             lineWindowID: lineWindowID
+        )
+        let observedFragments = buildStructuralObservedFragments(
+            ocrRowResults: ocrRowResults,
+            incomingRows: incomingRows,
+            incomingFrames: incomingFrames,
+            anchorAreaText: anchorAreaText,
+            axFallbackText: axFallbackText,
+            structuralFallbackOCR: structuralFallbackOCR,
+            fallbackFrame: lastFrame
         )
         let mergedText: String
         let mergedCandidates = mergeCandidatesPreservingLines(
@@ -824,25 +960,31 @@ final class LINEInboundWatcher {
 
         lastStructuralDiag = ["structural_row_count": "\(currentCount)", "structural_previous_count": "\(previousCount)", "structural_signal_result": "fired"]
 
+        var details: [String: String] = [
+            "row_count_delta": String(newRowCount),
+            "total_rows": String(currentCount),
+            "ax_bottom_changed": bottomChanged ? "1" : "0",
+            "incoming_rows": String(incomingFrames.count),
+            "newest_slice_used": newestSliceUsed ? "1" : "0",
+            "ocr_empty_fallback_ax": ocrText.isEmpty ? "1" : "0",
+            "ocr_text_len": String(ocrText.count),
+            "anchor_area_text_len": String(anchorAreaText.count),
+            "merged_text_len": String(mergedText.count),
+            "merged_text_head": textHeadForLog(mergedText),
+            "ax_fallback_text_len": String(axFallbackText.count),
+            "ocr_fallback_text_len": String(structuralFallbackOCR.count),
+            "observed_fragment_count": String(observedFragments.count),
+        ]
+        if let encodedFragments = encodeObservedFragments(observedFragments) {
+            details["observed_fragments_json"] = encodedFragments
+        }
+
         return LineDetectionSignal(
             name: "ax_structure",
             score: countChanged ? 70 : 58,
             text: mergedText,
             conversation: conversation,
-            details: [
-                "row_count_delta": String(newRowCount),
-                "total_rows": String(currentCount),
-                "ax_bottom_changed": bottomChanged ? "1" : "0",
-                "incoming_rows": String(incomingFrames.count),
-                "newest_slice_used": newestSliceUsed ? "1" : "0",
-                "ocr_empty_fallback_ax": ocrText.isEmpty ? "1" : "0",
-                "ocr_text_len": String(ocrText.count),
-                "anchor_area_text_len": String(anchorAreaText.count),
-                "merged_text_len": String(mergedText.count),
-                "merged_text_head": textHeadForLog(mergedText),
-                "ax_fallback_text_len": String(axFallbackText.count),
-                "ocr_fallback_text_len": String(structuralFallbackOCR.count),
-            ]
+            details: details
         )
     }
 
@@ -853,24 +995,21 @@ final class LINEInboundWatcher {
         return rowText
     }
 
-    private func extractInboundOCRText(from incomingFrames: [CGRect], lineWindowID: CGWindowID) -> String {
-        guard !incomingFrames.isEmpty else { return "" }
+    private func extractInboundOCRRows(from incomingFrames: [CGRect], lineWindowID: CGWindowID) -> [(frame: CGRect, text: String)] {
+        guard !incomingFrames.isEmpty else { return [] }
 
-        // OCR each row independently to avoid a wide union-crop pulling in older/adjacent bubbles.
         let ordered = incomingFrames.sorted { $0.origin.y < $1.origin.y }
-        var rows: [String] = []
+        var rows: [(frame: CGRect, text: String)] = []
         for frame in ordered {
             let crop = inboundCropRect(for: frame, horizontalRatio: 0.90)
             let text = (VisionOCR.extractTextLineInbound(from: crop, windowID: lineWindowID, config: ocrConfig) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
-                let normalized = LineTextSanitizer.sanitize(text)
-                if !normalized.isEmpty {
-                    mergeOCRRowPreferLonger(normalized, into: &rows)
-                }
+            let normalized = LineTextSanitizer.sanitize(text)
+            if !normalized.isEmpty {
+                rows.append((frame, normalized))
             }
         }
-        return rows.joined(separator: "\n")
+        return rows
     }
 
     private func collectAnchorAreaOCR(chatList: AXUIElement, lineWindowID: CGWindowID) -> String {
@@ -910,12 +1049,74 @@ final class LINEInboundWatcher {
         return lines.joined(separator: "\n")
     }
 
-    /// Deduplicate OCR rows while preserving richer text.
-    /// If one candidate contains another, keep the longer one.
-    private func mergeOCRRowPreferLonger(_ candidate: String, into rows: inout [String]) {
-        if !rows.contains(candidate) {
-            rows.append(candidate)
+    private func buildStructuralObservedFragments(
+        ocrRowResults: [(frame: CGRect, text: String)],
+        incomingRows: [AXUIElement],
+        incomingFrames: [CGRect],
+        anchorAreaText: String,
+        axFallbackText: String,
+        structuralFallbackOCR: String,
+        fallbackFrame: CGRect
+    ) -> [LineObservedFragment] {
+        var fragments: [LineObservedFragment] = []
+        var nextOrder = 0
+
+        for (frame, text) in ocrRowResults {
+            fragments.append(contentsOf: observedFragments(from: text, observedY: Int(frame.origin.y), source: "ax_row_ocr", nextOrder: &nextOrder))
         }
+
+        for (row, frame) in zip(incomingRows, incomingFrames) {
+            let rowText = extractTextFromRows([row])
+            fragments.append(contentsOf: observedFragments(from: rowText, observedY: Int(frame.origin.y), source: "ax_row_text", nextOrder: &nextOrder))
+        }
+
+        if !anchorAreaText.isEmpty {
+            fragments.append(contentsOf: observedFragments(from: anchorAreaText, observedY: Int(fallbackFrame.origin.y), source: "anchor_area", nextOrder: &nextOrder))
+        }
+        if !axFallbackText.isEmpty {
+            fragments.append(contentsOf: observedFragments(from: axFallbackText, observedY: Int(fallbackFrame.origin.y), source: "ax_fallback", nextOrder: &nextOrder))
+        }
+        if !structuralFallbackOCR.isEmpty {
+            fragments.append(contentsOf: observedFragments(from: structuralFallbackOCR, observedY: Int(fallbackFrame.origin.y), source: "structural_fallback", nextOrder: &nextOrder))
+        }
+
+        return LineInboundDedupDecisionEngine.collapseObservedFragments(fragments)
+    }
+
+    private func observedFragments(from text: String, observedY: Int, source: String, nextOrder: inout Int) -> [LineObservedFragment] {
+        let sanitized = LineTextSanitizer.sanitize(text)
+        guard !sanitized.isEmpty else { return [] }
+
+        let parts = sanitized
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var fragments: [LineObservedFragment] = []
+        for part in parts {
+            let normalized = normalizeForDuplicateFingerprint(part)
+            guard normalized.count >= 2 else { continue }
+            fragments.append(
+                LineObservedFragment(
+                    normalizedLine: normalized,
+                    displayText: part,
+                    observedY: observedY,
+                    source: source,
+                    order: nextOrder
+                )
+            )
+            nextOrder += 1
+        }
+        return fragments
+    }
+
+    private func encodeObservedFragments(_ fragments: [LineObservedFragment]) -> String? {
+        guard !fragments.isEmpty,
+              let data = try? JSONEncoder().encode(fragments),
+              let encoded = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return encoded
     }
 
     private func textHeadForLog(_ text: String, maxChars: Int = 48) -> String {
