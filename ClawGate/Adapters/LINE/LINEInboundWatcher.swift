@@ -1631,15 +1631,12 @@ final class LINEInboundWatcher {
         let cropX = messageAreaFrame.origin.x + leftInset
         let cropWidth = messageAreaFrame.width - leftInset
         let cropHeight = cropBottom - messageAreaFrame.origin.y
-        let topInset: CGFloat = 55  // Skip navigation title area (~55px header)
-        let adjustedY = messageAreaFrame.origin.y + topInset
-        let adjustedHeight = cropHeight - topInset
-        guard adjustedHeight >= 120, cropWidth >= 100 else { return messageAreaFrame }
+        guard cropHeight >= 120, cropWidth >= 100 else { return messageAreaFrame }
         return CGRect(
             x: cropX,
-            y: adjustedY,
+            y: messageAreaFrame.origin.y,
             width: cropWidth,
-            height: adjustedHeight
+            height: cropHeight
         )
     }
 
