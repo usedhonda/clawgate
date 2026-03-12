@@ -297,6 +297,9 @@ final class LINEInboundWatcher {
     private var pipelineHistory: [LineInboundDedupSnapshot.PipelineEntry] = []
     private let maxPipelineHistory = 20
 
+    /// AXTextArea origin.x — dynamically updated each poll for crop left boundary
+    private var contentLeftX: CGFloat?
+
     /// Signal diagnostics: written by each collect*Signal, read by doPoll for pipeline JSON
     private var lastStructuralDiag: [String: String] = [:]
     private var lastPixelDiag: [String: String] = [:]
@@ -522,6 +525,11 @@ final class LINEInboundWatcher {
         guard hasChatInput else {
             return
         }
+
+        // Dynamically determine content left boundary from input field position
+        contentLeftX = nodes.first(where: { $0.role == "AXTextArea" })
+            .flatMap { AXQuery.copyFrameAttribute($0.element) }
+            .map(\.origin.x)
 
         guard let chatList = findChatList(in: nodes) else {
             return
@@ -1035,10 +1043,11 @@ final class LINEInboundWatcher {
 
     private func collectAnchorAreaOCR(chatList: AXUIElement, lineWindowID: CGWindowID) -> String {
         guard let chatListFrame = AXQuery.copyFrameAttribute(chatList) else { return "" }
+        let leftInset = contentLeftX.map { max(0, $0 - chatListFrame.origin.x) } ?? Self.avatarLeftInset
         let bottomHalf = CGRect(
-            x: chatListFrame.origin.x,
+            x: chatListFrame.origin.x + leftInset,
             y: chatListFrame.origin.y + chatListFrame.height / 2,
-            width: chatListFrame.width,
+            width: chatListFrame.width - leftInset,
             height: chatListFrame.height / 2
         )
         let captureOptions: CGWindowListOption = lineWindowID != kCGNullWindowID
@@ -1178,10 +1187,12 @@ final class LINEInboundWatcher {
     }
 
     private func inboundCropRect(for frame: CGRect, horizontalRatio: CGFloat) -> CGRect {
+        let leftInset = contentLeftX.map { max(0, $0 - frame.origin.x) } ?? Self.avatarLeftInset
         let ratio = max(0.45, min(horizontalRatio, 1.0))
-        let width = max(40, frame.width * ratio)
+        let effectiveWidth = max(0, frame.width - leftInset)
+        let width = max(40, effectiveWidth * ratio)
         let rect = CGRect(
-            x: frame.origin.x,
+            x: frame.origin.x + leftInset,
             y: frame.origin.y,
             width: width,
             height: frame.height
@@ -1616,8 +1627,9 @@ final class LINEInboundWatcher {
         } else {
             cropBottom = messageAreaFrame.origin.y + messageAreaFrame.height
         }
-        let cropX = messageAreaFrame.origin.x + Self.avatarLeftInset
-        let cropWidth = messageAreaFrame.width - Self.avatarLeftInset
+        let leftInset = contentLeftX.map { max(0, $0 - messageAreaFrame.origin.x) } ?? Self.avatarLeftInset
+        let cropX = messageAreaFrame.origin.x + leftInset
+        let cropWidth = messageAreaFrame.width - leftInset
         let cropHeight = cropBottom - messageAreaFrame.origin.y
         guard cropHeight >= 120, cropWidth >= 100 else { return messageAreaFrame }
         return CGRect(
