@@ -1715,6 +1715,7 @@ final class LINEInboundWatcher {
             "anchor_y": anchorRect.map { String(format: "%.0f", $0.origin.y) } ?? "",
             "anchor_w": anchorRect.map { String(format: "%.0f", $0.width) } ?? "",
             "anchor_h": anchorRect.map { String(format: "%.0f", $0.height) } ?? "",
+            "content_left_x": contentLeftX.map { String(format: "%.0f", $0) } ?? "nil",
             "separator_y": lastSeparatorAnchorY.map(String.init) ?? "",
             "separator_confidence": String(separatorConfidence),
             "separator_method": separatorMethod,
