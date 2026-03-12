@@ -985,7 +985,7 @@ final class LINEInboundWatcher {
         let mergedCandidates = mergeCandidatesPreservingLines(
             [ocrText, anchorAreaText, axFallbackText, structuralFallbackOCR]
         )
-        mergedText = mergedCandidates
+        mergedText = stripWindowTitlePrefix(from: mergedCandidates, windowTitle: conversation)
 
         lastStructuralDiag = ["structural_row_count": "\(currentCount)", "structural_previous_count": "\(previousCount)", "structural_signal_result": "fired"]
 
@@ -1631,13 +1631,51 @@ final class LINEInboundWatcher {
         let cropX = messageAreaFrame.origin.x + leftInset
         let cropWidth = messageAreaFrame.width - leftInset
         let cropHeight = cropBottom - messageAreaFrame.origin.y
-        guard cropHeight >= 120, cropWidth >= 100 else { return messageAreaFrame }
+        let topInset: CGFloat = 55  // Skip navigation title area (~55px header)
+        let adjustedY = messageAreaFrame.origin.y + topInset
+        let adjustedHeight = cropHeight - topInset
+        guard adjustedHeight >= 120, cropWidth >= 100 else { return messageAreaFrame }
         return CGRect(
             x: cropX,
-            y: messageAreaFrame.origin.y,
+            y: adjustedY,
             width: cropWidth,
-            height: cropHeight
+            height: adjustedHeight
         )
+    }
+
+    /// Strip leading display-name noise from OCR text lines.
+    /// OCR sometimes captures the conversation partner's name from nearby UI elements.
+    /// Pattern: "DisplayName" + optional OCR garbage (digits, 1-char katakana) + real text.
+    private func stripWindowTitlePrefix(from text: String, windowTitle: String) -> String {
+        let baseName = windowTitle
+            .replacingOccurrences(of: "\u{2606}", with: "")  // ☆
+            .replacingOccurrences(of: "\u{2605}", with: "")  // ★
+            .trimmingCharacters(in: .whitespaces)
+        guard !baseName.isEmpty, baseName != "LINE" else { return text }
+
+        return text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in
+                let s = String(line)
+                guard s.hasPrefix(baseName) else { return s }
+                var rest = s.dropFirst(baseName.count)
+                // Skip OCR garbage: spaces, digits, single katakana, single ASCII
+                while let first = rest.first, first.isWhitespace || first.isNumber
+                    || (rest.count > 1 && isOCRGarbage(first)) {
+                    rest = rest.dropFirst()
+                }
+                return rest.isEmpty ? s : String(rest)
+            }
+            .joined(separator: "\n")
+    }
+
+    private func isOCRGarbage(_ c: Character) -> Bool {
+        let s = String(c)
+        if s.unicodeScalars.count == 1 {
+            let scalar = s.unicodeScalars.first!
+            if (0x30A0...0x30FF).contains(scalar.value) { return true }  // katakana
+            if c.isASCII && c.isLetter { return true }
+        }
+        return false
     }
 
     private func appendPipelineEntry(_ entry: LineInboundDedupSnapshot.PipelineEntry) {
