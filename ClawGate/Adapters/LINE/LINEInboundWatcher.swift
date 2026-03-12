@@ -515,6 +515,14 @@ final class LINEInboundWatcher {
         guard shouldContinue(pollID: pollID) else { return }
         let windowTitle = AXQuery.copyStringAttribute(window, attribute: kAXTitleAttribute as String) ?? ""
         let nodes = AXQuery.descendants(of: window, maxDepth: 4, maxNodes: 220)
+
+        // Chat-view guard: AXTextArea (message input field) exists only in chat view.
+        // Friends list, search results, settings screens have no AXTextArea.
+        let hasChatInput = nodes.contains { $0.role == "AXTextArea" }
+        guard hasChatInput else {
+            return
+        }
+
         guard let chatList = findChatList(in: nodes) else {
             return
         }

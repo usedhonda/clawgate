@@ -11,6 +11,7 @@ function isUiChromeLine(line) {
   if (/^ここから未読メッセージ$/.test(s)) return true;
   if (/^LINE$/.test(s)) return true;
   if (/友だち検索|おすすめ公式アカウント|トークを始めよう|検索結果がありません/u.test(s)) return true;
+  if (/^(友だち|グループ|公式アカウント|知り合いかも)\s*\d*$/u.test(s)) return true;
   if (_filterDisplayName && s.startsWith(_filterDisplayName) && (s.length === _filterDisplayName.length || /\W/.test(s[_filterDisplayName.length]))) return true;
   if (/^(午前|午後)\s*\d{1,2}:\d{2}$/.test(s)) return true;
   if (/^\d{1,2}:\d{2}$/.test(s)) return true;
@@ -107,7 +108,9 @@ function normalizeInboundText(rawText, source) {
     }
   }
 
-  return lines.join("\n").trim();
+  const result = lines.join("\n").trim();
+  if (result && looksLikeShortOcrGarbage(result)) return "";
+  return result;
 }
 
 describe("LINE inbound noise filtering", () => {
@@ -127,6 +130,26 @@ describe("LINE inbound noise filtering", () => {
     assert.equal(
       normalizeInboundText("友だち検索\nおすすめ公式アカウント\nトークを始めよう！", "hybrid_fusion"),
       ""
+    );
+  });
+
+  it("drops friends-list tab labels", () => {
+    assert.equal(normalizeInboundText("友だち", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("友だち 1", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("グループ", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("公式アカウント", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("知り合いかも", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("知り合いかも 3", "hybrid_fusion"), "");
+  });
+
+  it("drops search-box leftover fragments via final garbage check", () => {
+    assert.equal(normalizeInboundText("Yuzuru Honda 4 G", "hybrid_fusion"), "");
+  });
+
+  it("keeps real messages intact", () => {
+    assert.equal(
+      normalizeInboundText("こんにちは！お元気ですか？", "hybrid_fusion"),
+      "こんにちは！お元気ですか？"
     );
   });
 });
