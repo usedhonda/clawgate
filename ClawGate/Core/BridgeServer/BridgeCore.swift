@@ -12,6 +12,11 @@ final class BridgeCore {
     /// Set by main.swift to enable /v1/debug/line-dedup endpoint
     var lineInboundWatcher: LINEInboundWatcher?
     var lineHealthCaretaker: LineHealthCaretaker?
+    var gatewayHealthMonitor: GatewayHealthMonitor?
+
+    /// Tracks when the Gateway last polled /v1/poll (for staleness detection)
+    private(set) var lastGatewayPollAt: Date = .distantPast
+    private let pollTimestampLock = NSLock()
 
     private let registry: AdapterRegistry
     private let logger: AppLogger
@@ -940,6 +945,10 @@ final class BridgeCore {
     }
 
     func poll(since: Int64?) -> HTTPResult {
+        pollTimestampLock.lock()
+        lastGatewayPollAt = Date()
+        pollTimestampLock.unlock()
+
         let data = eventBus.poll(since: since)
 
         let deliveredTmux = data.events.filter { event in
@@ -1079,6 +1088,34 @@ final class BridgeCore {
                 message: "Federation client enabled",
                 details: "Connecting to \(cfg.federationURL)"
             ))
+        }
+
+        // Check 10: Gateway poll freshness (server role only — Gateway polls this host)
+        if cfg.nodeRole != .client {
+            let age = Date().timeIntervalSince(lastGatewayPollAt)
+            let staleThreshold: TimeInterval = 120
+            if lastGatewayPollAt == .distantPast {
+                checks.append(DoctorCheck(
+                    name: "gateway_poll_freshness",
+                    status: "warning",
+                    message: "Gateway has never polled",
+                    details: "No /v1/poll requests received"
+                ))
+            } else if age > staleThreshold {
+                checks.append(DoctorCheck(
+                    name: "gateway_poll_freshness",
+                    status: "error",
+                    message: "Gateway poll is stale",
+                    details: "age=\(Int(age))s threshold=\(Int(staleThreshold))s"
+                ))
+            } else {
+                checks.append(DoctorCheck(
+                    name: "gateway_poll_freshness",
+                    status: "ok",
+                    message: "Gateway poll is fresh",
+                    details: "age=\(Int(age))s"
+                ))
+            }
         }
 
         // Calculate summary

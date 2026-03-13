@@ -2691,15 +2691,20 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
               target: tprojHeader.sender,
               text: replyText,
             }),
-            signal: AbortSignal.timeout(15000),
+            signal: AbortSignal.timeout(8000),
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text().catch(() => "")}`);
           log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent via return_url=${returnUrl} to ${tprojHeader.sender}`);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply via return_url failed: ${err?.message || err}`);
-          // Fallback: route to originating channel with redirect prefix
-          const fallbackText = `[redirect: ->${tprojHeader.sender}]\n${text}`;
-          try { await sendTmuxMessage(conversation, fallbackText, traceId, { channel: replyChannel }); } catch {}
+          // Fallback: deliver via Telegram explicitly (don't rely on indirect channel resolution)
+          const fallbackText = `[session delivery failed -> Telegram]\nTo: ${tprojHeader.sender}\n\n${text}`;
+          try {
+            await sendTmuxMessage(conversation, fallbackText, traceId, { channel: "telegram" });
+            log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply fallback to Telegram succeeded`);
+          } catch (fbErr) {
+            log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply Telegram fallback also failed: ${fbErr?.message || fbErr}`);
+          }
         }
       } else {
         // Local execution fallback (single-host setup)
@@ -2714,9 +2719,14 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent to ${tprojHeader.sender} via ${tprojHeader.workspace}`);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply failed: ${err?.message || err}`);
-          // Fallback: route to originating channel with redirect prefix
-          const fallbackText2 = `[redirect: ->${tprojHeader.sender}]\n${text}`;
-          try { await sendTmuxMessage(conversation, fallbackText2, traceId, { channel: replyChannel }); } catch {}
+          // Fallback: deliver via Telegram explicitly
+          const fallbackText2 = `[session delivery failed -> Telegram]\nTo: ${tprojHeader.sender}\n\n${text}`;
+          try {
+            await sendTmuxMessage(conversation, fallbackText2, traceId, { channel: "telegram" });
+            log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply fallback to Telegram succeeded (local exec path)`);
+          } catch (fbErr) {
+            log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply Telegram fallback also failed (local exec path): ${fbErr?.message || fbErr}`);
+          }
         }
       }
       return;
@@ -4686,6 +4696,29 @@ export async function startAccount(ctx) {
     });
   } catch (err) {
     log?.warn?.(`clawgate: [${accountId}] task queue flush failed (shutdown): ${err}`);
+  }
+
+  // === Shutdown drain: forward unprocessed inbound events to Telegram ===
+  try {
+    const drainPoll = await clawgatePoll(apiUrl, cursor);
+    if (drainPoll.ok && drainPoll.events?.length > 0) {
+      for (const event of drainPoll.events) {
+        if (event.type !== "inbound_message") continue;
+        const text = event.payload?.text || "";
+        if (!text.trim()) continue;
+        const source = event.payload?.source || "unknown";
+        const adapter = event.adapter || "unknown";
+        const drainMsg = `[Gateway session ending - unprocessed ${adapter}/${source} message]\n${text}`;
+        try {
+          await sendViaTelegram(drainMsg, makeTraceId("shutdown-drain", event));
+          log?.warn?.(`clawgate: [${accountId}] shutdown drain: forwarded to Telegram (adapter=${adapter} source=${source})`);
+        } catch (tgErr) {
+          log?.error?.(`clawgate: [${accountId}] shutdown drain Telegram send failed: ${tgErr}`);
+        }
+      }
+    }
+  } catch (err) {
+    log?.warn?.(`clawgate: [${accountId}] shutdown drain poll failed: ${err}`);
   }
 
   projectViewReaders.delete(accountId);

@@ -74,6 +74,10 @@ final class AppRuntime {
         configStore: configStore,
         logger: logger
     )
+    private lazy var gatewayHealthMonitor = GatewayHealthMonitor(
+        core: core,
+        logger: logger
+    )
     private lazy var notificationBannerWatcher = NotificationBannerWatcher(
         eventBus: eventBus,
         logger: logger,
@@ -165,6 +169,12 @@ final class AppRuntime {
         } else if config.nodeRole == .client && config.federationEnabled {
             federationClient.start()
         }
+
+        // Gateway health monitor: auto-restart Gateway when poll goes stale (server role only)
+        if config.nodeRole == .server {
+            core.gatewayHealthMonitor = gatewayHealthMonitor
+            gatewayHealthMonitor.start()
+        }
     }
 
     private func requestPermissionPromptsIfNeeded() {
@@ -182,6 +192,7 @@ final class AppRuntime {
             lineHealthCaretaker.stop()
             inboundWatcher.stop()
         }
+        gatewayHealthMonitor.stop()
         tmuxInboundWatcher.stop()
         federationServerInstance?.stop()
         federationClient.stop()
