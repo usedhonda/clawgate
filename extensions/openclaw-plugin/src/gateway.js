@@ -1856,12 +1856,26 @@ function detectInteractionPendingFromCompletion({ payload, text, project }) {
   const parsedHasOptions = (normalizedParsed?.options?.length || 0) >= 2;
   const pendingHasOptions = (normalizedPending?.options?.length || 0) >= 2;
 
+  // Stale pending guard: pending questions older than 10 minutes are not evidence on their own.
+  // They can still supplement current evidence (hintByReason/parsedHasOptions) for context.
+  const PENDING_STALE_MS = 10 * 60 * 1000;
+  const pendingIsStale = pending?.setAt && (Date.now() - pending.setAt) > PENDING_STALE_MS;
+  const pendingIsCurrentEvidence = pendingHasOptions && !pendingIsStale;
+
   if (!ENABLE_INTERACTION_PENDING_STRICT_V2) {
     if (!parsed && !hintByReason && !pending && !hasShortcutFooter) return null;
   } else {
-    // Strict mode: shortcuts footer alone is not enough.
-    const hasStructuredEvidence = hintByReason || parsedHasOptions || pendingHasOptions;
+    // Strict mode: current evidence from this completion required.
+    // Stale pendingQuestions alone cannot keep the suppress loop alive.
+    const hasStructuredEvidence = hintByReason || parsedHasOptions || pendingIsCurrentEvidence;
     if (!hasStructuredEvidence) return null;
+  }
+
+  // Clear stale pending if no current corroborating evidence
+  if (pendingIsStale && !hintByReason && !parsedHasOptions) {
+    const ageMs = Date.now() - pending.setAt;
+    pendingQuestions.delete(project);
+    return { _staleCleared: true, project, ageMs };
   }
 
   let reason = "pending_question";
@@ -3334,9 +3348,14 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   sessionStatuses.set(project, "waiting_input");
   if (mode !== "autonomous") setAutonomousLoopActive(project, false);
 
-  const interactionPending = mode === "autonomous"
+  const interactionPendingRaw = mode === "autonomous"
     ? detectInteractionPendingFromCompletion({ payload, text, project })
     : null;
+  // Stale pending was cleared — log and treat as no interaction pending
+  if (interactionPendingRaw?._staleCleared) {
+    log?.info?.(`clawgate: [${accountId}] stale_pending_cleared project=${project} age_ms=${interactionPendingRaw.ageMs}`);
+  }
+  const interactionPending = interactionPendingRaw?._staleCleared ? null : interactionPendingRaw;
   if (interactionPending) {
     pendingQuestions.set(project, {
       questionText: interactionPending.questionText,
