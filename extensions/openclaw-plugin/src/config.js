@@ -45,7 +45,9 @@ export function listAccountIds(cfg) {
  * @returns {object} resolved account
  */
 export function resolveAccount(cfg, accountId) {
-  const section = cfg?.channels?.clawgate?.[accountId] ?? {};
+  // Fallback to default account when accountId is not provided
+  const effectiveId = accountId || defaultAccountId(cfg) || "default";
+  const section = cfg?.channels?.clawgate?.[effectiveId] ?? {};
   // Resolve telegramChatId: explicit config > credentials file fallback
   let telegramChatId = section.telegramChatId || "";
   if (!telegramChatId) {
