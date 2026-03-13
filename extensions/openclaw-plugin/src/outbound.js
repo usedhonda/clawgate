@@ -4,18 +4,6 @@
 
 import { resolveAccount } from "./config.js";
 import { clawgateSend, setClawgateAuthToken } from "./client.js";
-import { getActiveProject } from "./shared-state.js";
-
-function ensurePrefix(text, project, sessionType) {
-  if (!project) return text;
-  // Strip both legacy format ([CC/Codex ...]) and canonical pane label ([project.cc/cdx])
-  const stripped = text
-    .replace(/^\[(CC|Codex) [^\]]*\]\n?/, "")
-    .replace(/^\[[^\]\n]+\.(?:cc|cdx)\]\n?/i, "")
-    .trim();
-  const suffix = sessionType === "codex" ? "cdx" : "cc";
-  return `[${project}.${suffix}]\n${stripped}`;
-}
 
 export const outbound = {
   deliveryMode: "direct",
@@ -59,9 +47,7 @@ export const outbound = {
     const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
       ? (account.defaultConversation || to)
       : to;
-    const { project, sessionType } = getActiveProject(conversationHint);
-    const finalText = project ? ensurePrefix(text, project, sessionType) : text;
-    const result = await clawgateSend(account.apiUrl, conversationHint, finalText);
+    const result = await clawgateSend(account.apiUrl, conversationHint, text);
 
     if (!result.ok) {
       throw new Error(`clawgate send failed: ${result.error?.message ?? JSON.stringify(result)}`);

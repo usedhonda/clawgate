@@ -2667,12 +2667,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     }
 
     const sendReply = async (replyMsg) => {
-      if (tprojHeader) {
-        const prefixed = `[${tprojHeader.sender}] ${replyMsg}`;
-        try { await sendTmuxMessage(conversation, prefixed, traceId, { channel: replyChannel }); } catch {}
-      } else {
-        try { await sendTmuxMessage(conversation, replyMsg, traceId, { channel: replyChannel }); } catch {}
-      }
+      const shouldPrefix = tprojHeader && replyChannel !== "line";
+      const out = shouldPrefix ? `[${tprojHeader.sender}] ${replyMsg}` : replyMsg;
+      try { await sendTmuxMessage(conversation, out, traceId, { channel: replyChannel }); } catch {}
     };
 
     // tproj-msg reverse channel: reply via tmux session instead of LINE
@@ -2940,7 +2937,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
           block: bi + 1,
           blocks: collectedLineBlocks.length,
         });
-        const outBlock = tprojHeader ? `[${tprojHeader.sender}] ${blockText}` : blockText;
+        const outBlock = (tprojHeader && replyChannel !== "line") ? `[${tprojHeader.sender}] ${blockText}` : blockText;
         const outAction = replyChannel === "telegram" ? "telegram_send" : "line_send";
         try {
           await sendTmuxMessage(conversation, outBlock, traceId, { channel: replyChannel });
