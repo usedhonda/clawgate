@@ -1099,6 +1099,36 @@ const recentCommonInbounds = [];
 /** @type {{ keyHash: string, compact: string, time: number }[]} */
 const recentShortLineInbounds = [];
 
+// ── LINE re-read guard ──────────────────────────────────────────
+// Catches OCR re-reads that prepend AX artifacts (badge "3", reaction "♥")
+// to already-dispatched text. Separate from generic dedup — LINE only.
+const LINE_REREAD_WINDOW_MS = 120_000;
+/** @type {Map<string, number>} fingerprint -> timestamp */
+const recentLineDispatches = new Map();
+
+function stripLineArtifactPrefix(text) {
+  // Strip a SINGLE leading digit/symbol/emoji immediately followed by a letter.
+  // These appear when OCR re-reads a message with LINE UI decorations.
+  return `${text || ""}`.replace(/^[\d\p{So}\p{Sk}\p{Emoji_Presentation}](?=[\p{L}])/u, "");
+}
+
+function isLineRereadDuplicate(text) {
+  const stripped = stripLineArtifactPrefix(text);
+  if (stripped === text) return false;
+  const fp = eventFingerprint(stripped);
+  const last = recentLineDispatches.get(fp);
+  return !!(last && Date.now() - last < LINE_REREAD_WINDOW_MS);
+}
+
+function recordLineDispatch(text) {
+  const fp = eventFingerprint(stripLineArtifactPrefix(text));
+  recentLineDispatches.set(fp, Date.now());
+  const cutoff = Date.now() - LINE_REREAD_WINDOW_MS;
+  for (const [k, t] of recentLineDispatches) {
+    if (t < cutoff) recentLineDispatches.delete(k);
+  }
+}
+
 function eventFingerprint(text) {
   return text.replace(/\s+/g, " ").trim().slice(0, 60);
 }
@@ -4288,6 +4318,13 @@ export async function startAccount(ctx) {
       ...(latestEntry.latencyFields || {}),
     });
 
+    // LINE re-read guard (burst-coalesced path)
+    if ((baseEvent.adapter || "line") === "line" && isLineRereadDuplicate(mergedText)) {
+      log?.info?.(`clawgate: [${accountId}] line_reread_suppressed (coalesced): "${mergedText.slice(0, 60)}"`);
+      return;
+    }
+    if ((baseEvent.adapter || "line") === "line") recordLineDispatch(mergedText);
+
     try {
       await handleInboundMessage({
         event: baseEvent,
@@ -4616,11 +4653,28 @@ export async function startAccount(ctx) {
             continue;
           }
 
+          // LINE re-read guard: suppress AX artifact re-reads (badge "3", reaction "♥")
+          if ((event.adapter || "unknown") === "line" && isLineRereadDuplicate(eventText)) {
+            log?.info?.(`clawgate: [${accountId}] line_reread_suppressed: "${eventText.slice(0, 60)}"`);
+            traceLog(log, "info", {
+              trace_id: traceId,
+              stage: "ingress_dropped",
+              action: "line_reread_guard",
+              status: "suppressed",
+              reason: "line_artifact_reread",
+              dedup_key: commonDedupKey.keyHash || "",
+              ingress_origin: ingressOrigin,
+              ...ingressLatencyFields,
+            });
+            continue;
+          }
+
           // Record before dispatch so subsequent duplicates are caught
           recordInbound(eventText);
           recordStableInbound(eventText, conversation);
           recordShortLineIngress(shortLineDedupKey);
           recordCommonIngress(commonDedupKey);
+          if ((event.adapter || "unknown") === "line") recordLineDispatch(eventText);
           if (event.payload) {
             event.payload.text = eventText;
           }
