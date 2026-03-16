@@ -31,6 +31,9 @@ struct GhosttyTheme {
     let fontSize: CGFloat
     let backgroundOpacity: Double
 
+    static let minimumAppBackgroundOpacity: Double = 0.9
+
+    var appBackgroundOpacity: Double { max(backgroundOpacity, Self.minimumAppBackgroundOpacity) }
     var backgroundLighter: Color { background.brighten(0.10) }
     var cardBackground: Color { background.brighten(0.04) }
     var cardBorder: Color { foreground.opacity(0.06) }

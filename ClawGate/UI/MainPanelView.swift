@@ -75,11 +75,11 @@ struct MainPanelView: View {
             tabContent
 
             // Quit
-            PanelActionButton(title: "Quit", tone: .danger, dense: true, action: onQuit)
+            ActionButton(title: "Quit", tone: .danger, dense: true, action: onQuit)
         }
         .padding(PanelTheme.padding)
         .frame(minWidth: 200, maxWidth: 700, minHeight: 400, maxHeight: 1400)
-        .background(PanelTheme.background)
+        .background(PanelTheme.background.opacity(PanelTheme.appBackgroundOpacity))
         .preferredColorScheme(.dark)
     }
 
@@ -156,7 +156,7 @@ struct MainPanelView: View {
 
     private var opsLogsSection: some View {
         VStack(alignment: .leading, spacing: PanelTheme.spacing) {
-            PanelSectionHeader(title: "Ops Logs (\(logLimit))", accentColor: PanelTheme.accentYellow)
+            PanelSectionHeader(title: "Ops Logs (\(logLimit))")
             if panelModel.logs.isEmpty {
                 Text("No recent logs")
                     .font(PanelTheme.smallFont)
@@ -195,7 +195,7 @@ struct MainPanelView: View {
         var result = AttributedString()
         for (index, row) in panelModel.logs.enumerated() {
             var line = AttributedString(row.text)
-            line.font = PanelTheme.smallFont
+            line.font = PanelTheme.monoFont(size: 10)
             line.foregroundColor = logColor(from: row.color)
             result.append(line)
             if index < panelModel.logs.count - 1 {
@@ -209,7 +209,7 @@ struct MainPanelView: View {
 
     private var vibetermSection: some View {
         VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
-            PanelSectionHeader(title: "VibeTerm", accentColor: PanelTheme.accentGreen)
+            PanelSectionHeader(title: "VibeTerm")
 
             Text("Connect VibeTerm to OpenClaw on iPhone.")
                 .font(PanelTheme.bodyFont)

@@ -71,7 +71,7 @@ struct QRCodeView: View {
                 ConnectionInfoRow(label: "Port", value: String(openClawPort))
             }
 
-            PanelActionButton(title: copied ? "Copied!" : "Copy URL", tone: .primary) {
+            ActionButton(title: copied ? "Copied!" : "Copy URL", tone: .primary) {
                 copyURL()
             }
 
@@ -292,6 +292,6 @@ private struct ConnectionInfoRow: View {
                 .truncationMode(.middle)
             Spacer()
         }
-        .font(PanelTheme.bodyFont)
+        .font(PanelTheme.monoFont(size: 12))
     }
 }

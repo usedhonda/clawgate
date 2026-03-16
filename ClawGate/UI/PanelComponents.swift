@@ -4,16 +4,15 @@ import SwiftUI
 
 struct PanelSectionHeader: View {
     let title: String
-    var accentColor: Color = PanelTheme.accentCyan
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 4) {
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(PanelTheme.textPrimary.opacity(0.15))
+                .frame(width: 12, height: 1)
             Text(title.uppercased())
                 .font(PanelTheme.headerFont)
                 .foregroundStyle(PanelTheme.textPrimary)
-            Rectangle()
-                .fill(accentColor)
-                .frame(width: 12, height: 2)
         }
     }
 }
@@ -21,24 +20,37 @@ struct PanelSectionHeader: View {
 // MARK: - PanelCard
 
 struct PanelCard<Content: View>: View {
+    let compact: Bool
+    let chrome: Bool
     let content: Content
 
-    init(@ViewBuilder content: () -> Content) {
+    init(compact: Bool = false, chrome: Bool = true, @ViewBuilder content: () -> Content) {
+        self.compact = compact
+        self.chrome = chrome
         self.content = content()
     }
 
+    private var cardPadding: CGFloat { compact ? 2 : 6 }
+    private var cardSpacing: CGFloat { compact ? 4 : 8 }
+    private var cardRadius: CGFloat { compact ? 2 : 3 }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: PanelTheme.spacing) {
+        VStack(alignment: .leading, spacing: cardSpacing) {
             content
         }
-        .padding(PanelTheme.cardPadding)
+        .padding(cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
-                .fill(PanelTheme.backgroundCard)
+            RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+                .fill(chrome ? PanelTheme.backgroundCard : Color.clear)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
-                .stroke(PanelTheme.cardBorder, lineWidth: 1)
+            chrome
+                ? AnyView(
+                    RoundedRectangle(cornerRadius: cardRadius, style: .continuous)
+                        .stroke(PanelTheme.cardBorder, lineWidth: 1)
+                )
+                : AnyView(EmptyView())
         )
     }
 }
@@ -58,7 +70,7 @@ struct PanelPill: View {
 
     private var fillColor: Color {
         if lit { return color.opacity(0.85) }
-        return PanelTheme.controlSurface
+        return PanelTheme.backgroundCard.brighten(0.04)
     }
 
     private var tintColor: Color {
@@ -78,83 +90,107 @@ struct PanelPill: View {
             .padding(.horizontal, lit ? 6 : 5)
             .padding(.vertical, lit ? 2 : 1)
             .background(
-                RoundedRectangle(cornerRadius: PanelTheme.pillRadius)
+                Capsule()
                     .fill(fillColor)
                     .overlay(
-                        RoundedRectangle(cornerRadius: PanelTheme.pillRadius)
+                        Capsule()
                             .fill(tintColor)
                     )
             )
             .overlay(
-                RoundedRectangle(cornerRadius: PanelTheme.pillRadius)
+                Capsule()
                     .stroke(strokeColor, lineWidth: lit ? 1 : 0.75)
             )
             .shadow(color: lit ? color.opacity(0.65) : .clear, radius: 4, x: 0, y: 0)
     }
 }
 
-// MARK: - PanelActionButton
+// MARK: - ActionButton
 
-enum PanelButtonTone {
+enum ActionButtonTone {
     case neutral
     case primary
     case danger
 }
 
-struct PanelActionButton: View {
-    let title: String
-    var tone: PanelButtonTone = .neutral
-    var dense: Bool = false
-    let action: () -> Void
+struct ActionButtonStyle: ButtonStyle {
+    let tone: ActionButtonTone
+    let dense: Bool
+    let expand: Bool
+    let isEnabled: Bool
 
     @State private var isHovered = false
 
     private var fillColor: Color {
         switch tone {
-        case .neutral: return PanelTheme.textPrimary.opacity(isHovered ? 0.12 : 0.06)
-        case .primary: return PanelTheme.accentCyan.opacity(isHovered ? 0.22 : 0.14)
-        case .danger:  return PanelTheme.accentRed.opacity(isHovered ? 0.22 : 0.14)
+        case .neutral:
+            if isHovered { return PanelTheme.selectionBg.opacity(0.6) }
+            return PanelTheme.textPrimary.opacity(0.08)
+        case .primary:
+            if isHovered { return PanelTheme.accentBlue.opacity(0.62) }
+            return PanelTheme.accentBlue.opacity(0.46)
+        case .danger:
+            if isHovered { return PanelTheme.accentRed.opacity(0.20) }
+            return PanelTheme.accentRed.opacity(0.12)
+        }
+    }
+
+    private var pressedFillColor: Color {
+        switch tone {
+        case .neutral: return PanelTheme.selectionBg.opacity(0.4)
+        case .primary: return PanelTheme.accentBlue.opacity(0.75)
+        case .danger:  return PanelTheme.accentRed.opacity(0.26)
         }
     }
 
     private var textColor: Color {
         switch tone {
         case .neutral: return PanelTheme.textPrimary
-        case .primary: return PanelTheme.accentCyan
+        case .primary: return PanelTheme.accentBlue
         case .danger:  return PanelTheme.accentRed
         }
     }
 
-    private var borderColor: Color {
-        switch tone {
-        case .neutral: return PanelTheme.textPrimary.opacity(isHovered ? 0.18 : 0.10)
-        case .primary: return PanelTheme.accentCyan.opacity(isHovered ? 0.30 : 0.20)
-        case .danger:  return PanelTheme.accentRed.opacity(isHovered ? 0.30 : 0.20)
-        }
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(PanelTheme.font(size: dense ? 11 : 13, weight: .semibold))
+            .foregroundStyle(textColor)
+            .padding(.horizontal, dense ? 6 : 10)
+            .padding(.vertical, dense ? 3 : 5)
+            .frame(maxWidth: expand ? .infinity : nil)
+            .frame(minHeight: dense ? 18 : 32)
+            .background(
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
+                    .fill(configuration.isPressed ? pressedFillColor : fillColor)
+            )
+            .scaleEffect(configuration.isPressed ? 0.98 : (isHovered ? 1.02 : 1.0))
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.14), value: isHovered)
+            .opacity(isEnabled ? 1.0 : 0.45)
+            .onHover { hovering in isHovered = hovering }
     }
+}
+
+struct ActionButton: View {
+    let title: String
+    var tone: ActionButtonTone = .neutral
+    var dense: Bool = false
+    var expand: Bool = false
+    var isEnabled: Bool = true
+    let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(PanelTheme.font(size: dense ? 10 : 11, weight: .semibold))
-                .foregroundStyle(textColor)
-                .padding(.horizontal, dense ? 6 : 10)
-                .padding(.vertical, dense ? 3 : 5)
-                .background(
-                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
-                        .fill(fillColor)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
-                        .stroke(borderColor, lineWidth: 1)
-                )
         }
-        .buttonStyle(.plain)
-        .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.1)) { isHovered = hovering }
-        }
+        .buttonStyle(ActionButtonStyle(tone: tone, dense: dense, expand: expand, isEnabled: isEnabled))
+        .disabled(!isEnabled)
     }
 }
+
+// Keep backward compat alias
+typealias PanelActionButton = ActionButton
+typealias PanelButtonTone = ActionButtonTone
 
 // MARK: - PanelTabButton
 
@@ -173,13 +209,13 @@ struct PanelTabButton: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(
-                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
                         .fill(isSelected
                               ? PanelTheme.accentCyan.opacity(0.12)
-                              : (isHovered ? PanelTheme.controlSurfaceHover : PanelTheme.controlSurface))
+                              : PanelTheme.textPrimary.opacity(isHovered ? 0.10 : 0.06))
                 )
                 .overlay(
-                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
                         .stroke(isSelected
                                 ? PanelTheme.accentCyan.opacity(0.25)
                                 : (isHovered ? PanelTheme.controlBorderStrong : PanelTheme.controlBorder),
@@ -188,7 +224,7 @@ struct PanelTabButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.1)) { isHovered = hovering }
+            withAnimation(.easeOut(duration: 0.14)) { isHovered = hovering }
         }
     }
 }
@@ -203,11 +239,11 @@ struct PanelInputModifier: ViewModifier {
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .background(
-                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
                     .fill(PanelTheme.background.brighten(0.06))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
                     .stroke(PanelTheme.textPrimary.opacity(0.10), lineWidth: 1)
             )
     }

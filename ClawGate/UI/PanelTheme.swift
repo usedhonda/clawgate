@@ -11,10 +11,8 @@ enum PanelTheme {
     static let cardBorder = theme.cardBorder
 
     static let textPrimary = theme.textPrimary
-    static let textSecondary = theme.foreground.brighten(0.12).opacity(0.92)
-    static let textTertiary = theme.foreground.brighten(0.08).opacity(0.72)
-    static let controlSurface = backgroundCard.brighten(0.04)
-    static let controlSurfaceHover = backgroundCard.brighten(0.07)
+    static let textSecondary = theme.foreground.opacity(0.7)
+    static let textTertiary = theme.foreground.opacity(0.35)
     static let controlBorder = theme.foreground.opacity(0.16)
     static let controlBorderStrong = theme.foreground.opacity(0.24)
 
@@ -23,6 +21,11 @@ enum PanelTheme {
     static let accentYellow = theme.accentYellow
     static let accentRed = theme.accentRed
     static let accentBlue = theme.accentBlue
+    static let selectionBg = theme.selectionBg
+
+    // MARK: - Background Opacity
+
+    static let appBackgroundOpacity = theme.appBackgroundOpacity
 
     // MARK: - Mode Colors
 
@@ -80,23 +83,26 @@ enum PanelTheme {
 
     // MARK: - Fonts
 
-    static func font(size: CGFloat = 11, weight: Font.Weight = .regular) -> Font {
+    static func font(size: CGFloat = 12, weight: Font.Weight = .regular, monospaced: Bool = false) -> Font {
+        theme.font(size: size, weight: weight, monospaced: monospaced)
+    }
+
+    static func monoFont(size: CGFloat = 12, weight: Font.Weight = .regular) -> Font {
         theme.font(size: size, weight: weight, monospaced: true)
     }
 
-    static let bodyFont = font(size: 11, weight: .regular)
-    static let titleFont = font(size: 12, weight: .semibold)
+    static let bodyFont = font(size: 12, weight: .regular)
+    static let titleFont = font(size: 13, weight: .semibold)
     static let smallFont = font(size: 10, weight: .regular)
-    static let headerFont = font(size: 14, weight: .semibold)
+    static let headerFont = font(size: 16, weight: .semibold)
 
     // MARK: - Layout Constants
 
     static let spacing: CGFloat = 4
     static let sectionSpacing: CGFloat = 8
     static let padding: CGFloat = 10
-    static let cardPadding: CGFloat = 8
+    static let cardPadding: CGFloat = 6
     static let cornerRadius: CGFloat = 3
-    static let pillRadius: CGFloat = 3
 
     // MARK: - NSColor for panel background
 

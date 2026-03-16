@@ -150,7 +150,7 @@ struct InlineSettingsView: View {
             .pickerStyle(.segmented)
 
             HStack(spacing: 8) {
-                PanelActionButton(title: "Apply Recommended", tone: .primary) {
+                ActionButton(title: "Apply Recommended", tone: .primary) {
                     applyRecommended(force: true)
                 }
                 Text("Tailscale LAN defaults")
@@ -290,7 +290,7 @@ struct InlineSettingsView: View {
                     }
 
                     HStack(spacing: 8) {
-                        PanelActionButton(title: "Refresh Hosts", tone: .neutral) {
+                        ActionButton(title: "Refresh Hosts", tone: .neutral) {
                             loadTailscalePeers()
                         }
                         Text("Detected: \(tailscalePeers.count)")
@@ -323,7 +323,7 @@ struct InlineSettingsView: View {
                 Text("Utilities")
                     .font(PanelTheme.titleFont)
                     .foregroundStyle(PanelTheme.textPrimary)
-                PanelActionButton(title: "Show QR Code for [VibeTerm]", tone: .neutral) {
+                ActionButton(title: "Show QR Code for [VibeTerm]", tone: .neutral) {
                     onOpenQRCode()
                 }
             }
