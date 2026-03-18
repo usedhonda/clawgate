@@ -2723,6 +2723,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
       if (returnUrl) {
         // Federation-aware: HTTP forward to origin host's /v1/tproj-msg-deliver
+        let sessionOk = false;
         try {
           const resp = await fetch(`${returnUrl}/v1/tproj-msg-deliver`, {
             method: "POST",
@@ -2732,23 +2733,28 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
               target: tprojHeader.sender,
               text: replyText,
             }),
-            signal: AbortSignal.timeout(8000),
+            signal: AbortSignal.timeout(12000),
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status} ${await resp.text().catch(() => "")}`);
+          sessionOk = true;
           log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent via return_url=${returnUrl} to ${tprojHeader.sender}`);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply via return_url failed: ${err?.message || err}`);
-          // Fallback: deliver via Telegram explicitly (don't rely on indirect channel resolution)
-          const fallbackText = `[session delivery failed -> Telegram]\nTo: ${tprojHeader.sender}\n\n${text}`;
-          try {
-            await sendTmuxMessage(conversation, fallbackText, traceId, { channel: "telegram" });
-            log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply fallback to Telegram succeeded`);
-          } catch (fbErr) {
-            log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply Telegram fallback also failed: ${fbErr?.message || fbErr}`);
-          }
+        }
+
+        // Always CC to Telegram (session success or failure)
+        const prefix = sessionOk
+          ? `[session CC -> ${tprojHeader.workspace}]`
+          : `[session delivery failed -> Telegram] (session: ${tprojHeader.workspace})`;
+        const ccText = `${prefix}\nTo: ${tprojHeader.sender}\n\n${text}`;
+        try {
+          await sendTmuxMessage(conversation, ccText, traceId, { channel: "telegram" });
+        } catch (fbErr) {
+          log?.error?.(`clawgate: [${accountId}] Telegram CC failed: ${fbErr?.message || fbErr}`);
         }
       } else {
         // Local execution fallback (single-host setup)
+        let sessionOk = false;
         try {
           await execFilePromise(TPROJ_MSG_PATH, [
             "--allow-relay", "gate-reverse-channel",
@@ -2757,17 +2763,21 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
             tprojHeader.sender,
             replyText,
           ]);
+          sessionOk = true;
           log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply sent to ${tprojHeader.sender} via ${tprojHeader.workspace}`);
         } catch (err) {
           log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply failed: ${err?.message || err}`);
-          // Fallback: deliver via Telegram explicitly
-          const fallbackText2 = `[session delivery failed -> Telegram]\nTo: ${tprojHeader.sender}\n\n${text}`;
-          try {
-            await sendTmuxMessage(conversation, fallbackText2, traceId, { channel: "telegram" });
-            log?.info?.(`clawgate: [${accountId}] tproj-msg reverse reply fallback to Telegram succeeded (local exec path)`);
-          } catch (fbErr) {
-            log?.error?.(`clawgate: [${accountId}] tproj-msg reverse reply Telegram fallback also failed (local exec path): ${fbErr?.message || fbErr}`);
-          }
+        }
+
+        // Always CC to Telegram (session success or failure)
+        const prefix2 = sessionOk
+          ? `[session CC -> ${tprojHeader.workspace}]`
+          : `[session delivery failed -> Telegram] (session: ${tprojHeader.workspace})`;
+        const ccText2 = `${prefix2}\nTo: ${tprojHeader.sender}\n\n${text}`;
+        try {
+          await sendTmuxMessage(conversation, ccText2, traceId, { channel: "telegram" });
+        } catch (fbErr) {
+          log?.error?.(`clawgate: [${accountId}] Telegram CC failed (local exec path): ${fbErr?.message || fbErr}`);
         }
       }
       return;
