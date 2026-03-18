@@ -19,8 +19,9 @@ final class MainPanelModel: ObservableObject {
 
 struct MainPanelView: View {
     private enum Tab: String, CaseIterable {
-        case monitor = "Monitor"
-        case config  = "Config"
+        case monitor  = "Monitor"
+        case config   = "Config"
+        case vibeterm = "VibeTerm"
     }
 
     @ObservedObject var settingsModel: SettingsModel
@@ -34,6 +35,13 @@ struct MainPanelView: View {
     let logLimit: Int
 
     @State private var selectedTab: Tab = .monitor
+
+    private var visibleTabs: [Tab] {
+        Tab.allCases.filter { tab in
+            if tab == .vibeterm { return settingsModel.config.nodeRole == .server }
+            return true
+        }
+    }
 
     var body: some View {
         if panelModel.isCollapsed {
@@ -53,7 +61,7 @@ struct MainPanelView: View {
 
             // Tab bar
             HStack(spacing: 2) {
-                ForEach(Tab.allCases, id: \.rawValue) { tab in
+                ForEach(visibleTabs, id: \.rawValue) { tab in
                     PanelTabButton(
                         title: tab.rawValue,
                         isSelected: selectedTab == tab,
@@ -109,12 +117,24 @@ struct MainPanelView: View {
                 VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
                     PanelSectionHeader(title: "Settings")
                     InlineSettingsView(model: settingsModel, embedInScroll: false, onOpenQRCode: nil)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .vibeterm:
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
+                    Text("Connect VibeTerm to OpenClaw on iPhone.")
+                        .font(PanelTheme.bodyFont)
+                        .foregroundStyle(PanelTheme.textSecondary)
 
-                    Rectangle()
-                        .fill(PanelTheme.cardBorder)
-                        .frame(height: 1)
+                    HStack(spacing: 4) {
+                        PanelPill(text: "OpenClaw-linked", color: PanelTheme.accentCyan, fontSize: 10)
+                        PanelPill(text: "Mobile Handoff", color: PanelTheme.accentGreen, fontSize: 10)
+                        PanelPill(text: "Remote Control", color: PanelTheme.accentBlue, fontSize: 10)
+                    }
 
-                    vibetermSection
+                    QRCodeView()
+                        .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -205,26 +225,6 @@ struct MainPanelView: View {
         return result
     }
 
-    // MARK: - VibeTerm
-
-    private var vibetermSection: some View {
-        VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
-            PanelSectionHeader(title: "VibeTerm")
-
-            Text("Connect VibeTerm to OpenClaw on iPhone.")
-                .font(PanelTheme.bodyFont)
-                .foregroundStyle(PanelTheme.textSecondary)
-
-            HStack(spacing: 4) {
-                PanelPill(text: "OpenClaw-linked", color: PanelTheme.accentCyan, fontSize: 10)
-                PanelPill(text: "Mobile Handoff", color: PanelTheme.accentGreen, fontSize: 10)
-                PanelPill(text: "Remote Control", color: PanelTheme.accentBlue, fontSize: 10)
-            }
-
-            QRCodeView()
-                .frame(maxWidth: .infinity, alignment: .center)
-        }
-    }
 }
 
 private struct PanelWindowDragHandle: View {

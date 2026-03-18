@@ -24,8 +24,6 @@ struct QRCodeView: View {
                         .foregroundStyle(PanelTheme.textPrimary)
                 }
             }
-            .padding(.top, 4)
-
             if let url = connectionURL, let qrImage = generateQRCode(from: url) {
                 Link(destination: Self.appStoreURL) {
                     Image(nsImage: qrImage)
@@ -71,7 +69,7 @@ struct QRCodeView: View {
                 ConnectionInfoRow(label: "Port", value: String(openClawPort))
             }
 
-            ActionButton(title: copied ? "Copied!" : "Copy URL", tone: .primary) {
+            ActionButton(title: copied ? "Copied!" : "Copy URL", tone: .primary, dense: true) {
                 copyURL()
             }
 
@@ -86,7 +84,6 @@ struct QRCodeView: View {
             }
         }
         .padding(PanelTheme.padding)
-        .frame(width: 300, height: 420)
         .onAppear {
             loadConnectionInfo()
         }
@@ -156,7 +153,7 @@ struct QRCodeView: View {
     }
 
     private func loadFromLocal() {
-        tailscaleHostname = getTailscaleHostname()
+        tailscaleHostname = TailscaleResolver.hostname()
         if let config = getOpenClawConfig() {
             openClawToken = config.token
             openClawPort = config.port
@@ -221,45 +218,6 @@ struct QRCodeView: View {
 }
 
 // MARK: - Data Fetching
-
-private func getTailscaleHostname() -> String? {
-    let paths = [
-        "/usr/local/bin/tailscale",
-        "/opt/homebrew/bin/tailscale",
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    ]
-    guard let cli = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-        return nil
-    }
-
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: cli)
-    process.arguments = ["status", "--json"]
-
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = FileHandle.nullDevice
-
-    do {
-        try process.run()
-    } catch {
-        return nil
-    }
-
-    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-
-    guard process.terminationStatus == 0,
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let backendState = json["BackendState"] as? String,
-          backendState == "Running",
-          let selfInfo = json["Self"] as? [String: Any],
-          let dnsName = selfInfo["DNSName"] as? String else {
-        return nil
-    }
-
-    return dnsName.hasSuffix(".") ? String(dnsName.dropLast()) : dnsName
-}
 
 private func getOpenClawConfig() -> (token: String, port: Int)? {
     let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath

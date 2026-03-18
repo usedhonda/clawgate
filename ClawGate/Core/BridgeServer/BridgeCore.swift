@@ -107,7 +107,7 @@ final class BridgeCore {
             return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
         let port = gateway["port"] as? Int ?? 18789
-        let host = localTailscaleHostname() ?? "unknown"
+        let host = TailscaleResolver.hostname() ?? "unknown"
 
         let result: [String: Any] = ["ok": true, "host": host, "token": token, "port": port]
         guard let body = try? JSONSerialization.data(withJSONObject: result, options: [.withoutEscapingSlashes]) else {
@@ -121,29 +121,6 @@ final class BridgeCore {
             return jsonResponse(status: .internalServerError, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
         return jsonResponse(status: .ok, body: body)
-    }
-
-    private func localTailscaleHostname() -> String? {
-        let paths = [
-            "/usr/local/bin/tailscale",
-            "/opt/homebrew/bin/tailscale",
-            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-        ]
-        guard let cli = paths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
-            return nil
-        }
-        guard let output = runProcess(executable: cli, arguments: ["status", "--json"]) else {
-            return nil
-        }
-        guard let data = output.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let backendState = json["BackendState"] as? String,
-              backendState == "Running",
-              let selfInfo = json["Self"] as? [String: Any],
-              let dnsName = selfInfo["DNSName"] as? String else {
-            return nil
-        }
-        return dnsName.hasSuffix(".") ? String(dnsName.dropLast()) : dnsName
     }
 
     func config() -> HTTPResult {
