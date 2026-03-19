@@ -2633,6 +2633,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   // Parse tproj-msg reverse channel header (if present)
   const { header: tprojHeader, body: strippedBody } = parseTprojMsgHeader(ctx.Body);
   if (tprojHeader) {
+    log?.info?.(`clawgate: [${accountId}] tprojHeader parsed: reply=${tprojHeader.reply} sender=${tprojHeader.sender} workspace=${tprojHeader.workspace} return_url=${tprojHeader.return_url || "(empty)"} project=${tprojHeader.project}`);
     const originalBody = ctx.Body;
     ctx.Body = strippedBody;
     ctx.RawBody = strippedBody;
@@ -2760,6 +2761,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
             "--allow-relay", "gate-reverse-channel",
             "--force",
             "--session", tprojHeader.workspace,
+            "--as", "gate",
             tprojHeader.sender,
             replyText,
           ]);
