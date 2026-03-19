@@ -63,7 +63,7 @@ enum TailscaleResolver {
             return nil
         }
 
-        // Parse: "24.110.89.100.in-addr.arpa domain name pointer yuzurumac-mini-1.tailfeb2b0.ts.net."
+        // Parse: "x.x.x.100.in-addr.arpa domain name pointer my-host.example-tailnet.ts.net."
         for line in output.components(separatedBy: "\n") {
             guard line.contains("domain name pointer") else { continue }
             let parts = line.components(separatedBy: " ")
