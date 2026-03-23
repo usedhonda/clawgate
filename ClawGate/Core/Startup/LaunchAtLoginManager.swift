@@ -19,6 +19,7 @@ final class LaunchAtLoginManager {
     private let launchctlPath = "/bin/launchctl"
     private let migrationLock = NSLock()
     private var didAttemptStartupMigration = false
+    private var _cachedStatus: SMAppService.Status?
 
     init(
         fileManager: FileManager = .default,
@@ -29,10 +30,16 @@ final class LaunchAtLoginManager {
             .appendingPathComponent("Library/LaunchAgents/com.clawgate.app.plist")
         self.disabledLegacyLaunchAgentURL = homeDirectoryURL
             .appendingPathComponent("Library/LaunchAgents/com.clawgate.app.plist.disabled")
+        self._cachedStatus = SMAppService.mainApp.status
     }
 
     var status: SMAppService.Status {
-        SMAppService.mainApp.status
+        _cachedStatus ?? SMAppService.mainApp.status
+    }
+
+    /// Refresh cached status from SMAppService (XPC call). Call after register/unregister.
+    func refreshStatus() {
+        _cachedStatus = SMAppService.mainApp.status
     }
 
     var isEnabled: Bool {
@@ -68,6 +75,7 @@ final class LaunchAtLoginManager {
             log(.info, "launch_at_login: SMAppService main app already enabled")
         }
 
+        refreshStatus()
         guard status == .enabled else {
             log(.warning, "launch_at_login: SMAppService status is \(statusDescription(status)); keeping legacy LaunchAgent")
             return
@@ -104,6 +112,7 @@ final class LaunchAtLoginManager {
             try SMAppService.mainApp.unregister()
             log(.info, "launch_at_login: disabled via SMAppService")
         }
+        refreshStatus()
     }
 
     func statusDescription(_ status: SMAppService.Status? = nil) -> String {
