@@ -72,6 +72,7 @@ final class LineHealthCaretaker {
         stateLock.unlock()
 
         source.resume()
+        scheduleTick(trigger: "startup")
         logger.log(
             .info,
             "LineHealthCaretaker started (tick=\(Int(Constants.tickInterval))s cooldown=\(Int(Constants.repairCooldown))s forced=\(Int(Constants.forcedRepairInterval))s)"
@@ -136,6 +137,11 @@ final class LineHealthCaretaker {
         }
         guard !defaultConversation.isEmpty else {
             updateState(lastAssessmentReason: "inactive_default_conversation_missing")
+            return
+        }
+        guard CGPreflightScreenCaptureAccess() else {
+            updateState(lastAssessmentReason: "screen_recording_missing")
+            logger.log(.warning, "LineHealthCaretaker: screen recording unavailable, skipping repair")
             return
         }
 
@@ -213,7 +219,7 @@ final class LineHealthCaretaker {
             )
             logger.log(
                 .warning,
-                "LineHealthCaretaker: repair failed code=\(error.code) reason=\(repairReason)"
+                "LineHealthCaretaker: repair failed code=\(error.code) reason=\(repairReason) assessment=\(decision.assessmentReason) surface_reason=\(surfaceSnapshot?.reason ?? "none")"
             )
         } catch {
             updateState(
@@ -224,7 +230,7 @@ final class LineHealthCaretaker {
                 nextForcedRepairDueAt: now.addingTimeInterval(Constants.forcedRepairInterval),
                 cooldownUntil: now.addingTimeInterval(Constants.repairCooldown)
             )
-            logger.log(.warning, "LineHealthCaretaker: repair failed reason=\(repairReason) error=\(error)")
+            logger.log(.warning, "LineHealthCaretaker: repair failed reason=\(repairReason) assessment=\(decision.assessmentReason) error=\(error)")
         }
 
         restoreFrontmostApplication(previousFrontmostApp)

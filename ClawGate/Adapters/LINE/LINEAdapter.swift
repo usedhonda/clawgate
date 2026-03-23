@@ -18,6 +18,7 @@ final class LINEAdapter: AdapterProtocol {
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: searchFieldValue,
                 expectedConversation: expectedConversation,
+                matchesExpectedConversation: matchesExpectedConversation,
                 hasMessageInput: hasMessageInput,
                 hasConversationSurfaceSignal: hasConversationSurfaceSignal
             )
@@ -844,6 +845,7 @@ final class LINEAdapter: AdapterProtocol {
     static func isDefaultConversationSurfaceAbnormal(
         searchFieldValue: String,
         expectedConversation: String,
+        matchesExpectedConversation: Bool,
         hasMessageInput: Bool,
         hasConversationSurfaceSignal: Bool
     ) -> Bool {
@@ -851,6 +853,7 @@ final class LINEAdapter: AdapterProtocol {
             searchFieldValue: searchFieldValue,
             expectedConversation: expectedConversation
         )
+            || !matchesExpectedConversation
             || !hasMessageInput
             || !hasConversationSurfaceSignal
     }
@@ -858,6 +861,7 @@ final class LINEAdapter: AdapterProtocol {
     static func defaultConversationSurfaceReason(
         searchFieldValue: String,
         expectedConversation: String,
+        matchesExpectedConversation: Bool,
         hasMessageInput: Bool,
         hasConversationSurfaceSignal: Bool
     ) -> String {
@@ -866,6 +870,9 @@ final class LINEAdapter: AdapterProtocol {
             expectedConversation: expectedConversation
         ) {
             return "search_field_dirty"
+        }
+        if !matchesExpectedConversation {
+            return "expected_conversation_mismatch"
         }
         if !hasMessageInput {
             return "message_input_missing"
@@ -976,6 +983,7 @@ final class LINEAdapter: AdapterProtocol {
         let reason = Self.defaultConversationSurfaceReason(
             searchFieldValue: searchFieldValue,
             expectedConversation: expectedConversation ?? "",
+            matchesExpectedConversation: matchesExpectedConversation,
             hasMessageInput: hasMessageInput,
             hasConversationSurfaceSignal: hasConversationSurfaceSignal
         )

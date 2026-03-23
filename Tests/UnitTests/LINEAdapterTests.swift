@@ -35,6 +35,7 @@ final class LINEAdapterTests: XCTestCase {
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "",
                 expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
             )
@@ -43,6 +44,7 @@ final class LINEAdapterTests: XCTestCase {
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "",
                 expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
             ),
@@ -55,6 +57,7 @@ final class LINEAdapterTests: XCTestCase {
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "",
                 expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: true,
                 hasMessageInput: false,
                 hasConversationSurfaceSignal: true
             )
@@ -63,6 +66,7 @@ final class LINEAdapterTests: XCTestCase {
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "",
                 expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: true,
                 hasMessageInput: false,
                 hasConversationSurfaceSignal: true
             ),
@@ -75,9 +79,32 @@ final class LINEAdapterTests: XCTestCase {
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "Yuzuru Honda",
                 expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
             )
+        )
+    }
+
+    func testExpectedConversationMismatchStillMarksSurfaceAbnormal() {
+        XCTAssertTrue(
+            LINEAdapter.isDefaultConversationSurfaceAbnormal(
+                searchFieldValue: "",
+                expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: false,
+                hasMessageInput: true,
+                hasConversationSurfaceSignal: true
+            )
+        )
+        XCTAssertEqual(
+            LINEAdapter.defaultConversationSurfaceReason(
+                searchFieldValue: "",
+                expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: false,
+                hasMessageInput: true,
+                hasConversationSurfaceSignal: true
+            ),
+            "expected_conversation_mismatch"
         )
     }
 
@@ -86,6 +113,7 @@ final class LINEAdapterTests: XCTestCase {
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "heartbeat",
                 expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
             ),
@@ -98,6 +126,7 @@ final class LINEAdapterTests: XCTestCase {
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "Yuzuru Honda",
                 expectedConversation: "Yuzuru Honda",
+                matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: false
             ),
