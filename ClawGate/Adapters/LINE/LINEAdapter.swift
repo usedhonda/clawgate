@@ -970,14 +970,15 @@ final class LINEAdapter: AdapterProtocol {
         }()
         let hasConversationSurfaceSignal =
             hasVisibleMessageText || hasGreenSignal || hasConversationTitleSignal
+        // LINE Qt window title is always "LINE" regardless of conversation,
+        // so match against searchFieldValue instead of windowTitle.
         let matchesExpectedConversation: Bool = {
             let expected = expectedConversation?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !expected.isEmpty else { return true }
-            guard let title = windowTitle?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
-                return false
-            }
-            return LineSidebarDiscovery.normalizeConversationKey(title)
-                == LineSidebarDiscovery.normalizeConversationKey(expected)
+            return Self.defaultConversationSearchFieldMatchesExpected(
+                searchFieldValue: searchFieldValue,
+                expectedConversation: expected
+            )
         }()
 
         let reason = Self.defaultConversationSurfaceReason(
