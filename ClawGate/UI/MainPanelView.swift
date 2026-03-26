@@ -29,7 +29,6 @@ struct MainPanelView: View {
     let modeOrder: [String]
     let onSetSessionMode: (String, String, String) -> Void
     let onToggleCollapse: () -> Void
-    let onQuit: () -> Void
     let logLimit: Int
 
     @State private var selectedTab: Tab = .monitor
@@ -77,9 +76,6 @@ struct MainPanelView: View {
 
             // Tab content
             tabContent
-
-            // Quit
-            ActionButton(title: "Quit", tone: .danger, dense: true, action: onQuit)
         }
         .padding(PanelTheme.padding)
         .frame(minWidth: 200, maxWidth: 700, minHeight: 400, maxHeight: 1400)
@@ -234,12 +230,10 @@ private struct SessionRowView: View {
                 Button {
                     onSetSessionMode(session.sessionType, session.project, mode)
                 } label: {
-                    HStack {
+                    if mode == currentMode {
+                        Label(mode.capitalized, systemImage: "checkmark")
+                    } else {
                         Text(mode.capitalized)
-                        if mode == currentMode {
-                            Spacer()
-                            Image(systemName: "checkmark")
-                        }
                     }
                 }
             }

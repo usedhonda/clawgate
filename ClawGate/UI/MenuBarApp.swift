@@ -76,6 +76,17 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         button.sendAction(on: [.leftMouseUp, .rightMouseUp])
     }
 
+    private func showStatusItemMenu() {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Quit ClawGate", action: #selector(quit), keyEquivalent: "q")
+        statusItem?.menu = menu
+        statusItem?.button?.performClick(nil)
+        // Clear menu so left-click goes back to toggle action
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem?.menu = nil
+        }
+    }
+
     private func configureMainPanel() {
         let view = MainPanelView(
             settingsModel: settingsModel,
@@ -86,9 +97,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             },
             onToggleCollapse: { [weak self] in
                 self?.toggleCollapse()
-            },
-            onQuit: { [weak self] in
-                self?.quit()
             },
             logLimit: mainPanelLogLimit
         )
@@ -162,6 +170,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleMainPanel(_ sender: Any?) {
+        // Right-click → show context menu with Quit
+        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
+            showStatusItemMenu()
+            return
+        }
+
         guard let panel = mainPanel else { return }
 
         if panel.isVisible {
