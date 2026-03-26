@@ -81,9 +81,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
             settingsModel: settingsModel,
             panelModel: panelModel,
             modeOrder: modeOrder,
-            modeLabel: { [weak self] mode in
-                self?.modeLabel(mode) ?? mode.capitalized
-            },
             onSetSessionMode: { [weak self] sessionType, project, mode in
                 self?.setSessionMode(sessionType: sessionType, project: project, next: mode)
             },
@@ -108,7 +105,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.level = .normal
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
-        panel.isMovableByWindowBackground = false
+        panel.isMovableByWindowBackground = true
         panel.animationBehavior = .utilityWindow
         panel.backgroundColor = PanelTheme.backgroundNSColor
         panel.isOpaque = false
@@ -194,7 +191,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.minSize = NSSize(width: 200, height: panel.minSize.height)
         setTrafficLightsHidden(false)
         panel.isMovable = true
-        panel.isMovableByWindowBackground = false
+        panel.isMovableByWindowBackground = true
 
         let targetWidth = min(max(normalPanelWidth, panel.minSize.width), panel.maxSize.width)
         if abs(panel.frame.width - targetWidth) > 0.5 {
@@ -606,7 +603,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
 
         setTrafficLightsHidden(false)
         panel.isMovable = true
-        panel.isMovableByWindowBackground = false
+        panel.isMovableByWindowBackground = true
 
         let expandOrigin: NSPoint
         if isGhosttySnapped, let g = findGhosttyFrame() {
@@ -776,16 +773,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         return "ignore"
     }
 
-    private func modeLabel(_ mode: String) -> String {
-        switch mode {
-        case "ignore": return "Ignore"
-        case "observe": return "Observe"
-        case "auto": return "Auto"
-        case "autonomous": return "Autonomous"
-        default: return mode.capitalized
-        }
-    }
-
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
@@ -796,7 +783,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
     func refreshStatsAndTimeline() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.panelModel.autonomousStatus = self.runtime.autonomousStatusSummary()
             let entries = self.opsLogStore.recent(limit: self.mainPanelLogLimit)
             if entries.isEmpty {
                 let now = Self.timeFormatter.string(from: Date())

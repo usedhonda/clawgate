@@ -52,24 +52,6 @@ enum PanelTheme {
         }
     }
 
-    // MARK: - Session Type Colors
-
-    static func sessionTypeColor(_ sessionType: String) -> Color {
-        switch sessionType {
-        case "codex":       return accentYellow
-        case "claude_code": return accentCyan
-        default:            return textSecondary
-        }
-    }
-
-    static func sessionTypeLabel(_ sessionType: String) -> String {
-        switch sessionType {
-        case "codex":       return "cdx"
-        case "claude_code": return "cc"
-        default:            return sessionType
-        }
-    }
-
     // MARK: - Connectivity
 
     static func connectivityColor(_ text: String) -> Color {

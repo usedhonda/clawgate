@@ -13,7 +13,6 @@ final class MainPanelModel: ObservableObject {
     @Published var claudeSessions: [CCStatusBarClient.CCSession] = []
     @Published var sessionModes: [String: String] = [:]
     @Published var logs: [MainPanelLogLine] = []
-    @Published var autonomousStatus: String = "Autonomous: not configured"
     @Published var isCollapsed = false
 }
 
@@ -28,7 +27,6 @@ struct MainPanelView: View {
     @ObservedObject var panelModel: MainPanelModel
 
     let modeOrder: [String]
-    let modeLabel: (String) -> String
     let onSetSessionMode: (String, String, String) -> Void
     let onToggleCollapse: () -> Void
     let onQuit: () -> Void
@@ -57,8 +55,6 @@ struct MainPanelView: View {
     @ViewBuilder
     private var normalContent: some View {
         VStack(alignment: .leading, spacing: PanelTheme.spacing) {
-            PanelWindowDragHandle()
-
             // Tab bar
             HStack(spacing: 2) {
                 ForEach(visibleTabs, id: \.rawValue) { tab in
@@ -97,10 +93,6 @@ struct MainPanelView: View {
         case .monitor:
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
-                    Text(panelModel.autonomousStatus)
-                        .font(PanelTheme.smallFont)
-                        .foregroundStyle(PanelTheme.textSecondary)
-
                     sessionSection(title: "Codex Sessions", sessions: panelModel.codexSessions)
                     sessionSection(title: "Claude Code Sessions", sessions: panelModel.claudeSessions)
 
@@ -128,9 +120,9 @@ struct MainPanelView: View {
                         .foregroundStyle(PanelTheme.textSecondary)
 
                     HStack(spacing: 4) {
-                        PanelPill(text: "OpenClaw-linked", color: PanelTheme.accentCyan, fontSize: 10)
-                        PanelPill(text: "Mobile Handoff", color: PanelTheme.accentGreen, fontSize: 10)
-                        PanelPill(text: "Remote Control", color: PanelTheme.accentBlue, fontSize: 10)
+                        PanelPill(text: "OpenClaw-linked", tint: PanelTheme.accentCyan)
+                        PanelPill(text: "Mobile Handoff", tint: PanelTheme.accentGreen)
+                        PanelPill(text: "Remote Control", tint: PanelTheme.accentBlue)
                     }
 
                     QRCodeView()
@@ -167,7 +159,6 @@ struct MainPanelView: View {
             session: session,
             currentMode: currentMode,
             modeOrder: modeOrder,
-            modeLabel: modeLabel,
             onSetSessionMode: onSetSessionMode
         )
     }
@@ -227,66 +218,12 @@ struct MainPanelView: View {
 
 }
 
-private struct PanelWindowDragHandle: View {
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
-                .fill(PanelTheme.backgroundCard.opacity(0.88))
-                .overlay(
-                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
-                        .stroke(PanelTheme.cardBorder.opacity(1.0), lineWidth: 1)
-                )
-
-            HStack(spacing: 6) {
-                Image(systemName: "hand.draw")
-                    .font(.system(size: 10, weight: .medium))
-                Text("Drag Panel")
-                    .font(PanelTheme.smallFont)
-            }
-            .foregroundStyle(PanelTheme.textSecondary)
-            .allowsHitTesting(false)
-        }
-        .frame(maxWidth: .infinity)
-        .frame(height: 18)
-        .overlay {
-            PanelWindowDragRegion()
-        }
-        .help("Drag panel")
-    }
-}
-
-private struct PanelWindowDragRegion: NSViewRepresentable {
-    func makeNSView(context: Context) -> PanelWindowDragRegionView {
-        PanelWindowDragRegionView()
-    }
-
-    func updateNSView(_ nsView: PanelWindowDragRegionView, context: Context) {}
-}
-
-private final class PanelWindowDragRegionView: NSView {
-    override var isOpaque: Bool { false }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .openHand)
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        window?.performDrag(with: event)
-    }
-}
-
-// MARK: - SessionRowView (hover-aware)
+// MARK: - SessionRowView (tproj card style)
 
 private struct SessionRowView: View {
     let session: CCStatusBarClient.CCSession
     let currentMode: String
     let modeOrder: [String]
-    let modeLabel: (String) -> String
     let onSetSessionMode: (String, String, String) -> Void
 
     @State private var isHovered = false
@@ -298,7 +235,7 @@ private struct SessionRowView: View {
                     onSetSessionMode(session.sessionType, session.project, mode)
                 } label: {
                     HStack {
-                        Text(modeLabel(mode))
+                        Text(mode.capitalized)
                         if mode == currentMode {
                             Spacer()
                             Image(systemName: "checkmark")
@@ -307,23 +244,15 @@ private struct SessionRowView: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) {
-                StatusDot(color: dotColor)
-
+            HStack(spacing: 4) {
                 Text(session.project)
-                    .font(PanelTheme.bodyFont)
+                    .font(PanelTheme.font(size: 12, weight: .semibold))
                     .foregroundStyle(PanelTheme.textPrimary)
                     .lineLimit(1)
 
                 PanelPill(
                     text: currentMode,
-                    color: PanelTheme.modeColor(currentMode),
-                    lit: currentMode != "ignore"
-                )
-
-                PanelPill(
-                    text: PanelTheme.sessionTypeLabel(session.sessionType),
-                    color: PanelTheme.sessionTypeColor(session.sessionType)
+                    tint: PanelTheme.modeColor(currentMode)
                 )
 
                 Spacer(minLength: 0)
@@ -332,16 +261,19 @@ private struct SessionRowView: View {
                     .font(.system(size: 8, weight: .bold))
                     .foregroundStyle(PanelTheme.textTertiary.opacity(isHovered ? 1 : 0))
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
+            .padding(.leading, 10)
+            .padding(.trailing, 2)
             .background(
-                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
-                    .fill(PanelTheme.textPrimary.opacity(isHovered ? 0.08 : 0))
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(PanelTheme.textPrimary.opacity(isHovered ? 0.08 : 0.05))
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius)
-                    .stroke(PanelTheme.textPrimary.opacity(isHovered ? 0.12 : 0), lineWidth: 0.5)
-            )
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(PanelTheme.accentCyan)
+                    .frame(width: 2)
+                    .shadow(color: PanelTheme.accentCyan.opacity(0.7), radius: 3, x: 0, y: 0)
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -349,11 +281,6 @@ private struct SessionRowView: View {
             withAnimation(.easeOut(duration: 0.1)) { isHovered = hovering }
             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
-    }
-
-    private var dotColor: Color {
-        if currentMode == "ignore" { return PanelTheme.textTertiary }
-        return PanelTheme.statusColor(session.status)
     }
 }
 

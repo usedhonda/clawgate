@@ -59,49 +59,18 @@ struct PanelCard<Content: View>: View {
 
 struct PanelPill: View {
     let text: String
-    var color: Color = PanelTheme.textSecondary
-    var fontSize: CGFloat = 9
-    /// When true, pill renders as a solid lit badge with glow.
-    var lit: Bool = false
-
-    private var labelColor: Color {
-        lit ? .white : color.brighten(0.12).opacity(0.96)
-    }
-
-    private var fillColor: Color {
-        if lit { return color.opacity(0.85) }
-        return PanelTheme.backgroundCard.brighten(0.04)
-    }
-
-    private var tintColor: Color {
-        if lit { return .clear }
-        return color.opacity(0.10)
-    }
-
-    private var strokeColor: Color {
-        if lit { return color }
-        return color.opacity(0.30)
-    }
+    var tint: Color = PanelTheme.textSecondary
 
     var body: some View {
         Text(text)
-            .font(PanelTheme.font(size: fontSize, weight: lit ? .bold : .semibold))
-            .foregroundStyle(labelColor)
-            .padding(.horizontal, lit ? 6 : 5)
-            .padding(.vertical, lit ? 2 : 1)
+            .font(PanelTheme.font(size: 9, weight: .bold))
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
             .background(
-                Capsule()
-                    .fill(fillColor)
-                    .overlay(
-                        Capsule()
-                            .fill(tintColor)
-                    )
+                Capsule(style: .circular)
+                    .fill(tint.opacity(0.24))
             )
-            .overlay(
-                Capsule()
-                    .stroke(strokeColor, lineWidth: lit ? 1 : 0.75)
-            )
-            .shadow(color: lit ? color.opacity(0.65) : .clear, radius: 4, x: 0, y: 0)
+            .foregroundStyle(tint.opacity(0.95))
     }
 }
 
@@ -124,7 +93,7 @@ struct ActionButtonStyle: ButtonStyle {
     private var fillColor: Color {
         switch tone {
         case .neutral:
-            if isHovered { return PanelTheme.selectionBg.opacity(0.6) }
+            if isHovered { return PanelTheme.selectionBg.opacity(0.4) }
             return PanelTheme.textPrimary.opacity(0.08)
         case .primary:
             if isHovered { return PanelTheme.accentBlue.opacity(0.62) }
@@ -137,7 +106,7 @@ struct ActionButtonStyle: ButtonStyle {
 
     private var pressedFillColor: Color {
         switch tone {
-        case .neutral: return PanelTheme.selectionBg.opacity(0.4)
+        case .neutral: return PanelTheme.selectionBg.opacity(0.6)
         case .primary: return PanelTheme.accentBlue.opacity(0.75)
         case .danger:  return PanelTheme.accentRed.opacity(0.26)
         }
@@ -145,26 +114,46 @@ struct ActionButtonStyle: ButtonStyle {
 
     private var textColor: Color {
         switch tone {
-        case .neutral: return PanelTheme.textPrimary
-        case .primary: return PanelTheme.accentBlue
-        case .danger:  return PanelTheme.accentRed
+        case .neutral: return PanelTheme.textPrimary.opacity(0.92)
+        case .primary: return PanelTheme.textPrimary
+        case .danger:  return PanelTheme.accentRed.opacity(0.95)
+        }
+    }
+
+    private func borderColor(pressed: Bool) -> Color {
+        switch tone {
+        case .neutral:
+            return pressed ? PanelTheme.textPrimary.opacity(0.55)
+                 : PanelTheme.textPrimary.opacity(isHovered ? 0.44 : 0.20)
+        case .primary:
+            return pressed ? PanelTheme.accentBlue.opacity(0.95)
+                 : PanelTheme.accentBlue.opacity(isHovered ? 0.88 : 0.72)
+        case .danger:
+            return pressed ? PanelTheme.accentRed.opacity(0.82)
+                 : PanelTheme.accentRed.opacity(isHovered ? 0.74 : 0.52)
         }
     }
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        let pressed = configuration.isPressed && isEnabled
+
+        return configuration.label
             .font(PanelTheme.font(size: dense ? 11 : 13, weight: .semibold))
             .foregroundStyle(textColor)
-            .padding(.horizontal, dense ? 6 : 10)
-            .padding(.vertical, dense ? 3 : 5)
+            .padding(.horizontal, dense ? 4 : 12)
+            .padding(.vertical, dense ? 2 : 8)
             .frame(maxWidth: expand ? .infinity : nil)
             .frame(minHeight: dense ? 18 : 32)
             .background(
                 RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
-                    .fill(configuration.isPressed ? pressedFillColor : fillColor)
+                    .fill(pressed ? pressedFillColor : fillColor)
             )
-            .scaleEffect(configuration.isPressed ? 0.98 : (isHovered ? 1.02 : 1.0))
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .overlay(
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
+                    .stroke(borderColor(pressed: pressed), lineWidth: 1)
+            )
+            .scaleEffect(pressed ? 0.98 : (isHovered && isEnabled ? 1.02 : 1.0))
+            .animation(.easeOut(duration: 0.12), value: pressed)
             .animation(.easeOut(duration: 0.14), value: isHovered)
             .opacity(isEnabled ? 1.0 : 0.45)
             .onHover { hovering in isHovered = hovering }
@@ -187,10 +176,6 @@ struct ActionButton: View {
         .disabled(!isEnabled)
     }
 }
-
-// Keep backward compat alias
-typealias PanelActionButton = ActionButton
-typealias PanelButtonTone = ActionButtonTone
 
 // MARK: - PanelTabButton
 
@@ -249,7 +234,7 @@ struct PanelInputModifier: ViewModifier {
     }
 }
 
-// MARK: - Status Dot (5x5 tproj style)
+// MARK: - Status Dot (settings connectivity indicator)
 
 struct StatusDot: View {
     let color: Color
@@ -260,3 +245,4 @@ struct StatusDot: View {
             .frame(width: 5, height: 5)
     }
 }
+
