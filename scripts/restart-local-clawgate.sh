@@ -96,7 +96,8 @@ sync_plugin_dir() {
   echo "  - synced $label -> $dst"
 }
 sync_plugin_dir "$PLUGIN_CLAWGATE_SRC" "$PLUGIN_CLAWGATE_DST" "clawgate"
-sync_plugin_dir "$PLUGIN_TELEMETRY_SRC" "$PLUGIN_TELEMETRY_DST" "vibeterm-telemetry"
+# DISABLED: vibeterm-telemetry is a 4-route bundle managed by oc-general, not clawgate.
+# sync_plugin_dir "$PLUGIN_TELEMETRY_SRC" "$PLUGIN_TELEMETRY_DST" "vibeterm-telemetry"
 
 if [[ "$SKIP_SIGN" != "true" ]]; then
   if security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then

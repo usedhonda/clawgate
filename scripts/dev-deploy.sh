@@ -150,7 +150,8 @@ if [ "$SKIP_PLUGIN" = "false" ]; then
     }
 
     sync_plugin "$PROJECT_DIR/extensions/openclaw-plugin" "$HOME/.openclaw/extensions/clawgate" "clawgate"
-    sync_plugin "$PROJECT_DIR/extensions/vibeterm-telemetry" "$HOME/.openclaw/extensions/vibeterm-telemetry" "vibeterm-telemetry"
+    # DISABLED: vibeterm-telemetry is a 4-route bundle managed by oc-general, not clawgate.
+    # sync_plugin "$PROJECT_DIR/extensions/vibeterm-telemetry" "$HOME/.openclaw/extensions/vibeterm-telemetry" "vibeterm-telemetry"
 
     # Restart gateway once if any plugin changed
     if [ "$ANY_PLUGIN_SYNCED" = "true" ]; then
