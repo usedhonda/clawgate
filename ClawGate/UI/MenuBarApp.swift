@@ -223,8 +223,15 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         settingsModel.reload()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
-        fitPanelToContent(panel)
-        positionPanelBelowStatusItem(panel)
+        if let saved = Self.loadSavedFrame(),
+           saved.width >= panel.minSize.width, saved.height >= panel.minSize.height,
+           NSScreen.screens.contains(where: { $0.visibleFrame.intersects(saved) }) {
+            panel.setFrame(saved, display: true)
+            normalPanelWidth = saved.width
+        } else {
+            fitPanelToContent(panel)
+            positionPanelBelowStatusItem(panel)
+        }
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         panel.makeKeyAndOrderFront(nil)
         // Defer save so the frame is finalized after layout
@@ -1028,6 +1035,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     func windowDidMove(_ notification: Notification) { saveCurrentFrame() }
     func windowDidResize(_ notification: Notification) { saveCurrentFrame() }
     func windowDidEndLiveResize(_ notification: Notification) { saveCurrentFrame() }
+    func windowWillClose(_ notification: Notification) { saveCurrentFrame() }
 
     private func closeMainPanel(_ sender: Any?) {
         guard let panel = mainPanel, panel.isVisible else { return }
