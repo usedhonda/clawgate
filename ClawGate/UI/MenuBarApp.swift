@@ -8,7 +8,7 @@ private extension NSColor {
     static let logDim = NSColor(white: 0.55, alpha: 1.0)
 }
 
-final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
+final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private enum GhosttyAnchorSide {
         case right
         case left
@@ -121,8 +121,43 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(width: 200, height: 300)
         panel.maxSize = NSSize(width: 700, height: 1400)
+
+        // Restore saved frame
+        if let rect = Self.loadSavedFrame(),
+           rect.width >= panel.minSize.width, rect.height >= panel.minSize.height,
+           NSScreen.screens.contains(where: { $0.visibleFrame.intersects(rect) }) {
+            panel.setFrame(rect, display: false)
+            normalPanelWidth = rect.width
+        }
+
         mainPanel = panel
+        startFrameObserver(panel)
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+    }
+
+    private func startFrameObserver(_ panel: NSPanel) {
+        panel.delegate = self
+    }
+
+    private static let frameFile: URL = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/clawgate", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("panel-frame.txt")
+    }()
+
+    private func saveCurrentFrame() {
+        guard let panel = mainPanel, !isCollapsed else { return }
+        let frame = panel.frame
+        guard frame.width >= panel.minSize.width else { return }
+        try? NSStringFromRect(frame).write(to: Self.frameFile, atomically: true, encoding: .utf8)
+    }
+
+    private static func loadSavedFrame() -> NSRect? {
+        guard let str = try? String(contentsOf: frameFile, encoding: .utf8) else { return nil }
+        let rect = NSRectFromString(str)
+        guard rect.width > 0 && rect.height > 0 else { return nil }
+        return rect
     }
 
     private func startWindowLevelObserver() {
@@ -192,6 +227,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         positionPanelBelowStatusItem(panel)
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         panel.makeKeyAndOrderFront(nil)
+        // Defer save so the frame is finalized after layout
+        DispatchQueue.main.async { [weak self] in self?.saveCurrentFrame() }
     }
 
     private func prepareExpandedPanelForOpen(_ panel: NSPanel) {
@@ -984,11 +1021,17 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate {
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             self?.refreshStatsAndTimeline()
             self?.refreshSessionsMenu(sessions: self?.runtime.allCCSessions() ?? [])
+            self?.saveCurrentFrame()
         }
     }
 
+    func windowDidMove(_ notification: Notification) { saveCurrentFrame() }
+    func windowDidResize(_ notification: Notification) { saveCurrentFrame() }
+    func windowDidEndLiveResize(_ notification: Notification) { saveCurrentFrame() }
+
     private func closeMainPanel(_ sender: Any?) {
         guard let panel = mainPanel, panel.isVisible else { return }
+        saveCurrentFrame()
         stopGhosttyFollow()
         panel.orderOut(sender)
     }

@@ -89,8 +89,8 @@ struct MainPanelView: View {
         case .monitor:
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
-                    sessionSection(title: "Codex Sessions", sessions: panelModel.codexSessions)
-                    sessionSection(title: "Claude Code Sessions", sessions: panelModel.claudeSessions)
+                    sessionSection(title: "Codex", sessions: panelModel.codexSessions)
+                    sessionSection(title: "Claude Code", sessions: panelModel.claudeSessions)
 
                     Rectangle()
                         .fill(PanelTheme.cardBorder)
@@ -169,9 +169,17 @@ struct MainPanelView: View {
                     .font(PanelTheme.smallFont)
                     .foregroundStyle(PanelTheme.textTertiary)
             } else {
-                Text(opsLogsAttributedText())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(panelModel.logs) { row in
+                        Text(row.text)
+                            .font(PanelTheme.monoFont(size: 10))
+                            .foregroundStyle(logColor(from: row.color))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -196,20 +204,6 @@ struct MainPanelView: View {
         }
 
         return Color(red: Double(r), green: Double(g), blue: Double(b))
-    }
-
-    private func opsLogsAttributedText() -> AttributedString {
-        var result = AttributedString()
-        for (index, row) in panelModel.logs.enumerated() {
-            var line = AttributedString(row.text)
-            line.font = PanelTheme.monoFont(size: 10)
-            line.foregroundColor = logColor(from: row.color)
-            result.append(line)
-            if index < panelModel.logs.count - 1 {
-                result.append(AttributedString("\n"))
-            }
-        }
-        return result
     }
 
 }
