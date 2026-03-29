@@ -1,3 +1,5 @@
+# Maintainer-only workflow: requires APPLE_SIGNING_IDENTITY, APPLE_TEAM_ID,
+# APPLE_ID, APPLE_ID_PASSWORD secrets configured in GitHub repository settings.
 name: Release
 
 on:
@@ -85,7 +87,7 @@ jobs:
           codesign --force --deep --options runtime \
             --identifier com.clawgate.app \
             --entitlements ClawGate.entitlements \
-            --sign "Developer ID Application: Yuzuru Honda (${{ secrets.APPLE_TEAM_ID }})" \
+            --sign "${{ secrets.APPLE_SIGNING_IDENTITY }}" \
             ClawGate.app
 
       - name: Create DMG
@@ -99,7 +101,7 @@ jobs:
 
       - name: Sign DMG
         run: |
-          codesign --force --sign "Developer ID Application: Yuzuru Honda (${{ secrets.APPLE_TEAM_ID }})" \
+          codesign --force --sign "${{ secrets.APPLE_SIGNING_IDENTITY }}" \
             /tmp/ClawGate.dmg
 
       - name: Notarize

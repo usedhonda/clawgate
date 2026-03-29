@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-let _filterDisplayName = "Yuzuru Honda";
+let _filterDisplayName = "Alice Smith";
 
 function isUiChromeLine(line) {
   const s = line.trim();
@@ -115,13 +115,13 @@ function normalizeInboundText(rawText, source) {
 
 describe("LINE inbound noise filtering", () => {
   it("drops owner-name header garbage instead of resurrecting it via raw fallback", () => {
-    assert.equal(normalizeInboundText("Yuzuru Honda 1ロ", "hybrid_fusion"), "");
-    assert.equal(normalizeInboundText("Yuzuru Honda 4 ロ今日今日", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("Alice Smith 1ロ", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("Alice Smith 4 ロ今日今日", "hybrid_fusion"), "");
   });
 
   it("strips owner-name OCR prefix but keeps meaningful tail text", () => {
     assert.equal(
-      normalizeInboundText("Yuzuru Honda 4送信テスト。よめてる？", "hybrid_fusion"),
+      normalizeInboundText("Alice Smith 4送信テスト。よめてる？", "hybrid_fusion"),
       "送信テスト。よめてる？"
     );
   });
@@ -143,7 +143,7 @@ describe("LINE inbound noise filtering", () => {
   });
 
   it("drops search-box leftover fragments via final garbage check", () => {
-    assert.equal(normalizeInboundText("Yuzuru Honda 4 G", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("Alice Smith 4 G", "hybrid_fusion"), "");
   });
 
   it("keeps real messages intact", () => {

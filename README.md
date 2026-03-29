@@ -1,6 +1,6 @@
 # ClawGate
 
-[![CI](https://github.com/<owner>/<repo>/actions/workflows/ci.yml/badge.svg)](https://github.com/<owner>/<repo>/actions/workflows/ci.yml)
+[![CI](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml/badge.svg)](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A macOS menu bar app that lets an AI agent (OpenClaw) monitor, review, and interact with your Claude Code / Codex sessions in real time.
@@ -23,7 +23,7 @@ Claude Code (tmux) <--WS--> cc-status-bar <--WS--> ClawGate <--HTTP--> OpenClaw 
 
 ### Download
 
-Download the latest DMG from [GitHub Releases](https://github.com/<owner>/<repo>/releases/latest).
+Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/clawgate/releases/latest).
 
 ### Install
 
@@ -62,7 +62,7 @@ Each tmux project can be assigned one of four session modes. Set them in the men
 
 ## OpenClaw Integration
 
-ClawGate includes an [OpenClaw](https://github.com/<owner>/openclaw_general) channel plugin that connects the event stream to an AI reviewer.
+ClawGate includes an [OpenClaw](https://github.com/usedhonda/openclaw_general) channel plugin that connects the event stream to an AI reviewer.
 
 ### Plugin Setup
 
@@ -224,6 +224,8 @@ swift build
 - macOS 12+ (Monterey or later)
 - Swift 5.9+ (swift-nio 2.67+)
 - Xcode or Command Line Tools
+
+See [scripts/README.md](scripts/README.md) for a full list of available scripts and their intended audience (user vs. maintainer).
 
 ## Permissions
 

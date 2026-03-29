@@ -34,7 +34,7 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertFalse(
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "",
-                expectedConversation: "Yuzuru Honda",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
@@ -43,7 +43,7 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertEqual(
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "",
-                expectedConversation: "Yuzuru Honda",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
@@ -56,7 +56,7 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertTrue(
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "",
-                expectedConversation: "Yuzuru Honda",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: true,
                 hasMessageInput: false,
                 hasConversationSurfaceSignal: true
@@ -65,7 +65,7 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertEqual(
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "",
-                expectedConversation: "Yuzuru Honda",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: true,
                 hasMessageInput: false,
                 hasConversationSurfaceSignal: true
@@ -77,8 +77,8 @@ final class LINEAdapterTests: XCTestCase {
     func testMatchingSearchValueIsAllowedWhenConversationSurfaceIsVisible() {
         XCTAssertFalse(
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
-                searchFieldValue: "Yuzuru Honda",
-                expectedConversation: "Yuzuru Honda",
+                searchFieldValue: "Alice Smith",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
@@ -90,7 +90,7 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertTrue(
             LINEAdapter.isDefaultConversationSurfaceAbnormal(
                 searchFieldValue: "",
-                expectedConversation: "Yuzuru Honda",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: false,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
@@ -99,7 +99,7 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertEqual(
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "",
-                expectedConversation: "Yuzuru Honda",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: false,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
@@ -112,7 +112,7 @@ final class LINEAdapterTests: XCTestCase {
         XCTAssertEqual(
             LINEAdapter.defaultConversationSurfaceReason(
                 searchFieldValue: "heartbeat",
-                expectedConversation: "Yuzuru Honda",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: true
@@ -124,8 +124,8 @@ final class LINEAdapterTests: XCTestCase {
     func testMissingConversationSurfaceKeepsDefaultSurfaceAbnormal() {
         XCTAssertEqual(
             LINEAdapter.defaultConversationSurfaceReason(
-                searchFieldValue: "Yuzuru Honda",
-                expectedConversation: "Yuzuru Honda",
+                searchFieldValue: "Alice Smith",
+                expectedConversation: "Alice Smith",
                 matchesExpectedConversation: true,
                 hasMessageInput: true,
                 hasConversationSurfaceSignal: false
@@ -229,21 +229,21 @@ final class LINEAdapterTests: XCTestCase {
     /// canSkipNavigation = (lastHint == currentHint) AND inputFieldExists.
     /// When the hint comparison fails, navigation must NOT be skipped.
     func testSkipNavigationRequiresSameHint() {
-        let lastHint: String? = "Yuzuru Honda"
-        let currentHint = "Yuzuru Honda"
+        let lastHint: String? = "Alice Smith"
+        let currentHint = "Alice Smith"
         // Pure condition 1: hint must match
         XCTAssertEqual(lastHint, currentHint, "Same hint should allow skip consideration")
     }
 
     func testSkipNavigationDeniedOnDifferentHint() {
-        let lastHint: String? = "Yuzuru Honda"
+        let lastHint: String? = "Alice Smith"
         let currentHint = "Work Group"
         XCTAssertNotEqual(lastHint, currentHint, "Different hint must prevent skip")
     }
 
     func testSkipNavigationDeniedOnNilLastHint() {
         let lastHint: String? = nil
-        let currentHint = "Yuzuru Honda"
+        let currentHint = "Alice Smith"
         // nil lastHint means first send — must not skip
         XCTAssertNil(lastHint)
         XCTAssertFalse(lastHint == currentHint)
@@ -256,7 +256,7 @@ final class LINEAdapterTests: XCTestCase {
     func testEchoDetectionForLINESentText() {
         let tracker = RecentSendTracker(windowSeconds: 60)
         let sentText = "[clawgate.cc]\nHello from Claude Code"
-        tracker.recordSend(conversation: "Yuzuru Honda", text: sentText)
+        tracker.recordSend(conversation: "Alice Smith", text: sentText)
 
         XCTAssertTrue(tracker.isLikelyEcho(), "Should detect recent send as likely echo")
         XCTAssertEqual(tracker.recentSentText(), sentText)
@@ -265,7 +265,7 @@ final class LINEAdapterTests: XCTestCase {
     func testEchoDetectionWithLineBreaksInBubble() {
         let tracker = RecentSendTracker(windowSeconds: 60)
         let sent = "[clawgate.cc] long message with multiple lines of text for testing"
-        tracker.recordSend(conversation: "Yuzuru Honda", text: sent)
+        tracker.recordSend(conversation: "Alice Smith", text: sent)
 
         // LINE chat bubble may reflow the text with different line breaks
         let candidate = "[clawgate.cc] long message\nwith multiple lines of\ntext for testing"
@@ -302,7 +302,7 @@ final class LINEAdapterTests: XCTestCase {
     /// On failure, it must NOT be updated (stale hint = safer than wrong hint).
     func testRecentSendTrackerRecordsConversation() {
         let tracker = RecentSendTracker()
-        tracker.recordSend(conversation: "Yuzuru Honda", text: "Test")
+        tracker.recordSend(conversation: "Alice Smith", text: "Test")
         tracker.recordSend(conversation: "Work Group", text: "Test 2")
 
         // Most recent conversation's text should be returned

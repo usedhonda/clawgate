@@ -39,7 +39,7 @@ final class LineSidebarDiscoveryTests: XCTestCase {
     func testBuildConversationEntriesPrefersAXAndDedupesNames() {
         let axCandidates = [
             LineSidebarDiscovery.SidebarConversationCandidate(
-                name: "Yuzuru Honda",
+                name: "Alice Smith",
                 frame: CGRect(x: 122, y: 150, width: 302, height: 57),
                 yOrder: 0,
                 source: .ax
@@ -53,13 +53,13 @@ final class LineSidebarDiscoveryTests: XCTestCase {
         ]
         let ocrCandidates = [
             LineSidebarDiscovery.SidebarConversationCandidate(
-                name: "Yuzuru Honda",
+                name: "Alice Smith",
                 frame: CGRect(x: 122, y: 150, width: 302, height: 57),
                 yOrder: 0,
                 source: .ocr
             ),
             LineSidebarDiscovery.SidebarConversationCandidate(
-                name: "Yuzuru Honda",
+                name: "Alice Smith",
                 frame: CGRect(x: 122, y: 264, width: 302, height: 57),
                 yOrder: 2,
                 source: .ocr
@@ -76,7 +76,7 @@ final class LineSidebarDiscoveryTests: XCTestCase {
             limit: 10
         )
 
-        XCTAssertEqual(entries.map(\.name), ["Yuzuru Honda", "Work Group"])
+        XCTAssertEqual(entries.map(\.name), ["Alice Smith", "Work Group"])
         XCTAssertEqual(entries.map(\.hasUnread), [false, true])
         XCTAssertEqual(entries.map(\.yOrder), [0, 1])
     }

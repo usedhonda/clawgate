@@ -47,7 +47,7 @@ function makeAccount(overrides = {}) {
   return {
     token: "",
     apiUrl: "http://127.0.0.1:8765",
-    defaultConversation: "Yuzuru Honda",
+    defaultConversation: "Alice Smith",
     ...overrides,
   };
 }
@@ -67,17 +67,17 @@ describe("outbound conversation_hint mapping", () => {
   describe("sendText", () => {
     it('maps to="LINE" to defaultConversation', async () => {
       await outbound.sendText({ ...baseSendParams, to: "LINE" });
-      assert.equal(lastSendArgs.conversationHint, "Yuzuru Honda");
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
     });
 
     it('maps to="default" to defaultConversation', async () => {
       await outbound.sendText({ ...baseSendParams, to: "default" });
-      assert.equal(lastSendArgs.conversationHint, "Yuzuru Honda");
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
     });
 
     it('maps to="clawgate:default" to defaultConversation', async () => {
       await outbound.sendText({ ...baseSendParams, to: "clawgate:default" });
-      assert.equal(lastSendArgs.conversationHint, "Yuzuru Honda");
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
     });
 
     it("passes explicit conversation name through unchanged", async () => {
@@ -97,12 +97,12 @@ describe("outbound conversation_hint mapping", () => {
   describe("sendMedia", () => {
     it('maps to="LINE" to defaultConversation', async () => {
       await outbound.sendMedia({ ...baseSendParams, to: "LINE", mediaUrl: null });
-      assert.equal(lastSendArgs.conversationHint, "Yuzuru Honda");
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
     });
 
     it('maps to="default" to defaultConversation', async () => {
       await outbound.sendMedia({ ...baseSendParams, to: "default", mediaUrl: null });
-      assert.equal(lastSendArgs.conversationHint, "Yuzuru Honda");
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
     });
 
     it("passes explicit conversation name through unchanged", async () => {
