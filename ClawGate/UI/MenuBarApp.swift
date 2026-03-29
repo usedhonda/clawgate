@@ -26,7 +26,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var ghosttyLastDebugLogAt: Date = .distantPast
     private var suspendDriftDetection = false
     private var driftWatchdogGeneration: UInt64 = 0
-    private var isDragSuspended = false
 
     // Snap constants (Tproj parity)
     private let snapThreshold: CGFloat = 12
@@ -548,24 +547,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             if suspendDriftDetection {
                 lastGhosttyFrame = currentGhosttyFrame
                 return
-            }
-
-            // Skip follow while user is dragging the panel (Tproj parity)
-            if isDragSuspended {
-                let dragPB = NSPasteboard(name: .drag)
-                if dragPB.types == nil || dragPB.types?.isEmpty == true {
-                    isDragSuspended = false
-                } else {
-                    lastGhosttyFrame = currentGhosttyFrame
-                    return
-                }
-            } else {
-                let dragPB = NSPasteboard(name: .drag)
-                if let types = dragPB.types, !types.isEmpty {
-                    isDragSuspended = true
-                    lastGhosttyFrame = currentGhosttyFrame
-                    return
-                }
             }
 
             // Detach by X-only (Y movement never triggers detach)
