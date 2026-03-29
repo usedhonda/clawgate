@@ -44,9 +44,7 @@ APP_PATH="$PROJECT_PATH/ClawGate.app"
 APP_BIN="$APP_PATH/Contents/MacOS/ClawGate"
 BUILD_BIN="$PROJECT_PATH/.build/debug/ClawGate"
 PLUGIN_CLAWGATE_SRC="$PROJECT_PATH/extensions/openclaw-plugin"
-PLUGIN_TELEMETRY_SRC="$PROJECT_PATH/extensions/vibeterm-telemetry"
 PLUGIN_CLAWGATE_DST="$HOME/.openclaw/extensions/clawgate"
-PLUGIN_TELEMETRY_DST="$HOME/.openclaw/extensions/vibeterm-telemetry"
 
 cd "$PROJECT_PATH"
 
