@@ -25,6 +25,16 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var ghosttyAnchorSide: GhosttyAnchorSide = .right
     private var ghosttyLastDebugLogAt: Date = .distantPast
     private var suspendDriftDetection = false
+    private var driftWatchdogGeneration: UInt64 = 0
+    private var isDragSuspended = false
+
+    // Snap constants (Tproj parity)
+    private let snapThreshold: CGFloat = 12
+    private let snapGap: CGFloat = 2
+    private let snapDetachThreshold: CGFloat = 24   // snapThreshold * 2
+    private let snapDetachCooldown: TimeInterval = 0.4
+    private let snapYAlignThreshold: CGFloat = 100
+
     private var isCollapsed = false
     private var normalPanelWidth: CGFloat = 220
     private var normalPanelOrigin: NSPoint = .zero
@@ -122,11 +132,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         panel.minSize = NSSize(width: 200, height: 300)
         panel.maxSize = NSSize(width: 700, height: 1400)
 
-        // Restore saved frame
-        if let rect = Self.loadSavedFrame(),
-           rect.width >= panel.minSize.width, rect.height >= panel.minSize.height,
-           NSScreen.screens.contains(where: { $0.visibleFrame.intersects(rect) }) {
-            panel.setFrame(rect, display: false)
+        // Restore saved width only; position is determined at open time
+        if let rect = Self.loadSavedFrame(), rect.width >= panel.minSize.width {
             normalPanelWidth = rect.width
         }
 
@@ -147,7 +154,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }()
 
     private func saveCurrentFrame() {
-        guard let panel = mainPanel, !isCollapsed else { return }
+        guard let panel = mainPanel, !isCollapsed, !isGhosttySnapped else { return }
         let frame = panel.frame
         guard frame.width >= panel.minSize.width else { return }
         try? NSStringFromRect(frame).write(to: Self.frameFile, atomically: true, encoding: .utf8)
@@ -223,19 +230,38 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         settingsModel.reload()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
-        if let saved = Self.loadSavedFrame(),
-           saved.width >= panel.minSize.width, saved.height >= panel.minSize.height,
-           NSScreen.screens.contains(where: { $0.visibleFrame.intersects(saved) }) {
+
+        // Ghostty visible → always snap to Ghostty (Tproj parity).
+        // Saved frame is only used when Ghostty is absent.
+        if let ghosttyFrame = findGhosttyFrame() {
+            // Restore saved width if available
+            if let saved = Self.loadSavedFrame(), saved.width >= panel.minSize.width {
+                normalPanelWidth = saved.width
+                var frame = panel.frame
+                frame.size.width = normalPanelWidth
+                panel.setFrame(frame, display: false)
+            }
+            let placement = ghosttyAnchoredOrigin(for: ghosttyFrame, panelSize: panel.frame.size, preferredSide: nil)
+            panel.setFrameOrigin(placement.origin)
+            ghosttyAnchorSide = placement.side
+            isGhosttySnapped = true
+            ghosttyDetachCooldownUntil = nil
+            lastGhosttyFrame = ghosttyFrame
+            logGhosttyFollow("opened near Ghostty origin=\(placement.origin) side=\(placement.side)")
+        } else if let saved = Self.loadSavedFrame(),
+                  saved.width >= panel.minSize.width, saved.height >= panel.minSize.height,
+                  NSScreen.screens.contains(where: { $0.visibleFrame.intersects(saved) }) {
             panel.setFrame(saved, display: true)
             normalPanelWidth = saved.width
         } else {
             fitPanelToContent(panel)
             positionPanelBelowStatusItem(panel)
         }
+
+        startGhosttyFollow()
+        updateGhosttyFollowInterval()
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         panel.makeKeyAndOrderFront(nil)
-        // Defer save so the frame is finalized after layout
-        DispatchQueue.main.async { [weak self] in self?.saveCurrentFrame() }
     }
 
     private func prepareExpandedPanelForOpen(_ panel: NSPanel) {
@@ -380,23 +406,21 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return bestFrame
     }
 
+    private func visibleUnionFrame() -> CGRect? {
+        let frames = NSScreen.screens.map(\.visibleFrame)
+        guard var union = frames.first else { return nil }
+        for frame in frames.dropFirst() { union = union.union(frame) }
+        return union
+    }
+
     private func clampPanelOrigin(_ origin: CGPoint, panelSize: CGSize, margin: CGFloat = 8) -> CGPoint {
-        let panelRect = CGRect(origin: origin, size: panelSize)
-        let screen = NSScreen.screens.first(where: { $0.visibleFrame.intersects(panelRect) })
-            ?? NSScreen.screens.first(where: { $0.visibleFrame.contains(origin) })
-            ?? NSScreen.main
-            ?? NSScreen.screens.first
-        guard let targetScreen = screen else { return origin }
-
-        let visibleFrame = targetScreen.visibleFrame
-        let minX = visibleFrame.minX + margin
-        let minY = visibleFrame.minY + margin
-        let maxX = max(minX, visibleFrame.maxX - panelSize.width - margin)
-        let maxY = max(minY, visibleFrame.maxY - panelSize.height - margin)
-
-        let clampedX = max(minX, min(origin.x, maxX))
-        let clampedY = max(minY, min(origin.y, maxY))
-        return CGPoint(x: clampedX, y: clampedY)
+        guard let union = visibleUnionFrame() else { return origin }
+        let maxX = max(union.minX, union.maxX - panelSize.width - margin)
+        let maxY = max(union.minY, union.maxY - panelSize.height - margin)
+        return CGPoint(
+            x: min(max(origin.x, union.minX + margin), maxX),
+            y: min(max(origin.y, union.minY + margin), maxY)
+        )
     }
 
     private func ghosttyAnchoredOrigin(
@@ -404,7 +428,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         panelSize: CGSize,
         preferredSide: GhosttyAnchorSide?
     ) -> (origin: CGPoint, side: GhosttyAnchorSide) {
-        let gap: CGFloat = 2
+        let gap = snapGap
         let candidateScreen = NSScreen.screens.first(where: { $0.frame.intersects(ghosttyFrame) })
             ?? NSScreen.main
             ?? NSScreen.screens.first
@@ -472,12 +496,25 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return rightDistance <= leftDistance ? .right : .left
     }
 
+    /// Suspend drift detection with a 1.0s watchdog that forces it back to false.
+    /// Prevents permanent suspension if animation completion is dropped.
+    private func suspendDriftWithWatchdog() {
+        suspendDriftDetection = true
+        driftWatchdogGeneration &+= 1
+        let gen = driftWatchdogGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self, self.driftWatchdogGeneration == gen, self.suspendDriftDetection else { return }
+            self.suspendDriftDetection = false
+            self.logGhosttyFollow("drift watchdog fired — forced suspendDriftDetection=false", level: "warning")
+        }
+    }
+
     private func updateSnapOffset() {
         guard let panel = mainPanel, let ghosttyFrame = findGhosttyFrame(), isGhosttySnapped else { return }
         lastGhosttyFrame = ghosttyFrame
         let target = ghosttyAnchoredOrigin(for: ghosttyFrame, panelSize: panel.frame.size, preferredSide: ghosttyAnchorSide)
         let topGap = abs(panel.frame.maxY - ghosttyFrame.maxY)
-        let followOrigin = (topGap <= 100)
+        let followOrigin = (topGap <= snapYAlignThreshold)
             ? target.origin
             : CGPoint(x: target.origin.x, y: panel.frame.origin.y)
         panel.setFrameOrigin(followOrigin)
@@ -513,6 +550,24 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 return
             }
 
+            // Skip follow while user is dragging the panel (Tproj parity)
+            if isDragSuspended {
+                let dragPB = NSPasteboard(name: .drag)
+                if dragPB.types == nil || dragPB.types?.isEmpty == true {
+                    isDragSuspended = false
+                } else {
+                    lastGhosttyFrame = currentGhosttyFrame
+                    return
+                }
+            } else {
+                let dragPB = NSPasteboard(name: .drag)
+                if let types = dragPB.types, !types.isEmpty {
+                    isDragSuspended = true
+                    lastGhosttyFrame = currentGhosttyFrame
+                    return
+                }
+            }
+
             // Detach by X-only (Y movement never triggers detach)
             let xDrift = abs(currentOrigin.x - target.origin.x)
             let ghostMotion: CGFloat
@@ -524,9 +579,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             } else {
                 ghostMotion = 0
             }
-            if xDrift >= 28 && ghostMotion < 2 {
+            if xDrift >= snapDetachThreshold && ghostMotion < 2 {
                 isGhosttySnapped = false
-                ghosttyDetachCooldownUntil = Date().addingTimeInterval(0.45)
+                ghosttyDetachCooldownUntil = Date().addingTimeInterval(snapDetachCooldown)
                 lastGhosttyFrame = currentGhosttyFrame
                 logGhosttyFollow("detached from Ghostty manually (distance=\(Int(xDrift)))")
                 if isGhosttySnapped != prevSnapped { updateGhosttyFollowInterval() }
@@ -535,7 +590,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
             ghosttyAnchorSide = target.side
             let topGap = abs(currentFrame.maxY - currentGhosttyFrame.maxY)
-            let snapY = (topGap <= 100) ? target.origin.y : currentOrigin.y
+            let snapY = (topGap <= snapYAlignThreshold) ? target.origin.y : currentOrigin.y
             let followOrigin = CGPoint(x: target.origin.x, y: snapY)
             if abs(currentOrigin.x - followOrigin.x) >= 0.5 || abs(currentOrigin.y - followOrigin.y) >= 0.5 {
                 panel.setFrameOrigin(followOrigin)
@@ -547,7 +602,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
             ghosttyDetachCooldownUntil = nil
 
-            if let snapSide = detectSnapSide(panelFrame: currentFrame, ghosttyFrame: currentGhosttyFrame, threshold: 14) {
+            if let snapSide = detectSnapSide(panelFrame: currentFrame, ghosttyFrame: currentGhosttyFrame, threshold: snapThreshold) {
                 ghosttyAnchorSide = snapSide
                 let snapTarget = ghosttyAnchoredOrigin(
                     for: currentGhosttyFrame,
@@ -555,7 +610,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     preferredSide: snapSide
                 )
                 let topGap = abs(currentFrame.maxY - currentGhosttyFrame.maxY)
-                let snapOrigin = (topGap <= 100)
+                let snapOrigin = (topGap <= snapYAlignThreshold)
                     ? snapTarget.origin
                     : CGPoint(x: snapTarget.origin.x, y: currentFrame.origin.y)
                 panel.setFrameOrigin(snapOrigin)
@@ -600,7 +655,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         isCollapseAnimating = true
         normalPanelWidth = panel.frame.width
         normalPanelOrigin = panel.frame.origin
-        suspendDriftDetection = true
+        suspendDriftWithWatchdog()
 
         let targetWidth = Self.collapsedWidth
         panel.minSize = NSSize(width: targetWidth, height: panel.minSize.height)
@@ -647,7 +702,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func expandPanel() {
         guard let panel = mainPanel, !isCollapseAnimating else { return }
         isCollapseAnimating = true
-        suspendDriftDetection = true
+        suspendDriftWithWatchdog()
 
         let targetWidth = normalPanelWidth
 

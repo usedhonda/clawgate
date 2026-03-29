@@ -416,7 +416,7 @@ final class BridgeCore {
                 // Check both session types — a project may be CC-only, Codex-only, or both
                 let ccMode = modes[AppConfig.modeKey(sessionType: "claude_code", project: project)]
                 let codexMode = modes[AppConfig.modeKey(sessionType: "codex", project: project)]
-                let hasLocalAuthoritative = [ccMode, codexMode].contains(where: { $0 == "autonomous" || $0 == "auto" })
+                let hasLocalAuthoritative = ccMode == "autonomous" || ccMode == "auto" || codexMode == "autonomous" || codexMode == "auto"
                 if !hasLocalAuthoritative {
                     do {
                         let fedResult = try forwardToFederationClient(body: body, traceID: trace, fedServer: fedServer)
