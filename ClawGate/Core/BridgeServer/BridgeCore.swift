@@ -557,7 +557,7 @@ final class BridgeCore {
             let esc = { (s: String) -> String in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
             process.arguments = [
                 "-l", "-c",
-                "\(tprojMsgPath) --allow-relay gate-reverse-channel --force --session \(esc(req.session)) --as gate \(esc(req.target)) \(esc(req.text))",
+                "\(tprojMsgPath) --allow-relay gate-reverse-channel --force --as gate --session \(esc(req.session)) \(esc(req.target)) \(esc(req.text))",
             ]
 
             let pipe = Pipe()
