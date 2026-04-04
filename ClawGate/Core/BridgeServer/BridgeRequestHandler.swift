@@ -34,6 +34,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/openclaw-info"),
         (.GET, "/v1/events"),
         (.POST, "/v1/debug/inject"),
+        (.POST, "/v1/oauth/safari-open"),
         (.GET, "/v1/debug/line-dedup"),
         (.GET, "/v1/debug/line-health"),
         (.GET, "/v1/tmux/prompt-state"),
@@ -173,6 +174,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.handleLineHealthDebug()
             } else if method == .POST && path == "/v1/debug/inject" {
                 result = core.debugInject(body: bodyData)
+            } else if method == .POST && path == "/v1/oauth/safari-open" {
+                result = core.oauthSafariOpen(body: bodyData)
             } else if method == .POST && path == "/v1/send" {
                 let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
                 result = core.send(body: bodyData, traceID: traceID)

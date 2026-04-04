@@ -267,6 +267,34 @@ struct TmuxSessionModeUpdateResult: Codable {
     }
 }
 
+// MARK: - OAuth Safari AX
+
+struct OAuthSafariOpenRequest: Codable {
+    let url: String
+    let timeoutSec: Int?
+    let closeTab: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case url
+        case timeoutSec = "timeout_sec"
+        case closeTab = "close_tab"
+    }
+}
+
+struct OAuthSafariOpenResult: Codable {
+    let opened: Bool
+    let clickedLabels: [String]
+    let observedURL: String?
+    let durationMs: Int
+
+    enum CodingKeys: String, CodingKey {
+        case opened
+        case clickedLabels = "clicked_labels"
+        case observedURL = "observed_url"
+        case durationMs = "duration_ms"
+    }
+}
+
 // MARK: - Tmux Prompt State
 
 struct PromptStateResult: Codable {

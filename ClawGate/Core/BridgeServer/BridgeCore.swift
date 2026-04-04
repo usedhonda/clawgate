@@ -641,6 +641,117 @@ final class BridgeCore {
         }
     }
 
+    func oauthSafariOpen(body: Data) -> HTTPResult {
+        let startedAt = Date()
+        let request: OAuthSafariOpenRequest
+        do {
+            request = try jsonDecoder.decode(OAuthSafariOpenRequest.self, from: body)
+        } catch {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(APIResponse<OAuthSafariOpenResult>(
+                    ok: false,
+                    result: nil,
+                    error: ErrorPayload(
+                        code: "invalid_json",
+                        message: "Could not parse request JSON",
+                        retriable: false,
+                        failedStep: "decode_request",
+                        details: String(describing: error)
+                    )
+                ))
+            )
+        }
+
+        guard let targetURL = URL(string: request.url),
+              let scheme = targetURL.scheme?.lowercased(),
+              ["http", "https"].contains(scheme) else {
+            return jsonResponse(
+                status: .badRequest,
+                body: encode(APIResponse<OAuthSafariOpenResult>(
+                    ok: false,
+                    result: nil,
+                    error: ErrorPayload(
+                        code: "invalid_url",
+                        message: "url must be a valid http/https URL",
+                        retriable: false,
+                        failedStep: "validate_request",
+                        details: request.url
+                    )
+                ))
+            )
+        }
+
+        let timeoutSec = min(max(request.timeoutSec ?? 12, 3), 15)
+        let closeTab = request.closeTab ?? false
+
+        let openTask = Process()
+        openTask.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        openTask.arguments = ["-a", "Safari", targetURL.absoluteString]
+        do {
+            try openTask.run()
+            openTask.waitUntilExit()
+        } catch {
+            logger.log(.warning, "oauthSafariOpen: failed to open Safari URL: \(error)")
+            return jsonResponse(
+                status: .serviceUnavailable,
+                body: encode(APIResponse<OAuthSafariOpenResult>(
+                    ok: false,
+                    result: nil,
+                    error: ErrorPayload(
+                        code: "safari_open_failed",
+                        message: "Failed to open Safari with OAuth URL",
+                        retriable: true,
+                        failedStep: "open_safari",
+                        details: String(describing: error)
+                    )
+                ))
+            )
+        }
+
+        Thread.sleep(forTimeInterval: 3.0)
+
+        do {
+            let attempt = try runSafariOAuthAXFlow(
+                timeoutSec: timeoutSec,
+                clickSequence: [
+                    ["Google ロゴ Google で続行", "Google で続行", "Google"],
+                    ["続行", "Continue"],
+                ],
+                closeTab: closeTab
+            )
+            let result = OAuthSafariOpenResult(
+                opened: true,
+                clickedLabels: attempt.clickedLabels,
+                observedURL: attempt.observedURL,
+                durationMs: Int(Date().timeIntervalSince(startedAt) * 1000)
+            )
+            return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+        } catch let err as BridgeRuntimeError {
+            logger.log(.warning, "oauthSafariOpen failed: \(err.message)")
+            return jsonResponse(
+                status: err.retriable ? .serviceUnavailable : .badRequest,
+                body: encode(APIResponse<OAuthSafariOpenResult>(ok: false, result: nil, error: err.asPayload()))
+            )
+        } catch {
+            logger.log(.warning, "oauthSafariOpen unexpected error: \(error)")
+            return jsonResponse(
+                status: .internalServerError,
+                body: encode(APIResponse<OAuthSafariOpenResult>(
+                    ok: false,
+                    result: nil,
+                    error: ErrorPayload(
+                        code: "oauth_safari_open_failed",
+                        message: "Unexpected error during Safari OAuth automation",
+                        retriable: true,
+                        failedStep: "oauth_safari_open",
+                        details: String(describing: error)
+                    )
+                ))
+            )
+        }
+    }
+
     func opsLogs(limit: Int, level: String?, traceID: String?) -> HTTPResult {
         let entries = opsLogStore.recent(limit: limit, levelFilter: level, traceFilter: traceID)
         let result = OpsLogsResult(entries: entries, count: entries.count)
@@ -1709,6 +1820,141 @@ final class BridgeCore {
         headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
         headers.add(name: "Content-Length", value: "\(data.count)")
         return HTTPResult(status: status, headers: headers, body: data)
+    }
+
+    private struct SafariOAuthAXAttempt {
+        let clickedLabels: [String]
+        let observedURL: String?
+    }
+
+    private func runSafariOAuthAXFlow(
+        timeoutSec: Int,
+        clickSequence: [[String]],
+        closeTab: Bool
+    ) throws -> SafariOAuthAXAttempt {
+        let deadline = Date().addingTimeInterval(TimeInterval(timeoutSec))
+        var clickedLabels: [String] = []
+        var observedURL: String?
+
+        for labels in clickSequence {
+            var matchedNode: AXNode?
+            while Date() < deadline {
+                let node = try? AXAppWindow.withWindow(
+                    bundleIdentifier: "com.apple.Safari",
+                    maxDepth: 10,
+                    maxNodes: 1500
+                ) { context in
+                    observedURL = safariObservedURL(from: context.nodes)
+                    return findMatchingAXButton(in: context.nodes, labels: labels)
+                }
+                if let node {
+                    matchedNode = node
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+
+            guard let node = matchedNode else {
+                throw BridgeRuntimeError(
+                    code: "oauth_button_not_found",
+                    message: "Required Safari OAuth button not found",
+                    retriable: true,
+                    failedStep: "ax_find_button",
+                    details: labels.joined(separator: ",")
+                )
+            }
+
+            let chosenLabel = summarizeAXNode(node)
+            let clicked = AXActions.press(node.element) || AXActions.clickAtCenter(node.element, restoreCursor: true)
+            guard clicked else {
+                throw BridgeRuntimeError(
+                    code: "oauth_button_click_failed",
+                    message: "Found Safari OAuth button but could not click it",
+                    retriable: true,
+                    failedStep: "ax_click_button",
+                    details: chosenLabel
+                )
+            }
+            clickedLabels.append(chosenLabel)
+            Thread.sleep(forTimeInterval: 3.0)
+        }
+
+        if closeTab {
+            _ = closeSafariFrontTab()
+        }
+
+        return SafariOAuthAXAttempt(clickedLabels: clickedLabels, observedURL: observedURL)
+    }
+
+    private func findMatchingAXButton(in nodes: [AXNode], labels: [String]) -> AXNode? {
+        let normalizedNeedles = labels.map(normalizeOAuthAXText)
+        let candidates = nodes
+            .filter { $0.role == "AXButton" }
+            .map { node -> (node: AXNode, score: Int) in
+                let haystack = normalizeOAuthAXText([
+                    node.title,
+                    node.description,
+                    node.value,
+                    node.roleDescription,
+                    node.subrole,
+                ].compactMap { $0 }.joined(separator: " "))
+                let score = normalizedNeedles.reduce(0) { partial, needle in
+                    partial + (haystack.contains(needle) ? max(needle.count, 1) : 0)
+                }
+                return (node, score)
+            }
+            .filter { $0.score > 0 }
+            .sorted { lhs, rhs in
+                if lhs.score != rhs.score {
+                    return lhs.score > rhs.score
+                }
+                return (lhs.node.frame?.minY ?? .greatestFiniteMagnitude) < (rhs.node.frame?.minY ?? .greatestFiniteMagnitude)
+            }
+        return candidates.first?.node
+    }
+
+    private func normalizeOAuthAXText(_ text: String) -> String {
+        text
+            .lowercased()
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func summarizeAXNode(_ node: AXNode) -> String {
+        [
+            node.title,
+            node.description,
+            node.value,
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .first { !$0.isEmpty } ?? "<unknown>"
+    }
+
+    private func safariObservedURL(from nodes: [AXNode]) -> String? {
+        for node in nodes {
+            for candidate in [node.value, node.title, node.description] {
+                let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                if trimmed.hasPrefix("https://") || trimmed.hasPrefix("http://") {
+                    return trimmed
+                }
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func closeSafariFrontTab() -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-e", "tell application \"System Events\" to keystroke \"w\" using command down"]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            return task.terminationStatus == 0
+        } catch {
+            logger.log(.warning, "oauthSafariOpen: close tab failed: \(error)")
+            return false
+        }
     }
 
     // MARK: - LINE Ensure Conversation
