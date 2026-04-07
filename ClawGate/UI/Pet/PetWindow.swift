@@ -119,7 +119,9 @@ private final class PetContentView: NSView {
     private let model: PetModel
     private let characterSize: CGFloat
     private var bubbleWindow: NSWindow?
+    private var whisperWindow: NSWindow?
     private var bubbleObservation: Any?
+    private var whisperObservation: Any?
 
     init(spriteView: PetSpriteView, model: PetModel, characterSize: CGFloat) {
         self.spriteView = spriteView
@@ -138,6 +140,17 @@ private final class PetContentView: NSView {
                 }
             }
         }
+
+        // Observe whisper text (Layer 1)
+        whisperObservation = model.$whisperText.sink { [weak self] text in
+            DispatchQueue.main.async {
+                if let text, !text.isEmpty {
+                    self?.showWhisper(text)
+                } else {
+                    self?.hideWhisper()
+                }
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -150,6 +163,59 @@ private final class PetContentView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         model.stateMachine.handle(.userClicked)
+    }
+
+    // MARK: - Right-Click Context Menu
+
+    override func rightMouseDown(with event: NSEvent) {
+        let menu = NSMenu()
+
+        // Mode items
+        for mode in PetModel.PetMode.allCases {
+            let item = NSMenuItem(title: mode.rawValue, action: #selector(changePetMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode
+            item.state = model.petMode == mode ? .on : .off
+            menu.addItem(item)
+        }
+
+        menu.addItem(.separator())
+
+        // Open chat
+        let chatItem = NSMenuItem(title: "チャットを開く", action: #selector(openChat(_:)), keyEquivalent: "")
+        chatItem.target = self
+        menu.addItem(chatItem)
+
+        menu.addItem(.separator())
+
+        // Opacity submenu
+        let opacityItem = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
+        let opacityMenu = NSMenu()
+        for percent in [100, 75, 50, 25] {
+            let value = Double(percent) / 100.0
+            let sub = NSMenuItem(title: "\(percent)%", action: #selector(changeOpacity(_:)), keyEquivalent: "")
+            sub.target = self
+            sub.tag = percent
+            sub.state = abs(model.opacity - value) < 0.01 ? .on : .off
+            opacityMenu.addItem(sub)
+        }
+        opacityItem.submenu = opacityMenu
+        menu.addItem(opacityItem)
+
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
+
+    @objc private func changePetMode(_ sender: NSMenuItem) {
+        guard let mode = sender.representedObject as? PetModel.PetMode else { return }
+        model.petMode = mode
+    }
+
+    @objc private func openChat(_ sender: NSMenuItem) {
+        model.stateMachine.handle(.userDoubleClicked)
+    }
+
+    @objc private func changeOpacity(_ sender: NSMenuItem) {
+        model.opacity = Double(sender.tag) / 100.0
     }
 
     // MARK: - Bubble Window
@@ -190,6 +256,52 @@ private final class PetContentView: NSView {
             window?.removeChildWindow(bw)
             bw.orderOut(nil)
             bubbleWindow = nil
+        }
+    }
+
+    // MARK: - Whisper Window (Layer 1)
+
+    private func showWhisper(_ text: String) {
+        hideWhisper()
+        guard let parentWindow = window else { return }
+
+        let whisperView = PetWhisperView(text: text)
+        let hosting = NSHostingView(rootView: AnyView(whisperView))
+        let size = hosting.intrinsicContentSize
+        let w = max(size.width + 16, 60)
+        let h = max(size.height + 8, 24)
+        hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
+
+        let ww = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        ww.isOpaque = false
+        ww.backgroundColor = .clear
+        ww.level = .floating
+        ww.hasShadow = false
+        ww.contentView = hosting
+        ww.isReleasedWhenClosed = false
+        ww.ignoresMouseEvents = true
+
+        let parentFrame = parentWindow.frame
+        let origin = NSPoint(
+            x: parentFrame.midX - w / 2,
+            y: parentFrame.maxY + 2
+        )
+        ww.setFrameOrigin(origin)
+
+        parentWindow.addChildWindow(ww, ordered: .above)
+        whisperWindow = ww
+    }
+
+    private func hideWhisper() {
+        if let ww = whisperWindow {
+            window?.removeChildWindow(ww)
+            ww.orderOut(nil)
+            whisperWindow = nil
         }
     }
 }
