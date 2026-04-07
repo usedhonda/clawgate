@@ -48,7 +48,7 @@ enum PetEvent {
 final class PetStateMachine: ObservableObject {
     @Published var current: PetState = .idle
     @Published var isBubbleVisible = false
-    @Published private(set) var isChatOpen = false
+    @Published var isChatOpen = false
     /// Whisper text is managed by PetModel (Layer 1 display payload)
 
     /// Transition based on incoming event
@@ -63,15 +63,17 @@ final class PetStateMachine: ObservableObject {
 
         case .userClicked:
             // Simple toggle: click = chat open/close
+            NSLog("[Pet] userClicked: isChatOpen=%d isBubbleVisible=%d", isChatOpen ? 1 : 0, isBubbleVisible ? 1 : 0)
             if isChatOpen {
                 isChatOpen = false
             } else {
                 isChatOpen = true
-                isBubbleVisible = false  // dismiss notification when opening chat
+                isBubbleVisible = false
             }
+            NSLog("[Pet] after userClicked: isChatOpen=%d", isChatOpen ? 1 : 0)
 
         case .userDoubleClicked:
-            // Same as single click
+            NSLog("[Pet] userDoubleClicked: isChatOpen=%d", isChatOpen ? 1 : 0)
             if isChatOpen {
                 isChatOpen = false
             } else {
@@ -81,10 +83,7 @@ final class PetStateMachine: ObservableObject {
 
         case .bubbleDismissed:
             isBubbleVisible = false
-            isChatOpen = false
-            if current != .speak && current != .speakMix && current != .speakTilt && current != .talk {
-                current = .idle
-            }
+            // Don't touch isChatOpen — notification dismiss is independent of chat
 
         case .mouseEntered:
             break  // PetModel handles whisper

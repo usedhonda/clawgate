@@ -26,6 +26,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/ops/logs"),
         (.GET, "/v1/autonomous/status"),
         (.POST, "/v1/send"),
+        (.POST, "/v1/bubble-notify"),
         (.GET, "/v1/context"),
         (.GET, "/v1/messages"),
         (.GET, "/v1/conversations"),
@@ -179,6 +180,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
             } else if method == .POST && path == "/v1/send" {
                 let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
                 result = core.send(body: bodyData, traceID: traceID)
+            } else if method == .POST && path == "/v1/bubble-notify" {
+                result = core.bubbleNotify(body: bodyData)
             } else if method == .GET && path == "/v1/context" {
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
                 result = core.context(adapter: adapter)

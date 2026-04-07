@@ -10,16 +10,16 @@ struct PetNotificationBubble: View {
     @State private var fadeTask: Task<Void, Never>?
 
     var body: some View {
-        if isVisible, let lastMsg = model.messages.last, lastMsg.role == .assistant {
+        if isVisible, let lastMsg = model.notificationMessage {
             VStack(alignment: .leading, spacing: 2) {
                 Text(lastMsg.text)
                     .font(.system(size: 13))
                     .foregroundColor(.white)
-                    .lineLimit(5)
+                    .lineLimit(lastMsg.text.count > 200 ? 15 : 8)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
             }
-            .frame(maxWidth: 300)
+            .frame(maxWidth: lastMsg.text.count > 100 ? 400 : 300)
             .background(
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.8))
@@ -34,7 +34,7 @@ struct PetNotificationBubble: View {
                 }
             }
             .onTapGesture {
-                model.stateMachine.handle(.userDoubleClicked)
+                model.toggleChat()
             }
             .onAppear {
                 startFadeTimer(for: lastMsg.text)
@@ -54,7 +54,7 @@ struct PetNotificationBubble: View {
                     isVisible = false
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    model.stateMachine.handle(.bubbleDismissed)
+                    model.dismissNotification()
                 }
             }
         }

@@ -11,6 +11,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var opacity: Double = 1.0
     @Published var streamingText: String = ""
     @Published var whisperText: String?       // Layer 1: brief reaction text
+    @Published var notificationMessage: OpenClawChatMessage?  // Independent notification
     @Published var petMode: PetMode = .secretary
     @Published var isVisible: Bool = true
     @Published var isTrackingEnabled: Bool = true
@@ -27,6 +28,7 @@ final class PetModel: NSObject, ObservableObject {
     private var eventTask: Task<Void, Never>?
     private var streamingMessageId: String?
     private var whisperDismissTask: Task<Void, Never>?
+    private var notificationDismissTask: Task<Void, Never>?
     private var speakTimeoutTask: Task<Void, Never>?
     private var deltaIdleTask: Task<Void, Never>?
     private var idleTimer: Timer?
@@ -156,12 +158,9 @@ final class PetModel: NSObject, ObservableObject {
                     isNew = true
                 }
                 self.stateMachine.handle(.assistantFinished)
-                // Show notification bubble for proactive/new assistant messages
-                if isNew && msg.role == .assistant && !self.stateMachine.isChatOpen && self.isBubbleEnabled {
-                    self.stateMachine.isBubbleVisible = true
-                    if msg.isProactive {
-                        self.showWhisper(String(msg.text.prefix(40)))
-                    }
+                // Show notification for new assistant messages (independent of state machine)
+                if isNew && msg.role == .assistant {
+                    self.showNotification(msg)
                 }
 
             case .delta(let messageId, let text):
@@ -232,6 +231,35 @@ final class PetModel: NSObject, ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             try? await self.wsClient.chatHistory(sessionKey: sessionKey, limit: 50)
+        }
+    }
+
+    // MARK: - Notification (independent of state machine)
+
+    func showNotification(_ msg: OpenClawChatMessage) {
+        guard isBubbleEnabled, !stateMachine.isChatOpen else { return }
+        // Duration scales with text length: 15s base + 1s per 20 chars, max 60s
+        let duration = min(max(15.0, Double(msg.text.count) / 20.0 + 15.0), 60.0)
+        notificationMessage = msg
+        notificationDismissTask?.cancel()
+        notificationDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.notificationMessage = nil
+        }
+    }
+
+    func dismissNotification() {
+        notificationDismissTask?.cancel()
+        notificationMessage = nil
+    }
+
+    func toggleChat() {
+        if stateMachine.isChatOpen {
+            stateMachine.isChatOpen = false
+        } else {
+            stateMachine.isChatOpen = true
+            dismissNotification()
         }
     }
 
@@ -430,12 +458,20 @@ final class PetModel: NSObject, ObservableObject {
 
     func start() {
         characterManager.scan()
-        // Pre-load device identity into cache to avoid Keychain dialog during handshake
         _ = try? OpenClawDeviceIdentity.loadOrCreate()
         connect()
         startIdleTimer()
         startReconnectTimer()
         startWindowTracking()
+
+        // Listen for bubble_notify from bridge
+        NotificationCenter.default.addObserver(forName: .petBubbleNotify, object: nil, queue: .main) { [weak self] notif in
+            guard let self, let text = notif.userInfo?["text"] as? String else { return }
+            let source = notif.userInfo?["source"] as? String ?? "unknown"
+            let msg = OpenClawChatMessage(role: .assistant, text: text)
+            self.messages.append(msg)
+            self.showNotification(msg)
+        }
     }
 
     /// Retry connection every 15s if disconnected (handles Gateway-after-ClawGate startup)

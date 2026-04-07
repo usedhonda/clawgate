@@ -1,6 +1,10 @@
 import Foundation
 import CryptoKit
 
+extension Notification.Name {
+    static let petBubbleNotify = Notification.Name("petBubbleNotify")
+}
+
 // MARK: - Events from Gateway
 
 /// Events received from OpenClaw WebSocket

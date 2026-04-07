@@ -218,24 +218,23 @@ private final class PetContentView: NSView {
         super.init(frame: .zero)
         addSubview(spriteView)
 
-        // Observe notification bubble (proactive messages only)
-        bubbleObservation = model.stateMachine.$isBubbleVisible.sink { [weak self] visible in
+        // Observe notification (independent of state machine)
+        bubbleObservation = model.$notificationMessage.sink { [weak self] msg in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if visible && !self.model.stateMachine.isChatOpen {
+                if msg != nil {
                     self.showNotification()
-                } else if !visible {
+                } else {
                     self.hideNotificationBubble()
                 }
             }
         }
 
-        // Observe chat open/close (click toggle)
+        // Observe chat open/close
         chatObservation = model.stateMachine.$isChatOpen.sink { [weak self] open in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if open {
-                    self.hideNotificationBubble()
                     self.showFullChat()
                 } else {
                     self.hideChatWindow()
@@ -284,7 +283,7 @@ private final class PetContentView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if !isDragging { model.stateMachine.handle(.userClicked) }
+        if !isDragging { model.toggleChat() }
         dragStartScreenPos = nil
         dragStartWindowOrigin = nil
         isDragging = false

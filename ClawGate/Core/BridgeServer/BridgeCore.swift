@@ -85,6 +85,30 @@ final class BridgeCore {
         return nil
     }
 
+    // MARK: - Bubble Notify (dev session → pet notification)
+
+    func bubbleNotify(body: Data) -> HTTPResult {
+        guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let payload = json["payload"] as? [String: Any],
+              let text = payload["text"] as? String, !text.isEmpty else {
+            let err = Data("{\"ok\":false,\"error\":\"missing payload.text\"}".utf8)
+            return jsonResponse(status: .badRequest, body: err)
+        }
+
+        let source = payload["source"] as? String ?? "unknown"
+        let traceId = payload["trace_id"] as? String
+
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .petBubbleNotify,
+                object: nil,
+                userInfo: ["text": text, "source": source, "trace_id": traceId as Any]
+            )
+        }
+
+        return jsonResponse(status: .ok, body: encode(["ok": true]))
+    }
+
     func health() -> HTTPResult {
         let body = encode(HealthResponse(ok: true, version: "0.1.0"))
         return jsonResponse(status: .ok, body: body)
