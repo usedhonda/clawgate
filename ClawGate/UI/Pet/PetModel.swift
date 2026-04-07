@@ -330,7 +330,7 @@ final class PetModel: NSObject, ObservableObject {
               let frame = AXQuery.copyFrameAttribute(focusedWin) else { return }
 
         let screen = NSScreen.main?.visibleFrame ?? .zero
-        let petSize: CGFloat = 148
+        let petSize: CGFloat = characterSize + 20  // match actual window size
 
         // Skip fullscreen apps
         if let screenFull = NSScreen.main?.frame,
@@ -342,8 +342,9 @@ final class PetModel: NSObject, ObservableObject {
         let screenHeight = NSScreen.main?.frame.height ?? 900
         let appKitY = screenHeight - frame.origin.y - frame.height
 
-        let rightX = frame.origin.x + frame.width - 20
-        let leftX = frame.origin.x - petSize + 20
+        let overlap = characterSize * 0.15  // scale overlap with size
+        let rightX = frame.origin.x + frame.width - overlap
+        let leftX = frame.origin.x - petSize + overlap
         let topY = appKitY + frame.height - petSize
         let bottomY = appKitY
 

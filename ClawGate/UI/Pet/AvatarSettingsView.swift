@@ -11,23 +11,9 @@ struct AvatarSettingsView: View {
             VStack(alignment: .leading, spacing: 8) {
                 toggleRow("Enabled", isOn: $petModel.isVisible)
 
-                HStack {
-                    Text("Mode")
-                        .font(PanelTheme.bodyFont)
-                        .foregroundStyle(PanelTheme.textPrimary)
-                    Spacer()
-                    Picker("", selection: $petModel.petMode) {
-                        ForEach(PetModel.PetMode.allCases, id: \.self) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 180)
-                }
-
                 toggleRow("Follow Active Window", isOn: $petModel.isTrackingEnabled)
 
-                sliderRow("Size", value: Binding(get: { Double(petModel.characterSize) }, set: { petModel.characterSize = CGFloat($0) }), range: 64...256, format: "%.0f pt")
+                sliderRow("Size", value: Binding(get: { Double(petModel.characterSize) }, set: { petModel.characterSize = CGFloat($0) }), range: 32...128, format: "%.0f pt")
                 sliderRow("Opacity", value: $petModel.opacity, range: 0.25...1.0, format: "%.0f%%", multiplier: 100)
             }
             .padding(PanelTheme.cardPadding)

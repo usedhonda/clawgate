@@ -11,9 +11,7 @@ final class PetWindowController {
     private var opacityObservation: AnyCancellable?
     private var stateObservation: AnyCancellable?
     private var positionObservation: AnyCancellable?
-
-    /// Character display size in points
-    private let characterSize: CGFloat = 128
+    private var sizeObservation: AnyCancellable?
 
     init(model: PetModel) {
         self.model = model
@@ -22,8 +20,8 @@ final class PetWindowController {
     func show() {
         guard window == nil else { return }
 
+        let characterSize = model.characterSize
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
-        // Default position: bottom-right of screen
         let windowSize = NSSize(width: characterSize + 20, height: characterSize + 20)
         let origin = NSPoint(
             x: screenFrame.maxX - windowSize.width - 40,
@@ -70,6 +68,18 @@ final class PetWindowController {
         opacityObservation = model.$opacity.sink { [weak w] newValue in
             DispatchQueue.main.async {
                 w?.alphaValue = newValue
+            }
+        }
+
+        // Observe character size changes
+        sizeObservation = model.$characterSize.sink { [weak self] newSize in
+            guard let self, let w = self.window, let sprite = self.spriteView else { return }
+            DispatchQueue.main.async {
+                let winSize = NSSize(width: newSize + 20, height: newSize + 20)
+                var frame = w.frame
+                frame.size = winSize
+                w.setFrame(frame, display: true)
+                sprite.frame = NSRect(origin: .zero, size: NSSize(width: newSize, height: newSize))
             }
         }
 
@@ -144,6 +154,7 @@ final class PetWindowController {
         stateObservation = nil
         opacityObservation = nil
         positionObservation = nil
+        sizeObservation = nil
     }
 
     private func updateSpriteForCurrentState() {
