@@ -123,8 +123,9 @@ private final class PetContentView: NSView {
     private let characterSize: CGFloat
     private var bubbleWindow: NSWindow?
     private var whisperWindow: NSWindow?
-    private var bubbleObservation: Any?
-    private var whisperObservation: Any?
+    private var bubbleObservation: AnyCancellable?
+    private var chatObservation: AnyCancellable?
+    private var whisperObservation: AnyCancellable?
 
     init(spriteView: PetSpriteView, model: PetModel, characterSize: CGFloat) {
         self.spriteView = spriteView
@@ -133,13 +134,29 @@ private final class PetContentView: NSView {
         super.init(frame: .zero)
         addSubview(spriteView)
 
-        // Observe bubble visibility
+        // Observe bubble visibility (Layer 2 notification)
         bubbleObservation = model.stateMachine.$isBubbleVisible.sink { [weak self] visible in
             DispatchQueue.main.async {
+                guard let self else { return }
                 if visible {
-                    self?.showBubble()
+                    if self.model.stateMachine.isChatOpen {
+                        self.showFullChat()
+                    } else {
+                        self.showNotification()
+                    }
                 } else {
-                    self?.hideBubble()
+                    self.hideBubble()
+                }
+            }
+        }
+
+        // Observe chat open state (Layer 2 → Layer 3 upgrade)
+        chatObservation = model.stateMachine.$isChatOpen.sink { [weak self] open in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if open {
+                    self.hideBubble()
+                    self.showFullChat()
                 }
             }
         }
@@ -221,16 +238,27 @@ private final class PetContentView: NSView {
         model.opacity = Double(sender.tag) / 100.0
     }
 
-    // MARK: - Bubble Window
+    // MARK: - Bubble Window (Layer 2: notification / Layer 3: full chat)
 
-    private func showBubble() {
+    private func showNotification() {
         guard bubbleWindow == nil, let parentWindow = window else { return }
-        let bubbleView = PetBubbleView(model: model)
-        let hosting = NSHostingView(rootView: AnyView(bubbleView))
-        hosting.frame = NSRect(x: 0, y: 0, width: 260, height: 260)
+        let notifView = PetNotificationBubble(model: model)
+        showBubbleWindow(rootView: AnyView(notifView), width: 220, height: 80, parent: parentWindow)
+    }
+
+    private func showFullChat() {
+        hideBubble()
+        guard let parentWindow = window else { return }
+        let chatView = PetBubbleView(model: model)
+        showBubbleWindow(rootView: AnyView(chatView), width: 260, height: 260, parent: parentWindow)
+    }
+
+    private func showBubbleWindow(rootView: AnyView, width: CGFloat, height: CGFloat, parent: NSWindow) {
+        let hosting = NSHostingView(rootView: rootView)
+        hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
 
         let bw = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 260, height: 260),
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -242,15 +270,14 @@ private final class PetContentView: NSView {
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
 
-        // Position bubble above the character
-        let parentFrame = parentWindow.frame
-        let bubbleOrigin = NSPoint(
-            x: parentFrame.midX - 130,
+        let parentFrame = parent.frame
+        let origin = NSPoint(
+            x: parentFrame.midX - width / 2,
             y: parentFrame.maxY + 8
         )
-        bw.setFrameOrigin(bubbleOrigin)
+        bw.setFrameOrigin(origin)
 
-        parentWindow.addChildWindow(bw, ordered: .above)
+        parent.addChildWindow(bw, ordered: .above)
         bubbleWindow = bw
     }
 

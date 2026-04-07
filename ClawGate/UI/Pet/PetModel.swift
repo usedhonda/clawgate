@@ -57,7 +57,7 @@ final class PetModel: NSObject, ObservableObject {
             do {
                 let stream = try await wsClient.connect(url: url, token: config.token)
                 for await event in stream {
-                    await self.handleEvent(event)
+                    self.handleEvent(event)
                 }
                 // Stream ended
                 await MainActor.run {
@@ -179,10 +179,10 @@ final class PetModel: NSObject, ObservableObject {
         guard petMode != .quiet else { return }
         whisperText = text
         whisperDismissTask?.cancel()
-        whisperDismissTask = Task { [weak self] in
+        whisperDismissTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            DispatchQueue.main.async { self?.whisperText = nil }
+            self?.whisperText = nil
         }
     }
 
