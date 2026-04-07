@@ -40,9 +40,9 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Connection
 
     func connect() {
-        guard connectionState == .disconnected || connectionState != .connecting else { return }
+        guard connectionState != .connecting && connectionState != .connected else { return }
         guard let config = readOpenClawGatewayConfig() else {
-            connectionState = .error("OpenClaw config not found")
+            connectionState = .disconnected  // Silently stay disconnected, pet still works without Gateway
             return
         }
         guard let url = URL(string: "ws://127.0.0.1:\(config.port)/websocket") else {
@@ -207,6 +207,17 @@ final class PetModel: NSObject, ObservableObject {
         characterManager.scan()
         connect()
         startIdleTimer()
+        startReconnectTimer()
+    }
+
+    /// Retry connection every 15s if disconnected (handles Gateway-after-ClawGate startup)
+    private func startReconnectTimer() {
+        Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.connectionState == .disconnected {
+                self.connect()
+            }
+        }
     }
 
     func cleanup() {

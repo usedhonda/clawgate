@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// Transparent always-on-top window for the pet character
@@ -7,8 +8,8 @@ final class PetWindowController {
     private var spriteView: PetSpriteView?
     private var bubbleHostingView: NSHostingView<AnyView>?
     private let model: PetModel
-    private var observation: NSKeyValueObservation?
-    private var stateObservation: Any?
+    private var opacityObservation: AnyCancellable?
+    private var stateObservation: AnyCancellable?
 
     /// Character display size in points
     private let characterSize: CGFloat = 128
@@ -50,12 +51,12 @@ final class PetWindowController {
         let contentView = PetContentView(spriteView: sprite, model: model, characterSize: characterSize)
         w.contentView = contentView
 
-        // Load initial character
-        updateSpriteForCurrentState()
-
         window = w
         spriteView = sprite
         w.orderFront(nil)
+
+        // Load initial character (spriteView must be set first)
+        updateSpriteForCurrentState()
 
         // Observe state machine changes
         stateObservation = model.stateMachine.$current.sink { [weak self] _ in
@@ -64,9 +65,11 @@ final class PetWindowController {
             }
         }
 
-        // Observe opacity
-        observation = model.observe(\.opacity, options: [.new]) { [weak w] _, change in
-            w?.alphaValue = change.newValue ?? 1.0
+        // Observe opacity via Combine
+        opacityObservation = model.$opacity.sink { [weak w] newValue in
+            DispatchQueue.main.async {
+                w?.alphaValue = newValue
+            }
         }
     }
 
@@ -75,7 +78,7 @@ final class PetWindowController {
         window = nil
         spriteView = nil
         stateObservation = nil
-        observation = nil
+        opacityObservation = nil
     }
 
     private func updateSpriteForCurrentState() {
