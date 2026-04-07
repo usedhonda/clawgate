@@ -42,7 +42,7 @@ enum PetEvent {
 
 /// State machine for pet character with 3-layer UX
 final class PetStateMachine: ObservableObject {
-    @Published private(set) var current: PetState = .idle
+    @Published var current: PetState = .idle
     @Published private(set) var isBubbleVisible = false
     @Published private(set) var isChatOpen = false
     /// Whisper text is managed by PetModel (Layer 1 display payload)
