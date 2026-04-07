@@ -20,11 +20,13 @@ struct MainPanelView: View {
     private enum Tab: String, CaseIterable {
         case monitor  = "Monitor"
         case config   = "Config"
+        case avatar   = "Avatar"
         case vibeterm = "VibeTerm"
     }
 
     @ObservedObject var settingsModel: SettingsModel
     @ObservedObject var panelModel: MainPanelModel
+    @ObservedObject var petModel: PetModel
 
     let modeOrder: [String]
     let onSetSessionMode: (String, String, String) -> Void
@@ -107,6 +109,10 @@ struct MainPanelView: View {
                     InlineSettingsView(model: settingsModel, embedInScroll: false, onOpenQRCode: nil)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .avatar:
+            ScrollView(showsIndicators: false) {
+                AvatarSettingsView(petModel: petModel)
             }
         case .vibeterm:
             ScrollView(showsIndicators: false) {

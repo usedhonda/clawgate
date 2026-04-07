@@ -1,7 +1,6 @@
 import AppKit
 import Combine
 import SwiftUI
-import WebKit
 
 /// Transparent always-on-top window for the pet character
 final class PetWindowController {
@@ -96,7 +95,9 @@ final class PetWindowController {
         let distance = sqrt(dx * dx + dy * dy)
         guard distance > 5 else { return }  // Already close enough
 
-        let duration: TimeInterval = min(max(distance / 300, 0.3), 1.5)
+        // Longer distance = faster speed (scaled for ultrawide)
+        let speed: Double = distance < 300 ? 400 : distance < 1000 ? 1500 : 3000
+        let duration: TimeInterval = min(max(distance / speed, 0.15), 1.5)
         let steps = Int(duration * 60)  // ~60fps
         var step = 0
         let interval = duration / Double(steps)
@@ -114,11 +115,21 @@ final class PetWindowController {
                 timer.invalidate()
                 self?.moveTimer = nil
                 self?.model.currentWindowOrigin = target
-                // Arrive → idle
+                // Arrive → wave greeting or idle
                 let current = self?.model.stateMachine.current
                 if current == .walkFront || current == .walkBack
                     || current == .walkLeft || current == .walkRight {
-                    self?.model.stateMachine.current = .idle
+                    if self?.model.shouldWaveOnArrival == true {
+                        self?.model.shouldWaveOnArrival = false
+                        self?.model.stateMachine.current = .wave
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                            if self?.model.stateMachine.current == .wave {
+                                self?.model.stateMachine.current = .idle
+                            }
+                        }
+                    } else {
+                        self?.model.stateMachine.current = .idle
+                    }
                 }
             }
         }
@@ -327,67 +338,11 @@ private final class PetContentView: NSView {
     private func showNotification() {
         guard bubbleWindow == nil, let parentWindow = window else { return }
         let notifView = PetNotificationBubble(model: model)
-        showBubbleWindow(rootView: AnyView(notifView), width: 320, height: 120, parent: parentWindow)
-    }
-
-    private func showFullChat() {
-        hideBubble()
-        guard let parentWindow = window else { return }
-
-        // Try to open OpenClaw Control UI in WKWebView
-        if let config = readOpenClawGatewayConfig() {
-            // Use localhost (SSH tunnel) for secure context (Web Crypto API)
-            let urlString = "http://127.0.0.1:\(config.port)/#token=\(config.token)"
-            if let url = URL(string: urlString) {
-                showWebChatWindow(url: url, parent: parentWindow)
-                return
-            }
-        }
-
-        // Fallback to built-in chat if Gateway not configured
-        let chatView = PetBubbleView(model: model)
-        showBubbleWindow(rootView: AnyView(chatView), width: 260, height: 260, parent: parentWindow)
-    }
-
-    private func showWebChatWindow(url: URL, parent: NSWindow) {
-        let width: CGFloat = 420
-        let height: CGFloat = 600
-
-        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        webView.load(URLRequest(url: url))
+        let hosting = NSHostingView(rootView: AnyView(notifView))
+        hosting.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
 
         let bw = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        bw.title = "OpenClaw Chat"
-        bw.isOpaque = false
-        bw.backgroundColor = .windowBackgroundColor
-        bw.level = .floating
-        bw.hasShadow = true
-        bw.contentView = webView
-        bw.isReleasedWhenClosed = false
-        bw.minSize = NSSize(width: 320, height: 400)
-
-        let parentFrame = parent.frame
-        let origin = NSPoint(
-            x: parentFrame.midX - width / 2,
-            y: parentFrame.maxY + 8
-        )
-        bw.setFrameOrigin(origin)
-
-        parent.addChildWindow(bw, ordered: .above)
-        bubbleWindow = bw
-    }
-
-    private func showBubbleWindow(rootView: AnyView, width: CGFloat, height: CGFloat, parent: NSWindow) {
-        let hosting = NSHostingView(rootView: rootView)
-        hosting.frame = NSRect(x: 0, y: 0, width: width, height: height)
-
-        let bw = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 120),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -399,14 +354,46 @@ private final class PetContentView: NSView {
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
 
-        let parentFrame = parent.frame
-        let origin = NSPoint(
-            x: parentFrame.midX - width / 2,
+        let parentFrame = parentWindow.frame
+        bw.setFrameOrigin(NSPoint(
+            x: parentFrame.midX - 160,
             y: parentFrame.maxY + 8
-        )
-        bw.setFrameOrigin(origin)
+        ))
 
-        parent.addChildWindow(bw, ordered: .above)
+        parentWindow.addChildWindow(bw, ordered: .above)
+        bubbleWindow = bw
+    }
+
+    private func showFullChat() {
+        hideBubble()
+        guard let parentWindow = window else { return }
+        let chatView = PetBubbleView(model: model)
+        let hosting = NSHostingView(rootView: AnyView(chatView))
+        hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 480)
+
+        let bw = KeyableWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 480),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        bw.titlebarAppearsTransparent = true
+        bw.title = "Chi"
+        bw.isOpaque = false
+        bw.backgroundColor = NSColor(white: 0.12, alpha: 0.95)
+        bw.level = .floating
+        bw.hasShadow = true
+        bw.contentView = hosting
+        bw.isReleasedWhenClosed = false
+        bw.minSize = NSSize(width: 280, height: 300)
+
+        let parentFrame = parentWindow.frame
+        bw.setFrameOrigin(NSPoint(
+            x: parentFrame.midX - 180,
+            y: parentFrame.maxY + 8
+        ))
+
+        bw.makeKeyAndOrderFront(nil)
         bubbleWindow = bw
     }
 
@@ -463,4 +450,10 @@ private final class PetContentView: NSView {
             whisperWindow = nil
         }
     }
+}
+
+/// Borderless window that can become key (for text input)
+private final class KeyableWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
 }

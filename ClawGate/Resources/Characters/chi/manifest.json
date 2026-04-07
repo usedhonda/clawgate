@@ -1,0 +1,129 @@
+{
+  "name": "chi",
+  "displayName": "Chi (ちー)",
+  "author": "ClawGate",
+  "version": "1.0.0",
+  "description": "Secretary chibi character.",
+  "states": [
+    {
+      "name": "idle",
+      "frames": ["idle-01.png"],
+      "fps": 1,
+      "loop": true
+    },
+    {
+      "name": "blink-a",
+      "frames": ["idle-01.png", "idle-02.png", "idle-02.png", "idle-01.png"],
+      "fps": 8,
+      "loop": false
+    },
+    {
+      "name": "blink-b",
+      "frames": ["idle-01.png", "idle-02.png", "idle-01.png", "idle-02.png", "idle-01.png"],
+      "fps": 8,
+      "loop": false
+    },
+    {
+      "name": "blink",
+      "frames": ["blink-1.png", "blink-2.png", "blink-3.png", "blink-4.png", "blink-5.png"],
+      "fps": 8,
+      "loop": false
+    },
+    {
+      "name": "body-a",
+      "frames": ["idle-01.png", "idle-03.png", "idle-01.png"],
+      "fps": 4,
+      "loop": false
+    },
+    {
+      "name": "body-b",
+      "frames": ["idle-01.png", "idle-04.png", "idle-01.png"],
+      "fps": 4,
+      "loop": false
+    },
+    {
+      "name": "speak",
+      "frames": ["idle-01.png", "idle-05.png", "idle-01.png", "idle-05.png"],
+      "fps": 4,
+      "loop": true
+    },
+    {
+      "name": "speak-mix",
+      "frames": ["idle-01.png", "idle-05.png", "idle-03.png", "idle-05.png"],
+      "fps": 4,
+      "loop": true
+    },
+    {
+      "name": "speak-tilt",
+      "frames": ["idle-03.png", "idle-05.png", "idle-03.png", "idle-01.png"],
+      "fps": 4,
+      "loop": true
+    },
+    {
+      "name": "talk",
+      "frames": ["idle-05.png", "idle-01.png", "idle-05.png", "idle-03.png"],
+      "fps": 4,
+      "loop": true
+    },
+    {
+      "name": "walk-front",
+      "frames": ["walk-front-01.png", "walk-front-02.png", "walk-front-03.png", "walk-front-04.png"],
+      "fps": 6,
+      "loop": true
+    },
+    {
+      "name": "walk-back",
+      "frames": ["walk-back-01.png", "walk-back-02.png", "walk-back-03.png", "walk-back-04.png"],
+      "fps": 6,
+      "loop": true
+    },
+    {
+      "name": "walk-right",
+      "frames": ["walk-right-01.png", "walk-right-02.png", "walk-right-03.png", "walk-right-04.png"],
+      "fps": 6,
+      "loop": true
+    },
+    {
+      "name": "walk-left",
+      "frames": ["walk-left-01.png", "walk-left-02.png", "walk-left-03.png", "walk-left-04.png"],
+      "fps": 6,
+      "loop": true
+    },
+    {
+      "name": "wave",
+      "frames": ["idle-08.png", "idle-01.png", "idle-08.png", "idle-01.png"],
+      "fps": 2,
+      "loop": false
+    },
+    {
+      "name": "react",
+      "frames": ["idle-01.png", "idle-05.png", "idle-03.png", "idle-01.png"],
+      "fps": 2,
+      "loop": false
+    },
+    {
+      "name": "blush",
+      "frames": ["idle-06.png", "idle-01.png", "idle-06.png", "idle-01.png"],
+      "fps": 2,
+      "loop": false
+    },
+    {
+      "name": "idle-breathe",
+      "frames": ["idle-01.png", "idle-02.png", "idle-01.png", "idle-03.png", "idle-01.png"],
+      "fps": 2,
+      "loop": false
+    },
+    {
+      "name": "funny",
+      "frames": ["idle-06.png", "idle-07.png", "idle-06.png", "idle-01.png"],
+      "fps": 2,
+      "loop": false
+    },
+    {
+      "name": "secretary",
+      "frames": ["idle-08.png", "idle-03.png", "idle-08.png", "idle-01.png"],
+      "fps": 2,
+      "loop": false
+    }
+  ]
+}

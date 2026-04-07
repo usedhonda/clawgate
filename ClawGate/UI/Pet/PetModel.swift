@@ -12,6 +12,11 @@ final class PetModel: NSObject, ObservableObject {
     @Published var streamingText: String = ""
     @Published var whisperText: String?       // Layer 1: brief reaction text
     @Published var petMode: PetMode = .secretary
+    @Published var isVisible: Bool = true
+    @Published var isTrackingEnabled: Bool = true
+    @Published var isBubbleEnabled: Bool = true
+    @Published var isWhisperEnabled: Bool = true
+    @Published var characterSize: CGFloat = 128
     @Published var targetPosition: NSPoint?   // Window tracking target
 
     let stateMachine = PetStateMachine()
@@ -23,10 +28,14 @@ final class PetModel: NSObject, ObservableObject {
     private var streamingMessageId: String?
     private var whisperDismissTask: Task<Void, Never>?
     private var speakTimeoutTask: Task<Void, Never>?
+    private var deltaIdleTask: Task<Void, Never>?
     private var idleTimer: Timer?
     private var windowTrackingTimer: Timer?
     private var dragPauseUntil: Date?
     private var lastTrackedApp: NSRunningApplication?
+    @Published var shouldWaveOnArrival = false
+    private enum PlacementSide { case left, right }
+    private var lastPlacementSide: PlacementSide = .right
     @Published var currentWindowOrigin: NSPoint?  // For walk direction calculation
 
     /// Pet interaction mode (right-click menu)
@@ -146,7 +155,7 @@ final class PetModel: NSObject, ObservableObject {
                 }
                 self.stateMachine.handle(.assistantFinished)
                 // Show notification bubble for new assistant messages (proactive)
-                if isNew && msg.role == .assistant && !self.stateMachine.isChatOpen {
+                if isNew && msg.role == .assistant && !self.stateMachine.isChatOpen && self.isBubbleEnabled {
                     self.stateMachine.isBubbleVisible = true
                 }
 
@@ -158,23 +167,25 @@ final class PetModel: NSObject, ObservableObject {
                     let streamingMsg = OpenClawChatMessage(
                         id: messageId, role: .assistant, text: text, isStreaming: true)
                     self.messages.append(streamingMsg)
-                    self.stateMachine.handle(.assistantStarted)
-                    // Safety timeout: return to idle after 30s if no finish event
-                    self.speakTimeoutTask?.cancel()
-                    self.speakTimeoutTask = Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: 30_000_000_000)
-                        guard !Task.isCancelled, let self else { return }
-                        if self.isStreaming {
-                            NSLog("[Pet] Speak timeout, forcing idle")
-                            self.isStreaming = false
-                            self.streamingMessageId = nil
-                            self.stateMachine.handle(.assistantFinished)
-                        }
+                    // Only show speak animation if chat is open
+                    if self.stateMachine.isChatOpen {
+                        self.stateMachine.handle(.assistantStarted)
                     }
                 } else {
                     self.streamingText += text
                     if let idx = self.messages.firstIndex(where: { $0.id == messageId }) {
                         self.messages[idx].text = self.streamingText
+                    }
+                    // Reset idle timer on each delta — stop speak 5s after last delta
+                    self.deltaIdleTask?.cancel()
+                    self.deltaIdleTask = Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: 5_000_000_000)
+                        guard !Task.isCancelled, let self else { return }
+                        if self.isStreaming {
+                            self.isStreaming = false
+                            self.streamingMessageId = nil
+                            self.stateMachine.handle(.assistantFinished)
+                        }
                     }
                 }
 
@@ -186,6 +197,10 @@ final class PetModel: NSObject, ObservableObject {
                     self.messages[idx].isStreaming = false
                 }
                 self.stateMachine.handle(.assistantFinished)
+
+            case .history(let msgs):
+                NSLog("[Pet] Loaded %d history messages", msgs.count)
+                self.messages = msgs
 
             case .error(let err):
                 switch err {
@@ -205,10 +220,20 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - History
+
+    func loadHistory() {
+        guard let sessionKey else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            try? await self.wsClient.chatHistory(sessionKey: sessionKey, limit: 50)
+        }
+    }
+
     // MARK: - Layer 1: Whisper (brief reaction)
 
     func showWhisper(_ text: String, duration: TimeInterval = 3.0) {
-        guard petMode != .quiet else { return }
+        guard petMode != .quiet, isWhisperEnabled else { return }
         whisperText = text
         whisperDismissTask?.cancel()
         whisperDismissTask = Task { @MainActor [weak self] in
@@ -233,21 +258,26 @@ final class PetModel: NSObject, ObservableObject {
         runCycle()
     }
 
-    /// 30-second fixed cycle: blink x2, double-blink x1, body move x1
+    private let randomActions: [PetState] = [.wave, .react, .blush, .idleBreathe, .funny, .secretary]
+
+    /// 30-second cycle with random actions mixed in
     private func runCycle() {
         cycleWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.scheduleCycleAction(at: 3,  state: .blinkA, duration: 0.5)   // 瞬き
-            self.scheduleCycleAction(at: 7,  state: .blinkB, duration: 0.6)   // 二度瞬き
-            self.scheduleCycleAction(at: 10, state: .blinkA, duration: 0.5)   // 瞬き
-            self.scheduleCycleAction(at: 13, state: .bodyA,  duration: 0.7)   // 首傾げ
-            self.scheduleCycleAction(at: 16, state: .blinkA, duration: 0.5)   // 瞬き
-            self.scheduleCycleAction(at: 20, state: .blinkB, duration: 0.6)   // 二度瞬き
-            self.scheduleCycleAction(at: 23, state: .blinkA, duration: 0.5)   // 瞬き
-            self.scheduleCycleAction(at: 26, state: .bodyB,  duration: 0.7)   // 手合わせ
-            self.scheduleCycleAction(at: 29, state: .blinkA, duration: 0.5)   // 瞬き
-            // Restart cycle at 30s
+            // Pick two random actions for this cycle
+            let rand1 = self.randomActions.randomElement() ?? .wave
+            let rand2 = self.randomActions.randomElement() ?? .blush
+
+            self.scheduleCycleAction(at: 3,  state: .blinkA, duration: 0.5)
+            self.scheduleCycleAction(at: 6,  state: rand1,   duration: 3.0)   // ランダム表情
+            self.scheduleCycleAction(at: 10, state: .blinkA, duration: 0.5)
+            self.scheduleCycleAction(at: 13, state: .blinkB, duration: 0.6)
+            self.scheduleCycleAction(at: 16, state: .bodyA,  duration: 0.7)
+            self.scheduleCycleAction(at: 19, state: .blinkA, duration: 0.5)
+            self.scheduleCycleAction(at: 22, state: rand2,   duration: 3.0)   // ランダム表情
+            self.scheduleCycleAction(at: 26, state: .blinkB, duration: 0.6)
+            self.scheduleCycleAction(at: 29, state: .blinkA, duration: 0.5)
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
                 self?.runCycle()
             }
@@ -274,18 +304,22 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func startWindowTracking() {
-        windowTrackingTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+        windowTrackingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.updateTargetPosition()
         }
     }
 
     private func updateTargetPosition() {
+        guard isTrackingEnabled else { return }
         if let pause = dragPauseUntil, Date() < pause { return }
 
         let frontmost = NSWorkspace.shared.frontmostApplication
 
         // Track last non-ClawGate frontmost app (ClawGate becomes frontmost on pet click)
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
+            if lastTrackedApp?.processIdentifier != app.processIdentifier {
+                shouldWaveOnArrival = true  // New window — wave on arrival
+            }
             lastTrackedApp = app
         }
 
@@ -308,18 +342,42 @@ final class PetModel: NSObject, ObservableObject {
         let screenHeight = NSScreen.main?.frame.height ?? 900
         let appKitY = screenHeight - frame.origin.y - frame.height
 
-        var target: NSPoint
-        let rightX = frame.origin.x + frame.width + 8
-        let leftX = frame.origin.x - petSize - 8
+        let rightX = frame.origin.x + frame.width - 20
+        let leftX = frame.origin.x - petSize + 20
+        let topY = appKitY + frame.height - petSize
         let bottomY = appKitY
 
+        // Candidate positions: always bottom, left or right
+        var candidates: [(point: NSPoint, side: PlacementSide)] = []
         if rightX + petSize <= screen.maxX {
-            target = NSPoint(x: rightX, y: bottomY)
-        } else if leftX >= screen.minX {
-            target = NSPoint(x: leftX, y: bottomY)
-        } else {
-            target = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
+            candidates.append((NSPoint(x: rightX, y: bottomY), .right))
         }
+        if leftX >= screen.minX {
+            candidates.append((NSPoint(x: leftX, y: bottomY), .left))
+        }
+
+        guard !candidates.isEmpty else {
+            // No valid position, fallback
+            targetPosition = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
+            return
+        }
+
+        // Pick closest candidate to current pet position
+        let petPos = currentWindowOrigin ?? NSPoint(x: screen.maxX - petSize, y: screen.minY)
+        var target = candidates[0].point
+        var bestDist = Double.infinity
+        var bestSide = candidates[0].side
+        for c in candidates {
+            // Hysteresis: slight preference for current side
+            let bonus: Double = c.side == lastPlacementSide ? -50 : 0
+            let d = sqrt(pow(c.point.x - petPos.x, 2) + pow(c.point.y - petPos.y, 2)) + bonus
+            if d < bestDist {
+                bestDist = d
+                target = c.point
+                bestSide = c.side
+            }
+        }
+        lastPlacementSide = bestSide
 
         target.x = max(screen.minX, min(target.x, screen.maxX - petSize))
         target.y = max(screen.minY, min(target.y, screen.maxY - petSize))
@@ -338,10 +396,11 @@ final class PetModel: NSObject, ObservableObject {
                 } else {
                     walkState = dy > 0 ? .walkBack : .walkFront
                 }
-                // Only set walk if not speaking/reacting
+                // Set walk unless actively speaking
                 let current = stateMachine.current
-                if current == .idle || current == .walkFront || current == .walkBack
-                    || current == .walkLeft || current == .walkRight {
+                let isSpeaking = current == .speak || current == .speakMix
+                    || current == .speakTilt || current == .talk
+                if !isSpeaking {
                     stateMachine.current = walkState
                 }
             } else if stateMachine.current == .walkFront || stateMachine.current == .walkBack
@@ -350,6 +409,11 @@ final class PetModel: NSObject, ObservableObject {
             }
         }
 
+        // Only update if target moved significantly (avoid interrupting animation)
+        if let prev = targetPosition {
+            let moveDist = sqrt(pow(target.x - prev.x, 2) + pow(target.y - prev.y, 2))
+            if moveDist < 10 { return }
+        }
         targetPosition = target
     }
 

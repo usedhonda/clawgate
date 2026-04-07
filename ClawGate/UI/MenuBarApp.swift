@@ -107,6 +107,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let view = MainPanelView(
             settingsModel: settingsModel,
             panelModel: panelModel,
+            petModel: petModel,
             modeOrder: modeOrder,
             onSetSessionMode: { [weak self] sessionType, project, mode in
                 self?.setSessionMode(sessionType: sessionType, project: project, next: mode)

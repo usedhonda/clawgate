@@ -106,6 +106,17 @@ actor OpenClawWSClient {
         try await sendAndAwaitAck(request, requestId: requestId)
     }
 
+    func chatHistory(sessionKey: String, limit: Int = 50) async throws -> [[String: Any]] {
+        let requestId = UUID().uuidString
+        let request = GatewayRequest(
+            type: "req", id: requestId, method: "chat.history",
+            params: ChatHistoryParams(sessionKey: sessionKey, limit: limit)
+        )
+        try await sendJSON(request)
+        // History comes back as a response — handled in handleResponse
+        return []  // Messages delivered via event stream
+    }
+
     func subscribeToSession(sessionKey: String) async throws {
         let request = GatewayRequest(
             type: "req", id: UUID().uuidString,
@@ -226,20 +237,48 @@ actor OpenClawWSClient {
     }
 
     private func handleData(_ data: Data) async {
-        guard let msg = try? JSONDecoder().decode(IncomingMessage.self, from: data) else {
+        // Try standard decode first
+        if let msg = try? JSONDecoder().decode(IncomingMessage.self, from: data) {
+            switch msg.type {
+            case "event":
+                guard let eventName = msg.event else { return }
+                await handleEvent(eventName, payload: msg.payload)
+            case "res":
+                handleResponse(msg)
+            default:
+                break
+            }
+            return
+        }
+
+        // Fallback: try raw JSON parse for responses with unknown fields (e.g. chat.history)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String, type == "res",
+              let ok = json["ok"] as? Bool, ok,
+              let payload = json["payload"] as? [String: Any],
+              let rawMessages = payload["messages"] as? [[String: Any]] else {
             NSLog("[Pet] Failed to decode message: %@", String(data: data.prefix(200), encoding: .utf8) ?? "?")
             return
         }
 
-        switch msg.type {
-        case "event":
-            guard let eventName = msg.event else { return }
-            await handleEvent(eventName, payload: msg.payload)
-        case "res":
-            handleResponse(msg)
-        default:
-            break
+        // Parse chat.history manually
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let messages: [OpenClawChatMessage] = rawMessages.compactMap { m in
+            guard let role = m["role"] as? String else { return nil }
+            var text = m["text"] as? String
+            if text == nil, let content = m["content"] as? [[String: Any]] {
+                text = content.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined(separator: "\n\n")
+            }
+            guard let text, !text.isEmpty else { return nil }
+            let chatRole: OpenClawChatMessage.Role = role == "user" ? .user : .assistant
+            let ts = (m["createdAt"] as? String ?? m["timestamp"] as? String).flatMap { isoFormatter.date(from: $0) } ?? Date()
+            return OpenClawChatMessage(id: m["id"] as? String ?? UUID().uuidString, role: chatRole, text: text, timestamp: ts)
         }
+        if !messages.isEmpty {
+            continuation?.yield(.history(messages))
+        }
+        return
     }
 
     private func handleEvent(_ name: String, payload: IncomingPayload?) async {
@@ -300,6 +339,24 @@ actor OpenClawWSClient {
                 ack.resume(throwing: OpenClawError.serverError(code: err.code, message: err.message))
             } else {
                 ack.resume(throwing: OpenClawError.unknown("Request failed"))
+            }
+            return
+        }
+
+        // Chat history response
+        if ok, let historyMsgs = msg.payload?.messages {
+            let isoFormatter = ISO8601DateFormatter()
+            isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let messages = historyMsgs.compactMap { hm -> OpenClawChatMessage? in
+                guard let role = hm.role else { return nil }
+                let text = hm.text ?? hm.content?.compactMap({ $0.type == "text" ? $0.text : nil }).joined(separator: "\n\n") ?? ""
+                guard !text.isEmpty else { return nil }
+                let chatRole: OpenClawChatMessage.Role = role == "user" ? .user : .assistant
+                let ts = (hm.createdAt ?? hm.timestamp).flatMap { isoFormatter.date(from: $0) } ?? Date()
+                return OpenClawChatMessage(id: hm.id ?? UUID().uuidString, role: chatRole, text: text, timestamp: ts)
+            }
+            if !messages.isEmpty {
+                continuation?.yield(.history(messages))
             }
             return
         }

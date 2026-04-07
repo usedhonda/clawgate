@@ -24,7 +24,10 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOWebSocket", package: "swift-nio"),
             ],
-            path: "ClawGate"
+            path: "ClawGate",
+            resources: [
+                .copy("Resources/Characters")
+            ]
         ),
         .executableTarget(
             name: "ClawGateRelay",

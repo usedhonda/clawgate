@@ -9,6 +9,7 @@ enum OpenClawEvent {
     case message(OpenClawChatMessage)
     case delta(messageId: String, text: String)
     case messageComplete(messageId: String)
+    case history([OpenClawChatMessage])
     case error(OpenClawError)
     case disconnected(reason: String?)
 }
@@ -221,6 +222,11 @@ struct SessionSubscribeParams: Encodable {
     let key: String
 }
 
+struct ChatHistoryParams: Encodable {
+    let sessionKey: String
+    let limit: Int
+}
+
 // MARK: - Gateway Protocol Types (Incoming)
 
 struct IncomingMessage: Decodable {
@@ -247,6 +253,16 @@ struct IncomingPayload: Decodable {
     let messageId: String?
     let content: String?
     let delta: String?
+    let messages: [HistoryMessage]?
+}
+
+struct HistoryMessage: Decodable {
+    let id: String?
+    let role: String?
+    let text: String?
+    let content: [ChatContentPayload]?
+    let createdAt: String?
+    let timestamp: String?
 }
 
 struct AgentDataPayload: Decodable {

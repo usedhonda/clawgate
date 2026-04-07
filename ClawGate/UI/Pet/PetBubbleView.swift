@@ -69,83 +69,136 @@ struct PetBubbleView: View {
     @FocusState private var isInputFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // Messages (scrollable)
+        VStack(spacing: 0) {
+            // Messages (header integrated into titlebar)
             ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: 4) {
-                        ForEach(model.messages.suffix(20)) { msg in
-                            MessageBubble(message: msg)
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.messages) { msg in
+                            ChatMessageView(message: msg)
                                 .id(msg.id)
                         }
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 4)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
                 }
-                .frame(maxHeight: 200)
                 .onChange(of: model.messages.count) { _ in
-                    if let last = model.messages.last {
-                        withAnimation(.easeOut(duration: 0.2)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
-                    }
+                    scrollToBottom(proxy: proxy)
+                }
+                .onChange(of: model.streamingText) { _ in
+                    scrollToBottom(proxy: proxy)
                 }
             }
 
-            // Input field
-            HStack(spacing: 4) {
-                TextField("...", text: $model.inputText)
+            Divider().background(Color.white.opacity(0.1))
+
+            // Input
+            HStack(spacing: 8) {
+                TextField("メッセージを入力...", text: $model.inputText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(.system(size: 13))
+                    .foregroundColor(.white)
                     .focused($isInputFocused)
                     .onSubmit { model.send() }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.1))
-                    .cornerRadius(12)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.12))
+                    .cornerRadius(16)
 
                 Button(action: { model.send() }) {
                     Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(model.inputText.isEmpty ? .gray : .accentColor)
+                        .font(.system(size: 22))
+                        .foregroundColor(model.inputText.isEmpty ? .gray.opacity(0.5) : .accentColor)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.inputText.isEmpty)
+                .disabled(model.inputText.isEmpty || model.isStreaming)
             }
-            .padding(.horizontal, 8)
-            .padding(.bottom, 6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
-        .frame(width: 260)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.black.opacity(0.85))
-                .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
-        )
-        .onAppear { isInputFocused = true }
+        .frame(minWidth: 280, idealWidth: 360, minHeight: 300, idealHeight: 480)
+        .background(Color(nsColor: NSColor(white: 0.12, alpha: 0.95)))
+        .onAppear {
+            isInputFocused = true
+            model.loadHistory()
+        }
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy) {
+        if let last = model.messages.last {
+            withAnimation(.easeOut(duration: 0.15)) {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        }
     }
 }
 
-/// Individual message bubble
-struct MessageBubble: View {
+// MARK: - Chat Message View
+
+struct ChatMessageView: View {
     let message: OpenClawChatMessage
 
     var body: some View {
-        HStack {
-            if message.role == .user { Spacer(minLength: 40) }
+        HStack(alignment: .top, spacing: 0) {
+            if message.role == .user {
+                Spacer(minLength: 60)
+            }
 
+            VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 2) {
+                markdownText
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(message.role == .user ? 1.0 : 0.92))
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(message.role == .user
+                                  ? Color.blue.opacity(0.55)
+                                  : Color.white.opacity(0.15))
+                    )
+
+                Text(timeString)
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.35))
+                    .padding(.horizontal, 4)
+
+                if message.isStreaming {
+                    HStack(spacing: 3) {
+                        ForEach(0..<3, id: \.self) { i in
+                            Circle()
+                                .fill(Color.white.opacity(0.4))
+                                .frame(width: 4, height: 4)
+                        }
+                    }
+                    .padding(.leading, 8)
+                }
+            }
+
+            if message.role == .assistant {
+                Spacer(minLength: 60)
+            }
+        }
+    }
+
+    private var timeString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: message.timestamp)
+    }
+
+    @ViewBuilder
+    private var markdownText: some View {
+        if #available(macOS 13.0, *) {
+            // Use AttributedString for basic markdown
+            if let attributed = try? AttributedString(markdown: message.text,
+                                                       options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                Text(attributed)
+            } else {
+                Text(message.text)
+            }
+        } else {
             Text(message.text)
-                .font(.system(size: 11))
-                .foregroundColor(message.role == .user ? .white : .white.opacity(0.9))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(message.role == .user
-                              ? Color.blue.opacity(0.6)
-                              : Color.white.opacity(0.1))
-                )
-
-            if message.role == .assistant { Spacer(minLength: 40) }
         }
     }
 }

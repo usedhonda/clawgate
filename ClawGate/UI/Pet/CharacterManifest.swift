@@ -122,6 +122,12 @@ final class CharacterManager: ObservableObject {
         if let bundled = Bundle.main.resourceURL?.appendingPathComponent("Characters") {
             paths.append(bundled)
         }
+        // SwiftPM module bundle
+        let moduleBundle = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Resources/ClawGate_ClawGate.bundle/Contents/Resources/Characters")
+        if FileManager.default.fileExists(atPath: moduleBundle.path) {
+            paths.append(moduleBundle)
+        }
         return paths
     }
 
