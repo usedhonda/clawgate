@@ -262,8 +262,6 @@ actor OpenClawWSClient {
         }
 
         // Parse chat.history manually
-        let isoFormatter = ISO8601DateFormatter()
-        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let messages: [OpenClawChatMessage] = rawMessages.compactMap { m in
             guard let role = m["role"] as? String else { return nil }
             var text = m["text"] as? String
@@ -272,13 +270,35 @@ actor OpenClawWSClient {
             }
             guard let text, !text.isEmpty else { return nil }
             let chatRole: OpenClawChatMessage.Role = role == "user" ? .user : .assistant
-            let ts = (m["createdAt"] as? String ?? m["timestamp"] as? String).flatMap { isoFormatter.date(from: $0) } ?? Date()
+            let ts = Self.parseTimestamp(m["createdAt"] ?? m["timestamp"])
             return OpenClawChatMessage(id: m["id"] as? String ?? UUID().uuidString, role: chatRole, text: text, timestamp: ts)
         }
         if !messages.isEmpty {
             continuation?.yield(.history(messages))
         }
         return
+    }
+
+    private static func parseTimestamp(_ value: Any?) -> Date {
+        if let str = value as? String {
+            // Try ISO8601 with fractional seconds
+            let f1 = ISO8601DateFormatter()
+            f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let d = f1.date(from: str) { return d }
+            // Try ISO8601 without fractional seconds
+            let f2 = ISO8601DateFormatter()
+            f2.formatOptions = [.withInternetDateTime]
+            if let d = f2.date(from: str) { return d }
+            // Try epoch string
+            if let ms = Int64(str) {
+                return Date(timeIntervalSince1970: Double(ms) / (ms > 9_999_999_999 ? 1000.0 : 1.0))
+            }
+        }
+        if let num = value as? NSNumber {
+            let ms = num.int64Value
+            return Date(timeIntervalSince1970: Double(ms) / (ms > 9_999_999_999 ? 1000.0 : 1.0))
+        }
+        return Date()
     }
 
     private func handleEvent(_ name: String, payload: IncomingPayload?) async {
@@ -300,7 +320,8 @@ actor OpenClawWSClient {
                     .compactMap { $0.type == "text" ? $0.text : nil }
                     .joined(separator: "\n\n")
                 if let text, !text.isEmpty {
-                    let msg = OpenClawChatMessage(id: runId, role: .assistant, text: text)
+                    let isProactive = payload?.sessionKey?.contains("proactive") == true
+                    let msg = OpenClawChatMessage(id: runId, role: .assistant, text: text, isProactive: isProactive)
                     continuation?.yield(.message(msg))
                 }
             }

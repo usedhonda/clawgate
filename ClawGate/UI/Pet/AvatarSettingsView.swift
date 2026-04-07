@@ -24,8 +24,7 @@ struct AvatarSettingsView: View {
             PanelSectionHeader(title: "Notifications")
 
             VStack(alignment: .leading, spacing: 8) {
-                toggleRow("Whisper Reactions", isOn: $petModel.isWhisperEnabled)
-                toggleRow("Bubble Notifications", isOn: $petModel.isBubbleEnabled)
+                toggleRow("Notifications", isOn: $petModel.isBubbleEnabled)
             }
             .padding(PanelTheme.cardPadding)
             .background(PanelTheme.backgroundCard)

@@ -87,6 +87,8 @@ final class PetWindowController {
         positionObservation = model.$targetPosition.sink { [weak self] point in
             guard let point, let w = self?.window else { return }
             DispatchQueue.main.async {
+                // Skip if currently animating (wait for current move to finish)
+                if self?.moveTimer != nil { return }
                 self?.model.currentWindowOrigin = w.frame.origin
                 self?.animateWindowMove(to: point)
             }
@@ -197,7 +199,8 @@ private final class PetContentView: NSView {
     private let spriteView: PetSpriteView
     private let model: PetModel
     private let characterSize: CGFloat
-    private var bubbleWindow: NSWindow?
+    private var notificationWindow: NSWindow?
+    private var chatWindow: NSWindow?
     private var whisperWindow: NSWindow?
     private var bubbleObservation: AnyCancellable?
     private var chatObservation: AnyCancellable?
@@ -215,31 +218,27 @@ private final class PetContentView: NSView {
         super.init(frame: .zero)
         addSubview(spriteView)
 
-        // Observe bubble visibility (Layer 2 notification)
+        // Observe notification bubble (proactive messages only)
         bubbleObservation = model.stateMachine.$isBubbleVisible.sink { [weak self] visible in
             DispatchQueue.main.async {
                 guard let self else { return }
-                if visible {
-                    if self.model.stateMachine.isChatOpen {
-                        self.showFullChat()
-                    } else {
-                        self.showNotification()
-                    }
-                } else {
-                    self.hideBubble()
+                if visible && !self.model.stateMachine.isChatOpen {
+                    self.showNotification()
+                } else if !visible {
+                    self.hideNotificationBubble()
                 }
             }
         }
 
-        // Observe chat open state (Layer 2 → Layer 3 upgrade, or close)
+        // Observe chat open/close (click toggle)
         chatObservation = model.stateMachine.$isChatOpen.sink { [weak self] open in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if open {
-                    self.hideBubble()
+                    self.hideNotificationBubble()
                     self.showFullChat()
                 } else {
-                    self.hideBubble()
+                    self.hideChatWindow()
                 }
             }
         }
@@ -347,13 +346,18 @@ private final class PetContentView: NSView {
     // MARK: - Bubble Window (Layer 2: notification / Layer 3: full chat)
 
     private func showNotification() {
-        guard bubbleWindow == nil, let parentWindow = window else { return }
+        guard notificationWindow == nil, let parentWindow = window else { return }
         let notifView = PetNotificationBubble(model: model)
         let hosting = NSHostingView(rootView: AnyView(notifView))
-        hosting.frame = NSRect(x: 0, y: 0, width: 320, height: 120)
+
+        // Dynamic size based on content
+        let fitSize = hosting.intrinsicContentSize
+        let w = min(max(fitSize.width, 120), 320)
+        let h = min(max(fitSize.height, 30), 200)
+        hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
 
         let bw = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 120),
+            contentRect: NSRect(x: 0, y: 0, width: w, height: h),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -365,19 +369,19 @@ private final class PetContentView: NSView {
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
 
+        // Position: centered above character's head
         let parentFrame = parentWindow.frame
         bw.setFrameOrigin(NSPoint(
-            x: parentFrame.midX - 160,
-            y: parentFrame.maxY + 8
+            x: parentFrame.midX - w / 2,
+            y: parentFrame.maxY - 10  // slightly overlap top of character
         ))
 
         parentWindow.addChildWindow(bw, ordered: .above)
-        bubbleWindow = bw
+        notificationWindow = bw
     }
 
     private func showFullChat() {
-        hideBubble()
-        guard let parentWindow = window else { return }
+        guard chatWindow == nil, let parentWindow = window else { return }
         let chatView = PetBubbleView(model: model)
         let hosting = NSHostingView(rootView: AnyView(chatView))
         hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 480)
@@ -405,14 +409,21 @@ private final class PetContentView: NSView {
         ))
 
         bw.makeKeyAndOrderFront(nil)
-        bubbleWindow = bw
+        chatWindow = bw
     }
 
-    private func hideBubble() {
-        if let bw = bubbleWindow {
-            window?.removeChildWindow(bw)
-            bw.orderOut(nil)
-            bubbleWindow = nil
+    private func hideNotificationBubble() {
+        if let nw = notificationWindow {
+            window?.removeChildWindow(nw)
+            nw.orderOut(nil)
+            notificationWindow = nil
+        }
+    }
+
+    private func hideChatWindow() {
+        if let cw = chatWindow {
+            cw.orderOut(nil)
+            chatWindow = nil
         }
     }
 

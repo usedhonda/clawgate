@@ -67,6 +67,7 @@ struct PetNotificationBubble: View {
 struct PetBubbleView: View {
     @ObservedObject var model: PetModel
     @FocusState private var isInputFocused: Bool
+    @State private var userScrolledUp = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -78,15 +79,26 @@ struct PetBubbleView: View {
                             ChatMessageView(message: msg)
                                 .id(msg.id)
                         }
+                        // Invisible anchor at bottom
+                        Color.clear.frame(height: 1).id("bottom")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                 }
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                }
                 .onChange(of: model.messages.count) { _ in
-                    scrollToBottom(proxy: proxy)
+                    if !userScrolledUp {
+                        scrollToBottom(proxy: proxy)
+                    }
                 }
                 .onChange(of: model.streamingText) { _ in
-                    scrollToBottom(proxy: proxy)
+                    if !userScrolledUp {
+                        scrollToBottom(proxy: proxy)
+                    }
                 }
             }
 

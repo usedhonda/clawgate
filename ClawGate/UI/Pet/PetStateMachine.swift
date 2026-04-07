@@ -57,27 +57,27 @@ final class PetStateMachine: ObservableObject {
         switch event {
         case .assistantStarted:
             current = randomSpeakState()
-            isBubbleVisible = true
 
         case .assistantFinished:
             current = .idle
 
         case .userClicked:
+            // Simple toggle: click = chat open/close
             if isChatOpen {
-                // Chat open -> close it
                 isChatOpen = false
-                isBubbleVisible = false
-            } else if isBubbleVisible {
-                // Bubble visible -> open full chat
-                isChatOpen = true
             } else {
-                // Nothing visible -> show bubble
-                isBubbleVisible = true
+                isChatOpen = true
+                isBubbleVisible = false  // dismiss notification when opening chat
             }
 
         case .userDoubleClicked:
-            isChatOpen = true
-            isBubbleVisible = false
+            // Same as single click
+            if isChatOpen {
+                isChatOpen = false
+            } else {
+                isChatOpen = true
+                isBubbleVisible = false
+            }
 
         case .bubbleDismissed:
             isBubbleVisible = false

@@ -21,6 +21,7 @@ struct OpenClawChatMessage: Identifiable, Equatable {
     var text: String
     let timestamp: Date
     var isStreaming: Bool
+    var isProactive: Bool
 
     enum Role: String {
         case user
@@ -28,12 +29,13 @@ struct OpenClawChatMessage: Identifiable, Equatable {
     }
 
     init(id: String = UUID().uuidString, role: Role, text: String,
-         timestamp: Date = Date(), isStreaming: Bool = false) {
+         timestamp: Date = Date(), isStreaming: Bool = false, isProactive: Bool = false) {
         self.id = id
         self.role = role
         self.text = text
         self.timestamp = timestamp
         self.isStreaming = isStreaming
+        self.isProactive = isProactive
     }
 }
 

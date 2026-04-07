@@ -138,6 +138,8 @@ final class PetModel: NSObject, ObservableObject {
                 Task { [weak self] in
                     guard let self, let key = self.sessionKey else { return }
                     try? await self.wsClient.subscribeToSession(sessionKey: key)
+                    // Subscribe to proactive heartbeat for realtime notifications
+                    try? await self.wsClient.subscribeToSession(sessionKey: "agent:main:proactive:heartbeat")
                 }
 
             case .message(let msg):
@@ -154,9 +156,12 @@ final class PetModel: NSObject, ObservableObject {
                     isNew = true
                 }
                 self.stateMachine.handle(.assistantFinished)
-                // Show notification bubble for new assistant messages (proactive)
+                // Show notification bubble for proactive/new assistant messages
                 if isNew && msg.role == .assistant && !self.stateMachine.isChatOpen && self.isBubbleEnabled {
                     self.stateMachine.isBubbleVisible = true
+                    if msg.isProactive {
+                        self.showWhisper(String(msg.text.prefix(40)))
+                    }
                 }
 
             case .delta(let messageId, let text):
@@ -331,6 +336,9 @@ final class PetModel: NSObject, ObservableObject {
 
         let screen = NSScreen.main?.visibleFrame ?? .zero
         let petSize: CGFloat = characterSize + 20  // match actual window size
+
+        // Skip small windows (popups, dialogs)
+        if frame.width < 300 || frame.height < 200 { return }
 
         // Skip fullscreen apps
         if let screenFull = NSScreen.main?.frame,
