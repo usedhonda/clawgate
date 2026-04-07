@@ -1,60 +1,128 @@
 import Foundation
 
-/// Pet character states (Phase 1: idle + speak only)
+/// Pet character states
 enum PetState: String, CaseIterable {
     case idle
+    case idleBreathe = "idle-breathe"
+    case blink
     case speak
-
-    // Phase 2 (not yet implemented)
-    // case hover
-    // case walk
-    // case react
-    // case sleep
+    case speakMix = "speak-mix"
+    case speakTilt = "speak-tilt"
+    case talk
+    case walkFront = "walk-front"
+    case walkBack = "walk-back"
+    case walkRight = "walk-right"
+    case walkLeft = "walk-left"
+    case wave
+    case react
+    case blush
+    case secretary
+    case funny
+    case sleep
 }
 
 /// Events that trigger state transitions
 enum PetEvent {
-    case assistantStarted          // assistant.message.start -> speak
-    case assistantFinished         // assistant.message.done  -> idle
-    case userClicked               // click -> show bubble
+    case assistantStarted          // message incoming -> speak
+    case assistantFinished         // message done -> idle
+    case userClicked               // click -> show bubble / open chat
+    case userDoubleClicked         // double click -> open full chat
     case bubbleDismissed           // escape / click outside
-    case disconnected              // ws disconnect (Phase 2: -> sleep)
-    case reconnected               // ws reconnect  (Phase 2: -> idle)
+    case mouseEntered              // hover -> react
+    case mouseExited               // hover end -> idle
+    case disconnected              // ws disconnect -> sleep
+    case reconnected               // ws reconnect -> idle
+    case idleTimeout               // long idle -> breathe/walk/secretary
+    case notification(String)      // whisper text for Layer 1 reaction
+    case greeting                  // morning/startup -> wave
+    case error                     // error -> react
+    case success                   // task done -> react happy
+    case lateNight                 // deep night -> sleepy
 }
 
-/// Minimal state machine for pet character animation
+/// State machine for pet character with 3-layer UX
 final class PetStateMachine: ObservableObject {
     @Published private(set) var current: PetState = .idle
     @Published private(set) var isBubbleVisible = false
+    @Published private(set) var isChatOpen = false
+    /// Whisper text is managed by PetModel (Layer 1 display payload)
 
-    /// Transition based on incoming event. Returns the new state.
+    /// Transition based on incoming event
     @discardableResult
     func handle(_ event: PetEvent) -> PetState {
         switch event {
         case .assistantStarted:
-            current = .speak
+            current = randomSpeakState()
             isBubbleVisible = true
+
         case .assistantFinished:
             current = .idle
-            // Keep bubble visible so user can read the response
+
         case .userClicked:
-            isBubbleVisible = true
+            if isChatOpen {
+                // Already open, ignore
+            } else if isBubbleVisible {
+                // Bubble visible -> open full chat
+                isChatOpen = true
+            } else {
+                // Nothing visible -> show bubble
+                isBubbleVisible = true
+            }
+
+        case .userDoubleClicked:
+            isChatOpen = true
+            isBubbleVisible = false
+
         case .bubbleDismissed:
             isBubbleVisible = false
-            if current == .speak {
-                // If still speaking, let it finish; otherwise go idle
+            isChatOpen = false
+            if current != .speak && current != .speakMix && current != .speakTilt && current != .talk {
+                current = .idle
             }
+
+        case .mouseEntered:
+            break  // PetModel handles whisper
+
+        case .mouseExited:
+            break
+
         case .disconnected:
-            current = .idle
-            // Phase 2: current = .sleep
+            current = .sleep
+
         case .reconnected:
             current = .idle
+
+        case .idleTimeout:
+            let variations: [PetState] = [.idleBreathe, .blink, .secretary, .funny]
+            current = variations.randomElement() ?? .idleBreathe
+
+        case .notification:
+            break  // PetModel handles whisper text
+
+        case .greeting:
+            current = .wave
+
+        case .error:
+            current = .react
+
+        case .success:
+            current = .react
+
+        case .lateNight:
+            current = .sleep
         }
         return current
     }
 
-    /// Animation name for the current state (maps to sprite sheet row)
+    /// Pick a random speak animation for variety
+    private func randomSpeakState() -> PetState {
+        let options: [PetState] = [.speak, .speakMix, .speakTilt, .talk]
+        return options.randomElement() ?? .speak
+    }
+
+    /// Animation name for the current state (maps to manifest state name)
     var animationName: String {
         current.rawValue
     }
+
 }

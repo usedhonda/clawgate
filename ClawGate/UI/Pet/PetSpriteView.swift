@@ -6,23 +6,28 @@ final class PetSpriteView: NSImageView {
     private var currentFrame = 0
     private var animationTimer: Timer?
     private var currentStateName: String = ""
+    private var shouldLoop = true
+
+    /// Called when a non-looping animation finishes
+    var onAnimationComplete: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         imageScaling = .scaleProportionallyUpOrDown
         animates = false
         wantsLayer = true
-        layer?.magnificationFilter = .nearest  // crisp pixel art
+        layer?.magnificationFilter = .nearest
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
     /// Set animation frames and start playback
-    func setAnimation(frames: [NSImage], fps: Double, stateName: String) {
+    func setAnimation(frames: [NSImage], fps: Double, stateName: String, loop: Bool = true) {
         guard stateName != currentStateName || self.frames.count != frames.count else { return }
         currentStateName = stateName
         self.frames = frames
+        self.shouldLoop = loop
         currentFrame = 0
         animationTimer?.invalidate()
 
@@ -44,12 +49,28 @@ final class PetSpriteView: NSImageView {
         frames = [image]
         currentFrame = 0
         currentStateName = ""
+        shouldLoop = true
         self.image = image
     }
 
     private func advanceFrame() {
         guard !frames.isEmpty else { return }
-        currentFrame = (currentFrame + 1) % frames.count
+        let nextFrame = currentFrame + 1
+
+        if nextFrame >= frames.count {
+            if shouldLoop {
+                currentFrame = 0
+            } else {
+                // Non-looping: stay on last frame, stop timer
+                animationTimer?.invalidate()
+                animationTimer = nil
+                onAnimationComplete?()
+                return
+            }
+        } else {
+            currentFrame = nextFrame
+        }
+
         image = frames[currentFrame]
     }
 

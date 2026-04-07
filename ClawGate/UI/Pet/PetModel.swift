@@ -10,6 +10,8 @@ final class PetModel: NSObject, ObservableObject {
     @Published var isStreaming = false
     @Published var opacity: Double = 1.0
     @Published var streamingText: String = ""
+    @Published var whisperText: String?       // Layer 1: brief reaction text
+    @Published var petMode: PetMode = .secretary
 
     let stateMachine = PetStateMachine()
     let characterManager = CharacterManager()
@@ -18,6 +20,15 @@ final class PetModel: NSObject, ObservableObject {
     private var sessionKey: String?
     private var eventTask: Task<Void, Never>?
     private var streamingMessageId: String?
+    private var whisperDismissTask: Task<Void, Never>?
+    private var idleTimer: Timer?
+
+    /// Pet interaction mode (right-click menu)
+    enum PetMode: String, CaseIterable {
+        case secretary = "秘書"
+        case watching = "見守り"
+        case quiet = "静音"
+    }
 
     enum ConnectionState: Equatable {
         case disconnected
@@ -103,6 +114,7 @@ final class PetModel: NSObject, ObservableObject {
                 self.sessionKey = key
                 self.connectionState = .connected
                 self.stateMachine.handle(.reconnected)
+                self.showWhisper("接続しました")
                 Task { [weak self] in
                     guard let self, let key = self.sessionKey else { return }
                     try? await self.wsClient.subscribeToSession(sessionKey: key)
@@ -156,7 +168,36 @@ final class PetModel: NSObject, ObservableObject {
             case .disconnected:
                 self.connectionState = .disconnected
                 self.stateMachine.handle(.disconnected)
+                self.showWhisper("すぅ…")
             }
+        }
+    }
+
+    // MARK: - Layer 1: Whisper (brief reaction)
+
+    func showWhisper(_ text: String, duration: TimeInterval = 3.0) {
+        guard petMode != .quiet else { return }
+        whisperText = text
+        whisperDismissTask?.cancel()
+        whisperDismissTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            DispatchQueue.main.async { self?.whisperText = nil }
+        }
+    }
+
+    func dismissWhisper() {
+        whisperDismissTask?.cancel()
+        whisperText = nil
+    }
+
+    // MARK: - Idle Variation Timer
+
+    private func startIdleTimer() {
+        idleTimer?.invalidate()
+        idleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self, self.stateMachine.current == .idle else { return }
+            self.stateMachine.handle(.idleTimeout)
         }
     }
 
@@ -165,9 +206,12 @@ final class PetModel: NSObject, ObservableObject {
     func start() {
         characterManager.scan()
         connect()
+        startIdleTimer()
     }
 
     func cleanup() {
         disconnect()
+        idleTimer?.invalidate()
+        idleTimer = nil
     }
 }

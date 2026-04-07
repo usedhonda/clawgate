@@ -84,12 +84,21 @@ final class PetWindowController {
         if var character = model.characterManager.current() {
             let frames = character.frames(for: stateName)
             let fps = character.fps(for: stateName)
+            let loop = character.shouldLoop(for: stateName)
             if !frames.isEmpty {
-                sprite.setAnimation(frames: frames, fps: fps, stateName: stateName)
+                sprite.setAnimation(frames: frames, fps: fps, stateName: stateName, loop: loop)
+                if !loop {
+                    sprite.onAnimationComplete = { [weak self] in
+                        // Return to idle after non-looping animation
+                        DispatchQueue.main.async {
+                            self?.model.stateMachine.handle(.assistantFinished)
+                        }
+                    }
+                }
             } else {
                 // Fallback to idle
                 let idleFrames = character.frames(for: "idle")
-                sprite.setAnimation(frames: idleFrames, fps: character.fps(for: "idle"), stateName: "idle")
+                sprite.setAnimation(frames: idleFrames, fps: character.fps(for: "idle"), stateName: "idle", loop: true)
             }
         } else {
             // No character loaded — show placeholder
