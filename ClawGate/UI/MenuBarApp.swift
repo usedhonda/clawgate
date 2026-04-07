@@ -50,6 +50,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let opsLogStore: OpsLogStore
     private let settingsModel: SettingsModel
     private let panelModel = MainPanelModel()
+    private let petModel = PetModel()
+    private var petWindowController: PetWindowController?
 
     init(runtime: AppRuntime, statsCollector: StatsCollector, opsLogStore: OpsLogStore) {
         self.runtime = runtime
@@ -76,6 +78,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
         startRefreshTimer()
+
+        // Start pet character
+        petWindowController = PetWindowController(model: petModel)
+        petModel.start()
+        petWindowController?.show()
     }
 
     private func configureStatusButton() {
