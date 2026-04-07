@@ -3,8 +3,10 @@ import Foundation
 /// Pet character states
 enum PetState: String, CaseIterable {
     case idle
-    case idleBreathe = "idle-breathe"
-    case blink
+    case blinkA = "blink-a"
+    case blinkB = "blink-b"
+    case bodyA = "body-a"
+    case bodyB = "body-b"
     case speak
     case speakMix = "speak-mix"
     case speakTilt = "speak-tilt"
@@ -19,6 +21,8 @@ enum PetState: String, CaseIterable {
     case secretary
     case funny
     case sleep
+    case idleBreathe = "idle-breathe"
+    case blink
 }
 
 /// Events that trigger state transitions
@@ -43,7 +47,7 @@ enum PetEvent {
 /// State machine for pet character with 3-layer UX
 final class PetStateMachine: ObservableObject {
     @Published var current: PetState = .idle
-    @Published private(set) var isBubbleVisible = false
+    @Published var isBubbleVisible = false
     @Published private(set) var isChatOpen = false
     /// Whisper text is managed by PetModel (Layer 1 display payload)
 
@@ -60,7 +64,9 @@ final class PetStateMachine: ObservableObject {
 
         case .userClicked:
             if isChatOpen {
-                // Already open, ignore
+                // Chat open -> close it
+                isChatOpen = false
+                isBubbleVisible = false
             } else if isBubbleVisible {
                 // Bubble visible -> open full chat
                 isChatOpen = true

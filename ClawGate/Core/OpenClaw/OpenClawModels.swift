@@ -45,7 +45,7 @@ enum OpenClawError: Error {
     case unknown(String)
 }
 
-// MARK: - Device Identity (macOS Keychain)
+// MARK: - Device Identity (file-based for dev, Keychain for release)
 
 struct OpenClawDeviceIdentity {
     let deviceId: String
@@ -57,21 +57,41 @@ struct OpenClawDeviceIdentity {
         return Data(signature).base64URLEncoded()
     }
 
-    /// Load from Keychain or create new identity
-    static func loadOrCreate() throws -> OpenClawDeviceIdentity {
-        let service = "com.clawgate.openclaw.device"
-        let account = "gateway-client-ed25519"
+    private static var cached: OpenClawDeviceIdentity?
 
-        // Try loading existing key from Keychain
-        if let existing = try? keychainLoad(service: service, account: account) {
-            let key = try Curve25519.Signing.PrivateKey(rawRepresentation: existing)
-            return makeIdentity(from: key)
+    /// File path for dev identity storage (no Keychain dialog)
+    private static var identityFilePath: String {
+        NSString("~/.clawgate/device-identity.json").expandingTildeInPath
+    }
+
+    /// Load from cache → file → Keychain → create new
+    static func loadOrCreate() throws -> OpenClawDeviceIdentity {
+        if let cached { return cached }
+
+        // 1. Try file backend (dev-friendly, no dialog)
+        if let raw = loadFromFile() {
+            let key = try Curve25519.Signing.PrivateKey(rawRepresentation: raw)
+            let identity = makeIdentity(from: key)
+            cached = identity
+            return identity
         }
 
-        // Generate new key
+        // 2. Try Keychain (may trigger dialog on unsigned builds)
+        if let raw = try? keychainLoad() {
+            let key = try Curve25519.Signing.PrivateKey(rawRepresentation: raw)
+            let identity = makeIdentity(from: key)
+            // Migrate to file so we don't hit Keychain again
+            saveToFile(raw)
+            cached = identity
+            return identity
+        }
+
+        // 3. Generate new key, save to file
         let key = Curve25519.Signing.PrivateKey()
-        try keychainSave(key.rawRepresentation, service: service, account: account)
-        return makeIdentity(from: key)
+        saveToFile(key.rawRepresentation)
+        let identity = makeIdentity(from: key)
+        cached = identity
+        return identity
     }
 
     private static func makeIdentity(from key: Curve25519.Signing.PrivateKey) -> OpenClawDeviceIdentity {
@@ -84,11 +104,36 @@ struct OpenClawDeviceIdentity {
         )
     }
 
-    private static func keychainLoad(service: String, account: String) throws -> Data {
+    // MARK: - File Backend
+
+    private static func loadFromFile() -> Data? {
+        guard let data = FileManager.default.contents(atPath: identityFilePath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let b64 = json["privateKeyRawBase64URL"] as? String,
+              let raw = Data(base64URLDecoded: b64) else {
+            return nil
+        }
+        return raw
+    }
+
+    private static func saveToFile(_ raw: Data) {
+        let json: [String: Any] = [
+            "version": 1,
+            "privateKeyRawBase64URL": raw.base64URLEncoded()
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) else { return }
+        let dir = (identityFilePath as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: identityFilePath, contents: data, attributes: [.posixPermissions: 0o600])
+    }
+
+    // MARK: - Keychain Backend (fallback)
+
+    private static func keychainLoad() throws -> Data {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
+            kSecAttrService as String: "com.clawgate.openclaw.device",
+            kSecAttrAccount as String: "gateway-client-ed25519",
             kSecReturnData as String: true,
         ]
         var result: CFTypeRef?
@@ -97,19 +142,6 @@ struct OpenClawDeviceIdentity {
             throw OpenClawError.connectionFailed("Keychain load failed: \(status)")
         }
         return data
-    }
-
-    private static func keychainSave(_ data: Data, service: String, account: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-        ]
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess || status == errSecDuplicateItem else {
-            throw OpenClawError.connectionFailed("Keychain save failed: \(status)")
-        }
     }
 }
 
@@ -121,6 +153,14 @@ extension Data {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+
+    init?(base64URLDecoded str: String) {
+        var b64 = str
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while b64.count % 4 != 0 { b64.append("=") }
+        self.init(base64Encoded: b64)
     }
 }
 

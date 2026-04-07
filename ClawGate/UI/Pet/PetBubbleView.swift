@@ -13,13 +13,13 @@ struct PetNotificationBubble: View {
         if isVisible, let lastMsg = model.messages.last, lastMsg.role == .assistant {
             VStack(alignment: .leading, spacing: 2) {
                 Text(lastMsg.text)
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.9))
-                    .lineLimit(3)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .font(.system(size: 13))
+                    .foregroundColor(.white)
+                    .lineLimit(5)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
             }
-            .frame(maxWidth: 220)
+            .frame(maxWidth: 300)
             .background(
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.black.opacity(0.8))

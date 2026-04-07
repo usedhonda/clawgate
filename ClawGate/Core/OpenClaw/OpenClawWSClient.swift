@@ -61,6 +61,7 @@ actor OpenClawWSClient {
             guard stuck else { return }
             logger.warning("Handshake timeout — no challenge in 10s")
             ws?.cancel(with: .abnormalClosure, reason: "handshake timeout".data(using: .utf8))
+            await self.teardown()
         }
 
         return stream
@@ -154,7 +155,9 @@ actor OpenClawWSClient {
         pendingRequestId = requestId
 
         do {
+            NSLog("[Pet] Loading device identity...")
             let identity = try OpenClawDeviceIdentity.loadOrCreate()
+            NSLog("[Pet] Device identity loaded, building connect request...")
             let signedAtMs = Int64(Date().timeIntervalSince1970 * 1000)
             let normalizedNonce = nonce?.isEmpty == false ? nonce : nil
             let role = "operator"
@@ -188,7 +191,9 @@ actor OpenClawWSClient {
             )
 
             try await sendJSON(connectReq)
+            NSLog("[Pet] Connect request sent, waiting for hello-ok...")
         } catch {
+            NSLog("[Pet] Connect request FAILED: %@", "\(error)")
             continuation?.yield(.error(.connectionFailed("Connect request failed: \(error)")))
         }
     }
@@ -213,8 +218,7 @@ actor OpenClawWSClient {
                 }
             } catch {
                 if isConnected {
-                    continuation?.yield(.error(.connectionFailed("\(error)")))
-                    continuation?.yield(.disconnected(reason: "\(error)"))
+                    teardown()
                 }
                 break
             }
@@ -222,7 +226,10 @@ actor OpenClawWSClient {
     }
 
     private func handleData(_ data: Data) async {
-        guard let msg = try? JSONDecoder().decode(IncomingMessage.self, from: data) else { return }
+        guard let msg = try? JSONDecoder().decode(IncomingMessage.self, from: data) else {
+            NSLog("[Pet] Failed to decode message: %@", String(data: data.prefix(200), encoding: .utf8) ?? "?")
+            return
+        }
 
         switch msg.type {
         case "event":
@@ -238,6 +245,7 @@ actor OpenClawWSClient {
     private func handleEvent(_ name: String, payload: IncomingPayload?) async {
         switch name {
         case "connect.challenge":
+            NSLog("[Pet] Received connect.challenge, sending connect request...")
             await sendConnectRequest(nonce: payload?.nonce)
 
         case "agent":
@@ -282,6 +290,7 @@ actor OpenClawWSClient {
     private func handleResponse(_ msg: IncomingMessage) {
         let ok = msg.ok ?? false
         let responseId = msg.id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        NSLog("[Pet] handleResponse: ok=%d id=%@ type=%@ error=%@", ok ? 1 : 0, responseId, msg.payload?.type ?? "nil", msg.error?.message ?? "none")
 
         // Check in-flight ACKs
         if !responseId.isEmpty, let ack = inFlightAcks.removeValue(forKey: responseId) {
@@ -355,7 +364,7 @@ actor OpenClawWSClient {
 // MARK: - Config Reader
 
 /// Read OpenClaw Gateway config from ~/.openclaw/openclaw.json
-func readOpenClawGatewayConfig() -> (token: String, port: Int)? {
+func readOpenClawGatewayConfig() -> (token: String, port: Int, host: String)? {
     let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
     guard let data = FileManager.default.contents(atPath: configPath),
           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -365,5 +374,6 @@ func readOpenClawGatewayConfig() -> (token: String, port: Int)? {
         return nil
     }
     let port = gateway["port"] as? Int ?? 18789
-    return (token: token, port: port)
+    let host = gateway["host"] as? String ?? "127.0.0.1"
+    return (token: token, port: port, host: host)
 }

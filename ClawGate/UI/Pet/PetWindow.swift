@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import WebKit
 
 /// Transparent always-on-top window for the pet character
 final class PetWindowController {
@@ -10,6 +11,7 @@ final class PetWindowController {
     private let model: PetModel
     private var opacityObservation: AnyCancellable?
     private var stateObservation: AnyCancellable?
+    private var positionObservation: AnyCancellable?
 
     /// Character display size in points
     private let characterSize: CGFloat = 128
@@ -39,9 +41,9 @@ final class PetWindowController {
         w.backgroundColor = .clear
         w.level = .floating
         w.hasShadow = false
-        w.isMovableByWindowBackground = true
+        w.isMovableByWindowBackground = false
         w.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        w.sharingType = .none
+        w.sharingType = .readOnly
         w.isReleasedWhenClosed = false
 
         // Sprite view
@@ -71,14 +73,66 @@ final class PetWindowController {
                 w?.alphaValue = newValue
             }
         }
+
+        // Observe target position for window tracking
+        positionObservation = model.$targetPosition.sink { [weak self] point in
+            guard let point, let w = self?.window else { return }
+            DispatchQueue.main.async {
+                self?.model.currentWindowOrigin = w.frame.origin
+                self?.animateWindowMove(to: point)
+            }
+        }
+    }
+
+    private var moveTimer: Timer?
+
+    private func animateWindowMove(to target: NSPoint) {
+        moveTimer?.invalidate()
+        guard let w = window else { return }
+
+        let start = w.frame.origin
+        let dx = target.x - start.x
+        let dy = target.y - start.y
+        let distance = sqrt(dx * dx + dy * dy)
+        guard distance > 5 else { return }  // Already close enough
+
+        let duration: TimeInterval = min(max(distance / 300, 0.3), 1.5)
+        let steps = Int(duration * 60)  // ~60fps
+        var step = 0
+        let interval = duration / Double(steps)
+
+        moveTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self, weak w] timer in
+            guard let w else { timer.invalidate(); return }
+            step += 1
+            let t = min(Double(step) / Double(steps), 1.0)
+            // Ease-in-out
+            let ease = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2
+            let x = start.x + dx * ease
+            let y = start.y + dy * ease
+            w.setFrameOrigin(NSPoint(x: x, y: y))
+            if step >= steps {
+                timer.invalidate()
+                self?.moveTimer = nil
+                self?.model.currentWindowOrigin = target
+                // Arrive → idle
+                let current = self?.model.stateMachine.current
+                if current == .walkFront || current == .walkBack
+                    || current == .walkLeft || current == .walkRight {
+                    self?.model.stateMachine.current = .idle
+                }
+            }
+        }
     }
 
     func hide() {
+        moveTimer?.invalidate()
+        moveTimer = nil
         window?.orderOut(nil)
         window = nil
         spriteView = nil
         stateObservation = nil
         opacityObservation = nil
+        positionObservation = nil
     }
 
     private func updateSpriteForCurrentState() {
@@ -127,6 +181,11 @@ private final class PetContentView: NSView {
     private var chatObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
 
+    // Drag state
+    private var dragStartScreenPos: NSPoint?
+    private var dragStartWindowOrigin: NSPoint?
+    private var isDragging = false
+
     init(spriteView: PetSpriteView, model: PetModel, characterSize: CGFloat) {
         self.spriteView = spriteView
         self.model = model
@@ -150,13 +209,15 @@ private final class PetContentView: NSView {
             }
         }
 
-        // Observe chat open state (Layer 2 → Layer 3 upgrade)
+        // Observe chat open state (Layer 2 → Layer 3 upgrade, or close)
         chatObservation = model.stateMachine.$isChatOpen.sink { [weak self] open in
             DispatchQueue.main.async {
                 guard let self else { return }
                 if open {
                     self.hideBubble()
                     self.showFullChat()
+                } else {
+                    self.hideBubble()
                 }
             }
         }
@@ -182,7 +243,30 @@ private final class PetContentView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
-        model.stateMachine.handle(.userClicked)
+        dragStartScreenPos = NSEvent.mouseLocation
+        dragStartWindowOrigin = window?.frame.origin
+        isDragging = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let startPos = dragStartScreenPos,
+              let startOrigin = dragStartWindowOrigin,
+              let w = window else { return }
+        let current = NSEvent.mouseLocation
+        let dx = current.x - startPos.x
+        let dy = current.y - startPos.y
+        if !isDragging && (abs(dx) > 3 || abs(dy) > 3) { isDragging = true }
+        if isDragging {
+            w.setFrameOrigin(NSPoint(x: startOrigin.x + dx, y: startOrigin.y + dy))
+            model.onPetDragged()
+        }
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if !isDragging { model.stateMachine.handle(.userClicked) }
+        dragStartScreenPos = nil
+        dragStartWindowOrigin = nil
+        isDragging = false
     }
 
     // MARK: - Right-Click Context Menu
@@ -243,14 +327,59 @@ private final class PetContentView: NSView {
     private func showNotification() {
         guard bubbleWindow == nil, let parentWindow = window else { return }
         let notifView = PetNotificationBubble(model: model)
-        showBubbleWindow(rootView: AnyView(notifView), width: 220, height: 80, parent: parentWindow)
+        showBubbleWindow(rootView: AnyView(notifView), width: 320, height: 120, parent: parentWindow)
     }
 
     private func showFullChat() {
         hideBubble()
         guard let parentWindow = window else { return }
+
+        // Try to open OpenClaw Control UI in WKWebView
+        if let config = readOpenClawGatewayConfig() {
+            // Use localhost (SSH tunnel) for secure context (Web Crypto API)
+            let urlString = "http://127.0.0.1:\(config.port)/#token=\(config.token)"
+            if let url = URL(string: urlString) {
+                showWebChatWindow(url: url, parent: parentWindow)
+                return
+            }
+        }
+
+        // Fallback to built-in chat if Gateway not configured
         let chatView = PetBubbleView(model: model)
         showBubbleWindow(rootView: AnyView(chatView), width: 260, height: 260, parent: parentWindow)
+    }
+
+    private func showWebChatWindow(url: URL, parent: NSWindow) {
+        let width: CGFloat = 420
+        let height: CGFloat = 600
+
+        let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        webView.load(URLRequest(url: url))
+
+        let bw = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        bw.title = "OpenClaw Chat"
+        bw.isOpaque = false
+        bw.backgroundColor = .windowBackgroundColor
+        bw.level = .floating
+        bw.hasShadow = true
+        bw.contentView = webView
+        bw.isReleasedWhenClosed = false
+        bw.minSize = NSSize(width: 320, height: 400)
+
+        let parentFrame = parent.frame
+        let origin = NSPoint(
+            x: parentFrame.midX - width / 2,
+            y: parentFrame.maxY + 8
+        )
+        bw.setFrameOrigin(origin)
+
+        parent.addChildWindow(bw, ordered: .above)
+        bubbleWindow = bw
     }
 
     private func showBubbleWindow(rootView: AnyView, width: CGFloat, height: CGFloat, parent: NSWindow) {
