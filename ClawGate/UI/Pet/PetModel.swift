@@ -193,38 +193,33 @@ final class PetModel: NSObject, ObservableObject {
 
     // MARK: - Idle Variation Timer
 
+    private var blinkTimer: Timer?
+    private var bodyMoveTimer: Timer?
+
     private func startIdleTimer() {
         idleTimer?.invalidate()
-        var tickCount = 0
-        // Tick every 5 seconds
-        idleTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            let current = self.stateMachine.current
-            guard current == .idle || current == .blink else { return }
+        blinkTimer?.invalidate()
+        bodyMoveTimer?.invalidate()
 
-            tickCount += 1
-
-            // Blink: ~every 5 seconds (natural)
+        // Blink only: every 5 seconds, 0.8s duration
+        blinkTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self, self.stateMachine.current == .idle else { return }
             self.stateMachine.current = .blink
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
                 guard let self, self.stateMachine.current == .blink else { return }
                 self.stateMachine.current = .idle
             }
+        }
 
-            // Body movement: every ~3 minutes (36 ticks x 5s = 180s)
-            if tickCount >= 36 {
-                tickCount = 0
-                let variations: [PetState] = [.idleBreathe, .secretary]
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                    guard let self, self.stateMachine.current == .idle else { return }
-                    self.stateMachine.current = variations.randomElement() ?? .idleBreathe
-                    // Return to idle after 3s
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                        guard let self else { return }
-                        if self.stateMachine.current != .idle && self.stateMachine.current != .speak {
-                            self.stateMachine.current = .idle
-                        }
-                    }
+        // Body movement: every 3 minutes, 3s duration
+        bodyMoveTimer = Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in
+            guard let self, self.stateMachine.current == .idle else { return }
+            let variations: [PetState] = [.idleBreathe, .secretary]
+            self.stateMachine.current = variations.randomElement() ?? .idleBreathe
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                guard let self else { return }
+                if self.stateMachine.current != .idle && self.stateMachine.current != .speak {
+                    self.stateMachine.current = .idle
                 }
             }
         }
@@ -252,6 +247,10 @@ final class PetModel: NSObject, ObservableObject {
     func cleanup() {
         disconnect()
         idleTimer?.invalidate()
+        blinkTimer?.invalidate()
+        bodyMoveTimer?.invalidate()
         idleTimer = nil
+        blinkTimer = nil
+        bodyMoveTimer = nil
     }
 }
