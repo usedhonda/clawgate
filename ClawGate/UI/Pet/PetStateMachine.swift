@@ -1,6 +1,7 @@
 import Foundation
 
-/// Pet character states
+/// Legacy combined state kept as a compatibility bridge while locomotion and
+/// expression are split into separate layers.
 enum PetState: String, CaseIterable {
     case idle
     case blinkA = "blink-a"
@@ -25,6 +26,38 @@ enum PetState: String, CaseIterable {
     case blink
 }
 
+enum PetExpression: String, CaseIterable {
+    case idle
+    case blinkA = "blink-a"
+    case blinkB = "blink-b"
+    case bodyA = "body-a"
+    case bodyB = "body-b"
+    case speak
+    case speakMix = "speak-mix"
+    case speakTilt = "speak-tilt"
+    case talk
+    case wave
+    case react
+    case blush
+    case secretary
+    case funny
+    case sleep
+    case idleBreathe = "idle-breathe"
+    case blink
+}
+
+enum LocomotionState: Equatable {
+    case stationary
+    case walking(WalkDirection)
+
+    enum WalkDirection: String {
+        case front = "walk-front"
+        case back = "walk-back"
+        case left = "walk-left"
+        case right = "walk-right"
+    }
+}
+
 /// Events that trigger state transitions
 enum PetEvent {
     case assistantStarted          // message incoming -> speak
@@ -46,20 +79,21 @@ enum PetEvent {
 
 /// State machine for pet character with 3-layer UX
 final class PetStateMachine: ObservableObject {
-    @Published var current: PetState = .idle
+    @Published var expression: PetExpression = .idle
+    @Published var locomotion: LocomotionState = .stationary
     @Published var isBubbleVisible = false
     @Published var isChatOpen = false
     /// Whisper text is managed by PetModel (Layer 1 display payload)
 
     /// Transition based on incoming event
     @discardableResult
-    func handle(_ event: PetEvent) -> PetState {
+    func handle(_ event: PetEvent) -> PetExpression {
         switch event {
         case .assistantStarted:
-            current = randomSpeakState()
+            expression = randomSpeakState()
 
         case .assistantFinished:
-            current = .idle
+            expression = .idle
 
         case .userClicked:
             // Simple toggle: click = chat open/close
@@ -92,42 +126,145 @@ final class PetStateMachine: ObservableObject {
             break
 
         case .disconnected:
-            current = .sleep
+            expression = .sleep
 
         case .reconnected:
-            current = .idle
+            expression = .idle
 
         case .idleTimeout:
-            let variations: [PetState] = [.idleBreathe, .blink, .secretary, .funny]
-            current = variations.randomElement() ?? .idleBreathe
+            let variations: [PetExpression] = [.idleBreathe, .blink, .secretary, .funny]
+            expression = variations.randomElement() ?? .idleBreathe
 
         case .notification:
             break  // PetModel handles whisper text
 
         case .greeting:
-            current = .wave
+            expression = .wave
 
         case .error:
-            current = .react
+            expression = .react
 
         case .success:
-            current = .react
+            expression = .react
 
         case .lateNight:
-            current = .sleep
+            expression = .sleep
         }
-        return current
+        return expression
     }
 
     /// Pick a random speak animation for variety
-    private func randomSpeakState() -> PetState {
-        let options: [PetState] = [.speak, .speakMix, .speakTilt, .talk]
+    private func randomSpeakState() -> PetExpression {
+        let options: [PetExpression] = [.speak, .speakMix, .speakTilt, .talk]
         return options.randomElement() ?? .speak
     }
 
-    /// Animation name for the current state (maps to manifest state name)
-    var animationName: String {
-        current.rawValue
+    var resolvedAnimationName: String {
+        switch locomotion {
+        case .walking(let direction):
+            switch expression {
+            case .speak, .speakMix, .speakTilt, .talk, .wave:
+                return expression.rawValue
+            default:
+                return direction.rawValue
+            }
+        case .stationary:
+            return expression.rawValue
+        }
     }
 
+    /// Legacy bridge for code that still talks in the old combined-state dialect.
+    var current: PetState {
+        get {
+            switch locomotion {
+            case .walking(.front): return .walkFront
+            case .walking(.back): return .walkBack
+            case .walking(.left): return .walkLeft
+            case .walking(.right): return .walkRight
+            case .stationary:
+                switch expression {
+                case .idle: return .idle
+                case .blinkA: return .blinkA
+                case .blinkB: return .blinkB
+                case .bodyA: return .bodyA
+                case .bodyB: return .bodyB
+                case .speak: return .speak
+                case .speakMix: return .speakMix
+                case .speakTilt: return .speakTilt
+                case .talk: return .talk
+                case .wave: return .wave
+                case .react: return .react
+                case .blush: return .blush
+                case .secretary: return .secretary
+                case .funny: return .funny
+                case .sleep: return .sleep
+                case .idleBreathe: return .idleBreathe
+                case .blink: return .blink
+                }
+            }
+        }
+        set {
+            switch newValue {
+            case .walkFront:
+                locomotion = .walking(.front)
+            case .walkBack:
+                locomotion = .walking(.back)
+            case .walkLeft:
+                locomotion = .walking(.left)
+            case .walkRight:
+                locomotion = .walking(.right)
+            case .idle:
+                locomotion = .stationary
+                expression = .idle
+            case .blinkA:
+                locomotion = .stationary
+                expression = .blinkA
+            case .blinkB:
+                locomotion = .stationary
+                expression = .blinkB
+            case .bodyA:
+                locomotion = .stationary
+                expression = .bodyA
+            case .bodyB:
+                locomotion = .stationary
+                expression = .bodyB
+            case .speak:
+                locomotion = .stationary
+                expression = .speak
+            case .speakMix:
+                locomotion = .stationary
+                expression = .speakMix
+            case .speakTilt:
+                locomotion = .stationary
+                expression = .speakTilt
+            case .talk:
+                locomotion = .stationary
+                expression = .talk
+            case .wave:
+                locomotion = .stationary
+                expression = .wave
+            case .react:
+                locomotion = .stationary
+                expression = .react
+            case .blush:
+                locomotion = .stationary
+                expression = .blush
+            case .secretary:
+                locomotion = .stationary
+                expression = .secretary
+            case .funny:
+                locomotion = .stationary
+                expression = .funny
+            case .sleep:
+                locomotion = .stationary
+                expression = .sleep
+            case .idleBreathe:
+                locomotion = .stationary
+                expression = .idleBreathe
+            case .blink:
+                locomotion = .stationary
+                expression = .blink
+            }
+        }
+    }
 }

@@ -21,10 +21,10 @@ final class PetModel: NSObject, ObservableObject {
     @Published var notificationHistory: [NotificationEntry] = []
     @Published var summonResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
-    @Published var targetPosition: NSPoint?   // Window tracking target
 
     let stateMachine = PetStateMachine()
     let characterManager = CharacterManager()
+    lazy var moveController = MoveController(stateMachine: stateMachine)
 
     private let wsClient = OpenClawWSClient()
     private var sessionKey: String?
@@ -41,12 +41,8 @@ final class PetModel: NSObject, ObservableObject {
     /// The AX window element Chi is currently following (for context capture)
     private var lastTrackedWindow: AXUIElement?
     private var lastTrackedWindowFrame: CGRect?
-    @Published var shouldWaveOnArrival = false
-    var isAnimatingMove = false  // Set by PetWindowController during move animation
-    var moveGeneration: UInt = 0  // Incremented on each move, used to guard wave timeout
     private enum PlacementSide { case left, right }
     private var lastPlacementSide: PlacementSide = .right
-    @Published var currentWindowOrigin: NSPoint?  // For walk direction calculation
 
     /// Pet interaction mode (right-click menu)
     enum PetMode: String, CaseIterable {
@@ -328,7 +324,7 @@ final class PetModel: NSObject, ObservableObject {
         runCycle()
     }
 
-    private let randomActions: [PetState] = [.wave, .react, .blush, .idleBreathe, .funny, .secretary]
+    private let randomActions: [PetExpression] = [.wave, .react, .blush, .idleBreathe, .funny, .secretary]
 
     /// 30-second cycle with random actions mixed in
     private func runCycle() {
@@ -356,13 +352,13 @@ final class PetModel: NSObject, ObservableObject {
         DispatchQueue.main.async(execute: work)
     }
 
-    private func scheduleCycleAction(at seconds: Double, state: PetState, duration: Double) {
+    private func scheduleCycleAction(at seconds: Double, state: PetExpression, duration: Double) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            guard let self, self.stateMachine.current == .idle else { return }
-            self.stateMachine.current = state
+            guard let self, self.stateMachine.expression == .idle else { return }
+            self.stateMachine.expression = state
             DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
-                guard let self, self.stateMachine.current == state else { return }
-                self.stateMachine.current = .idle
+                guard let self, self.stateMachine.expression == state else { return }
+                self.stateMachine.expression = .idle
             }
         }
     }
@@ -384,11 +380,12 @@ final class PetModel: NSObject, ObservableObject {
         if let pause = dragPauseUntil, Date() < pause { return }
 
         let frontmost = NSWorkspace.shared.frontmostApplication
+        var waveOnArrival = false
 
         // Track last non-ClawGate frontmost app (ClawGate becomes frontmost on pet click)
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             if lastTrackedApp?.processIdentifier != app.processIdentifier {
-                shouldWaveOnArrival = true  // New window — wave on arrival
+                waveOnArrival = true  // New window — wave on arrival
             }
             lastTrackedApp = app
         }
@@ -398,12 +395,7 @@ final class PetModel: NSObject, ObservableObject {
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
         guard let focusedWin = AXQuery.focusedWindow(appElement: appElement),
               let frame = AXQuery.copyFrameAttribute(focusedWin) else {
-            // Window closed or inaccessible — clear walk state to avoid stuck animation
-            let current = stateMachine.current
-            if current == .walkFront || current == .walkBack
-                || current == .walkLeft || current == .walkRight {
-                stateMachine.current = .idle
-            }
+            moveController.stop()
             return
         }
 
@@ -416,14 +408,14 @@ final class PetModel: NSObject, ObservableObject {
 
         // Skip small windows (popups, dialogs) — but clear walk first
         if frame.width < 300 || frame.height < 200 {
-            clearWalkIfNeeded()
+            moveController.stop()
             return
         }
 
         // Skip fullscreen apps — but clear walk first
         if let screenFull = NSScreen.main?.frame,
            abs(frame.width - screenFull.width) < 10 && abs(frame.height - screenFull.height) < 40 {
-            clearWalkIfNeeded()
+            moveController.stop()
             return
         }
 
@@ -448,12 +440,13 @@ final class PetModel: NSObject, ObservableObject {
 
         guard !candidates.isEmpty else {
             // No valid position, fallback
-            targetPosition = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
+            let fallback = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
+            moveController.moveTo(fallback, waveOnArrival: waveOnArrival)
             return
         }
 
         // Pick closest candidate to current pet position
-        let petPos = currentWindowOrigin ?? NSPoint(x: screen.maxX - petSize, y: screen.minY)
+        let petPos = moveController.currentOrigin ?? NSPoint(x: screen.maxX - petSize, y: screen.minY)
         var target = candidates[0].point
         var bestDist = Double.infinity
         var bestSide = candidates[0].side
@@ -471,56 +464,7 @@ final class PetModel: NSObject, ObservableObject {
 
         target.x = max(screen.minX, min(target.x, screen.maxX - petSize))
         target.y = max(screen.minY, min(target.y, screen.maxY - petSize))
-
-        // Walk direction based on movement delta (skip if mid-animation to avoid stutter)
-        if !isAnimatingMove, let current = currentWindowOrigin {
-            let dx = target.x - current.x
-            let dy = target.y - current.y
-            let distance = sqrt(dx * dx + dy * dy)
-
-            if distance > 20 {
-                // Set walk state based on dominant direction
-                let walkState: PetState
-                if abs(dx) > abs(dy) {
-                    walkState = dx > 0 ? .walkRight : .walkLeft
-                } else {
-                    walkState = dy > 0 ? .walkBack : .walkFront
-                }
-                // Set walk unless actively speaking or waving (protect wave arrival animation)
-                let current = stateMachine.current
-                let isSpeaking = current == .speak || current == .speakMix
-                    || current == .speakTilt || current == .talk
-                let isWaving = current == .wave
-                if !isSpeaking && !isWaving {
-                    NSLog("[PetWalk] SET walk=%@ dist=%.0f from=%@ animating=%d gen=%u",
-                          String(describing: walkState), distance, String(describing: current),
-                          isAnimatingMove ? 1 : 0, moveGeneration)
-                    stateMachine.current = walkState
-                }
-            } else if stateMachine.current == .walkFront || stateMachine.current == .walkBack
-                        || stateMachine.current == .walkLeft || stateMachine.current == .walkRight {
-                NSLog("[PetWalk] CLEAR walk→idle from=%@ dist=%.0f animating=%d gen=%u",
-                      String(describing: stateMachine.current), distance,
-                      isAnimatingMove ? 1 : 0, moveGeneration)
-                stateMachine.current = .idle
-            }
-        }
-
-        // Only update if target moved significantly (avoid interrupting animation)
-        if let prev = targetPosition {
-            let moveDist = sqrt(pow(target.x - prev.x, 2) + pow(target.y - prev.y, 2))
-            if moveDist < 10 { return }
-        }
-        targetPosition = target
-    }
-
-    /// Clear walk state if currently walking (used by early-return paths)
-    private func clearWalkIfNeeded() {
-        let current = stateMachine.current
-        if current == .walkFront || current == .walkBack
-            || current == .walkLeft || current == .walkRight {
-            stateMachine.current = .idle
-        }
+        moveController.moveTo(target, waveOnArrival: waveOnArrival)
     }
 
     // MARK: - Lifecycle
@@ -565,6 +509,7 @@ final class PetModel: NSObject, ObservableObject {
 
     func cleanup() {
         disconnect()
+        moveController.stop()
         idleTimer?.invalidate()
         idleTimer = nil
         cycleWorkItem?.cancel()

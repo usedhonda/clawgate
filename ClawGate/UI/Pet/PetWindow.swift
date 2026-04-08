@@ -10,7 +10,6 @@ final class PetWindowController {
     private let model: PetModel
     private var opacityObservation: AnyCancellable?
     private var stateObservation: AnyCancellable?
-    private var positionObservation: AnyCancellable?
     private var sizeObservation: AnyCancellable?
 
     init(model: PetModel) {
@@ -53,12 +52,16 @@ final class PetWindowController {
         window = w
         spriteView = sprite
         w.orderFront(nil)
+        model.moveController.bind(window: w)
 
         // Load initial character (spriteView must be set first)
         updateSpriteForCurrentState()
 
-        // Observe state machine changes
-        stateObservation = model.stateMachine.$current.sink { [weak self] _ in
+        // Observe state layers for sprite updates
+        stateObservation = Publishers.CombineLatest(
+            model.stateMachine.$expression,
+            model.stateMachine.$locomotion
+        ).sink { [weak self] _, _ in
             DispatchQueue.main.async {
                 self?.updateSpriteForCurrentState()
             }
@@ -83,100 +86,21 @@ final class PetWindowController {
             }
         }
 
-        // Observe target position for window tracking
-        positionObservation = model.$targetPosition.sink { [weak self] point in
-            guard let point, let w = self?.window else { return }
-            DispatchQueue.main.async {
-                // Skip if currently animating (wait for current move to finish)
-                if self?.moveTimer != nil { return }
-                self?.model.currentWindowOrigin = w.frame.origin
-                self?.animateWindowMove(to: point)
-            }
-        }
-    }
-
-    private var moveTimer: Timer?
-
-    private func animateWindowMove(to target: NSPoint) {
-        moveTimer?.invalidate()
-        guard let w = window else { return }
-
-        let start = w.frame.origin
-        let dx = target.x - start.x
-        let dy = target.y - start.y
-        let distance = sqrt(dx * dx + dy * dy)
-
-        // FIX: Set isAnimatingMove AFTER the distance check to avoid stuck flag
-        guard distance > 5 else { return }  // Already close enough
-        model.isAnimatingMove = true
-        model.moveGeneration &+= 1
-        let gen = model.moveGeneration
-
-        // Longer distance = faster speed (scaled for ultrawide)
-        let speed: Double = distance < 300 ? 400 : distance < 1000 ? 1500 : 3000
-        let duration: TimeInterval = min(max(distance / speed, 0.15), 1.5)
-        let steps = Int(duration * 60)  // ~60fps
-        var step = 0
-        let interval = duration / Double(steps)
-
-        moveTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self, weak w] timer in
-            guard let w else { timer.invalidate(); return }
-            step += 1
-            let t = min(Double(step) / Double(steps), 1.0)
-            // Ease-in-out
-            let ease = t < 0.5 ? 2 * t * t : 1 - pow(-2 * t + 2, 2) / 2
-            let x = start.x + dx * ease
-            let y = start.y + dy * ease
-            w.setFrameOrigin(NSPoint(x: x, y: y))
-            if step >= steps {
-                timer.invalidate()
-                self?.moveTimer = nil
-                // Atomic arrival: set state BEFORE clearing isAnimatingMove
-                // This prevents polling from racing in between
-                self?.model.currentWindowOrigin = target
-                let current = self?.model.stateMachine.current
-                let isWalking = current == .walkFront || current == .walkBack
-                    || current == .walkLeft || current == .walkRight
-                NSLog("[PetWalk] ARRIVE current=%@ isWalking=%d waveOnArrival=%d gen=%u",
-                      String(describing: current), isWalking ? 1 : 0,
-                      self?.model.shouldWaveOnArrival == true ? 1 : 0,
-                      self?.model.moveGeneration ?? 0)
-                if isWalking {
-                    if self?.model.shouldWaveOnArrival == true {
-                        self?.model.shouldWaveOnArrival = false
-                        self?.model.stateMachine.current = .wave
-                        // Wave timeout with generation guard — only clear if same move
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                            guard let self, self.model.moveGeneration == gen else { return }
-                            if self.model.stateMachine.current == .wave {
-                                self.model.stateMachine.current = .idle
-                            }
-                        }
-                    } else {
-                        self?.model.stateMachine.current = .idle
-                    }
-                }
-                // Clear flag LAST — polling won't interfere with arrival state
-                self?.model.isAnimatingMove = false
-            }
-        }
     }
 
     func hide() {
-        moveTimer?.invalidate()
-        moveTimer = nil
+        model.moveController.stop()
         window?.orderOut(nil)
         window = nil
         spriteView = nil
         stateObservation = nil
         opacityObservation = nil
-        positionObservation = nil
         sizeObservation = nil
     }
 
     private func updateSpriteForCurrentState() {
         guard let sprite = spriteView else { return }
-        let stateName = model.stateMachine.animationName
+        let stateName = model.stateMachine.resolvedAnimationName
         if var character = model.characterManager.current() {
             let frames = character.frames(for: stateName)
             let fps = character.fps(for: stateName)
@@ -369,7 +293,7 @@ private final class PetContentView: NSView {
     }
 
     @objc private func summonOmakase(_ sender: NSMenuItem) {
-        model.stateMachine.current = .wave
+        model.stateMachine.expression = .wave
         model.summonOmakase()
     }
 
@@ -419,7 +343,7 @@ private final class PetContentView: NSView {
         container.addSubview(field)
 
         // Trigger wave animation
-        model.stateMachine.current = .wave
+        model.stateMachine.expression = .wave
 
         let bw = KeyableWindow(
             contentRect: NSRect(x: 0, y: 0, width: 260, height: 56),
