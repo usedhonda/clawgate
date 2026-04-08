@@ -47,7 +47,7 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Hide behind window
     @Published var isHiding = false
     /// Minutes of idle before hiding. 0 = disabled. Min 0.5.
-    var hideAfterMinutes: Double = 0  // Disabled until hide feature is properly designed
+    var hideAfterMinutes: Double = 0.5  // Debug: 30s
     private var lastActivityTime = Date()
     private var hideCheckTimer: Timer?
     private var clawWaveTimer: Timer?
@@ -296,7 +296,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func toggleChat() {
-        touchActivity()
+        noteActivity()
         if stateMachine.isChatOpen {
             stateMachine.isChatOpen = false
         } else {
@@ -413,7 +413,7 @@ final class PetModel: NSObject, ObservableObject {
 
     func onPetDragged() {
         dragPauseUntil = Date().addingTimeInterval(30)
-        touchActivity()
+        noteActivity()
     }
 
     func startWindowTracking() {
@@ -423,7 +423,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func updateTargetPosition() {
-        guard isTrackingEnabled, !isHiding else { return }
+        guard isTrackingEnabled else { return }
         if let pause = dragPauseUntil, Date() < pause { return }
 
         let frontmost = NSWorkspace.shared.frontmostApplication
@@ -433,7 +433,7 @@ final class PetModel: NSObject, ObservableObject {
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             if lastTrackedApp?.processIdentifier != app.processIdentifier {
                 waveOnArrival = true  // New window — wave on arrival
-                touchActivity()
+                noteActivity(unhideIfNeeded: true)  // app changed — come out and follow
             }
             lastTrackedApp = app
         }
@@ -487,19 +487,46 @@ final class PetModel: NSObject, ObservableObject {
         }
 
         guard !candidates.isEmpty else {
-            // No valid position, fallback
             let fallback = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
             moveController.moveTo(fallback, waveOnArrival: waveOnArrival)
             return
         }
 
-        // Pick closest candidate to current pet position
+        // Hidden: stick to the side we entered hiding on, immediate move + pose offset
+        if isHiding {
+            if let fixed = candidates.first(where: { $0.side == hidingSide }) {
+                var t = fixed.point
+                // Claw-only: compensate for overlap + height-fit inset
+                // Peek was already perfect, don't touch it
+                if stateMachine.expression == .hideClaw {
+                    // Height-fit: scale = characterSize / 768, display_w = 688 * scale
+                    // Left inset in sprite = (characterSize - display_w) / 2
+                    let scale = characterSize / 768.0
+                    let displayW = 688.0 * scale
+                    let inset = (characterSize - displayW) / 2.0
+                    // Claw is inset px from sprite edge, overlap px into host
+                    // Push out by (overlap - inset) to put claw at host edge
+                    let clawFix = overlap - inset
+                    if hidingSide == .right {
+                        t.x += clawFix
+                    } else {
+                        t.x -= clawFix
+                    }
+                }
+                t.x += hiddenPoseOffsetX(for: stateMachine.expression, side: hidingSide)
+                t.x = max(screen.minX, min(t.x, screen.maxX - petSize))
+                t.y = max(screen.minY, min(t.y, screen.maxY - petSize))
+                moveController.moveTo(t, waveOnArrival: false, style: .immediate)
+            }
+            return
+        }
+
+        // Normal: pick closest candidate
         let petPos = moveController.currentOrigin ?? NSPoint(x: screen.maxX - petSize, y: screen.minY)
         var target = candidates[0].point
         var bestDist = Double.infinity
         var bestSide = candidates[0].side
         for c in candidates {
-            // Hysteresis: slight preference for current side
             let bonus: Double = c.side == lastPlacementSide ? -50 : 0
             let d = sqrt(pow(c.point.x - petPos.x, 2) + pow(c.point.y - petPos.y, 2)) + bonus
             if d < bestDist {
@@ -573,9 +600,9 @@ final class PetModel: NSObject, ObservableObject {
 
     // MARK: - Hide Behind Window
 
-    func touchActivity() {
+    func noteActivity(unhideIfNeeded: Bool = true) {
         lastActivityTime = Date()
-        if isHiding {
+        if unhideIfNeeded && isHiding {
             unhide()
         }
     }
@@ -598,17 +625,33 @@ final class PetModel: NSObject, ObservableObject {
         isHiding = true
         hidingSide = lastPlacementSide
 
-        // Instant: stop cycle + switch sprite. No freeze, no movement.
+        // Instant: lock expression, stop cycle, switch sprite
         cycleWorkItem?.cancel()
         moveController.stop()
-        // Right placement → claw peeks from RIGHT edge → use "-left" assets (right-anchored)
-        // Left placement → claw peeks from LEFT edge → use "" assets (left-anchored)
-        stateMachine.hideAnimationSuffix = hidingSide == .right ? "-left" : ""
+        stateMachine.isExpressionLocked = true
+        stateMachine.hideAnimationSuffix = hidingSide == .left ? "-left" : ""
         stateMachine.expression = .hideClaw
 
         // Micro-loop: occasional peek while hiding
         startHideMicroLoop()
         NSLog("[PetHide] Entered hiding (side=%@)", hidingSide == .left ? "left" : "right")
+    }
+
+    /// Pose-specific X offset for hiding states (in points).
+    /// Aligns claw screen position between claw-only and peek states.
+    private func hiddenPoseOffsetX(for expression: PetExpression, side: PlacementSide) -> CGFloat {
+        // scale = 128/768 = 1/6 (height-fit)
+        // base = hide-claw claw center x=59
+        let scale: CGFloat = 128.0 / 768.0
+        let deltaPx: CGFloat
+        switch expression {
+        case .hidePeek:
+            deltaPx = 77  // peek claw center x=136 minus base 59
+        default:
+            deltaPx = 0   // claw and emerge: no offset
+        }
+        let deltaPt = deltaPx * scale
+        return side == .right ? -deltaPt : deltaPt
     }
 
     private func startHideMicroLoop() {
@@ -617,9 +660,11 @@ final class PetModel: NSObject, ObservableObject {
             guard let self, self.isHiding else { return }
             if self.stateMachine.expression == .hideClaw {
                 self.stateMachine.expression = .hidePeek
+                self.updateTargetPosition()  // reposition with peek offset
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
                     guard let self, self.isHiding else { return }
                     self.stateMachine.expression = .hideClaw
+                    self.updateTargetPosition()  // reposition back to claw offset
                 }
             }
         }
@@ -631,6 +676,7 @@ final class PetModel: NSObject, ObservableObject {
         clawWaveTimer?.invalidate()
         clawWaveTimer = nil
         lastActivityTime = Date()
+        stateMachine.isExpressionLocked = false
 
         // Emerge animation (keep suffix for correct side)
         stateMachine.expression = .hideEmerge

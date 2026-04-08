@@ -99,11 +99,22 @@ final class PetStateMachine: ObservableObject {
     @Published var locomotion: LocomotionState = .stationary
     @Published var isBubbleVisible = false
     @Published var isChatOpen = false
+    /// When true, handle() won't change expression (hiding mode owns expression)
+    var isExpressionLocked = false
     /// Whisper text is managed by PetModel (Layer 1 display payload)
 
     /// Transition based on incoming event
     @discardableResult
     func handle(_ event: PetEvent) -> PetExpression {
+        // During hiding, only chat open/close and bubble events are allowed
+        if isExpressionLocked {
+            switch event {
+            case .userClicked, .userDoubleClicked, .bubbleDismissed:
+                break  // allow these through
+            default:
+                return expression  // block expression changes
+            }
+        }
         switch event {
         case .assistantStarted:
             expression = randomSpeakState()

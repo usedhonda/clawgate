@@ -24,7 +24,15 @@ final class MoveController {
         currentOrigin = window.frame.origin
     }
 
-    func moveTo(_ target: NSPoint, waveOnArrival: Bool) {
+    enum MoveStyle { case animated, immediate }
+
+    func moveTo(_ target: NSPoint, waveOnArrival: Bool, style: MoveStyle = .animated) {
+        if style == .immediate {
+            stop()
+            window?.setFrameOrigin(target)
+            currentOrigin = target
+            return
+        }
         if isMoving {
             pendingTarget = target
             pendingWaveOnArrival = waveOnArrival
