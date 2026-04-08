@@ -289,31 +289,34 @@ private final class PetContentView: NSView {
         isDragging = false
     }
 
-    // MARK: - Right-Click Context Menu
+    // MARK: - Right-Click Summon Menu
 
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu()
 
-        // Mode items
-        for mode in PetModel.PetMode.allCases {
-            let item = NSMenuItem(title: mode.rawValue, action: #selector(changePetMode(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = mode
-            item.state = model.petMode == mode ? .on : .off
-            menu.addItem(item)
+        // Summon: Omakase
+        let omakaseItem = NSMenuItem(title: "Omakase", action: #selector(summonOmakase(_:)), keyEquivalent: "")
+        omakaseItem.target = self
+        menu.addItem(omakaseItem)
+
+        // Summon: Ask...
+        let askItem = NSMenuItem(title: "Ask...", action: #selector(summonAsk(_:)), keyEquivalent: "")
+        askItem.target = self
+        menu.addItem(askItem)
+
+        // Summon: Draft PR (Terminal only)
+        let ctx = model.captureScreenContext()
+        if ctx.isTerminal {
+            menu.addItem(.separator())
+            let draftPRItem = NSMenuItem(title: "Draft PR", action: #selector(summonDraftPR(_:)), keyEquivalent: "")
+            draftPRItem.target = self
+            menu.addItem(draftPRItem)
         }
 
         menu.addItem(.separator())
 
-        // Open chat
-        let chatItem = NSMenuItem(title: "チャットを開く", action: #selector(openChat(_:)), keyEquivalent: "")
-        chatItem.target = self
-        menu.addItem(chatItem)
-
-        menu.addItem(.separator())
-
         // Opacity submenu
-        let opacityItem = NSMenuItem(title: "透明度", action: nil, keyEquivalent: "")
+        let opacityItem = NSMenuItem(title: "Opacity", action: nil, keyEquivalent: "")
         let opacityMenu = NSMenu()
         for percent in [100, 75, 50, 25] {
             let value = Double(percent) / 100.0
@@ -329,13 +332,30 @@ private final class PetContentView: NSView {
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
-    @objc private func changePetMode(_ sender: NSMenuItem) {
-        guard let mode = sender.representedObject as? PetModel.PetMode else { return }
-        model.petMode = mode
+    @objc private func summonOmakase(_ sender: NSMenuItem) {
+        model.summonOmakase()
     }
 
-    @objc private func openChat(_ sender: NSMenuItem) {
-        model.stateMachine.handle(.userDoubleClicked)
+    @objc private func summonAsk(_ sender: NSMenuItem) {
+        // Show input dialog
+        let alert = NSAlert()
+        alert.messageText = "Ask Chi"
+        alert.informativeText = "Enter your instruction:"
+        alert.addButton(withTitle: "Send")
+        alert.addButton(withTitle: "Cancel")
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        input.placeholderString = "e.g. 訳して, summarize, explain..."
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        let instruction = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty else { return }
+        model.summonAsk(instruction: instruction)
+    }
+
+    @objc private func summonDraftPR(_ sender: NSMenuItem) {
+        model.summonDraftPR()
     }
 
     @objc private func changeOpacity(_ sender: NSMenuItem) {
@@ -381,7 +401,7 @@ private final class PetContentView: NSView {
 
     private func showFullChat() {
         guard chatWindow == nil, let parentWindow = window else { return }
-        let chatView = PetBubbleView(model: model)
+        let chatView = PetChatContainerView(model: model)
         let hosting = NSHostingView(rootView: AnyView(chatView))
         hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 480)
 

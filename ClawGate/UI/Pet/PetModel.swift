@@ -18,6 +18,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var isBubbleEnabled: Bool = true
     @Published var isWhisperEnabled: Bool = true
     @Published var characterSize: CGFloat = 128
+    @Published var notificationHistory: [NotificationEntry] = []
     @Published var targetPosition: NSPoint?   // Window tracking target
 
     let stateMachine = PetStateMachine()
@@ -237,7 +238,15 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Notification (independent of state machine)
 
     func showNotification(_ msg: OpenClawChatMessage) {
-        guard isBubbleEnabled, !stateMachine.isChatOpen else { return }
+        NSLog("[Pet] showNotification: bubbleEnabled=%d chatOpen=%d text=%@", isBubbleEnabled ? 1 : 0, stateMachine.isChatOpen ? 1 : 0, String(msg.text.prefix(30)))
+
+        // Always save to history
+        addNotificationEntry(text: msg.text, source: msg.isProactive ? "proactive" : "gateway")
+
+        guard isBubbleEnabled, !stateMachine.isChatOpen else {
+            NSLog("[Pet] showNotification suppressed")
+            return
+        }
         // Duration scales with text length: 15s base + 1s per 20 chars, max 60s
         let duration = min(max(15.0, Double(msg.text.count) / 20.0 + 15.0), 60.0)
         notificationMessage = msg
@@ -466,10 +475,15 @@ final class PetModel: NSObject, ObservableObject {
 
         // Listen for bubble_notify from bridge
         NotificationCenter.default.addObserver(forName: .petBubbleNotify, object: nil, queue: .main) { [weak self] notif in
-            guard let self, let text = notif.userInfo?["text"] as? String else { return }
-            let source = notif.userInfo?["source"] as? String ?? "unknown"
+            guard let self, let text = notif.userInfo?["text"] as? String else {
+                NSLog("[Pet] bubble_notify: missing text")
+                return
+            }
+            NSLog("[Pet] bubble_notify received: %@", String(text.prefix(50)))
+            let source = notif.userInfo?["source"] as? String ?? "bridge"
             let msg = OpenClawChatMessage(role: .assistant, text: text)
             self.messages.append(msg)
+            self.addNotificationEntry(text: text, source: source)
             self.showNotification(msg)
         }
     }
@@ -493,4 +507,238 @@ final class PetModel: NSObject, ObservableObject {
         windowTrackingTimer?.invalidate()
         windowTrackingTimer = nil
     }
+
+    // MARK: - Screen Context Capture (on-demand AX)
+
+    func captureScreenContext() -> ScreenContext {
+        let app = lastTrackedApp ?? NSWorkspace.shared.frontmostApplication
+        let appName = app?.localizedName ?? "Unknown"
+        let bundleId = app?.bundleIdentifier ?? ""
+
+        let terminalBundles: Set<String> = [
+            "com.mitchellh.ghostty", "com.apple.Terminal",
+            "com.googlecode.iterm2", "net.kovidgoyal.kitty",
+        ]
+        let isTerminal = terminalBundles.contains(bundleId)
+
+        var windowTitle = ""
+        var visibleText = ""
+
+        if let pid = app?.processIdentifier {
+            let appElement = AXQuery.applicationElement(pid: pid)
+            if let focusedWin = AXQuery.focusedWindow(appElement: appElement) {
+                windowTitle = AXQuery.copyStringAttribute(focusedWin, attribute: kAXTitleAttribute as String) ?? ""
+
+                let nodes = AXQuery.descendants(of: focusedWin, maxDepth: 3, maxNodes: 100)
+                let textRoles: Set<String> = ["AXStaticText", "AXTextField", "AXTextArea", "AXCell"]
+                var parts: [String] = []
+                var seen = Set<String>()
+                for node in nodes {
+                    guard let role = node.role, textRoles.contains(role) else { continue }
+                    let text = node.value ?? node.title ?? node.description ?? ""
+                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty, !seen.contains(trimmed) else { continue }
+                    seen.insert(trimmed)
+                    parts.append(trimmed)
+                }
+                visibleText = parts.joined(separator: "\n")
+                if visibleText.count > 2000 {
+                    visibleText = String(visibleText.prefix(2000))
+                }
+            }
+        }
+
+        return ScreenContext(
+            appName: appName, bundleId: bundleId,
+            windowTitle: windowTitle, visibleText: visibleText,
+            isTerminal: isTerminal
+        )
+    }
+
+    // MARK: - Summon (right-click actions)
+
+    func summonOmakase() {
+        guard sessionKey != nil else {
+            showWhisper("Not connected")
+            return
+        }
+        let ctx = captureScreenContext()
+        let prompt = """
+        [Summon:Omakase]
+        [Context]
+        App: \(ctx.appName)
+        Window: \(ctx.windowTitle)
+        Screen text:
+        \(ctx.visibleText)
+
+        Based on what I'm looking at, give me the most useful response.
+        If it's an error, explain the cause and fix.
+        If it's a message/email, summarize and draft a reply.
+        If it's code, point out issues or suggest improvements.
+        If it's an article, summarize the key points.
+        Keep it concise.
+        """
+        sendSummon(prompt, source: "omakase")
+    }
+
+    func summonAsk(instruction: String) {
+        guard sessionKey != nil else {
+            showWhisper("Not connected")
+            return
+        }
+        let ctx = captureScreenContext()
+        let prompt = """
+        [Summon:Ask]
+        [Context]
+        App: \(ctx.appName)
+        Window: \(ctx.windowTitle)
+        Screen text:
+        \(ctx.visibleText)
+
+        User instruction: \(instruction)
+        """
+        sendSummon(prompt, source: "ask")
+    }
+
+    func summonDraftPR() {
+        guard sessionKey != nil else {
+            showWhisper("Not connected")
+            return
+        }
+
+        // Get tmux pane cwd via tty mapping
+        BlockingWork.queue.async { [weak self] in
+            guard let self else { return }
+            let cwd = self.detectTmuxPaneCwd()
+            guard let cwd, !cwd.isEmpty else {
+                DispatchQueue.main.async { self.showWhisper("No git repo found") }
+                return
+            }
+
+            // Check if git repo
+            let gitCheck = Process()
+            gitCheck.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            gitCheck.arguments = ["-C", cwd, "rev-parse", "--is-inside-work-tree"]
+            gitCheck.standardOutput = Pipe()
+            gitCheck.standardError = Pipe()
+            try? gitCheck.run()
+            gitCheck.waitUntilExit()
+            guard gitCheck.terminationStatus == 0 else {
+                DispatchQueue.main.async { self.showWhisper("Not a git repo") }
+                return
+            }
+
+            // Get git diff
+            let diffProc = Process()
+            diffProc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            diffProc.arguments = ["-C", cwd, "diff", "--stat", "--unified=3"]
+            let diffPipe = Pipe()
+            diffProc.standardOutput = diffPipe
+            diffProc.standardError = Pipe()
+            try? diffProc.run()
+            diffProc.waitUntilExit()
+            let diffData = diffPipe.fileHandleForReading.readDataToEndOfFile()
+            var diffText = String(data: diffData, encoding: .utf8) ?? ""
+            if diffText.count > 4000 { diffText = String(diffText.prefix(4000)) }
+
+            guard !diffText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                DispatchQueue.main.async { self.showWhisper("No changes to diff") }
+                return
+            }
+
+            let prompt = """
+            [Summon:DraftPR]
+            Here's the git diff for this project. Write a PR description.
+
+            \(diffText)
+
+            Format:
+            ## Summary
+            - bullet points
+
+            ## Changes
+            - file-by-file summary
+            """
+
+            DispatchQueue.main.async {
+                self.sendSummon(prompt, source: "draft_pr")
+            }
+        }
+    }
+
+    private func sendSummon(_ prompt: String, source: String) {
+        guard let sessionKey else { return }
+
+        // Add user message to chat (but mark as summon)
+        let userMsg = OpenClawChatMessage(role: .user, text: "[\(source.uppercased())]")
+        messages.append(userMsg)
+
+        // Record in notification history
+        addNotificationEntry(text: "Requesting \(source)...", source: source)
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await wsClient.sendMessage(prompt, sessionKey: sessionKey)
+            } catch {
+                await MainActor.run {
+                    self.addNotificationEntry(text: "Error: \(error)", source: source)
+                }
+            }
+        }
+    }
+
+    private func detectTmuxPaneCwd() -> String? {
+        // List all tmux panes with tty and cwd
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        proc.arguments = ["tmux", "list-panes", "-a", "-F", "#{pane_tty} #{pane_current_path}"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        try? proc.run()
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else { return nil }
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let lines = output.components(separatedBy: "\n").filter { !$0.isEmpty }
+
+        // Try to match frontmost terminal's tty
+        // For now, use the first pane as fallback — could be improved with AX tty detection
+        guard let first = lines.first else { return nil }
+        let parts = first.components(separatedBy: " ")
+        guard parts.count >= 2 else { return nil }
+        return parts.dropFirst().joined(separator: " ")
+    }
+
+    // MARK: - Notification History
+
+    func addNotificationEntry(text: String, source: String) {
+        let entry = NotificationEntry(
+            id: UUID().uuidString, text: text,
+            source: source, timestamp: Date()
+        )
+        notificationHistory.append(entry)
+        // Keep max 100 entries
+        if notificationHistory.count > 100 {
+            notificationHistory.removeFirst(notificationHistory.count - 100)
+        }
+    }
+}
+
+// MARK: - Supporting Types
+
+struct ScreenContext {
+    let appName: String
+    let bundleId: String
+    let windowTitle: String
+    let visibleText: String
+    let isTerminal: Bool
+}
+
+struct NotificationEntry: Identifiable {
+    let id: String
+    let text: String
+    let source: String  // "omakase", "ask", "draft_pr", "proactive", "gateway"
+    let timestamp: Date
 }

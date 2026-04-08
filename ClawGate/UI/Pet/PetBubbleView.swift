@@ -214,3 +214,136 @@ struct ChatMessageView: View {
         }
     }
 }
+
+// MARK: - Tab Container (Chat + Notifications)
+
+struct PetChatContainerView: View {
+    @ObservedObject var model: PetModel
+    @State private var selectedTab = "chat"
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Tab bar
+            HStack(spacing: 0) {
+                chatTabButton("Chat", tab: "chat")
+                chatTabButton("Notifications", tab: "notifications")
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            .background(Color(nsColor: NSColor(white: 0.08, alpha: 1.0)))
+
+            // Content
+            if selectedTab == "chat" {
+                PetBubbleView(model: model)
+            } else {
+                NotificationListView(model: model)
+            }
+        }
+        .frame(minWidth: 280, idealWidth: 360, minHeight: 300, idealHeight: 480)
+        .background(Color(nsColor: NSColor(white: 0.12, alpha: 0.95)))
+    }
+
+    private func chatTabButton(_ title: String, tab: String) -> some View {
+        Button(action: { selectedTab = tab }) {
+            Text(title)
+                .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
+                .foregroundColor(selectedTab == tab ? .accentColor : .white.opacity(0.5))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .background(selectedTab == tab ? Color.white.opacity(0.08) : Color.clear)
+        .cornerRadius(6)
+        .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Notification List View
+
+struct NotificationListView: View {
+    @ObservedObject var model: PetModel
+
+    var body: some View {
+        if model.notificationHistory.isEmpty {
+            VStack {
+                Spacer()
+                Text("No notifications yet")
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(0.4))
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 4) {
+                    ForEach(model.notificationHistory.reversed()) { entry in
+                        NotificationEntryView(entry: entry)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+        }
+    }
+}
+
+struct NotificationEntryView: View {
+    let entry: NotificationEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: iconForSource(entry.source))
+                    .font(.system(size: 10))
+                    .foregroundColor(colorForSource(entry.source))
+                Text(entry.source.uppercased())
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(colorForSource(entry.source))
+                Spacer()
+                Text(timeString(entry.timestamp))
+                    .font(.system(size: 9))
+                    .foregroundColor(.white.opacity(0.3))
+            }
+            Text(entry.text)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.85))
+                .lineLimit(6)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white.opacity(0.06))
+        )
+    }
+
+    private func iconForSource(_ source: String) -> String {
+        switch source {
+        case "omakase": return "sparkles"
+        case "ask": return "questionmark.circle"
+        case "draft_pr": return "doc.text"
+        case "proactive": return "bell"
+        case "gateway": return "message"
+        case "bridge": return "network"
+        default: return "circle"
+        }
+    }
+
+    private func colorForSource(_ source: String) -> Color {
+        switch source {
+        case "omakase": return .yellow
+        case "ask": return .cyan
+        case "draft_pr": return .green
+        case "proactive": return .orange
+        default: return .white.opacity(0.5)
+        }
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+}
