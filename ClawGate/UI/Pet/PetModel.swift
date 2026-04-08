@@ -536,6 +536,7 @@ final class PetModel: NSObject, ObservableObject {
         startIdleTimer()
         startReconnectTimer()
         startWindowTracking()
+        startClipboardWatcher()
 
         // Listen for bubble_notify from bridge
         NotificationCenter.default.addObserver(forName: .petBubbleNotify, object: nil, queue: .main) { [weak self] notif in
@@ -971,6 +972,67 @@ final class PetModel: NSObject, ObservableObject {
         let parts = first.components(separatedBy: " ")
         guard parts.count >= 2 else { return nil }
         return parts.dropFirst().joined(separator: " ")
+    }
+
+    // MARK: - Clipboard Watcher
+
+    @Published var pendingClipboardOffer: ClipboardOffer?
+
+    private func startClipboardWatcher() {
+        ClipboardWatcher.shared.onOffer = { [weak self] offer in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // Enrich with source app context
+                var enriched = offer
+                enriched = ClipboardOffer(
+                    text: offer.text,
+                    contentType: offer.contentType,
+                    actions: offer.actions,
+                    sourceApp: self.lastTrackedApp?.localizedName
+                )
+                self.pendingClipboardOffer = enriched
+
+                // Show first action as whisper
+                let label = enriched.actions.first?.label ?? "Clipboard"
+                let appHint = enriched.sourceApp.map { " (\($0))" } ?? ""
+                self.showWhisper("\(label)?\(appHint)", duration: 5.0)
+            }
+        }
+        ClipboardWatcher.shared.start()
+    }
+
+    func executeClipboardAction(_ action: ClipboardAction) {
+        guard let offer = pendingClipboardOffer else { return }
+        pendingClipboardOffer = nil
+
+        // Try local execution first
+        if let result = ClipboardExecutor.executeLocal(action.type, text: offer.text) {
+            // Write result to clipboard
+            ClipboardWatcher.shared.suppress()  // Don't re-trigger on our own write
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(result, forType: .string)
+            showWhisper("Done — copied to clipboard", duration: 3.0)
+            return
+        }
+
+        // Gateway action — build prompt based on action type
+        let prompt: String
+        switch action.type {
+        case .translate(let to):
+            let lang = to == "ja" ? "Japanese" : "English"
+            prompt = "[Clipboard:\(action.label)]\nTranslate to \(lang):\n\(offer.text)"
+        case .explain:
+            prompt = "[Clipboard:\(action.label)]\nExplain this:\n\(offer.text)"
+        case .summarize:
+            prompt = "[Clipboard:\(action.label)]\nSummarize concisely:\n\(offer.text)"
+        case .draftReply:
+            prompt = "[Clipboard:\(action.label)]\nDraft a reply to this message:\n\(offer.text)"
+        case .review:
+            prompt = "[Clipboard:\(action.label)]\nReview this code briefly:\n\(offer.text)"
+        default:
+            return
+        }
+        sendSummon(prompt, source: "clipboard")
     }
 
     // MARK: - Notification History
