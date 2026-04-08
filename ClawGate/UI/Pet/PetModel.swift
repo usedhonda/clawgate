@@ -43,6 +43,7 @@ final class PetModel: NSObject, ObservableObject {
     private var lastTrackedWindowFrame: CGRect?
     @Published var shouldWaveOnArrival = false
     var isAnimatingMove = false  // Set by PetWindowController during move animation
+    var moveGeneration: UInt = 0  // Incremented on each move, used to guard wave timeout
     private enum PlacementSide { case left, right }
     private var lastPlacementSide: PlacementSide = .right
     @Published var currentWindowOrigin: NSPoint?  // For walk direction calculation
@@ -464,11 +465,12 @@ final class PetModel: NSObject, ObservableObject {
                 } else {
                     walkState = dy > 0 ? .walkBack : .walkFront
                 }
-                // Set walk unless actively speaking
+                // Set walk unless actively speaking or waving (protect wave arrival animation)
                 let current = stateMachine.current
                 let isSpeaking = current == .speak || current == .speakMix
                     || current == .speakTilt || current == .talk
-                if !isSpeaking {
+                let isWaving = current == .wave
+                if !isSpeaking && !isWaving {
                     stateMachine.current = walkState
                 }
             } else if stateMachine.current == .walkFront || stateMachine.current == .walkBack

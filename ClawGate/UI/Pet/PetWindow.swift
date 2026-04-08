@@ -100,13 +100,17 @@ final class PetWindowController {
     private func animateWindowMove(to target: NSPoint) {
         moveTimer?.invalidate()
         guard let w = window else { return }
-        model.isAnimatingMove = true
 
         let start = w.frame.origin
         let dx = target.x - start.x
         let dy = target.y - start.y
         let distance = sqrt(dx * dx + dy * dy)
+
+        // FIX: Set isAnimatingMove AFTER the distance check to avoid stuck flag
         guard distance > 5 else { return }  // Already close enough
+        model.isAnimatingMove = true
+        model.moveGeneration &+= 1
+        let gen = model.moveGeneration
 
         // Longer distance = faster speed (scaled for ultrawide)
         let speed: Double = distance < 300 ? 400 : distance < 1000 ? 1500 : 3000
@@ -127,9 +131,9 @@ final class PetWindowController {
             if step >= steps {
                 timer.invalidate()
                 self?.moveTimer = nil
-                self?.model.isAnimatingMove = false
+                // Atomic arrival: set state BEFORE clearing isAnimatingMove
+                // This prevents polling from racing in between
                 self?.model.currentWindowOrigin = target
-                // Arrive → always stop walking, then wave or idle
                 let current = self?.model.stateMachine.current
                 let isWalking = current == .walkFront || current == .walkBack
                     || current == .walkLeft || current == .walkRight
@@ -137,15 +141,19 @@ final class PetWindowController {
                     if self?.model.shouldWaveOnArrival == true {
                         self?.model.shouldWaveOnArrival = false
                         self?.model.stateMachine.current = .wave
+                        // Wave timeout with generation guard — only clear if same move
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                            if self?.model.stateMachine.current == .wave {
-                                self?.model.stateMachine.current = .idle
+                            guard let self, self.model.moveGeneration == gen else { return }
+                            if self.model.stateMachine.current == .wave {
+                                self.model.stateMachine.current = .idle
                             }
                         }
                     } else {
                         self?.model.stateMachine.current = .idle
                     }
                 }
+                // Clear flag LAST — polling won't interfere with arrival state
+                self?.model.isAnimatingMove = false
             }
         }
     }
