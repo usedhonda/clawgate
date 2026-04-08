@@ -76,16 +76,13 @@ struct ScreenshotSaveLocationResolver {
 
 struct ScreenshotTempStore {
     private static let canonicalTempURL = URL(fileURLWithPath: "/tmp", isDirectory: true)
+    private static let prefixes = ["chi-shot-", "clawgate-screenshot-"]
 
     static func makeTempURL(now: Date = Date()) -> URL {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let stamp = formatter.string(from: now)
-        let suffix = UUID().uuidString.prefix(8)
+        _ = now
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8)
         return canonicalTempURL
-            .appendingPathComponent("clawgate-screenshot-\(stamp)-\(suffix).png")
+            .appendingPathComponent("chi-shot-\(suffix).png")
     }
 
     static func pruneOldFiles(olderThan: TimeInterval = 24 * 60 * 60) {
@@ -97,7 +94,7 @@ struct ScreenshotTempStore {
         ) else { return }
 
         let cutoff = Date().addingTimeInterval(-olderThan)
-        for url in entries where url.lastPathComponent.hasPrefix("clawgate-screenshot-") && url.pathExtension.lowercased() == "png" {
+        for url in entries where prefixes.contains(where: { url.lastPathComponent.hasPrefix($0) }) && url.pathExtension.lowercased() == "png" {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
             if let modifiedAt = values?.contentModificationDate, modifiedAt < cutoff {
                 try? FileManager.default.removeItem(at: url)

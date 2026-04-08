@@ -45,7 +45,7 @@ final class ScreenshotWatcherTests: XCTestCase {
     func testScreenshotTempStoreCreatesClawgatePngPath() {
         let url = ScreenshotTempStore.makeTempURL(now: Date(timeIntervalSince1970: 0))
         XCTAssertEqual(url.pathExtension, "png")
-        XCTAssertTrue(url.lastPathComponent.hasPrefix("clawgate-screenshot-"))
+        XCTAssertTrue(url.lastPathComponent.hasPrefix("chi-shot-"))
         XCTAssertTrue(url.path.hasPrefix("/tmp/"))
     }
 }
