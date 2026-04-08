@@ -204,6 +204,7 @@ private final class PetContentView: NSView {
     private var whisperWindow: NSWindow?
     private var bubbleObservation: AnyCancellable?
     private var chatObservation: AnyCancellable?
+    private var summonObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
 
     // Drag state
@@ -239,6 +240,18 @@ private final class PetContentView: NSView {
                 } else {
                     self.hideChatWindow()
                 }
+            }
+        }
+
+        // Observe summon tab auto-open
+        summonObservation = model.$showSummonTab.sink { [weak self] show in
+            DispatchQueue.main.async {
+                guard let self, show else { return }
+                // Open chat window if not already open
+                if !self.model.stateMachine.isChatOpen {
+                    self.model.stateMachine.isChatOpen = true
+                }
+                // showSummonTab is consumed by PetChatContainerView's onChange
             }
         }
 
@@ -317,6 +330,7 @@ private final class PetContentView: NSView {
     }
 
     @objc private func summonOmakase(_ sender: NSMenuItem) {
+        model.stateMachine.current = .wave
         model.summonOmakase()
     }
 
@@ -353,14 +367,23 @@ private final class PetContentView: NSView {
             self?.askWindow = nil
         }
 
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 40))
+        let label = NSTextField(labelWithString: "Type your instruction here")
+        label.frame = NSRect(x: 10, y: 32, width: 240, height: 16)
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.textColor = NSColor.white.withAlphaComponent(0.5)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 56))
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.95).cgColor
         container.layer?.cornerRadius = 10
+        container.addSubview(label)
         container.addSubview(field)
 
+        // Trigger wave animation
+        model.stateMachine.current = .wave
+
         let bw = KeyableWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 260, height: 40),
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 56),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false

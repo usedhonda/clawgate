@@ -226,6 +226,7 @@ struct PetChatContainerView: View {
             // Tab bar
             HStack(spacing: 0) {
                 chatTabButton("Chat", tab: "chat")
+                chatTabButton("Summon", tab: "summon")
                 chatTabButton("Notifications", tab: "notifications")
                 Spacer()
             }
@@ -234,14 +235,23 @@ struct PetChatContainerView: View {
             .background(Color(nsColor: NSColor(white: 0.08, alpha: 1.0)))
 
             // Content
-            if selectedTab == "chat" {
+            switch selectedTab {
+            case "chat":
                 PetBubbleView(model: model)
-            } else {
+            case "summon":
+                SummonResultsView(model: model)
+            default:
                 NotificationListView(model: model)
             }
         }
         .frame(minWidth: 280, idealWidth: 360, minHeight: 300, idealHeight: 480)
         .background(Color(nsColor: NSColor(white: 0.12, alpha: 0.95)))
+        .onChange(of: model.showSummonTab) { show in
+            if show {
+                selectedTab = "summon"
+                model.showSummonTab = false
+            }
+        }
     }
 
     private func chatTabButton(_ title: String, tab: String) -> some View {
@@ -256,6 +266,120 @@ struct PetChatContainerView: View {
         .background(selectedTab == tab ? Color.white.opacity(0.08) : Color.clear)
         .cornerRadius(6)
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Summon Results View
+
+struct SummonResultsView: View {
+    @ObservedObject var model: PetModel
+
+    var body: some View {
+        if model.summonResults.isEmpty {
+            VStack {
+                Spacer()
+                Image(systemName: "sparkles")
+                    .font(.system(size: 24))
+                    .foregroundColor(.white.opacity(0.2))
+                Text("Right-click → Omakase or Ask")
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(0.4))
+                    .padding(.top, 4)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.summonResults) { entry in
+                            SummonEntryView(entry: entry)
+                                .id(entry.id)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .onChange(of: model.summonResults.count) { _ in
+                    if let last = model.summonResults.last {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct SummonEntryView: View {
+    let entry: NotificationEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: iconForSource(entry.source))
+                    .font(.system(size: 11))
+                    .foregroundColor(colorForSource(entry.source))
+                Text(entry.source.uppercased())
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(colorForSource(entry.source))
+                Spacer()
+                Text(timeString(entry.timestamp))
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.3))
+            }
+
+            if #available(macOS 13.0, *) {
+                if let attributed = try? AttributedString(markdown: entry.text,
+                                                           options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                    Text(attributed)
+                        .font(.system(size: 13))
+                        .foregroundColor(.white.opacity(0.9))
+                        .textSelection(.enabled)
+                } else {
+                    Text(entry.text)
+                        .font(.system(size: 13))
+                        .foregroundColor(.white.opacity(0.9))
+                        .textSelection(.enabled)
+                }
+            } else {
+                Text(entry.text)
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(0.9))
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.08))
+        )
+    }
+
+    private func iconForSource(_ source: String) -> String {
+        switch source {
+        case "omakase": return "sparkles"
+        case "ask": return "questionmark.circle"
+        case "draft_pr": return "doc.text"
+        default: return "circle"
+        }
+    }
+
+    private func colorForSource(_ source: String) -> Color {
+        switch source {
+        case "omakase": return .yellow
+        case "ask": return .cyan
+        case "draft_pr": return .green
+        default: return .white.opacity(0.5)
+        }
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
     }
 }
 

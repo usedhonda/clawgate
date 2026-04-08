@@ -19,6 +19,8 @@ final class PetModel: NSObject, ObservableObject {
     @Published var isWhisperEnabled: Bool = true
     @Published var characterSize: CGFloat = 128
     @Published var notificationHistory: [NotificationEntry] = []
+    @Published var summonResults: [NotificationEntry] = []
+    @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
     @Published var targetPosition: NSPoint?   // Window tracking target
 
     let stateMachine = PetStateMachine()
@@ -149,6 +151,15 @@ final class PetModel: NSObject, ObservableObject {
                 NSLog("[Pet] message event: role=%@ text=%@", msg.role == .assistant ? "assistant" : "user", String(msg.text.prefix(50)))
                 self.isStreaming = false
                 self.streamingText = ""
+
+                // Route summon responses to Summon tab
+                if msg.role == .assistant, let source = self.pendingSummonSource {
+                    self.pendingSummonSource = nil
+                    self.addSummonResult(text: msg.text, source: source)
+                    self.stateMachine.handle(.assistantFinished)
+                    break
+                }
+
                 let isNew: Bool
                 if let idx = self.messages.firstIndex(where: { $0.id == msg.id }) {
                     self.messages[idx].text = msg.text
@@ -188,7 +199,9 @@ final class PetModel: NSObject, ObservableObject {
                         guard !Task.isCancelled, let self else { return }
                         if self.isStreaming {
                             self.isStreaming = false
+                            let mid = self.streamingMessageId
                             self.streamingMessageId = nil
+                            self.finishStreamingMessage(messageId: mid)
                             self.stateMachine.handle(.assistantFinished)
                         }
                     }
@@ -198,9 +211,7 @@ final class PetModel: NSObject, ObservableObject {
                 NSLog("[Pet] messageComplete: %@", messageId)
                 self.isStreaming = false
                 self.streamingMessageId = nil
-                if let idx = self.messages.firstIndex(where: { $0.id == messageId }) {
-                    self.messages[idx].isStreaming = false
-                }
+                self.finishStreamingMessage(messageId: messageId)
                 self.stateMachine.handle(.assistantFinished)
 
             case .history(let msgs):
@@ -710,15 +721,31 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    /// Handle streaming message completion — route to summon or regular chat
+    private func finishStreamingMessage(messageId: String?) {
+        guard let messageId else { return }
+        if let idx = messages.firstIndex(where: { $0.id == messageId }) {
+            messages[idx].isStreaming = false
+            // If this was a summon response, move it to summon results
+            if let source = pendingSummonSource {
+                pendingSummonSource = nil
+                let text = messages[idx].text
+                messages.remove(at: idx)
+                addSummonResult(text: text, source: source)
+            }
+        }
+    }
+
+    private var pendingSummonSource: String?
+
     private func sendSummon(_ prompt: String, source: String) {
         guard let sessionKey else { return }
 
-        // Add user message to chat (but mark as summon)
-        let userMsg = OpenClawChatMessage(role: .user, text: "[\(source.uppercased())]")
-        messages.append(userMsg)
+        pendingSummonSource = source
 
-        // Record in notification history
+        // Record pending state
         addNotificationEntry(text: "Requesting \(source)...", source: source)
+        showWhisper("Working on it...")
 
         Task { [weak self] in
             guard let self else { return }
@@ -726,10 +753,24 @@ final class PetModel: NSObject, ObservableObject {
                 try await wsClient.sendMessage(prompt, sessionKey: sessionKey)
             } catch {
                 await MainActor.run {
-                    self.addNotificationEntry(text: "Error: \(error)", source: source)
+                    self.pendingSummonSource = nil
+                    self.addSummonResult(text: "Error: \(error)", source: source)
                 }
             }
         }
+    }
+
+    func addSummonResult(text: String, source: String) {
+        let entry = NotificationEntry(
+            id: UUID().uuidString, text: text,
+            source: source, timestamp: Date()
+        )
+        summonResults.append(entry)
+        if summonResults.count > 50 {
+            summonResults.removeFirst(summonResults.count - 50)
+        }
+        // Auto-open chat window on Summon tab
+        showSummonTab = true
     }
 
     private func detectTmuxPaneCwd() -> String? {
