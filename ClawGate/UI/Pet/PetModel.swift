@@ -176,20 +176,23 @@ final class PetModel: NSObject, ObservableObject {
                 }
 
             case .delta(let messageId, let text):
+                let isSummon = self.pendingSummonSource != nil
                 if self.streamingMessageId != messageId {
                     self.streamingMessageId = messageId
                     self.streamingText = text
                     self.isStreaming = true
-                    let streamingMsg = OpenClawChatMessage(
-                        id: messageId, role: .assistant, text: text, isStreaming: true)
-                    self.messages.append(streamingMsg)
+                    if !isSummon {
+                        let streamingMsg = OpenClawChatMessage(
+                            id: messageId, role: .assistant, text: text, isStreaming: true)
+                        self.messages.append(streamingMsg)
+                    }
                     // Only show speak animation if chat is open
                     if self.stateMachine.isChatOpen {
                         self.stateMachine.handle(.assistantStarted)
                     }
                 } else {
                     self.streamingText += text
-                    if let idx = self.messages.firstIndex(where: { $0.id == messageId }) {
+                    if !isSummon, let idx = self.messages.firstIndex(where: { $0.id == messageId }) {
                         self.messages[idx].text = self.streamingText
                     }
                     // Reset idle timer on each delta — stop speak 5s after last delta
@@ -723,16 +726,22 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Handle streaming message completion — route to summon or regular chat
     private func finishStreamingMessage(messageId: String?) {
+        // If this was a summon response, route to summon results
+        if let source = pendingSummonSource {
+            pendingSummonSource = nil
+            let text = streamingText.isEmpty ? "(empty response)" : streamingText
+            streamingText = ""
+            // Remove from messages if it leaked there
+            if let messageId, let idx = messages.firstIndex(where: { $0.id == messageId }) {
+                messages.remove(at: idx)
+            }
+            addSummonResult(text: text, source: source)
+            return
+        }
+
         guard let messageId else { return }
         if let idx = messages.firstIndex(where: { $0.id == messageId }) {
             messages[idx].isStreaming = false
-            // If this was a summon response, move it to summon results
-            if let source = pendingSummonSource {
-                pendingSummonSource = nil
-                let text = messages[idx].text
-                messages.remove(at: idx)
-                addSummonResult(text: text, source: source)
-            }
         }
     }
 
@@ -742,9 +751,6 @@ final class PetModel: NSObject, ObservableObject {
         guard let sessionKey else { return }
 
         pendingSummonSource = source
-
-        // Record pending state
-        addNotificationEntry(text: "Requesting \(source)...", source: source)
         showWhisper("Working on it...")
 
         Task { [weak self] in
