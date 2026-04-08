@@ -86,7 +86,13 @@ struct PetBubbleView: View {
                     .padding(.vertical, 8)
                 }
                 .onAppear {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    // Immediate scroll (no animation) to avoid showing top content first
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                    // Retry after layout settles (LazyVStack may not be fully rendered)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         proxy.scrollTo("bottom", anchor: .bottom)
                     }
                 }
