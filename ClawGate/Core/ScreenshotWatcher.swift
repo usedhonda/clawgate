@@ -10,7 +10,6 @@ enum ScreenshotSourceKind: String {
 
 enum ScreenshotAction {
     case copyMention
-    case draftMention
 }
 
 struct ScreenshotOffer: Identifiable {

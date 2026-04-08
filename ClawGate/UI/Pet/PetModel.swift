@@ -1234,19 +1234,6 @@ final class PetModel: NSObject, ObservableObject {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(offer.mentionText, forType: .string)
             showWhisper("Copied \(offer.mentionText)", duration: 3.0)
-
-        case .draftMention:
-            if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                inputText = offer.mentionText
-            } else if !inputText.contains(offer.mentionText) {
-                if inputText.hasSuffix(" ") || inputText.hasSuffix("\n") {
-                    inputText += offer.mentionText
-                } else {
-                    inputText += " " + offer.mentionText
-                }
-            }
-            stateMachine.isChatOpen = true
-            showWhisper("Drafted \(offer.mentionText)", duration: 3.0)
         }
 
         pendingScreenshotOffer = nil

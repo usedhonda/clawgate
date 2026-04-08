@@ -128,10 +128,6 @@ struct PetNotificationBubble: View {
                     model.executeScreenshotAction(.copyMention)
                     dismissScreenshotOffer()
                 }
-                screenshotActionButton("Draft Mention") {
-                    model.executeScreenshotAction(.draftMention)
-                    dismissScreenshotOffer()
-                }
             }
         }
         .padding(.horizontal, 12)
