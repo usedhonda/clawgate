@@ -397,7 +397,15 @@ final class PetModel: NSObject, ObservableObject {
 
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
         guard let focusedWin = AXQuery.focusedWindow(appElement: appElement),
-              let frame = AXQuery.copyFrameAttribute(focusedWin) else { return }
+              let frame = AXQuery.copyFrameAttribute(focusedWin) else {
+            // Window closed or inaccessible — clear walk state to avoid stuck animation
+            let current = stateMachine.current
+            if current == .walkFront || current == .walkBack
+                || current == .walkLeft || current == .walkRight {
+                stateMachine.current = .idle
+            }
+            return
+        }
 
         // Track the specific window Chi is following (for context capture)
         lastTrackedWindow = focusedWin
@@ -406,12 +414,16 @@ final class PetModel: NSObject, ObservableObject {
         let screen = NSScreen.main?.visibleFrame ?? .zero
         let petSize: CGFloat = characterSize + 20  // match actual window size
 
-        // Skip small windows (popups, dialogs)
-        if frame.width < 300 || frame.height < 200 { return }
+        // Skip small windows (popups, dialogs) — but clear walk first
+        if frame.width < 300 || frame.height < 200 {
+            clearWalkIfNeeded()
+            return
+        }
 
-        // Skip fullscreen apps
+        // Skip fullscreen apps — but clear walk first
         if let screenFull = NSScreen.main?.frame,
            abs(frame.width - screenFull.width) < 10 && abs(frame.height - screenFull.height) < 40 {
+            clearWalkIfNeeded()
             return
         }
 
@@ -500,6 +512,15 @@ final class PetModel: NSObject, ObservableObject {
             if moveDist < 10 { return }
         }
         targetPosition = target
+    }
+
+    /// Clear walk state if currently walking (used by early-return paths)
+    private func clearWalkIfNeeded() {
+        let current = stateMachine.current
+        if current == .walkFront || current == .walkBack
+            || current == .walkLeft || current == .walkRight {
+            stateMachine.current = .idle
+        }
     }
 
     // MARK: - Lifecycle
