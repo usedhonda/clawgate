@@ -990,18 +990,7 @@ final class PetModel: NSObject, ObservableObject {
                     actions: offer.actions,
                     sourceApp: self.lastTrackedApp?.localizedName
                 )
-                // Auto-execute local actions (no user interaction needed)
-                if let firstAction = enriched.actions.first,
-                   let result = ClipboardExecutor.executeLocal(firstAction.type, text: enriched.text) {
-                    ClipboardWatcher.shared.suppress()
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(result, forType: .string)
-                    let appHint = enriched.sourceApp.map { " (\($0))" } ?? ""
-                    self.showWhisper("\(firstAction.label) done\(appHint)", duration: 3.0)
-                    return
-                }
-
-                // Gateway actions: show offer whisper (user needs to act)
+                // Show offer as whisper — all actions require user confirmation
                 self.pendingClipboardOffer = enriched
                 let label = enriched.actions.first?.label ?? "Clipboard"
                 let appHint = enriched.sourceApp.map { " (\($0))" } ?? ""
