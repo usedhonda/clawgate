@@ -39,6 +39,7 @@ final class PetModel: NSObject, ObservableObject {
     private var dragPauseUntil: Date?
     private var lastTrackedApp: NSRunningApplication?
     @Published var shouldWaveOnArrival = false
+    var isAnimatingMove = false  // Set by PetWindowController during move animation
     private enum PlacementSide { case left, right }
     private var lastPlacementSide: PlacementSide = .right
     @Published var currentWindowOrigin: NSPoint?  // For walk direction calculation
@@ -442,8 +443,8 @@ final class PetModel: NSObject, ObservableObject {
         target.x = max(screen.minX, min(target.x, screen.maxX - petSize))
         target.y = max(screen.minY, min(target.y, screen.maxY - petSize))
 
-        // Walk direction based on movement delta
-        if let current = currentWindowOrigin {
+        // Walk direction based on movement delta (skip if mid-animation to avoid stutter)
+        if !isAnimatingMove, let current = currentWindowOrigin {
             let dx = target.x - current.x
             let dy = target.y - current.y
             let distance = sqrt(dx * dx + dy * dy)

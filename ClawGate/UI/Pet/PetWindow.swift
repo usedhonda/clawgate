@@ -100,6 +100,7 @@ final class PetWindowController {
     private func animateWindowMove(to target: NSPoint) {
         moveTimer?.invalidate()
         guard let w = window else { return }
+        model.isAnimatingMove = true
 
         let start = w.frame.origin
         let dx = target.x - start.x
@@ -126,11 +127,13 @@ final class PetWindowController {
             if step >= steps {
                 timer.invalidate()
                 self?.moveTimer = nil
+                self?.model.isAnimatingMove = false
                 self?.model.currentWindowOrigin = target
-                // Arrive → wave greeting or idle
+                // Arrive → always stop walking, then wave or idle
                 let current = self?.model.stateMachine.current
-                if current == .walkFront || current == .walkBack
-                    || current == .walkLeft || current == .walkRight {
+                let isWalking = current == .walkFront || current == .walkBack
+                    || current == .walkLeft || current == .walkRight
+                if isWalking {
                     if self?.model.shouldWaveOnArrival == true {
                         self?.model.shouldWaveOnArrival = false
                         self?.model.stateMachine.current = .wave
