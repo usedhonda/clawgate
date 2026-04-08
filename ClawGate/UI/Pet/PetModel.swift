@@ -38,6 +38,9 @@ final class PetModel: NSObject, ObservableObject {
     private var windowTrackingTimer: Timer?
     private var dragPauseUntil: Date?
     private(set) var lastTrackedApp: NSRunningApplication?
+    /// The AX window element Chi is currently following (for context capture)
+    private var lastTrackedWindow: AXUIElement?
+    private var lastTrackedWindowFrame: CGRect?
     @Published var shouldWaveOnArrival = false
     var isAnimatingMove = false  // Set by PetWindowController during move animation
     private enum PlacementSide { case left, right }
@@ -386,6 +389,10 @@ final class PetModel: NSObject, ObservableObject {
         guard let focusedWin = AXQuery.focusedWindow(appElement: appElement),
               let frame = AXQuery.copyFrameAttribute(focusedWin) else { return }
 
+        // Track the specific window Chi is following (for context capture)
+        lastTrackedWindow = focusedWin
+        lastTrackedWindowFrame = frame
+
         let screen = NSScreen.main?.visibleFrame ?? .zero
         let petSize: CGFloat = characterSize + 20  // match actual window size
 
@@ -546,7 +553,9 @@ final class PetModel: NSObject, ObservableObject {
 
         if let pid = app?.processIdentifier {
             let appElement = AXQuery.applicationElement(pid: pid)
-            if let focusedWin = AXQuery.focusedWindow(appElement: appElement) {
+            // Use the window Chi is following, not just the focused window
+            let targetWin = lastTrackedWindow ?? AXQuery.focusedWindow(appElement: appElement)
+            if let focusedWin = targetWin {
                 windowTitle = AXQuery.copyStringAttribute(focusedWin, attribute: kAXTitleAttribute as String) ?? ""
 
                 // Browser AX trees are deeper — increase search depth for Gmail etc.
@@ -575,8 +584,11 @@ final class PetModel: NSObject, ObservableObject {
                 // OCR fallback: if AX yielded little/no text, try screenshot + Vision OCR
                 // This handles Qt apps (LINE), Electron, and any app with sparse AX trees
                 if visibleText.count < 50, let pid = app?.processIdentifier {
-                    if let windowID = AXActions.findWindowID(pid: pid),
-                       let frame = AXQuery.copyFrameAttribute(focusedWin) {
+                    let winFrame = AXQuery.copyFrameAttribute(focusedWin)
+                    // Find the CGWindowID matching this specific window (not just any window of the app)
+                    let windowID = Self.findWindowIDByFrame(pid: pid, targetFrame: winFrame)
+                        ?? AXActions.findWindowID(pid: pid) // fallback to first window
+                    if let windowID, let frame = winFrame {
                         let ocrText = VisionOCR.extractText(
                             from: frame, windowID: windowID,
                             config: .init(confidenceAccept: 0.35, candidateCount: 3)
@@ -607,6 +619,32 @@ final class PetModel: NSObject, ObservableObject {
             windowTitle: windowTitle, visibleText: visibleText,
             isTerminal: isTerminal, paneCwd: paneCwd
         )
+    }
+
+    /// Find CGWindowID matching a specific AX window frame (for multi-window apps like LINE).
+    /// Returns nil if no matching window found.
+    private static func findWindowIDByFrame(pid: pid_t, targetFrame: CGRect?) -> CGWindowID? {
+        guard let target = targetFrame else { return nil }
+        guard let list = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+
+        for info in list {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t,
+                  ownerPID == pid,
+                  let number = info[kCGWindowNumber as String] as? CGWindowID,
+                  let layer = info[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let bounds = info[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"],
+                  let w = bounds["Width"], let h = bounds["Height"] else { continue }
+            // Match by frame position (within tolerance for coordinate system differences)
+            if abs(x - target.origin.x) < 5 && abs(y - target.origin.y) < 5
+                && abs(w - target.width) < 5 && abs(h - target.height) < 5 {
+                return number
+            }
+        }
+        return nil
     }
 
     /// Capture active tmux pane content and cwd
