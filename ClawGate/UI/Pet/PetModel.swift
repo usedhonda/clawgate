@@ -571,6 +571,22 @@ final class PetModel: NSObject, ObservableObject {
                 if visibleText.count > 2000 {
                     visibleText = String(visibleText.prefix(2000))
                 }
+
+                // OCR fallback: if AX yielded little/no text, try screenshot + Vision OCR
+                // This handles Qt apps (LINE), Electron, and any app with sparse AX trees
+                if visibleText.count < 50, let pid = app?.processIdentifier {
+                    if let windowID = AXActions.findWindowID(pid: pid),
+                       let frame = AXQuery.copyFrameAttribute(focusedWin) {
+                        let ocrText = VisionOCR.extractText(
+                            from: frame, windowID: windowID,
+                            config: .init(confidenceAccept: 0.35, candidateCount: 3)
+                        )
+                        if let ocr = ocrText, ocr.count > visibleText.count {
+                            visibleText = String(ocr.prefix(2000))
+                            NSLog("[Pet] captureScreenContext: OCR fallback used (%d chars)", visibleText.count)
+                        }
+                    }
+                }
             }
         }
 
