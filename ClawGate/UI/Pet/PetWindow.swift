@@ -137,6 +137,10 @@ final class PetWindowController {
                 let current = self?.model.stateMachine.current
                 let isWalking = current == .walkFront || current == .walkBack
                     || current == .walkLeft || current == .walkRight
+                NSLog("[PetWalk] ARRIVE current=%@ isWalking=%d waveOnArrival=%d gen=%u",
+                      String(describing: current), isWalking ? 1 : 0,
+                      self?.model.shouldWaveOnArrival == true ? 1 : 0,
+                      self?.model.moveGeneration ?? 0)
                 if isWalking {
                     if self?.model.shouldWaveOnArrival == true {
                         self?.model.shouldWaveOnArrival = false
@@ -335,9 +339,13 @@ private final class PetContentView: NSView {
         askItem.target = self
         menu.addItem(askItem)
 
-        // Summon: Draft PR (Terminal only)
-        let ctx = model.captureScreenContext()
-        if ctx.isTerminal {
+        // Summon: Draft PR (Terminal only — check bundleId directly, no heavy AX/OCR)
+        let terminalBundles: Set<String> = [
+            "com.mitchellh.ghostty", "com.apple.Terminal",
+            "com.googlecode.iterm2", "net.kovidgoyal.kitty",
+        ]
+        let isTerminal = terminalBundles.contains(model.lastTrackedApp?.bundleIdentifier ?? "")
+        if isTerminal {
             menu.addItem(.separator())
             let draftPRItem = NSMenuItem(title: "Draft PR", action: #selector(summonDraftPR(_:)), keyEquivalent: "")
             draftPRItem.target = self
