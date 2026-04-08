@@ -76,6 +76,8 @@ struct ScreenshotSaveLocationResolver {
 }
 
 struct ScreenshotTempStore {
+    private static let canonicalTempURL = URL(fileURLWithPath: "/tmp", isDirectory: true)
+
     static func makeTempURL(now: Date = Date()) -> URL {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -83,12 +85,12 @@ struct ScreenshotTempStore {
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = formatter.string(from: now)
         let suffix = UUID().uuidString.prefix(8)
-        return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        return canonicalTempURL
             .appendingPathComponent("clawgate-screenshot-\(stamp)-\(suffix).png")
     }
 
     static func pruneOldFiles(olderThan: TimeInterval = 24 * 60 * 60) {
-        let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        let tmpURL = canonicalTempURL
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: tmpURL,
             includingPropertiesForKeys: [.contentModificationDateKey],

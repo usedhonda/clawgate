@@ -46,6 +46,6 @@ final class ScreenshotWatcherTests: XCTestCase {
         let url = ScreenshotTempStore.makeTempURL(now: Date(timeIntervalSince1970: 0))
         XCTAssertEqual(url.pathExtension, "png")
         XCTAssertTrue(url.lastPathComponent.hasPrefix("clawgate-screenshot-"))
-        XCTAssertTrue(url.path.hasPrefix(NSTemporaryDirectory()))
+        XCTAssertTrue(url.path.hasPrefix("/tmp/"))
     }
 }
