@@ -217,14 +217,14 @@
     },
     {
       "name": "hide-emerge",
-      "frames": ["hide-emerge.png", "idle-09.png", "idle-01.png"],
-      "fps": 3,
+      "frames": ["hide-emerge.png"],
+      "fps": 1,
       "loop": false
     },
     {
       "name": "hide-emerge-left",
-      "frames": ["hide-emerge-left.png", "idle-09.png", "idle-01.png"],
-      "fps": 3,
+      "frames": ["hide-emerge-left.png"],
+      "fps": 1,
       "loop": false
     }
   ]

@@ -51,6 +51,7 @@ final class PetModel: NSObject, ObservableObject {
     private var lastActivityTime = Date()
     private var hideCheckTimer: Timer?
     private var clawWaveTimer: Timer?
+    private var unhideWaveOnArrival = false
 
     /// Pet interaction mode (right-click menu)
     enum PetMode: String, CaseIterable {
@@ -422,12 +423,45 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    /// Teleport to normal position without walk animation
+    private func updateTargetPositionImmediate() {
+        let saved = isHiding
+        isHiding = false  // temporarily to get normal position
+        // Calculate where we should be, then teleport
+        guard isTrackingEnabled else { isHiding = saved; return }
+        guard let app = lastTrackedApp else { isHiding = saved; return }
+        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        guard let focusedWin = AXQuery.focusedWindow(appElement: appElement),
+              let frame = AXQuery.copyFrameAttribute(focusedWin) else { isHiding = saved; return }
+        let screen = NSScreen.main?.visibleFrame ?? .zero
+        let petSize: CGFloat = characterSize + 20
+        let screenHeight = NSScreen.main?.frame.height ?? 900
+        let appKitY = screenHeight - frame.origin.y - frame.height
+        let overlap = characterSize * 0.15
+        let rightX = frame.origin.x + frame.width - overlap
+        let leftX = frame.origin.x - petSize + overlap
+        let bottomY = appKitY
+        var target: NSPoint
+        if lastPlacementSide == .right && rightX + petSize <= screen.maxX {
+            target = NSPoint(x: rightX, y: bottomY)
+        } else if leftX >= screen.minX {
+            target = NSPoint(x: leftX, y: bottomY)
+        } else {
+            target = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
+        }
+        target.x = max(screen.minX, min(target.x, screen.maxX - petSize))
+        target.y = max(screen.minY, min(target.y, screen.maxY - petSize))
+        moveController.moveTo(target, waveOnArrival: false, style: .immediate)
+        isHiding = saved
+    }
+
     private func updateTargetPosition() {
         guard isTrackingEnabled else { return }
         if let pause = dragPauseUntil, Date() < pause { return }
 
         let frontmost = NSWorkspace.shared.frontmostApplication
-        var waveOnArrival = false
+        var waveOnArrival = unhideWaveOnArrival
+        unhideWaveOnArrival = false
 
         // Track last non-ClawGate frontmost app (ClawGate becomes frontmost on pet click)
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
@@ -677,17 +711,16 @@ final class PetModel: NSObject, ObservableObject {
         clawWaveTimer = nil
         lastActivityTime = Date()
         stateMachine.isExpressionLocked = false
+        stateMachine.hideAnimationSuffix = ""
 
-        // Emerge animation (keep suffix for correct side)
+        // Teleport to idle position first, then show emerge → idle
+        stateMachine.hideAnimationSuffix = ""
+        updateTargetPositionImmediate()  // go to normal position instantly
         stateMachine.expression = .hideEmerge
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self else { return }
-            self.stateMachine.hideAnimationSuffix = ""
             self.stateMachine.expression = .idle
-            // Resume normal cycle
             self.runCycle()
-            // Move back to normal position
-            self.updateTargetPosition()
         }
         NSLog("[PetHide] Unhidden")
     }
