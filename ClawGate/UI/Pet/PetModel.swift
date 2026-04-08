@@ -548,11 +548,53 @@ final class PetModel: NSObject, ObservableObject {
             }
         }
 
+        // For terminal apps, try to get tmux pane content (richer than AX)
+        var paneContent = ""
+        var paneCwd = ""
+        if isTerminal {
+            if let info = captureTmuxPaneInfo() {
+                paneContent = info.content
+                paneCwd = info.cwd
+                // Tmux pane content is usually better than AX for terminals
+                if !paneContent.isEmpty { visibleText = paneContent }
+            }
+        }
+
         return ScreenContext(
             appName: appName, bundleId: bundleId,
             windowTitle: windowTitle, visibleText: visibleText,
-            isTerminal: isTerminal
+            isTerminal: isTerminal, paneCwd: paneCwd
         )
+    }
+
+    /// Capture active tmux pane content and cwd
+    private func captureTmuxPaneInfo() -> (content: String, cwd: String)? {
+        // Get active pane's content via capture-pane
+        let captureProc = Process()
+        captureProc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        captureProc.arguments = ["tmux", "capture-pane", "-p", "-S", "-50"]
+        let capturePipe = Pipe()
+        captureProc.standardOutput = capturePipe
+        captureProc.standardError = Pipe()
+        try? captureProc.run()
+        captureProc.waitUntilExit()
+        guard captureProc.terminationStatus == 0 else { return nil }
+        var content = String(data: capturePipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if content.count > 2000 { content = String(content.suffix(2000)) }
+
+        // Get active pane's cwd
+        let cwdProc = Process()
+        cwdProc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        cwdProc.arguments = ["tmux", "display-message", "-p", "#{pane_current_path}"]
+        let cwdPipe = Pipe()
+        cwdProc.standardOutput = cwdPipe
+        cwdProc.standardError = Pipe()
+        try? cwdProc.run()
+        cwdProc.waitUntilExit()
+        let cwd = String(data: cwdPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        return (content: content, cwd: cwd)
     }
 
     // MARK: - Summon (right-click actions)
@@ -563,11 +605,12 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         let ctx = captureScreenContext()
+        let cwdLine = ctx.paneCwd.isEmpty ? "" : "\nWorking directory: \(ctx.paneCwd)"
         let prompt = """
         [Summon:Omakase]
         [Context]
         App: \(ctx.appName)
-        Window: \(ctx.windowTitle)
+        Window: \(ctx.windowTitle)\(cwdLine)
         Screen text:
         \(ctx.visibleText)
 
@@ -587,11 +630,12 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         let ctx = captureScreenContext()
+        let cwdLine = ctx.paneCwd.isEmpty ? "" : "\nWorking directory: \(ctx.paneCwd)"
         let prompt = """
         [Summon:Ask]
         [Context]
         App: \(ctx.appName)
-        Window: \(ctx.windowTitle)
+        Window: \(ctx.windowTitle)\(cwdLine)
         Screen text:
         \(ctx.visibleText)
 
@@ -734,6 +778,7 @@ struct ScreenContext {
     let windowTitle: String
     let visibleText: String
     let isTerminal: Bool
+    var paneCwd: String = ""
 }
 
 struct NotificationEntry: Identifiable {

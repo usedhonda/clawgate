@@ -313,22 +313,6 @@ private final class PetContentView: NSView {
             menu.addItem(draftPRItem)
         }
 
-        menu.addItem(.separator())
-
-        // Opacity submenu
-        let opacityItem = NSMenuItem(title: "Opacity", action: nil, keyEquivalent: "")
-        let opacityMenu = NSMenu()
-        for percent in [100, 75, 50, 25] {
-            let value = Double(percent) / 100.0
-            let sub = NSMenuItem(title: "\(percent)%", action: #selector(changeOpacity(_:)), keyEquivalent: "")
-            sub.target = self
-            sub.tag = percent
-            sub.state = abs(model.opacity - value) < 0.01 ? .on : .off
-            opacityMenu.addItem(sub)
-        }
-        opacityItem.submenu = opacityMenu
-        menu.addItem(opacityItem)
-
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 
@@ -336,31 +320,74 @@ private final class PetContentView: NSView {
         model.summonOmakase()
     }
 
+    private var askWindow: NSWindow?
+
     @objc private func summonAsk(_ sender: NSMenuItem) {
-        // Show input dialog
-        let alert = NSAlert()
-        alert.messageText = "Ask Chi"
-        alert.informativeText = "Enter your instruction:"
-        alert.addButton(withTitle: "Send")
-        alert.addButton(withTitle: "Cancel")
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
-        input.placeholderString = "e.g. 訳して, summarize, explain..."
-        alert.accessoryView = input
-        alert.window.initialFirstResponder = input
-        let response = alert.runModal()
-        guard response == .alertFirstButtonReturn else { return }
-        let instruction = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !instruction.isEmpty else { return }
-        model.summonAsk(instruction: instruction)
+        showAskInput()
+    }
+
+    private func showAskInput() {
+        askWindow?.orderOut(nil)
+        askWindow = nil
+
+        guard let parentWindow = window else { return }
+
+        let field = AskTextField(frame: NSRect(x: 8, y: 8, width: 244, height: 24))
+        field.placeholderString = "e.g. 訳して, summarize, explain..."
+        field.font = .systemFont(ofSize: 13)
+        field.focusRingType = .none
+        field.backgroundColor = NSColor(white: 0.2, alpha: 1.0)
+        field.textColor = .white
+        field.isBezeled = false
+        field.isBordered = false
+        field.drawsBackground = true
+        field.onSubmit = { [weak self] text in
+            self?.askWindow?.orderOut(nil)
+            self?.askWindow = nil
+            let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !instruction.isEmpty else { return }
+            self?.model.summonAsk(instruction: instruction)
+        }
+        field.onCancel = { [weak self] in
+            self?.askWindow?.orderOut(nil)
+            self?.askWindow = nil
+        }
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 40))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.95).cgColor
+        container.layer?.cornerRadius = 10
+        container.addSubview(field)
+
+        let bw = KeyableWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 40),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        bw.isOpaque = false
+        bw.backgroundColor = .clear
+        bw.level = .floating + 1
+        bw.hasShadow = true
+        bw.contentView = container
+        bw.isReleasedWhenClosed = false
+
+        // Position above pet
+        let parentFrame = parentWindow.frame
+        bw.setFrameOrigin(NSPoint(
+            x: parentFrame.midX - 130,
+            y: parentFrame.maxY + 4
+        ))
+
+        bw.makeKeyAndOrderFront(nil)
+        bw.makeFirstResponder(field)
+        askWindow = bw
     }
 
     @objc private func summonDraftPR(_ sender: NSMenuItem) {
         model.summonDraftPR()
     }
 
-    @objc private func changeOpacity(_ sender: NSMenuItem) {
-        model.opacity = Double(sender.tag) / 100.0
-    }
 
     // MARK: - Bubble Window (Layer 2: notification / Layer 3: full chat)
 
@@ -497,4 +524,23 @@ private final class PetContentView: NSView {
 private final class KeyableWindow: NSWindow {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+}
+
+/// Text field with Enter/Escape handling for Ask input
+private final class AskTextField: NSTextField {
+    var onSubmit: ((String) -> Void)?
+    var onCancel: (() -> Void)?
+
+    override func textDidEndEditing(_ notification: Notification) {
+        // Check if ended by Return key
+        if let movement = notification.userInfo?["NSTextMovement"] as? Int,
+           movement == NSReturnTextMovement {
+            onSubmit?(stringValue)
+        }
+        super.textDidEndEditing(notification)
+    }
+
+    override func cancelOperation(_ sender: Any?) {
+        onCancel?()
+    }
 }
