@@ -143,6 +143,7 @@ private final class PetContentView: NSView {
     private var whisperWindow: NSWindow?
     private var bubbleObservation: AnyCancellable?
     private var clipboardObservation: AnyCancellable?
+    private var screenshotObservation: AnyCancellable?
     private var chatObservation: AnyCancellable?
     private var summonObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
@@ -177,7 +178,19 @@ private final class PetContentView: NSView {
                 guard let self else { return }
                 if offer != nil {
                     self.showNotification()
-                } else if self.model.notificationMessage == nil {
+                } else if self.model.notificationMessage == nil && self.model.pendingScreenshotOffer == nil {
+                    self.hideNotificationBubble()
+                }
+            }
+        }
+
+        // Observe screenshot offers
+        screenshotObservation = model.$pendingScreenshotOffer.sink { [weak self] offer in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if offer != nil {
+                    self.showNotification()
+                } else if self.model.notificationMessage == nil && self.model.pendingClipboardOffer == nil {
                     self.hideNotificationBubble()
                 }
             }

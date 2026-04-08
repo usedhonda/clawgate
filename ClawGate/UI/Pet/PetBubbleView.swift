@@ -36,8 +36,19 @@ struct PetNotificationBubble: View {
     @State private var fadeTask: Task<Void, Never>?
 
     var body: some View {
+        // Screenshot offer bubble
+        if isVisible, let offer = model.pendingScreenshotOffer {
+            screenshotOfferView(offer)
+                .onHover { hovering in
+                    isHovered = hovering
+                    if hovering { fadeTask?.cancel() }
+                    else { startFadeTimer(duration: 8_000_000_000) }
+                }
+                .onAppear { startFadeTimer(duration: 8_000_000_000) }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
         // Clipboard offer bubble (action buttons)
-        if isVisible, let offer = model.pendingClipboardOffer {
+        else if isVisible, let offer = model.pendingClipboardOffer {
             clipboardOfferView(offer)
                 .onHover { hovering in
                     isHovered = hovering
@@ -76,6 +87,61 @@ struct PetNotificationBubble: View {
             }
             .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
+    }
+
+    @ViewBuilder
+    private func screenshotOfferView(_ offer: ScreenshotOffer) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "photo")
+                    .font(.system(size: 11))
+                    .foregroundColor(.accentColor)
+                Text("SCREENSHOT")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                if let app = offer.sourceApp {
+                    Text("from \(app)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+                Spacer()
+                Button(action: { dismissScreenshotOffer() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.3))
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("Use \(offer.mentionText)?")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white)
+                .lineLimit(2)
+
+            Text(offer.tempPath)
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.45))
+                .lineLimit(1)
+
+            HStack(spacing: 8) {
+                screenshotActionButton("Copy Mention") {
+                    model.executeScreenshotAction(.copyMention)
+                    dismissScreenshotOffer()
+                }
+                screenshotActionButton("Draft Mention") {
+                    model.executeScreenshotAction(.draftMention)
+                    dismissScreenshotOffer()
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 320)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(PetColors.notificationBubble)
+                .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
+        )
     }
 
     @ViewBuilder
@@ -141,6 +207,22 @@ struct PetNotificationBubble: View {
         )
     }
 
+    @ViewBuilder
+    private func screenshotActionButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color.accentColor.opacity(0.4))
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     private func dismissOffer() {
         model.pendingClipboardOffer = nil
         withAnimation(.easeOut(duration: 0.3)) {
@@ -148,6 +230,16 @@ struct PetNotificationBubble: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             isVisible = true  // reset for next notification
+        }
+    }
+
+    private func dismissScreenshotOffer() {
+        model.dismissScreenshotOffer()
+        withAnimation(.easeOut(duration: 0.3)) {
+            isVisible = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            isVisible = true
         }
     }
 
@@ -182,6 +274,7 @@ struct PetNotificationBubble: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     model.dismissNotification()
                     model.pendingClipboardOffer = nil
+                    model.dismissScreenshotOffer()
                     isVisible = true
                 }
             }

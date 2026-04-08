@@ -12,6 +12,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var streamingText: String = ""
     @Published var whisperText: String?       // Layer 1: brief reaction text
     @Published var notificationMessage: OpenClawChatMessage?  // Independent notification
+    @Published var pendingScreenshotOffer: ScreenshotOffer?
     @Published var petMode: PetMode = .secretary
     @Published var isVisible: Bool = true
     @Published var isTrackingEnabled: Bool = true
@@ -294,6 +295,21 @@ final class PetModel: NSObject, ObservableObject {
     func dismissNotification() {
         notificationDismissTask?.cancel()
         notificationMessage = nil
+    }
+
+    func showScreenshotOffer(_ offer: ScreenshotOffer) {
+        addNotificationEntry(text: offer.mentionText, source: offer.sourceKind.rawValue)
+        showWhisper("Screenshot ready.", duration: 2.5)
+
+        guard isBubbleEnabled, !stateMachine.isChatOpen else {
+            NSLog("[Pet] screenshot offer suppressed")
+            return
+        }
+        pendingScreenshotOffer = offer
+    }
+
+    func dismissScreenshotOffer() {
+        pendingScreenshotOffer = nil
     }
 
     func toggleChat() {
@@ -590,6 +606,7 @@ final class PetModel: NSObject, ObservableObject {
         startReconnectTimer()
         startWindowTracking()
         startClipboardWatcher()
+        startScreenshotWatcher()
         startHideCheck()
 
         // Listen for bubble_notify from bridge
@@ -630,6 +647,7 @@ final class PetModel: NSObject, ObservableObject {
         hideCheckTimer = nil
         clawWaveTimer?.invalidate()
         clawWaveTimer = nil
+        ScreenshotWatcher.shared.stop()
     }
 
     // MARK: - Hide Behind Window
@@ -1151,6 +1169,27 @@ final class PetModel: NSObject, ObservableObject {
         ClipboardWatcher.shared.start()
     }
 
+    private func startScreenshotWatcher() {
+        ScreenshotWatcher.shared.onScreenshot = { [weak self] offer in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let enriched = ScreenshotOffer(
+                    id: offer.id,
+                    sourceKind: offer.sourceKind,
+                    originalPath: offer.originalPath,
+                    tempPath: offer.tempPath,
+                    mentionText: offer.mentionText,
+                    capturedAt: offer.capturedAt,
+                    pixelSize: offer.pixelSize,
+                    sourceApp: self.lastTrackedApp?.localizedName,
+                    fingerprint: offer.fingerprint
+                )
+                self.showScreenshotOffer(enriched)
+            }
+        }
+        ScreenshotWatcher.shared.start()
+    }
+
     func executeClipboardAction(_ action: ClipboardAction) {
         guard let offer = pendingClipboardOffer else { return }
         pendingClipboardOffer = nil
@@ -1183,6 +1222,34 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         sendSummon(prompt, source: "clipboard")
+    }
+
+    func executeScreenshotAction(_ action: ScreenshotAction) {
+        guard let offer = pendingScreenshotOffer else { return }
+
+        switch action {
+        case .copyMention:
+            ClipboardWatcher.shared.suppress()
+            ScreenshotWatcher.shared.suppress()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(offer.mentionText, forType: .string)
+            showWhisper("Copied \(offer.mentionText)", duration: 3.0)
+
+        case .draftMention:
+            if inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                inputText = offer.mentionText
+            } else if !inputText.contains(offer.mentionText) {
+                if inputText.hasSuffix(" ") || inputText.hasSuffix("\n") {
+                    inputText += offer.mentionText
+                } else {
+                    inputText += " " + offer.mentionText
+                }
+            }
+            stateMachine.isChatOpen = true
+            showWhisper("Drafted \(offer.mentionText)", duration: 3.0)
+        }
+
+        pendingScreenshotOffer = nil
     }
 
     // MARK: - Notification History
