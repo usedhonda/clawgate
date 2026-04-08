@@ -34,7 +34,19 @@ struct PetNotificationBubble: View {
     @State private var fadeTask: Task<Void, Never>?
 
     var body: some View {
-        if isVisible, let lastMsg = model.notificationMessage {
+        // Clipboard offer bubble (action buttons)
+        if isVisible, let offer = model.pendingClipboardOffer {
+            clipboardOfferView(offer)
+                .onHover { hovering in
+                    isHovered = hovering
+                    if hovering { fadeTask?.cancel() }
+                    else { startFadeTimer(duration: 8_000_000_000) }
+                }
+                .onAppear { startFadeTimer(duration: 8_000_000_000) }
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
+        // Regular notification bubble
+        else if isVisible, let lastMsg = model.notificationMessage {
             VStack(alignment: .leading, spacing: 2) {
                 Text(lastMsg.text)
                     .font(.system(size: 13))
@@ -51,11 +63,8 @@ struct PetNotificationBubble: View {
             )
             .onHover { hovering in
                 isHovered = hovering
-                if hovering {
-                    fadeTask?.cancel()
-                } else {
-                    startFadeTimer(for: lastMsg.text)
-                }
+                if hovering { fadeTask?.cancel() }
+                else { startFadeTimer(for: lastMsg.text) }
             }
             .onTapGesture {
                 model.toggleChat()
@@ -67,9 +76,100 @@ struct PetNotificationBubble: View {
         }
     }
 
+    @ViewBuilder
+    private func clipboardOfferView(_ offer: ClipboardOffer) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Header: content type + source app
+            HStack(spacing: 6) {
+                Image(systemName: iconForContentType(offer.contentType))
+                    .font(.system(size: 11))
+                    .foregroundColor(.accentColor)
+                Text(offer.contentType.rawValue.uppercased())
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                if let app = offer.sourceApp {
+                    Text("from \(app)")
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+                Spacer()
+                // Dismiss button
+                Button(action: { dismissOffer() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.white.opacity(0.3))
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Preview of copied text
+            Text(offer.text.prefix(80) + (offer.text.count > 80 ? "..." : ""))
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.6))
+                .lineLimit(2)
+
+            // Action buttons
+            HStack(spacing: 8) {
+                ForEach(Array(offer.actions.prefix(3).enumerated()), id: \.offset) { _, action in
+                    Button(action: {
+                        model.executeClipboardAction(action)
+                        dismissOffer()
+                    }) {
+                        Text(action.label)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(Color.accentColor.opacity(0.4))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: 320)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(PetColors.notificationBubble)
+                .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
+        )
+    }
+
+    private func dismissOffer() {
+        model.pendingClipboardOffer = nil
+        withAnimation(.easeOut(duration: 0.3)) {
+            isVisible = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            isVisible = true  // reset for next notification
+        }
+    }
+
+    private func iconForContentType(_ type: ClipboardContentType) -> String {
+        switch type {
+        case .json: return "curlybraces"
+        case .url: return "link"
+        case .error: return "exclamationmark.triangle"
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .english, .japanese: return "textformat"
+        case .longText: return "doc.text"
+        case .base64: return "lock.open"
+        case .jwt: return "key"
+        case .terminalOutput: return "terminal"
+        }
+    }
+
     private func startFadeTimer(for text: String) {
-        fadeTask?.cancel()
         let duration: UInt64 = text.count > 100 ? 12_000_000_000 : 6_000_000_000
+        startFadeTimer(duration: duration)
+    }
+
+    private func startFadeTimer(duration: UInt64) {
+        fadeTask?.cancel()
         fadeTask = Task {
             try? await Task.sleep(nanoseconds: duration)
             guard !Task.isCancelled else { return }
@@ -79,6 +179,8 @@ struct PetNotificationBubble: View {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                     model.dismissNotification()
+                    model.pendingClipboardOffer = nil
+                    isVisible = true
                 }
             }
         }

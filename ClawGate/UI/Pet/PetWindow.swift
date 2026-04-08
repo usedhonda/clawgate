@@ -218,6 +218,7 @@ private final class PetContentView: NSView {
     private var chatWindow: NSWindow?
     private var whisperWindow: NSWindow?
     private var bubbleObservation: AnyCancellable?
+    private var clipboardObservation: AnyCancellable?
     private var chatObservation: AnyCancellable?
     private var summonObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
@@ -241,6 +242,18 @@ private final class PetContentView: NSView {
                 if msg != nil {
                     self.showNotification()
                 } else {
+                    self.hideNotificationBubble()
+                }
+            }
+        }
+
+        // Observe clipboard offers
+        clipboardObservation = model.$pendingClipboardOffer.sink { [weak self] offer in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if offer != nil {
+                    self.showNotification()
+                } else if self.model.notificationMessage == nil {
                     self.hideNotificationBubble()
                 }
             }

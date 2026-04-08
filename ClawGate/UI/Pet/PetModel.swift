@@ -990,11 +990,8 @@ final class PetModel: NSObject, ObservableObject {
                     actions: offer.actions,
                     sourceApp: self.lastTrackedApp?.localizedName
                 )
-                // Show offer as whisper — all actions require user confirmation
+                // Show offer as notification bubble with action buttons
                 self.pendingClipboardOffer = enriched
-                let label = enriched.actions.first?.label ?? "Clipboard"
-                let appHint = enriched.sourceApp.map { " (\($0))" } ?? ""
-                self.showWhisper("\(label)?\(appHint)", duration: 5.0)
             }
         }
         ClipboardWatcher.shared.start()
