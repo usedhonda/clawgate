@@ -18,9 +18,11 @@ struct DragHandle: NSViewRepresentable {
     func updateNSView(_ nsView: DragHandleView, context: Context) {}
 }
 
-class DragHandleView: NSView {
-    override func mouseDown(with event: NSEvent) {
-        window?.performDrag(with: event)
+final class DragHandleView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return bounds.contains(point) ? self : nil
     }
 }
 
@@ -360,11 +362,13 @@ struct PetChatContainerView: View {
                 tabButton("Chat", tab: "chat")
                 tabButton("Summon", tab: "summon")
                 tabButton("Notifs", tab: "notifications")
-                Spacer()
+
+                Spacer(minLength: 12)
+                    .background(DragHandle())
+                    .frame(maxWidth: .infinity, minHeight: 28)
             }
             .padding(.horizontal, 6)
             .background(PetColors.tabBarBg)
-            .overlay(DragHandle())  // Enable window drag from tab bar
 
             Divider().opacity(0.15)
 
@@ -399,8 +403,8 @@ struct PetChatContainerView: View {
                     .fill(selectedTab == tab ? Color.accentColor : Color.clear)
                     .frame(height: 2)
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 10)
+            .padding(.horizontal, 12)
+            .padding(.top, 6)
             .padding(.bottom, 2)
         }
         .buttonStyle(.plain)
