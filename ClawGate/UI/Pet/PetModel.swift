@@ -37,7 +37,7 @@ final class PetModel: NSObject, ObservableObject {
     private var idleTimer: Timer?
     private var windowTrackingTimer: Timer?
     private var dragPauseUntil: Date?
-    private var lastTrackedApp: NSRunningApplication?
+    private(set) var lastTrackedApp: NSRunningApplication?
     @Published var shouldWaveOnArrival = false
     var isAnimatingMove = false  // Set by PetWindowController during move animation
     private enum PlacementSide { case left, right }
@@ -539,6 +539,7 @@ final class PetModel: NSObject, ObservableObject {
             "com.googlecode.iterm2", "net.kovidgoyal.kitty",
         ]
         let isTerminal = terminalBundles.contains(bundleId)
+        let isBrowser = DraftPlacer.browserBundles.contains(bundleId)
 
         var windowTitle = ""
         var visibleText = ""
@@ -548,8 +549,14 @@ final class PetModel: NSObject, ObservableObject {
             if let focusedWin = AXQuery.focusedWindow(appElement: appElement) {
                 windowTitle = AXQuery.copyStringAttribute(focusedWin, attribute: kAXTitleAttribute as String) ?? ""
 
-                let nodes = AXQuery.descendants(of: focusedWin, maxDepth: 3, maxNodes: 100)
-                let textRoles: Set<String> = ["AXStaticText", "AXTextField", "AXTextArea", "AXCell"]
+                // Browser AX trees are deeper — increase search depth for Gmail etc.
+                let maxDepth = isBrowser ? 7 : 3
+                let maxNodes = isBrowser ? 1000 : 100
+                let nodes = AXQuery.descendants(of: focusedWin, maxDepth: maxDepth, maxNodes: maxNodes)
+                let textRoles: Set<String> = isBrowser
+                    ? ["AXStaticText", "AXTextField", "AXTextArea", "AXCell",
+                       "AXHeading", "AXLink", "AXListItem"]
+                    : ["AXStaticText", "AXTextField", "AXTextArea", "AXCell"]
                 var parts: [String] = []
                 var seen = Set<String>()
                 for node in nodes {
@@ -639,7 +646,31 @@ final class PetModel: NSObject, ObservableObject {
         If it's code, point out issues or suggest improvements.
         If it's an article, summarize the key points.
         Keep it concise.
+        If it's a message or email and you draft a reply, wrap ONLY the reply text in <draft_reply>...</draft_reply> tags.
+        Do NOT use this tag for summaries, explanations, or code suggestions.
         """
+
+        // Capture target app context for post-response draft placement
+        if let app = lastTrackedApp ?? NSWorkspace.shared.frontmostApplication {
+            let isMessaging: Bool = {
+                if Self.messagingBundles.contains(ctx.bundleId) { return true }
+                if DraftPlacer.browserBundles.contains(ctx.bundleId) {
+                    let title = ctx.windowTitle.lowercased()
+                    return title.contains("gmail") || title.contains("outlook.live")
+                        || title.contains("outlook.office") || title.contains("yahoo mail")
+                        || title.contains("slack") || title.contains("messenger.com")
+                        || title.contains("web.whatsapp") || title.contains("discord")
+                }
+                return false
+            }()
+            pendingOmakaseContext = OmakaseContext(
+                bundleId: ctx.bundleId,
+                appName: ctx.appName,
+                pid: app.processIdentifier,
+                isMessagingApp: isMessaging
+            )
+        }
+
         sendSummon(prompt, source: "omakase")
     }
 
@@ -751,6 +782,17 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private var pendingSummonSource: String?
+    private var pendingOmakaseContext: OmakaseContext?
+
+    private static let messagingBundles: Set<String> = [
+        "jp.naver.line.mac",
+        "com.apple.MobileSMS",
+        "net.whatsapp.WhatsApp",
+        "com.tinyspeck.slackmacgap",
+        "com.microsoft.teams2",
+        "ru.keepcoder.Telegram",
+        "com.hnc.Discord",
+    ]
 
     private func sendSummon(_ prompt: String, source: String) {
         guard let sessionKey else { return }
@@ -772,6 +814,38 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func addSummonResult(text: String, source: String) {
+        // Draft reply detection: if messaging app + <draft_reply> tag → place in input field
+        if source == "omakase",
+           let ctx = pendingOmakaseContext,
+           ctx.isMessagingApp,
+           let draftText = TagExtractor.extractDraftReply(from: text) {
+            pendingOmakaseContext = nil
+            BlockingWork.queue.async { [weak self] in
+                let result = DraftPlacer.placeDraft(text: draftText, context: ctx)
+                DispatchQueue.main.async {
+                    self?.handleDraftResult(result, fullText: text, appName: ctx.appName, source: source)
+                }
+            }
+            return
+        }
+        pendingOmakaseContext = nil
+        appendSummonEntry(text: text, source: source)
+    }
+
+    private func handleDraftResult(
+        _ result: DraftPlacer.PlaceResult,
+        fullText: String, appName: String, source: String
+    ) {
+        switch result {
+        case .placed:
+            showWhisper("Draft placed in \(appName)")
+            appendSummonEntry(text: fullText, source: "omakase_draft")
+        case .fallback, .appNotRunning:
+            appendSummonEntry(text: fullText, source: source)
+        }
+    }
+
+    private func appendSummonEntry(text: String, source: String) {
         let entry = NotificationEntry(
             id: UUID().uuidString, text: text,
             source: source, timestamp: Date()
@@ -781,7 +855,6 @@ final class PetModel: NSObject, ObservableObject {
             summonResults.removeFirst(summonResults.count - 100)
         }
         PetLogStore.save(summonResults, file: "summon.json")
-        // Auto-open chat window on Summon tab
         showSummonTab = true
     }
 

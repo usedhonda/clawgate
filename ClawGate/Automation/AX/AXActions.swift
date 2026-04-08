@@ -121,6 +121,66 @@ enum AXActions {
         }
     }
 
+    /// Paste text via clipboard using Cmd+V only (no Cmd+A).
+    /// Safer than `pasteText` — does not select-all, so won't overwrite content
+    /// in a wrongly-focused field. Preserves full clipboard (images, files, RTF).
+    static func safePaste(_ text: String) {
+        let pasteboard = NSPasteboard.general
+
+        // Save ALL clipboard items (not just string — preserve images, files, RTF etc.)
+        let savedItems = pasteboard.pasteboardItems?.map { item -> [NSPasteboard.PasteboardType: Data] in
+            var dict: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    dict[type] = data
+                }
+            }
+            return dict
+        }
+
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+
+        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+            NSLog("[AXActions] safePaste: no CGEventSource, restoring clipboard")
+            // Restore clipboard even on failure
+            restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
+            return
+        }
+
+        // Cmd+V only (no Cmd+A — avoids select-all in wrong field)
+        let vDown = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
+        let vUp = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)
+        vDown?.flags = .maskCommand
+        vUp?.flags = .maskCommand
+        vDown?.post(tap: .cghidEventTap)
+        vUp?.post(tap: .cghidEventTap)
+
+        NSLog("[AXActions] safePaste: pasted %d chars via Cmd+V (no Cmd+A)", text.count)
+
+        // Restore clipboard after a short delay
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
+            restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
+        }
+    }
+
+    /// Restore clipboard from saved items (all types, all items in one call).
+    private static func restoreClipboard(
+        pasteboard: NSPasteboard,
+        savedItems: [[NSPasteboard.PasteboardType: Data]]?
+    ) {
+        pasteboard.clearContents()
+        guard let saved = savedItems, !saved.isEmpty else { return }
+        let restoredItems: [NSPasteboardItem] = saved.map { itemDict in
+            let newItem = NSPasteboardItem()
+            for (type, data) in itemDict {
+                newItem.setData(data, forType: type)
+            }
+            return newItem
+        }
+        pasteboard.writeObjects(restoredItems)
+    }
+
     // MARK: - Window discovery
 
     /// Find the CGWindowID for a PID's main window (layer 0, on-screen).

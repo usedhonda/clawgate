@@ -310,6 +310,13 @@ private final class PetContentView: NSView {
     override func rightMouseDown(with event: NSEvent) {
         let menu = NSMenu()
 
+        // Header: show tracked app name
+        let appName = model.lastTrackedApp?.localizedName ?? "Unknown"
+        let header = NSMenuItem(title: "\u{1F4CD} \(appName)", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        menu.addItem(.separator())
+
         // Summon: Omakase
         let omakaseItem = NSMenuItem(title: "Omakase", action: #selector(summonOmakase(_:)), keyEquivalent: "")
         omakaseItem.target = self

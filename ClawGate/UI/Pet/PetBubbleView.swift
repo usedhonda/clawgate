@@ -361,6 +361,7 @@ struct SummonEntryView: View {
     private func iconForSource(_ source: String) -> String {
         switch source {
         case "omakase": return "sparkles"
+        case "omakase_draft": return "pencil.and.outline"
         case "ask": return "questionmark.circle"
         case "draft_pr": return "doc.text"
         default: return "circle"
@@ -370,6 +371,7 @@ struct SummonEntryView: View {
     private func colorForSource(_ source: String) -> Color {
         switch source {
         case "omakase": return .yellow
+        case "omakase_draft": return .mint
         case "ask": return .cyan
         case "draft_pr": return .green
         default: return .white.opacity(0.5)
@@ -446,6 +448,7 @@ struct NotificationEntryView: View {
     private func iconForSource(_ source: String) -> String {
         switch source {
         case "omakase": return "sparkles"
+        case "omakase_draft": return "pencil.and.outline"
         case "ask": return "questionmark.circle"
         case "draft_pr": return "doc.text"
         case "proactive": return "bell"
@@ -458,6 +461,7 @@ struct NotificationEntryView: View {
     private func colorForSource(_ source: String) -> Color {
         switch source {
         case "omakase": return .yellow
+        case "omakase_draft": return .mint
         case "ask": return .cyan
         case "draft_pr": return .green
         case "proactive": return .orange
