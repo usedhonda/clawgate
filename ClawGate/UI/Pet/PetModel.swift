@@ -480,6 +480,10 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Lifecycle
 
     func start() {
+        // Restore persisted logs
+        notificationHistory = PetLogStore.load(file: "notifications.json")
+        summonResults = PetLogStore.load(file: "summon.json")
+
         characterManager.scan()
         _ = try? OpenClawDeviceIdentity.loadOrCreate()
         connect()
@@ -772,9 +776,10 @@ final class PetModel: NSObject, ObservableObject {
             source: source, timestamp: Date()
         )
         summonResults.append(entry)
-        if summonResults.count > 50 {
-            summonResults.removeFirst(summonResults.count - 50)
+        if summonResults.count > 100 {
+            summonResults.removeFirst(summonResults.count - 100)
         }
+        PetLogStore.save(summonResults, file: "summon.json")
         // Auto-open chat window on Summon tab
         showSummonTab = true
     }
@@ -810,10 +815,10 @@ final class PetModel: NSObject, ObservableObject {
             source: source, timestamp: Date()
         )
         notificationHistory.append(entry)
-        // Keep max 100 entries
-        if notificationHistory.count > 100 {
-            notificationHistory.removeFirst(notificationHistory.count - 100)
+        if notificationHistory.count > 200 {
+            notificationHistory.removeFirst(notificationHistory.count - 200)
         }
+        PetLogStore.save(notificationHistory, file: "notifications.json")
     }
 }
 
@@ -828,9 +833,36 @@ struct ScreenContext {
     var paneCwd: String = ""
 }
 
-struct NotificationEntry: Identifiable {
+struct NotificationEntry: Identifiable, Codable {
     let id: String
     let text: String
     let source: String  // "omakase", "ask", "draft_pr", "proactive", "gateway"
     let timestamp: Date
+}
+
+// MARK: - Local Persistence for Summon/Notification logs
+
+enum PetLogStore {
+    private static let dir = NSString("~/.clawgate/logs").expandingTildeInPath
+
+    private static func ensureDir() {
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    }
+
+    static func save(_ entries: [NotificationEntry], file: String) {
+        ensureDir()
+        let path = (dir as NSString).appendingPathComponent(file)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(entries) else { return }
+        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    static func load(file: String) -> [NotificationEntry] {
+        let path = (dir as NSString).appendingPathComponent(file)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([NotificationEntry].self, from: data)) ?? []
+    }
 }
