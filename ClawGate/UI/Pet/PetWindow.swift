@@ -248,6 +248,13 @@ private final class PetContentView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if model.isHiding {
+            model.unhide()
+            dragStartScreenPos = nil
+            dragStartWindowOrigin = nil
+            isDragging = false
+            return
+        }
         if !isDragging { model.toggleChat() }
         dragStartScreenPos = nil
         dragStartWindowOrigin = nil

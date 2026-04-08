@@ -41,8 +41,16 @@ final class PetModel: NSObject, ObservableObject {
     /// The AX window element Chi is currently following (for context capture)
     private var lastTrackedWindow: AXUIElement?
     private var lastTrackedWindowFrame: CGRect?
-    private enum PlacementSide { case left, right }
+    enum PlacementSide { case left, right }
     private var lastPlacementSide: PlacementSide = .right
+
+    // MARK: - Hide behind window
+    @Published var isHiding = false
+    /// Minutes of idle before hiding. 0 = disabled. Min 0.5.
+    var hideAfterMinutes: Double = 0  // Disabled until hide feature is properly designed
+    private var lastActivityTime = Date()
+    private var hideCheckTimer: Timer?
+    private var clawWaveTimer: Timer?
 
     /// Pet interaction mode (right-click menu)
     enum PetMode: String, CaseIterable {
@@ -288,6 +296,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func toggleChat() {
+        touchActivity()
         if stateMachine.isChatOpen {
             stateMachine.isChatOpen = false
         } else {
@@ -324,27 +333,63 @@ final class PetModel: NSObject, ObservableObject {
         runCycle()
     }
 
-    private let randomActions: [PetExpression] = [.wave, .react, .blush, .idleBreathe, .funny, .secretary]
+    private var randomActions: [PetExpression] {
+        var base: [PetExpression] = [.wave, .react, .blush, .idleBreathe, .funny, .secretary]
+        if characterManager.selectedName == "chi-claw" {
+            base += [.clawProud, .clawSnap, .clawGuard, .clawBye,
+                     .clawShy, .clawClack, .clawThink, .clawPump,
+                     .clawBeckon, .clawSurprise, .clawCombo]
+        }
+        return base
+    }
 
-    /// 30-second cycle with random actions mixed in
+    /// Randomized idle cycle — varying length, random blink timing, more action slots
     private func runCycle() {
         cycleWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            // Pick two random actions for this cycle
-            let rand1 = self.randomActions.randomElement() ?? .wave
-            let rand2 = self.randomActions.randomElement() ?? .blush
 
-            self.scheduleCycleAction(at: 3,  state: .blinkA, duration: 0.5)
-            self.scheduleCycleAction(at: 6,  state: rand1,   duration: 3.0)   // ランダム表情
-            self.scheduleCycleAction(at: 10, state: .blinkA, duration: 0.5)
-            self.scheduleCycleAction(at: 13, state: .blinkB, duration: 0.6)
-            self.scheduleCycleAction(at: 16, state: .bodyA,  duration: 0.7)
-            self.scheduleCycleAction(at: 19, state: .blinkA, duration: 0.5)
-            self.scheduleCycleAction(at: 22, state: rand2,   duration: 3.0)   // ランダム表情
-            self.scheduleCycleAction(at: 26, state: .blinkB, duration: 0.6)
-            self.scheduleCycleAction(at: 29, state: .blinkA, duration: 0.5)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            let cycleLength = Double.random(in: 25...35)
+            var events: [(Double, PetExpression, Double)] = []
+
+            // 3-5 random blinks scattered throughout
+            for _ in 0..<Int.random(in: 3...5) {
+                let t = Double.random(in: 2...(cycleLength - 2))
+                let style: PetExpression = Bool.random() ? .blinkA : .blinkB
+                events.append((t, style, Double.random(in: 0.4...0.7)))
+            }
+
+            // 2-4 random actions from the pool
+            let actions = self.randomActions
+            for _ in 0..<Int.random(in: 2...4) {
+                let t = Double.random(in: 3...(cycleLength - 3))
+                let action = actions.randomElement() ?? .wave
+                events.append((t, action, Double.random(in: 3.5...6.0)))
+            }
+
+            // 0-1 body sway
+            if Bool.random() {
+                let t = Double.random(in: 4...(cycleLength - 4))
+                let body: PetExpression = Bool.random() ? .bodyA : .bodyB
+                events.append((t, body, Double.random(in: 0.5...1.0)))
+            }
+
+            // Sort by time, remove overlaps (minimum 1.5s gap)
+            events.sort { $0.0 < $1.0 }
+            var filtered: [(Double, PetExpression, Double)] = []
+            var lastEnd = 0.0
+            for e in events {
+                if e.0 > lastEnd + 1.5 {
+                    filtered.append(e)
+                    lastEnd = e.0 + e.2
+                }
+            }
+
+            for (time, state, duration) in filtered {
+                self.scheduleCycleAction(at: time, state: state, duration: duration)
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + cycleLength) { [weak self] in
                 self?.runCycle()
             }
         }
@@ -354,7 +399,8 @@ final class PetModel: NSObject, ObservableObject {
 
     private func scheduleCycleAction(at seconds: Double, state: PetExpression, duration: Double) {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
-            guard let self, self.stateMachine.expression == .idle else { return }
+            guard let self, self.stateMachine.expression == .idle, !self.isHiding else { return }
+            // NOTE: idle cycle animations are NOT activity — don't reset lastActivityTime
             self.stateMachine.expression = state
             DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
                 guard let self, self.stateMachine.expression == state else { return }
@@ -367,6 +413,7 @@ final class PetModel: NSObject, ObservableObject {
 
     func onPetDragged() {
         dragPauseUntil = Date().addingTimeInterval(30)
+        touchActivity()
     }
 
     func startWindowTracking() {
@@ -376,7 +423,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func updateTargetPosition() {
-        guard isTrackingEnabled else { return }
+        guard isTrackingEnabled, !isHiding else { return }
         if let pause = dragPauseUntil, Date() < pause { return }
 
         let frontmost = NSWorkspace.shared.frontmostApplication
@@ -386,6 +433,7 @@ final class PetModel: NSObject, ObservableObject {
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             if lastTrackedApp?.processIdentifier != app.processIdentifier {
                 waveOnArrival = true  // New window — wave on arrival
+                touchActivity()
             }
             lastTrackedApp = app
         }
@@ -481,6 +529,7 @@ final class PetModel: NSObject, ObservableObject {
         startReconnectTimer()
         startWindowTracking()
         startClipboardWatcher()
+        startHideCheck()
 
         // Listen for bubble_notify from bridge
         NotificationCenter.default.addObserver(forName: .petBubbleNotify, object: nil, queue: .main) { [weak self] notif in
@@ -516,6 +565,85 @@ final class PetModel: NSObject, ObservableObject {
         cycleWorkItem = nil
         windowTrackingTimer?.invalidate()
         windowTrackingTimer = nil
+        hideCheckTimer?.invalidate()
+        hideCheckTimer = nil
+        clawWaveTimer?.invalidate()
+        clawWaveTimer = nil
+    }
+
+    // MARK: - Hide Behind Window
+
+    func touchActivity() {
+        lastActivityTime = Date()
+        if isHiding {
+            unhide()
+        }
+    }
+
+    private func startHideCheck() {
+        hideCheckTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self, self.hideAfterMinutes > 0, !self.isHiding else { return }
+            let elapsed = Date().timeIntervalSince(self.lastActivityTime)
+            if elapsed >= self.hideAfterMinutes * 60 {
+                self.enterHiding()
+            }
+        }
+    }
+
+    /// Which side the pet is hiding on (for sprite selection)
+    private(set) var hidingSide: PlacementSide = .right
+
+    private func enterHiding() {
+        guard !isHiding, characterManager.selectedName == "chi-claw" else { return }
+        isHiding = true
+        hidingSide = lastPlacementSide
+
+        // Instant: stop cycle + switch sprite. No freeze, no movement.
+        cycleWorkItem?.cancel()
+        moveController.stop()
+        // Right placement → claw peeks from RIGHT edge → use "-left" assets (right-anchored)
+        // Left placement → claw peeks from LEFT edge → use "" assets (left-anchored)
+        stateMachine.hideAnimationSuffix = hidingSide == .right ? "-left" : ""
+        stateMachine.expression = .hideClaw
+
+        // Micro-loop: occasional peek while hiding
+        startHideMicroLoop()
+        NSLog("[PetHide] Entered hiding (side=%@)", hidingSide == .left ? "left" : "right")
+    }
+
+    private func startHideMicroLoop() {
+        clawWaveTimer?.invalidate()
+        clawWaveTimer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 6...12), repeats: true) { [weak self] _ in
+            guard let self, self.isHiding else { return }
+            if self.stateMachine.expression == .hideClaw {
+                self.stateMachine.expression = .hidePeek
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+                    guard let self, self.isHiding else { return }
+                    self.stateMachine.expression = .hideClaw
+                }
+            }
+        }
+    }
+
+    func unhide() {
+        guard isHiding else { return }
+        isHiding = false
+        clawWaveTimer?.invalidate()
+        clawWaveTimer = nil
+        lastActivityTime = Date()
+
+        // Emerge animation (keep suffix for correct side)
+        stateMachine.expression = .hideEmerge
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            self.stateMachine.hideAnimationSuffix = ""
+            self.stateMachine.expression = .idle
+            // Resume normal cycle
+            self.runCycle()
+            // Move back to normal position
+            self.updateTargetPosition()
+        }
+        NSLog("[PetHide] Unhidden")
     }
 
     // MARK: - Screen Context Capture (on-demand AX)

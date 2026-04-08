@@ -70,6 +70,11 @@ if [[ "$SKIP_SYNC" != "true" ]]; then
   if [[ -f "$PROJECT_PATH/resources/AppIcon.icns" ]]; then
     cp "$PROJECT_PATH/resources/AppIcon.icns" "$APP_PATH/Contents/Resources/AppIcon.icns"
   fi
+  # Copy SwiftPM resource bundle (Characters, etc.)
+  BUILD_BUNDLE="$PROJECT_PATH/.build/debug/ClawGate_ClawGate.bundle"
+  if [[ -d "$BUILD_BUNDLE" ]]; then
+    cp -R "$BUILD_BUNDLE" "$APP_PATH/Contents/Resources/"
+  fi
 else
   echo "[2/5] Skip app-binary sync (by option)"
 fi

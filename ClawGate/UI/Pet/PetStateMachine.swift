@@ -44,6 +44,22 @@ enum PetExpression: String, CaseIterable {
     case sleep
     case idleBreathe = "idle-breathe"
     case blink
+    // Claw actions (chi-claw only — graceful fallback to idle for other characters)
+    case clawProud = "claw-proud"
+    case clawSnap = "claw-snap"
+    case clawGuard = "claw-guard"
+    case clawBye = "claw-bye"
+    case clawShy = "claw-shy"
+    case clawClack = "claw-clack"
+    case clawThink = "claw-think"
+    case clawPump = "claw-pump"
+    case clawBeckon = "claw-beckon"
+    case clawSurprise = "claw-surprise"
+    case clawCombo = "claw-combo"
+    // Hide/peek actions
+    case hideClaw = "hide-claw"
+    case hidePeek = "hide-peek"
+    case hideEmerge = "hide-emerge"
 }
 
 enum LocomotionState: Equatable {
@@ -159,6 +175,9 @@ final class PetStateMachine: ObservableObject {
         return options.randomElement() ?? .speak
     }
 
+    /// Override for hide-side-specific animation names
+    var hideAnimationSuffix: String = ""
+
     var resolvedAnimationName: String {
         switch locomotion {
         case .walking(let direction):
@@ -169,7 +188,12 @@ final class PetStateMachine: ObservableObject {
                 return direction.rawValue
             }
         case .stationary:
-            return expression.rawValue
+            switch expression {
+            case .hideClaw, .hidePeek, .hideEmerge:
+                return expression.rawValue + hideAnimationSuffix
+            default:
+                return expression.rawValue
+            }
         }
     }
 
@@ -200,6 +224,11 @@ final class PetStateMachine: ObservableObject {
                 case .sleep: return .sleep
                 case .idleBreathe: return .idleBreathe
                 case .blink: return .blink
+                case .clawProud, .clawSnap, .clawGuard, .clawBye,
+                     .clawShy, .clawClack, .clawThink, .clawPump,
+                     .clawBeckon, .clawSurprise, .clawCombo,
+                     .hideClaw, .hidePeek, .hideEmerge:
+                    return .idle  // No legacy PetState equivalent; fallback to idle
                 }
             }
         }
