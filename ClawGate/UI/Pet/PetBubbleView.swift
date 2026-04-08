@@ -1,5 +1,29 @@
 import SwiftUI
 
+// MARK: - Dark Blue Color Palette
+
+private enum PetColors {
+    static let mainBg = Color(nsColor: NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.95))
+    static let tabBarBg = Color(nsColor: NSColor(red: 0.13, green: 0.14, blue: 0.19, alpha: 1.0))
+    static let userBubble = Color(nsColor: NSColor(red: 0.22, green: 0.35, blue: 0.65, alpha: 0.85))
+    static let assistantBubble = Color(nsColor: NSColor(red: 0.16, green: 0.18, blue: 0.24, alpha: 0.9))
+    static let notificationBubble = Color(nsColor: NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.92))
+    static let whisperBubble = Color(nsColor: NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.88))
+}
+
+// MARK: - Drag Handle for borderless window
+
+struct DragHandle: NSViewRepresentable {
+    func makeNSView(context: Context) -> DragHandleView { DragHandleView() }
+    func updateNSView(_ nsView: DragHandleView, context: Context) {}
+}
+
+class DragHandleView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
 // MARK: - Layer 2: Notification Bubble (auto-fade, click to open chat)
 
 /// Brief notification bubble showing the latest assistant message
@@ -21,9 +45,9 @@ struct PetNotificationBubble: View {
             }
             .frame(maxWidth: lastMsg.text.count > 100 ? 400 : 300)
             .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.black.opacity(0.8))
-                    .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(PetColors.notificationBubble)
+                    .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
             )
             .onHover { hovering in
                 isHovered = hovering
@@ -120,8 +144,8 @@ struct PetBubbleView: View {
                     .onSubmit { model.send() }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.12))
-                    .cornerRadius(16)
+                    .background(Color.white.opacity(0.10))
+                    .cornerRadius(18)
 
                 Button(action: { model.send() }) {
                     Image(systemName: "arrow.up.circle.fill")
@@ -135,7 +159,7 @@ struct PetBubbleView: View {
             .padding(.vertical, 8)
         }
         .frame(minWidth: 280, idealWidth: 360, minHeight: 300, idealHeight: 480)
-        .background(Color(nsColor: NSColor(white: 0.12, alpha: 0.95)))
+        .background(PetColors.mainBg)
         .onAppear {
             isInputFocused = true
             model.loadHistory()
@@ -170,10 +194,10 @@ struct ChatMessageView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(
-                        RoundedRectangle(cornerRadius: 12)
+                        RoundedRectangle(cornerRadius: 14)
                             .fill(message.role == .user
-                                  ? Color.blue.opacity(0.55)
-                                  : Color.white.opacity(0.15))
+                                  ? PetColors.userBubble
+                                  : PetColors.assistantBubble)
                     )
 
                 Text(timeString)
@@ -229,16 +253,18 @@ struct PetChatContainerView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Tab bar
+            // Tab bar (also serves as drag handle for borderless window)
             HStack(spacing: 0) {
-                chatTabButton("Chat", tab: "chat")
-                chatTabButton("Summon", tab: "summon")
-                chatTabButton("Notifications", tab: "notifications")
+                tabButton("Chat", tab: "chat")
+                tabButton("Summon", tab: "summon")
+                tabButton("Notifs", tab: "notifications")
                 Spacer()
             }
-            .padding(.horizontal, 8)
-            .padding(.top, 8)
-            .background(Color(nsColor: NSColor(white: 0.08, alpha: 1.0)))
+            .padding(.horizontal, 6)
+            .background(PetColors.tabBarBg)
+            .overlay(DragHandle())  // Enable window drag from tab bar
+
+            Divider().opacity(0.15)
 
             // Content
             switch selectedTab {
@@ -251,7 +277,8 @@ struct PetChatContainerView: View {
             }
         }
         .frame(minWidth: 280, idealWidth: 360, minHeight: 300, idealHeight: 480)
-        .background(Color(nsColor: NSColor(white: 0.12, alpha: 0.95)))
+        .background(PetColors.mainBg)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
         .onChange(of: model.showSummonTab) { show in
             if show {
                 selectedTab = "summon"
@@ -260,18 +287,21 @@ struct PetChatContainerView: View {
         }
     }
 
-    private func chatTabButton(_ title: String, tab: String) -> some View {
+    private func tabButton(_ title: String, tab: String) -> some View {
         Button(action: { selectedTab = tab }) {
-            Text(title)
-                .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
-                .foregroundColor(selectedTab == tab ? .accentColor : .white.opacity(0.5))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+            VStack(spacing: 4) {
+                Text(title)
+                    .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
+                    .foregroundColor(selectedTab == tab ? .white : .white.opacity(0.45))
+                Rectangle()
+                    .fill(selectedTab == tab ? Color.accentColor : Color.clear)
+                    .frame(height: 2)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 2)
         }
         .buttonStyle(.plain)
-        .background(selectedTab == tab ? Color.white.opacity(0.08) : Color.clear)
-        .cornerRadius(6)
-        .padding(.vertical, 4)
     }
 }
 
@@ -360,7 +390,7 @@ struct SummonEntryView: View {
         .padding(.vertical, 10)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(0.08))
+                .fill(Color.white.opacity(0.07))
         )
     }
 
@@ -447,7 +477,7 @@ struct NotificationEntryView: View {
         .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color.white.opacity(0.06))
+                .fill(Color.white.opacity(0.05))
         )
     }
 

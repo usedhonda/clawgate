@@ -12,7 +12,7 @@ struct PetWhisperView: View {
             .padding(.vertical, 4)
             .background(
                 Capsule()
-                    .fill(Color.black.opacity(0.75))
+                    .fill(Color(nsColor: NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.88)))
             )
             .transition(.asymmetric(
                 insertion: .scale(scale: 0.5).combined(with: .opacity),

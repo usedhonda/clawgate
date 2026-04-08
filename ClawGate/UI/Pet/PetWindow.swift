@@ -483,14 +483,13 @@ private final class PetContentView: NSView {
 
         let bw = KeyableWindow(
             contentRect: NSRect(x: 0, y: 0, width: 360, height: 480),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            styleMask: [.resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
-        bw.titlebarAppearsTransparent = true
-        bw.title = "Chi"
+        bw.titleVisibility = .hidden
         bw.isOpaque = false
-        bw.backgroundColor = NSColor(white: 0.12, alpha: 0.95)
+        bw.backgroundColor = .clear
         bw.level = .floating
         bw.hasShadow = true
         bw.contentView = hosting
