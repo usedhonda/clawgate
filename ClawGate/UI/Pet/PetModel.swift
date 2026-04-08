@@ -153,9 +153,18 @@ final class PetModel: NSObject, ObservableObject {
                 }
 
             case .message(let msg):
-                NSLog("[Pet] message event: role=%@ text=%@", msg.role == .assistant ? "assistant" : "user", String(msg.text.prefix(50)))
+                NSLog("[Pet] message event: role=%@ proactive=%d text=%@",
+                      msg.role == .assistant ? "assistant" : "user",
+                      msg.isProactive ? 1 : 0, String(msg.text.prefix(50)))
                 self.isStreaming = false
                 self.streamingText = ""
+
+                // Proactive messages always go to Notifications, never Summon
+                if msg.isProactive {
+                    self.showNotification(msg)
+                    self.stateMachine.handle(.assistantFinished)
+                    break
+                }
 
                 // Route summon responses to Summon tab
                 if msg.role == .assistant, let source = self.pendingSummonSource {
@@ -471,10 +480,16 @@ final class PetModel: NSObject, ObservableObject {
                     || current == .speakTilt || current == .talk
                 let isWaving = current == .wave
                 if !isSpeaking && !isWaving {
+                    NSLog("[PetWalk] SET walk=%@ dist=%.0f from=%@ animating=%d gen=%u",
+                          String(describing: walkState), distance, String(describing: current),
+                          isAnimatingMove ? 1 : 0, moveGeneration)
                     stateMachine.current = walkState
                 }
             } else if stateMachine.current == .walkFront || stateMachine.current == .walkBack
                         || stateMachine.current == .walkLeft || stateMachine.current == .walkRight {
+                NSLog("[PetWalk] CLEAR walk→idle from=%@ dist=%.0f animating=%d gen=%u",
+                      String(describing: stateMachine.current), distance,
+                      isAnimatingMove ? 1 : 0, moveGeneration)
                 stateMachine.current = .idle
             }
         }
