@@ -353,11 +353,11 @@ final class PetModel: NSObject, ObservableObject {
             let cycleLength = Double.random(in: 25...35)
             var events: [(Double, PetExpression, Double)] = []
 
-            // 3-5 random blinks scattered throughout
-            for _ in 0..<Int.random(in: 3...5) {
-                let t = Double.random(in: 2...(cycleLength - 2))
+            // 6-8 random blinks — frequent, natural
+            for _ in 0..<Int.random(in: 6...8) {
+                let t = Double.random(in: 1...(cycleLength - 1))
                 let style: PetExpression = Bool.random() ? .blinkA : .blinkB
-                events.append((t, style, Double.random(in: 0.4...0.7)))
+                events.append((t, style, Double.random(in: 0.3...0.5)))
             }
 
             // 2-4 random actions from the pool
@@ -368,19 +368,19 @@ final class PetModel: NSObject, ObservableObject {
                 events.append((t, action, Double.random(in: 3.5...6.0)))
             }
 
-            // 0-1 body sway
-            if Bool.random() {
-                let t = Double.random(in: 4...(cycleLength - 4))
+            // 1-2 body sway
+            for _ in 0..<Int.random(in: 1...2) {
+                let t = Double.random(in: 3...(cycleLength - 3))
                 let body: PetExpression = Bool.random() ? .bodyA : .bodyB
                 events.append((t, body, Double.random(in: 0.5...1.0)))
             }
 
-            // Sort by time, remove overlaps (minimum 1.5s gap)
+            // Sort by time, remove overlaps (minimum 0.8s gap)
             events.sort { $0.0 < $1.0 }
             var filtered: [(Double, PetExpression, Double)] = []
             var lastEnd = 0.0
             for e in events {
-                if e.0 > lastEnd + 1.5 {
+                if e.0 > lastEnd + 0.8 {
                     filtered.append(e)
                     lastEnd = e.0 + e.2
                 }
@@ -642,7 +642,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func startHideCheck() {
-        hideCheckTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+        hideCheckTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, self.hideAfterMinutes > 0, !self.isHiding else { return }
             let elapsed = Date().timeIntervalSince(self.lastActivityTime)
             if elapsed >= self.hideAfterMinutes * 60 {
@@ -679,7 +679,7 @@ final class PetModel: NSObject, ObservableObject {
         let scale: CGFloat = 128.0 / 768.0
         let deltaPx: CGFloat
         switch expression {
-        case .hidePeek:
+        case .hidePeek, .hidePeek2, .hidePeek3:
             deltaPx = 77  // peek claw center x=136 minus base 59
         default:
             deltaPx = 0   // claw and emerge: no offset
@@ -693,12 +693,14 @@ final class PetModel: NSObject, ObservableObject {
         clawWaveTimer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 6...12), repeats: true) { [weak self] _ in
             guard let self, self.isHiding else { return }
             if self.stateMachine.expression == .hideClaw {
-                self.stateMachine.expression = .hidePeek
-                self.updateTargetPosition()  // reposition with peek offset
+                let peeks: [PetExpression] = [.hidePeek, .hidePeek2, .hidePeek3]
+                let peek = peeks.randomElement() ?? .hidePeek
+                self.stateMachine.expression = peek
+                self.updateTargetPosition()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
                     guard let self, self.isHiding else { return }
                     self.stateMachine.expression = .hideClaw
-                    self.updateTargetPosition()  // reposition back to claw offset
+                    self.updateTargetPosition()
                 }
             }
         }

@@ -210,8 +210,32 @@
       "loop": true
     },
     {
+      "name": "hide-peek-2",
+      "frames": ["hide-peek-2.png"],
+      "fps": 1,
+      "loop": true
+    },
+    {
+      "name": "hide-peek-3",
+      "frames": ["hide-peek-3.png"],
+      "fps": 1,
+      "loop": true
+    },
+    {
       "name": "hide-peek-left",
       "frames": ["hide-peek-left.png"],
+      "fps": 1,
+      "loop": true
+    },
+    {
+      "name": "hide-peek-2-left",
+      "frames": ["hide-peek-2-left.png"],
+      "fps": 1,
+      "loop": true
+    },
+    {
+      "name": "hide-peek-3-left",
+      "frames": ["hide-peek-3-left.png"],
       "fps": 1,
       "loop": true
     },

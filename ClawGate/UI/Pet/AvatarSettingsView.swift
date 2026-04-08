@@ -15,6 +15,17 @@ struct AvatarSettingsView: View {
 
                 sliderRow("Size", value: Binding(get: { Double(petModel.characterSize) }, set: { petModel.characterSize = CGFloat($0) }), range: 32...128, format: "%.0f pt")
                 sliderRow("Opacity", value: $petModel.opacity, range: 0.25...1.0, format: "%.0f%%", multiplier: 100)
+                HStack {
+                    Text("Hide After")
+                        .font(PanelTheme.bodyFont)
+                        .foregroundStyle(PanelTheme.textPrimary)
+                    Slider(value: $petModel.hideAfterMinutes, in: 0...10, step: 0.5)
+                        .frame(width: 100)
+                    Text(petModel.hideAfterMinutes == 0 ? "Off" : String(format: "%.1fm", petModel.hideAfterMinutes))
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(PanelTheme.textSecondary)
+                        .frame(width: 45, alignment: .trailing)
+                }
             }
             .padding(PanelTheme.cardPadding)
             .background(PanelTheme.backgroundCard)

@@ -59,6 +59,8 @@ enum PetExpression: String, CaseIterable {
     // Hide/peek actions
     case hideClaw = "hide-claw"
     case hidePeek = "hide-peek"
+    case hidePeek2 = "hide-peek-2"
+    case hidePeek3 = "hide-peek-3"
     case hideEmerge = "hide-emerge"
 }
 
@@ -200,7 +202,7 @@ final class PetStateMachine: ObservableObject {
             }
         case .stationary:
             switch expression {
-            case .hideClaw, .hidePeek, .hideEmerge:
+            case .hideClaw, .hidePeek, .hidePeek2, .hidePeek3, .hideEmerge:
                 return expression.rawValue + hideAnimationSuffix
             default:
                 return expression.rawValue
@@ -238,7 +240,7 @@ final class PetStateMachine: ObservableObject {
                 case .clawProud, .clawSnap, .clawGuard, .clawBye,
                      .clawShy, .clawClack, .clawThink, .clawPump,
                      .clawBeckon, .clawSurprise, .clawCombo,
-                     .hideClaw, .hidePeek, .hideEmerge:
+                     .hideClaw, .hidePeek, .hidePeek2, .hidePeek3, .hideEmerge:
                     return .idle  // No legacy PetState equivalent; fallback to idle
                 }
             }
