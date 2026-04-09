@@ -147,6 +147,7 @@ private final class PetContentView: NSView {
     private var chatObservation: AnyCancellable?
     private var summonObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
+    private var summonMenuGlobalMonitor: Any?
 
     // Drag state
     private var dragStartScreenPos: NSPoint?
@@ -293,76 +294,81 @@ private final class PetContentView: NSView {
 
         // Build menu items
         struct MenuItem {
-            let icon: String
+            let iconImage: NSImage
             let title: String
             let action: () -> Void
         }
         var items: [MenuItem] = [
-            MenuItem(icon: "✨", title: "Omakase", action: { [weak self] in
+            MenuItem(iconImage: emojiIconImage("✨"), title: "Omakase", action: { [weak self] in
                 self?.model.stateMachine.expression = .wave
                 self?.model.summonOmakase()
             }),
-            MenuItem(icon: "❓", title: "Ask...", action: { [weak self] in
+            MenuItem(iconImage: emojiIconImage("❓"), title: "Ask...", action: { [weak self] in
                 self?.showAskInput()
             }),
         ]
         if isTerminal {
-            items.append(MenuItem(icon: "📄", title: "Draft PR", action: { [weak self] in
+            items.append(MenuItem(iconImage: emojiIconImage("📄"), title: "Draft PR", action: { [weak self] in
                 self?.model.summonDraftPR()
             }))
         }
 
-        let itemHeight: CGFloat = 28
+        let outerPadding: CGFloat = 6
+        let itemHeight: CGFloat = 30
         let headerHeight: CGFloat = 28
         let separatorHeight: CGFloat = 1
-        let panelWidth: CGFloat = 160
-        let panelHeight = headerHeight + separatorHeight + CGFloat(items.count) * itemHeight + 8  // 4pt top/bottom padding
+        let panelWidth: CGFloat = 180
+        let panelHeight = outerPadding * 2 + headerHeight + separatorHeight + CGFloat(items.count) * itemHeight
 
         let container = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.95).cgColor
-        container.layer?.cornerRadius = 10
+        container.layer?.backgroundColor = NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.96).cgColor
+        container.layer?.cornerRadius = 12
 
-        // Header: 2-column layout (icon slot + text) — same as action items
-        let iconColWidth: CGFloat = 28  // fixed icon column width
-        let headerY = panelHeight - headerHeight - 4  // top padding
-        if let icon = appIcon {
-            let iconX = 4 + (iconColWidth - 16) / 2  // center 16px icon in 28pt slot, same as emoji
-            let iconView = NSImageView(frame: NSRect(x: iconX, y: headerY + (headerHeight - 16) / 2, width: 16, height: 16))
-            iconView.image = icon
-            iconView.imageScaling = .scaleProportionallyUpOrDown
-            container.addSubview(iconView)
-        }
-        let nameLabel = NSTextField(labelWithString: appName)
-        nameLabel.frame = NSRect(x: 4 + iconColWidth, y: headerY + (headerHeight - 18) / 2, width: panelWidth - 4 - iconColWidth - 8, height: 18)
-        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        nameLabel.textColor = NSColor.white.withAlphaComponent(0.5)
-        nameLabel.lineBreakMode = .byTruncatingTail
-        container.addSubview(nameLabel)
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: outerPadding),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -outerPadding),
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: outerPadding),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -outerPadding),
+        ])
 
-        // Separator
-        let sepY = headerY - separatorHeight
-        let sep = NSView(frame: NSRect(x: 8, y: sepY, width: panelWidth - 16, height: separatorHeight))
-        sep.wantsLayer = true
-        sep.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.1).cgColor
-        container.addSubview(sep)
+        let headerRow = SummonMenuHeaderRow(
+            frame: NSRect(x: 0, y: 0, width: panelWidth - outerPadding * 2, height: headerHeight),
+            appIcon: appIcon,
+            title: appName
+        )
+        stack.addArrangedSubview(headerRow)
 
-        // Action buttons
-        for (i, item) in items.enumerated() {
-            let btnY = sepY - CGFloat(i + 1) * itemHeight + 2
-            let btn = SummonMenuButton(
-                frame: NSRect(x: 4, y: btnY, width: panelWidth - 8, height: itemHeight),
-                icon: item.icon,
+        let separator = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth - outerPadding * 2, height: separatorHeight))
+        separator.wantsLayer = true
+        separator.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            separator.widthAnchor.constraint(equalToConstant: panelWidth - outerPadding * 2),
+            separator.heightAnchor.constraint(equalToConstant: separatorHeight),
+        ])
+        stack.addArrangedSubview(separator)
+
+        for item in items {
+            let button = SummonMenuButton(
+                frame: NSRect(x: 0, y: 0, width: panelWidth - outerPadding * 2, height: itemHeight),
+                iconImage: item.iconImage,
                 title: item.title,
                 action: { [weak self] in
                     self?.dismissSummonMenu()
                     item.action()
                 }
             )
-            container.addSubview(btn)
+            stack.addArrangedSubview(button)
         }
 
-        let bw = NSWindow(
+        let bw = KeyableWindow(
             contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
             styleMask: [.borderless],
             backing: .buffered,
@@ -375,15 +381,15 @@ private final class PetContentView: NSView {
         bw.contentView = container
         bw.isReleasedWhenClosed = false
 
-        // Position: pointer at first action item (below header + separator)
+        // Position: pointer sits on the first action row center.
         let mouseScreen = NSEvent.mouseLocation
-        let firstItemOffsetFromTop = headerHeight + separatorHeight + itemHeight / 2
+        let firstItemOffsetFromTop = outerPadding + headerHeight + separatorHeight + itemHeight / 2
         bw.setFrameOrigin(NSPoint(
             x: mouseScreen.x - panelWidth / 2,
             y: mouseScreen.y - panelHeight + firstItemOffsetFromTop
         ))
 
-        bw.orderFront(nil)
+        bw.makeKeyAndOrderFront(nil)
         summonMenuWindow = bw
 
         // Dismiss on click outside or Escape
@@ -400,12 +406,19 @@ private final class PetContentView: NSView {
             }
             return event
         }
+        summonMenuGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.dismissSummonMenu()
+        }
     }
 
     private func dismissSummonMenu() {
         if let monitor = summonMenuMonitor {
             NSEvent.removeMonitor(monitor)
             summonMenuMonitor = nil
+        }
+        if let monitor = summonMenuGlobalMonitor {
+            NSEvent.removeMonitor(monitor)
+            summonMenuGlobalMonitor = nil
         }
         summonMenuWindow?.orderOut(nil)
         summonMenuWindow = nil
@@ -651,30 +664,107 @@ private final class AskTextField: NSTextField {
 
 // MARK: - Summon Menu Button
 
+private func emojiIconImage(_ emoji: String, canvas: CGSize = CGSize(width: 16, height: 16), fontSize: CGFloat = 13) -> NSImage {
+    let image = NSImage(size: canvas)
+    image.lockFocusFlipped(false)
+    defer { image.unlockFocus() }
+    NSColor.clear.setFill()
+    NSBezierPath(rect: NSRect(origin: .zero, size: canvas)).fill()
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.alignment = .center
+    let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: fontSize), .paragraphStyle: paragraph]
+    let text = NSString(string: emoji)
+    let textSize = text.size(withAttributes: attrs)
+    let rect = NSRect(x: floor((canvas.width - textSize.width) / 2.0), y: floor((canvas.height - textSize.height) / 2.0) - 1, width: textSize.width, height: textSize.height)
+    text.draw(in: rect, withAttributes: attrs)
+    image.isTemplate = false
+    return image
+}
+
+private let summonMenuIconSlot: CGFloat = 28
+
+private class SummonMenuRow: NSView {
+    let iconView: NSImageView
+    let textLabel: NSTextField
+
+    init(frame: NSRect, iconImage: NSImage?, title: String, titleColor: NSColor) {
+        iconView = NSImageView()
+        textLabel = NSTextField(labelWithString: title)
+        super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.image = iconImage
+        iconView.imageScaling = .scaleNone
+        iconView.imageAlignment = .alignCenter
+
+        let iconSlot = NSView()
+        iconSlot.translatesAutoresizingMaskIntoConstraints = false
+        iconSlot.addSubview(iconView)
+
+        textLabel.translatesAutoresizingMaskIntoConstraints = false
+        textLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        textLabel.textColor = titleColor
+        textLabel.lineBreakMode = .byTruncatingTail
+
+        let stack = NSStackView(views: [iconSlot, textLabel])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: frame.height),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            iconSlot.widthAnchor.constraint(equalToConstant: summonMenuIconSlot),
+
+            iconView.centerXAnchor.constraint(equalTo: iconSlot.centerXAnchor),
+            iconView.centerYAnchor.constraint(equalTo: iconSlot.centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+}
+
+private final class SummonMenuHeaderRow: SummonMenuRow {
+    init(frame: NSRect, appIcon: NSImage?, title: String) {
+        super.init(frame: frame, iconImage: appIcon, title: title, titleColor: NSColor.white.withAlphaComponent(0.5))
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+}
+
 private final class SummonMenuButton: NSView {
     private let action: () -> Void
-    private var isHovered = false
     private var trackingArea: NSTrackingArea?
+    private let row: SummonMenuRow
 
-    init(frame: NSRect, icon: String, title: String, action: @escaping () -> Void) {
+    init(frame: NSRect, iconImage: NSImage, title: String, action: @escaping () -> Void) {
         self.action = action
+        self.row = SummonMenuRow(frame: frame, iconImage: iconImage, title: title, titleColor: .white)
         super.init(frame: frame)
+        translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
         layer?.cornerRadius = 6
-
-        let iconColWidth: CGFloat = 28  // same as header
-        let iconLabel = NSTextField(labelWithString: icon)
-        iconLabel.font = .systemFont(ofSize: 14)
-        iconLabel.textColor = .white
-        iconLabel.alignment = .center
-        iconLabel.frame = NSRect(x: 4, y: (frame.height - 18) / 2, width: iconColWidth, height: 18)
-        addSubview(iconLabel)
-
-        let textLabel = NSTextField(labelWithString: title)
-        textLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        textLabel.textColor = .white
-        textLabel.frame = NSRect(x: 4 + iconColWidth, y: (frame.height - 18) / 2, width: frame.width - 4 - iconColWidth - 8, height: 18)
-        addSubview(textLabel)
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: frame.height),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
     }
 
     @available(*, unavailable)
@@ -692,12 +782,10 @@ private final class SummonMenuButton: NSView {
     }
 
     override func mouseEntered(with event: NSEvent) {
-        isHovered = true
         layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
     }
 
     override func mouseExited(with event: NSEvent) {
-        isHovered = false
         layer?.backgroundColor = nil
     }
 
