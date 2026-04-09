@@ -4,6 +4,49 @@ import Foundation
 
 /// ViewModel for the pet character system
 final class PetModel: NSObject, ObservableObject {
+    private struct PetRenderMetrics {
+        static let assetWidth: CGFloat = 688
+        static let assetHeight: CGFloat = 768
+        static let baselineCharacterSize: CGFloat = 128
+        static let baselineWindowSize: CGFloat = baselineCharacterSize + 20
+        static let baselineRenderedWidth: CGFloat = assetWidth * (baselineWindowSize / assetHeight)
+        static let overlapRatio: CGFloat = (baselineCharacterSize * 0.15) / baselineRenderedWidth
+
+        let windowSize: CGFloat
+        let scale: CGFloat
+        let renderedWidth: CGFloat
+        let renderedHeight: CGFloat
+        let horizontalInset: CGFloat
+        let overlap: CGFloat
+
+        init(windowSize: CGFloat) {
+            self.windowSize = windowSize
+            scale = windowSize / Self.assetHeight
+            renderedWidth = Self.assetWidth * scale
+            renderedHeight = Self.assetHeight * scale
+            horizontalInset = (windowSize - renderedWidth) / 2.0
+            overlap = renderedWidth * Self.overlapRatio
+        }
+
+        func hiddenPoseOffsetX(for expression: PetExpression, side: PlacementSide) -> CGFloat {
+            let deltaPx: CGFloat
+            switch expression {
+            case .hidePeek, .hidePeek3:
+                deltaPx = 77
+            case .hidePeek2:
+                deltaPx = 95
+            default:
+                deltaPx = 0
+            }
+            let deltaPt = deltaPx * scale
+            return side == .right ? -deltaPt : deltaPt
+        }
+
+        var clawFix: CGFloat {
+            overlap - horizontalInset
+        }
+    }
+
     @Published var messages: [OpenClawChatMessage] = []
     @Published var inputText: String = ""
     @Published var connectionState: ConnectionState = .disconnected
@@ -534,7 +577,8 @@ final class PetModel: NSObject, ObservableObject {
         let screenHeight = NSScreen.main?.frame.height ?? 900
         let appKitY = screenHeight - frame.origin.y - frame.height
 
-        let overlap = characterSize * 0.15  // scale overlap with size
+        let metrics = PetRenderMetrics(windowSize: petSize)
+        let overlap = metrics.overlap
         let rightX = frame.origin.x + frame.width - overlap
         let leftX = frame.origin.x - petSize + overlap
         let topY = appKitY + frame.height - petSize
@@ -562,21 +606,13 @@ final class PetModel: NSObject, ObservableObject {
                 // Claw-only: compensate for overlap + height-fit inset
                 // Peek was already perfect, don't touch it
                 if stateMachine.expression == .hideClaw {
-                    // Height-fit: scale = characterSize / 768, display_w = 688 * scale
-                    // Left inset in sprite = (characterSize - display_w) / 2
-                    let scale = characterSize / 768.0
-                    let displayW = 688.0 * scale
-                    let inset = (characterSize - displayW) / 2.0
-                    // Claw is inset px from sprite edge, overlap px into host
-                    // Push out by (overlap - inset) to put claw at host edge
-                    let clawFix = overlap - inset
                     if hidingSide == .right {
-                        t.x += clawFix
+                        t.x += metrics.clawFix
                     } else {
-                        t.x -= clawFix
+                        t.x -= metrics.clawFix
                     }
                 }
-                t.x += hiddenPoseOffsetX(for: stateMachine.expression, side: hidingSide)
+                t.x += metrics.hiddenPoseOffsetX(for: stateMachine.expression, side: hidingSide)
                 t.x = max(screen.minX, min(t.x, screen.maxX - petSize))
                 t.y = max(screen.minY, min(t.y, screen.maxY - petSize))
                 moveController.moveTo(t, waveOnArrival: false, style: .immediate)
@@ -700,25 +736,6 @@ final class PetModel: NSObject, ObservableObject {
         // Micro-loop: occasional peek while hiding
         startHideMicroLoop()
         NSLog("[PetHide] Entered hiding (side=%@)", hidingSide == .left ? "left" : "right")
-    }
-
-    /// Pose-specific X offset for hiding states (in points).
-    /// Aligns claw screen position between claw-only and peek states.
-    private func hiddenPoseOffsetX(for expression: PetExpression, side: PlacementSide) -> CGFloat {
-        // scale = 128/768 = 1/6 (height-fit)
-        // base = hide-claw claw center x=59
-        let scale: CGFloat = 128.0 / 768.0
-        let deltaPx: CGFloat
-        switch expression {
-        case .hidePeek, .hidePeek3:
-            deltaPx = 77  // peek claw center x=136 minus base 59
-        case .hidePeek2:
-            deltaPx = 95  // +18px (~3pt on screen) visual alignment correction
-        default:
-            deltaPx = 0   // claw and emerge: no offset
-        }
-        let deltaPt = deltaPx * scale
-        return side == .right ? -deltaPt : deltaPt
     }
 
     private func startHideMicroLoop() {
