@@ -327,13 +327,14 @@ private final class PetContentView: NSView {
         let iconColWidth: CGFloat = 28  // fixed icon column width
         let headerY = panelHeight - headerHeight - 4  // top padding
         if let icon = appIcon {
-            let iconView = NSImageView(frame: NSRect(x: 8, y: headerY + (headerHeight - 16) / 2, width: 16, height: 16))
+            let iconX = 4 + (iconColWidth - 16) / 2  // center 16px icon in 28pt slot, same as emoji
+            let iconView = NSImageView(frame: NSRect(x: iconX, y: headerY + (headerHeight - 16) / 2, width: 16, height: 16))
             iconView.image = icon
             iconView.imageScaling = .scaleProportionallyUpOrDown
             container.addSubview(iconView)
         }
         let nameLabel = NSTextField(labelWithString: appName)
-        nameLabel.frame = NSRect(x: 8 + iconColWidth, y: headerY + (headerHeight - 18) / 2, width: panelWidth - 8 - iconColWidth - 8, height: 18)
+        nameLabel.frame = NSRect(x: 4 + iconColWidth, y: headerY + (headerHeight - 18) / 2, width: panelWidth - 4 - iconColWidth - 8, height: 18)
         nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
         nameLabel.textColor = NSColor.white.withAlphaComponent(0.5)
         nameLabel.lineBreakMode = .byTruncatingTail
@@ -672,7 +673,7 @@ private final class SummonMenuButton: NSView {
         let textLabel = NSTextField(labelWithString: title)
         textLabel.font = .systemFont(ofSize: 13, weight: .medium)
         textLabel.textColor = .white
-        textLabel.frame = NSRect(x: 8 + iconColWidth, y: (frame.height - 18) / 2, width: frame.width - 8 - iconColWidth - 8, height: 18)
+        textLabel.frame = NSRect(x: 4 + iconColWidth, y: (frame.height - 18) / 2, width: frame.width - 4 - iconColWidth - 8, height: 18)
         addSubview(textLabel)
     }
 
