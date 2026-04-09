@@ -11,21 +11,6 @@ private enum PetColors {
     static let whisperBubble = Color(nsColor: NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.88))
 }
 
-// MARK: - Drag Handle for borderless window
-
-struct DragHandle: NSViewRepresentable {
-    func makeNSView(context: Context) -> DragHandleView { DragHandleView() }
-    func updateNSView(_ nsView: DragHandleView, context: Context) {}
-}
-
-final class DragHandleView: NSView {
-    override var mouseDownCanMoveWindow: Bool { true }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        return bounds.contains(point) ? self : nil
-    }
-}
-
 // MARK: - Layer 2: Notification Bubble (auto-fade, click to open chat)
 
 /// Brief notification bubble showing the latest assistant message
@@ -440,23 +425,175 @@ struct ChatMessageView: View {
 
 // MARK: - Tab Container (Chat + Notifications)
 
+private struct PetTabHeaderView: NSViewRepresentable {
+    @Binding var selectedTab: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selectedTab: $selectedTab)
+    }
+
+    func makeNSView(context: Context) -> PetTabHeaderNSView {
+        let view = PetTabHeaderNSView()
+        view.onSelect = { tab in
+            context.coordinator.selectedTab.wrappedValue = tab
+        }
+        view.updateSelection(selectedTab)
+        return view
+    }
+
+    func updateNSView(_ nsView: PetTabHeaderNSView, context: Context) {
+        nsView.onSelect = { tab in
+            context.coordinator.selectedTab.wrappedValue = tab
+        }
+        nsView.updateSelection(selectedTab)
+    }
+
+    final class Coordinator {
+        let selectedTab: Binding<String>
+        init(selectedTab: Binding<String>) {
+            self.selectedTab = selectedTab
+        }
+    }
+}
+
+private final class PetTabHeaderNSView: NSView {
+    var onSelect: ((String) -> Void)?
+
+    private let stackView = NSStackView()
+    private var buttons: [PetTabButton] = []
+    private let tabs: [(title: String, id: String)] = [
+        ("Chat", "chat"),
+        ("Summon", "summon"),
+        ("Notifs", "notifications"),
+    ]
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+
+        stackView.orientation = .horizontal
+        stackView.alignment = .centerY
+        stackView.spacing = 0
+        stackView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stackView)
+
+        NSLayoutConstraint.activate([
+            stackView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            stackView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            stackView.topAnchor.constraint(equalTo: topAnchor),
+            stackView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+
+        for tab in tabs {
+            let button = PetTabButton(title: tab.title, tabID: tab.id)
+            button.target = self
+            button.action = #selector(tabPressed(_:))
+            buttons.append(button)
+            stackView.addArrangedSubview(button)
+        }
+
+        let filler = NSView()
+        filler.translatesAutoresizingMaskIntoConstraints = false
+        stackView.addArrangedSubview(filler)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point) else { return nil }
+        for button in buttons {
+            let local = convert(point, to: button)
+            if button.bounds.contains(local) {
+                return button.hitTest(local) ?? button
+            }
+        }
+        return self
+    }
+
+    func updateSelection(_ selectedTab: String) {
+        for button in buttons {
+            button.isSelected = (button.tabID == selectedTab)
+        }
+    }
+
+    @objc private func tabPressed(_ sender: PetTabButton) {
+        onSelect?(sender.tabID)
+    }
+}
+
+private final class PetTabButton: NSButton {
+    let tabID: String
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let underline = NSView()
+
+    var isSelected: Bool = false {
+        didSet { updateAppearance() }
+    }
+
+    init(title: String, tabID: String) {
+        self.tabID = tabID
+        super.init(frame: .zero)
+        bezelStyle = .regularSquare
+        isBordered = false
+        self.title = ""
+        self.image = nil
+        focusRingType = .none
+        setButtonType(.momentaryChange)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        titleLabel.stringValue = title
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = .systemFont(ofSize: 12, weight: .regular)
+
+        underline.wantsLayer = true
+        underline.translatesAutoresizingMaskIntoConstraints = false
+        underline.layer?.cornerRadius = 1
+
+        addSubview(titleLabel)
+        addSubview(underline)
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 62),
+            heightAnchor.constraint(equalToConstant: 30),
+
+            titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 6),
+
+            underline.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            underline.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+            underline.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+            underline.heightAnchor.constraint(equalToConstant: 2),
+        ])
+
+        updateAppearance()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    private func updateAppearance() {
+        titleLabel.font = .systemFont(ofSize: 12, weight: isSelected ? .semibold : .regular)
+        titleLabel.textColor = isSelected ? .white : NSColor.white.withAlphaComponent(0.45)
+        underline.layer?.backgroundColor = isSelected ? NSColor.controlAccentColor.cgColor : NSColor.clear.cgColor
+    }
+}
+
 struct PetChatContainerView: View {
     @ObservedObject var model: PetModel
     @State private var selectedTab = "chat"
 
     var body: some View {
         VStack(spacing: 0) {
-            // Tab bar (also serves as drag handle for borderless window)
-            HStack(spacing: 0) {
-                tabButton("Chat", tab: "chat")
-                tabButton("Summon", tab: "summon")
-                tabButton("Notifs", tab: "notifications")
-
-                Spacer(minLength: 12)
-                    .background(DragHandle())
-                    .frame(maxWidth: .infinity, minHeight: 28)
-            }
-            .padding(.horizontal, 6)
+            PetTabHeaderView(selectedTab: $selectedTab)
+                .frame(height: 30)
             .background(PetColors.tabBarBg)
 
             Divider().opacity(0.15)
@@ -480,23 +617,6 @@ struct PetChatContainerView: View {
                 model.showSummonTab = false
             }
         }
-    }
-
-    private func tabButton(_ title: String, tab: String) -> some View {
-        Button(action: { selectedTab = tab }) {
-            VStack(spacing: 4) {
-                Text(title)
-                    .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
-                    .foregroundColor(selectedTab == tab ? .white : .white.opacity(0.45))
-                Rectangle()
-                    .fill(selectedTab == tab ? Color.accentColor : Color.clear)
-                    .frame(height: 2)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 6)
-            .padding(.bottom, 2)
-        }
-        .buttonStyle(.plain)
     }
 }
 
