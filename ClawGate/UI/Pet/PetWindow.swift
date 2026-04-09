@@ -153,6 +153,7 @@ private final class PetContentView: NSView {
     private var dragStartScreenPos: NSPoint?
     private var dragStartWindowOrigin: NSPoint?
     private var isDragging = false
+    private var singleClickTask: DispatchWorkItem?
 
     init(spriteView: PetSpriteView, model: PetModel, characterSize: CGFloat) {
         self.spriteView = spriteView
@@ -269,7 +270,19 @@ private final class PetContentView: NSView {
             isDragging = false
             return
         }
-        if !isDragging { model.toggleChat() }
+        if !isDragging {
+            if event.clickCount == 2 {
+                singleClickTask?.cancel()
+                singleClickTask = nil
+                model.moveToOppositeSide()
+            } else {
+                singleClickTask?.cancel()
+                singleClickTask = DispatchWorkItem { [weak self] in
+                    self?.model.toggleChat()
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: singleClickTask!)
+            }
+        }
         dragStartScreenPos = nil
         dragStartWindowOrigin = nil
         isDragging = false
@@ -537,7 +550,7 @@ private final class PetContentView: NSView {
         let parentFrame = parentWindow.frame
         bw.setFrameOrigin(NSPoint(
             x: parentFrame.midX - w / 2,
-            y: parentFrame.maxY - 10  // slightly overlap top of character
+            y: parentFrame.maxY + 4  // bottom of bubble just above character's head
         ))
 
         parentWindow.addChildWindow(bw, ordered: .above)

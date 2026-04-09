@@ -194,7 +194,7 @@ final class PetModel: NSObject, ObservableObject {
                 self.connectionState = .connected
                 self.stateMachine.handle(.reconnected)
                 NSLog("[Pet] Connected to Gateway, sessionKey=%@", key)
-                self.showWhisper("接続しました")
+                self.showWhisper("Connected")
                 Task { [weak self] in
                     guard let self, let key = self.sessionKey else { return }
                     try? await self.wsClient.subscribeToSession(sessionKey: key)
@@ -527,7 +527,7 @@ final class PetModel: NSObject, ObservableObject {
         isHiding = saved
     }
 
-    private func updateTargetPosition() {
+    private func updateTargetPosition(forceSide: PlacementSide? = nil) {
         guard isTrackingEnabled else { return }
         if let pause = dragPauseUntil, Date() < pause { return }
 
@@ -620,18 +620,26 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
 
-        // Normal: pick closest candidate
-        let petPos = moveController.currentOrigin ?? NSPoint(x: screen.maxX - petSize, y: screen.minY)
-        var target = candidates[0].point
-        var bestDist = Double.infinity
-        var bestSide = candidates[0].side
-        for c in candidates {
-            let bonus: Double = c.side == lastPlacementSide ? -50 : 0
-            let d = sqrt(pow(c.point.x - petPos.x, 2) + pow(c.point.y - petPos.y, 2)) + bonus
-            if d < bestDist {
-                bestDist = d
-                target = c.point
-                bestSide = c.side
+        // Normal: pick candidate
+        var target: NSPoint
+        var bestSide: PlacementSide
+
+        if let forced = forceSide, let match = candidates.first(where: { $0.side == forced }) {
+            target = match.point
+            bestSide = match.side
+        } else {
+            let petPos = moveController.currentOrigin ?? NSPoint(x: screen.maxX - petSize, y: screen.minY)
+            target = candidates[0].point
+            var bestDist = Double.infinity
+            bestSide = candidates[0].side
+            for c in candidates {
+                let bonus: Double = c.side == lastPlacementSide ? -50 : 0
+                let d = sqrt(pow(c.point.x - petPos.x, 2) + pow(c.point.y - petPos.y, 2)) + bonus
+                if d < bestDist {
+                    bestDist = d
+                    target = c.point
+                    bestSide = c.side
+                }
             }
         }
         lastPlacementSide = bestSide
@@ -639,6 +647,15 @@ final class PetModel: NSObject, ObservableObject {
         target.x = max(screen.minX, min(target.x, screen.maxX - petSize))
         target.y = max(screen.minY, min(target.y, screen.maxY - petSize))
         moveController.moveTo(target, waveOnArrival: waveOnArrival)
+    }
+
+    /// Move to opposite side of tracked window
+    func moveToOppositeSide() {
+        guard isTrackingEnabled, !isHiding else { return }
+        let opposite: PlacementSide = lastPlacementSide == .right ? .left : .right
+        lastPlacementSide = opposite
+        noteActivity()
+        updateTargetPosition(forceSide: opposite)
     }
 
     // MARK: - Lifecycle
@@ -763,14 +780,12 @@ final class PetModel: NSObject, ObservableObject {
         clawWaveTimer = nil
         lastActivityTime = Date()
         stateMachine.isExpressionLocked = false
-        stateMachine.hideAnimationSuffix = ""
-
-        // Teleport to idle position first, then show emerge → idle
-        stateMachine.hideAnimationSuffix = ""
-        updateTargetPositionImmediate()  // go to normal position instantly
+        // Keep hideAnimationSuffix for emerge animation (cleared after emerge finishes)
+        updateTargetPositionImmediate()
         stateMachine.expression = .hideEmerge
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self else { return }
+            self.stateMachine.hideAnimationSuffix = ""
             self.stateMachine.expression = .idle
             self.runCycle()
         }

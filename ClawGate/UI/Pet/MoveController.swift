@@ -70,14 +70,31 @@ final class MoveController {
             return
         }
 
+        // Teleport for very long distances
+        if distance > 2000 {
+            stop()
+            window.setFrameOrigin(target)
+            currentOrigin = target
+            stateMachine.locomotion = .stationary
+            if waveOnArrival {
+                stateMachine.expression = .wave
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    if self?.stateMachine.expression == .wave {
+                        self?.stateMachine.expression = .idle
+                    }
+                }
+            }
+            return
+        }
+
         generation &+= 1
         let gen = generation
         isMoving = true
         stateMachine.expression = .idle  // interrupt any blink/body animation
         stateMachine.locomotion = .walking(directionForMove(dx: dx, dy: dy))
 
-        let speed: Double = distance < 300 ? 400 : distance < 1000 ? 1500 : 3000
-        let duration: TimeInterval = min(max(distance / speed, 0.15), 1.5)
+        let speed: Double = distance < 200 ? 200 : distance < 500 ? 400 : distance < 1000 ? 1500 : 3000
+        let duration: TimeInterval = min(max(distance / speed, 0.3), 1.5)
         let steps = max(1, Int(duration * 60))
         let interval = duration / Double(steps)
         var step = 0
