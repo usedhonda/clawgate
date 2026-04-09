@@ -127,11 +127,14 @@ final class ScreenshotWatcher {
         lastClipboardChangeCount = NSPasteboard.general.changeCount
     }
 
+    private var directoryWatchStarted = false
+
     func start() {
         stop()
         ScreenshotTempStore.pruneOldFiles()
         startClipboardPolling()
-        configureDirectoryWatch()
+        // Directory watch deferred until first clipboard image detected
+        // to avoid Desktop access prompt on every launch
     }
 
     func stop() {
@@ -167,6 +170,13 @@ final class ScreenshotWatcher {
 
         if let until = suppressUntil, Date() < until { return }
         guard let image = NSImage(pasteboard: pasteboard) else { return }
+
+        // Lazily start directory watch on first clipboard image
+        if !directoryWatchStarted {
+            directoryWatchStarted = true
+            configureDirectoryWatch()
+        }
+
         emitCandidate(from: image, sourceKind: .clipboardImage, originalPath: nil)
     }
 

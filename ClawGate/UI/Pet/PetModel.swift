@@ -37,6 +37,7 @@ final class PetModel: NSObject, ObservableObject {
     private var deltaIdleTask: Task<Void, Never>?
     private var idleTimer: Timer?
     private var windowTrackingTimer: Timer?
+    private var trackingTickCount = 0
     private var dragPauseUntil: Date?
     private(set) var lastTrackedApp: NSRunningApplication?
     /// The AX window element Chi is currently following (for context capture)
@@ -436,8 +437,18 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func startWindowTracking() {
-        windowTrackingTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.updateTargetPosition()
+        windowTrackingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.isHiding {
+                self.updateTargetPosition()
+            } else {
+                // Normal: throttle to every 5th tick (0.5s)
+                self.trackingTickCount += 1
+                if self.trackingTickCount >= 5 {
+                    self.trackingTickCount = 0
+                    self.updateTargetPosition()
+                }
+            }
         }
     }
 

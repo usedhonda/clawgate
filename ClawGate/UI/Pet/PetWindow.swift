@@ -276,40 +276,138 @@ private final class PetContentView: NSView {
 
     // MARK: - Right-Click Summon Menu
 
+    private var summonMenuWindow: NSWindow?
+    private var summonMenuMonitor: Any?
+
     override func rightMouseDown(with event: NSEvent) {
-        let menu = NSMenu()
+        dismissSummonMenu()
 
-        // Header: show tracked app name
         let appName = model.lastTrackedApp?.localizedName ?? "Unknown"
-        let header = NSMenuItem(title: "\u{1F4CD} \(appName)", action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-        menu.addItem(.separator())
+        let appIcon = model.lastTrackedApp?.icon
 
-        // Summon: Omakase
-        let omakaseItem = NSMenuItem(title: "Omakase", action: #selector(summonOmakase(_:)), keyEquivalent: "")
-        omakaseItem.target = self
-        menu.addItem(omakaseItem)
-
-        // Summon: Ask...
-        let askItem = NSMenuItem(title: "Ask...", action: #selector(summonAsk(_:)), keyEquivalent: "")
-        askItem.target = self
-        menu.addItem(askItem)
-
-        // Summon: Draft PR (Terminal only — check bundleId directly, no heavy AX/OCR)
         let terminalBundles: Set<String> = [
             "com.mitchellh.ghostty", "com.apple.Terminal",
             "com.googlecode.iterm2", "net.kovidgoyal.kitty",
         ]
         let isTerminal = terminalBundles.contains(model.lastTrackedApp?.bundleIdentifier ?? "")
+
+        // Build menu items
+        struct MenuItem {
+            let icon: String
+            let title: String
+            let action: () -> Void
+        }
+        var items: [MenuItem] = [
+            MenuItem(icon: "✨", title: "Omakase", action: { [weak self] in
+                self?.model.stateMachine.expression = .wave
+                self?.model.summonOmakase()
+            }),
+            MenuItem(icon: "❓", title: "Ask...", action: { [weak self] in
+                self?.showAskInput()
+            }),
+        ]
         if isTerminal {
-            menu.addItem(.separator())
-            let draftPRItem = NSMenuItem(title: "Draft PR", action: #selector(summonDraftPR(_:)), keyEquivalent: "")
-            draftPRItem.target = self
-            menu.addItem(draftPRItem)
+            items.append(MenuItem(icon: "📄", title: "Draft PR", action: { [weak self] in
+                self?.model.summonDraftPR()
+            }))
         }
 
-        NSMenu.popUpContextMenu(menu, with: event, for: self)
+        let itemHeight: CGFloat = 28
+        let headerHeight: CGFloat = 28
+        let separatorHeight: CGFloat = 1
+        let panelWidth: CGFloat = 160
+        let panelHeight = headerHeight + separatorHeight + CGFloat(items.count) * itemHeight + 8  // 4pt top/bottom padding
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor(red: 0.11, green: 0.12, blue: 0.16, alpha: 0.95).cgColor
+        container.layer?.cornerRadius = 10
+
+        // Header: 2-column layout (icon slot + text) — same as action items
+        let iconColWidth: CGFloat = 28  // fixed icon column width
+        let headerY = panelHeight - headerHeight - 4  // top padding
+        if let icon = appIcon {
+            let iconView = NSImageView(frame: NSRect(x: 8, y: headerY + (headerHeight - 16) / 2, width: 16, height: 16))
+            iconView.image = icon
+            iconView.imageScaling = .scaleProportionallyUpOrDown
+            container.addSubview(iconView)
+        }
+        let nameLabel = NSTextField(labelWithString: appName)
+        nameLabel.frame = NSRect(x: 8 + iconColWidth, y: headerY + (headerHeight - 18) / 2, width: panelWidth - 8 - iconColWidth - 8, height: 18)
+        nameLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        nameLabel.textColor = NSColor.white.withAlphaComponent(0.5)
+        nameLabel.lineBreakMode = .byTruncatingTail
+        container.addSubview(nameLabel)
+
+        // Separator
+        let sepY = headerY - separatorHeight
+        let sep = NSView(frame: NSRect(x: 8, y: sepY, width: panelWidth - 16, height: separatorHeight))
+        sep.wantsLayer = true
+        sep.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.1).cgColor
+        container.addSubview(sep)
+
+        // Action buttons
+        for (i, item) in items.enumerated() {
+            let btnY = sepY - CGFloat(i + 1) * itemHeight + 2
+            let btn = SummonMenuButton(
+                frame: NSRect(x: 4, y: btnY, width: panelWidth - 8, height: itemHeight),
+                icon: item.icon,
+                title: item.title,
+                action: { [weak self] in
+                    self?.dismissSummonMenu()
+                    item.action()
+                }
+            )
+            container.addSubview(btn)
+        }
+
+        let bw = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: panelWidth, height: panelHeight),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        bw.isOpaque = false
+        bw.backgroundColor = .clear
+        bw.level = .floating + 1
+        bw.hasShadow = true
+        bw.contentView = container
+        bw.isReleasedWhenClosed = false
+
+        // Position: pointer at first action item (below header + separator)
+        let mouseScreen = NSEvent.mouseLocation
+        let firstItemOffsetFromTop = headerHeight + separatorHeight + itemHeight / 2
+        bw.setFrameOrigin(NSPoint(
+            x: mouseScreen.x - panelWidth / 2,
+            y: mouseScreen.y - panelHeight + firstItemOffsetFromTop
+        ))
+
+        bw.orderFront(nil)
+        summonMenuWindow = bw
+
+        // Dismiss on click outside or Escape
+        summonMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
+            guard let self, let menuWin = self.summonMenuWindow else { return event }
+            if event.type == .keyDown && event.keyCode == 53 {  // Escape
+                self.dismissSummonMenu()
+                return nil
+            }
+            if event.type == .leftMouseDown || event.type == .rightMouseDown {
+                if event.window != menuWin {
+                    self.dismissSummonMenu()
+                }
+            }
+            return event
+        }
+    }
+
+    private func dismissSummonMenu() {
+        if let monitor = summonMenuMonitor {
+            NSEvent.removeMonitor(monitor)
+            summonMenuMonitor = nil
+        }
+        summonMenuWindow?.orderOut(nil)
+        summonMenuWindow = nil
     }
 
     @objc private func summonOmakase(_ sender: NSMenuItem) {
@@ -547,5 +645,65 @@ private final class AskTextField: NSTextField {
 
     override func cancelOperation(_ sender: Any?) {
         onCancel?()
+    }
+}
+
+// MARK: - Summon Menu Button
+
+private final class SummonMenuButton: NSView {
+    private let action: () -> Void
+    private var isHovered = false
+    private var trackingArea: NSTrackingArea?
+
+    init(frame: NSRect, icon: String, title: String, action: @escaping () -> Void) {
+        self.action = action
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.cornerRadius = 6
+
+        let iconColWidth: CGFloat = 28  // same as header
+        let iconLabel = NSTextField(labelWithString: icon)
+        iconLabel.font = .systemFont(ofSize: 14)
+        iconLabel.textColor = .white
+        iconLabel.alignment = .center
+        iconLabel.frame = NSRect(x: 4, y: (frame.height - 18) / 2, width: iconColWidth, height: 18)
+        addSubview(iconLabel)
+
+        let textLabel = NSTextField(labelWithString: title)
+        textLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        textLabel.textColor = .white
+        textLabel.frame = NSRect(x: 8 + iconColWidth, y: (frame.height - 18) / 2, width: frame.width - 8 - iconColWidth - 8, height: 18)
+        addSubview(textLabel)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let ta = trackingArea { removeTrackingArea(ta) }
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways],
+            owner: self
+        )
+        addTrackingArea(trackingArea!)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        layer?.backgroundColor = nil
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        let loc = convert(event.locationInWindow, from: nil)
+        if bounds.contains(loc) {
+            action()
+        }
     }
 }
