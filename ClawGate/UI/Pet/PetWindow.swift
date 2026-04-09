@@ -561,6 +561,8 @@ private final class PetContentView: NSView {
         bw.backgroundColor = .clear
         bw.level = .floating
         bw.hasShadow = true
+        bw.isMovable = true
+        bw.isMovableByWindowBackground = true
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
         bw.minSize = NSSize(width: 280, height: 300)
