@@ -112,7 +112,10 @@ if [[ "$SKIP_SIGN" != "true" ]]; then
       --entitlements ClawGate.entitlements \
       --sign "ClawGate Dev" "$APP_PATH"
   else
-    echo "[4/5] Skip codesign (ClawGate Dev not found)"
+    echo "[4/5] Codesign (ad-hoc, preserves TCC permissions)"
+    codesign --force --deep \
+      --identifier com.clawgate.app \
+      --sign - "$APP_PATH"
   fi
 else
   echo "[4/5] Skip codesign (by option)"
