@@ -277,6 +277,13 @@ struct PetBubbleView: View {
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 8) {
+                        if model.messages.isEmpty && model.connectionState != .connected {
+                            Text("Connect OpenClaw Gateway to start chatting")
+                                .font(.system(size: 12))
+                                .foregroundColor(.white.opacity(0.35))
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.top, 40)
+                        }
                         ForEach(model.messages) { msg in
                             ChatMessageView(message: msg)
                                 .id(msg.id)
@@ -314,7 +321,8 @@ struct PetBubbleView: View {
 
             // Input
             HStack(spacing: 8) {
-                TextField("メッセージを入力...", text: $model.inputText)
+                TextField(model.connectionState == .connected ? "Type a message..." : "Not connected",
+                          text: $model.inputText)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .foregroundColor(.white)
@@ -331,7 +339,7 @@ struct PetBubbleView: View {
                         .foregroundColor(model.inputText.isEmpty ? .gray.opacity(0.5) : .accentColor)
                 }
                 .buttonStyle(.plain)
-                .disabled(model.inputText.isEmpty || model.isStreaming)
+                .disabled(model.inputText.isEmpty || model.isStreaming || model.connectionState != .connected)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)

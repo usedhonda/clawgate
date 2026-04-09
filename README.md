@@ -29,12 +29,13 @@ Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/claw
 
 1. Open `ClawGate.dmg` and drag **ClawGate** to **Applications**
 2. Launch ClawGate from Applications (it runs as a menu bar app)
-3. Grant **Accessibility** permission when prompted (System Settings > Privacy & Security > Accessibility)
+3. Grant **Accessibility** permission: System Settings > Privacy & Security > Accessibility > enable ClawGate (required for window tracking — Chi follows your focused window)
 4. Install [cc-status-bar](https://github.com/nicobailon/cc-status-bar) and start it:
    ```bash
    cc-status-bar
    ```
-5. Verify ClawGate is running:
+5. Install the ClawGate plugin on your OpenClaw Gateway machine (see [Plugin Setup](#plugin-setup) below)
+6. Verify ClawGate is running:
    ```bash
    curl -s http://127.0.0.1:8765/v1/health | python3 -m json.tool
    # Full diagnostics
@@ -45,6 +46,25 @@ Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/claw
 
 - macOS 13+ (Ventura or later)
 - [cc-status-bar](https://github.com/nicobailon/cc-status-bar) (provides Claude Code / Codex session state via WebSocket)
+- [OpenClaw Gateway](https://github.com/usedhonda/openclaw_general) (required for pet chat and summon features)
+
+## Pet Character (Chi)
+
+ClawGate includes a desktop pet character ("Chi") that sits beside your active window.
+
+### What works without OpenClaw Gateway
+
+- Chi renders and follows your focused window
+- Single-click: toggle chat panel
+- Double-click: move to opposite side of the window
+- Drag: reposition Chi
+- Hide/peek animations (after idle timeout)
+
+### What requires OpenClaw Gateway
+
+- Chat (send/receive messages)
+- Right-click summon menu (Omakase, Ask, Draft PR)
+- Screenshot analysis
 
 ## Session Modes
 
@@ -66,14 +86,27 @@ ClawGate includes an [OpenClaw](https://github.com/usedhonda/openclaw_general) c
 
 ### Plugin Setup
 
-The plugin lives in `extensions/openclaw-plugin/` and should be symlinked or copied to the OpenClaw extensions directory:
+The ClawGate plugin connects OpenClaw Gateway to your ClawGate instance. Install it on the machine where OpenClaw Gateway runs.
+
+**From source (recommended):**
 
 ```bash
-# Copy plugin to OpenClaw
-cp -r extensions/openclaw-plugin/ ~/.openclaw/extensions/clawgate/
-# Or symlink
-ln -s "$(pwd)/extensions/openclaw-plugin" ~/.openclaw/extensions/clawgate
+# On the Gateway machine
+git clone https://github.com/usedhonda/clawgate.git
+cp -r clawgate/extensions/openclaw-plugin/ ~/.openclaw/extensions/clawgate/
 ```
+
+**From a running ClawGate checkout:**
+
+```bash
+# Local Gateway
+cp -r extensions/openclaw-plugin/ ~/.openclaw/extensions/clawgate/
+
+# Remote Gateway (via SSH)
+scp -r extensions/openclaw-plugin/ yourhost:~/.openclaw/extensions/clawgate/
+```
+
+Restart OpenClaw Gateway after installing the plugin.
 
 ### Configuration
 
