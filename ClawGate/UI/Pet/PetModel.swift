@@ -298,7 +298,9 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func showScreenshotOffer(_ offer: ScreenshotOffer) {
-        addNotificationEntry(text: offer.mentionText, source: offer.sourceKind.rawValue)
+        let entry = NotificationEntry(id: UUID().uuidString, text: offer.mentionText, source: offer.sourceKind.rawValue, timestamp: Date())
+        summonResults.append(entry)
+        PetLogStore.save(summonResults, file: "summon.json")
         showWhisper("Screenshot ready.", duration: 2.5)
 
         guard isBubbleEnabled, !stateMachine.isChatOpen else {
@@ -697,8 +699,12 @@ final class PetModel: NSObject, ObservableObject {
         let scale: CGFloat = 128.0 / 768.0
         let deltaPx: CGFloat
         switch expression {
-        case .hidePeek, .hidePeek2, .hidePeek3:
-            deltaPx = 77  // peek claw center x=136 minus base 59
+        case .hidePeek:
+            deltaPx = 77   // contact edge flush with image boundary
+        case .hidePeek2:
+            deltaPx = 77 + 78  // 78px margin on window-facing side
+        case .hidePeek3:
+            deltaPx = 77 + 97  // 97px margin on window-facing side
         default:
             deltaPx = 0   // claw and emerge: no offset
         }

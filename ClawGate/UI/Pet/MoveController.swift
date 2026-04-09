@@ -73,6 +73,7 @@ final class MoveController {
         generation &+= 1
         let gen = generation
         isMoving = true
+        stateMachine.expression = .idle  // interrupt any blink/body animation
         stateMachine.locomotion = .walking(directionForMove(dx: dx, dy: dy))
 
         let speed: Double = distance < 300 ? 400 : distance < 1000 ? 1500 : 3000

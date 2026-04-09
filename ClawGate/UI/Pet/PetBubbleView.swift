@@ -42,9 +42,9 @@ struct PetNotificationBubble: View {
                 .onHover { hovering in
                     isHovered = hovering
                     if hovering { fadeTask?.cancel() }
-                    else { startFadeTimer(duration: 8_000_000_000) }
+                    else { startFadeTimer(duration: 15_000_000_000) }
                 }
-                .onAppear { startFadeTimer(duration: 8_000_000_000) }
+                .onAppear { startFadeTimer(duration: 15_000_000_000) }
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
         // Clipboard offer bubble (action buttons)
@@ -523,7 +523,7 @@ struct SummonResultsView: View {
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.summonResults) { entry in
+                        ForEach(model.summonResults.reversed()) { entry in
                             SummonEntryView(entry: entry)
                                 .id(entry.id)
                         }
