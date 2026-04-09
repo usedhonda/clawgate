@@ -699,12 +699,10 @@ final class PetModel: NSObject, ObservableObject {
         let scale: CGFloat = 128.0 / 768.0
         let deltaPx: CGFloat
         switch expression {
-        case .hidePeek:
-            deltaPx = 77   // contact edge flush with image boundary
+        case .hidePeek, .hidePeek3:
+            deltaPx = 77  // peek claw center x=136 minus base 59
         case .hidePeek2:
-            deltaPx = 77 + 78  // 78px margin on window-facing side
-        case .hidePeek3:
-            deltaPx = 77 + 97  // 97px margin on window-facing side
+            deltaPx = 95  // +18px (~3pt on screen) visual alignment correction
         default:
             deltaPx = 0   // claw and emerge: no offset
         }
