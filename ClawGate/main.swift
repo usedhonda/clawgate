@@ -97,7 +97,7 @@ final class AppRuntime {
 
     /// All current CC sessions (for menu refresh).
     func allCCSessions() -> [SessionSnapshot] {
-        ccStatusBarClient.allSessions()
+        tmuxSourceProxy.allSessions()
     }
 
     func autonomousStatusSummary() -> String {
@@ -198,7 +198,7 @@ final class AppRuntime {
         tmuxInboundWatcher.stop()
         federationServerInstance?.stop()
         federationClient.stop()
-        ccStatusBarClient.disconnect()
+        tmuxSourceProxy.disconnect()
         server.stop()
         logger.log(.info, "ClawGate stopped")
     }
@@ -229,27 +229,12 @@ final class AppRuntime {
     }
 
     func startTmuxSubsystem() {
-        logger.log(.info, "Tmux subsystem starting")
+        logger.log(.info, "Tmux subsystem starting — built-in direct poller (cc-status-bar decoupled)")
 
-        // Hybrid source selection (per Cdx 2026-04-10 review):
-        // direct-only was rolled back because session discovery via heuristics
-        // is too fragile. cc-status-bar remains the primary source when available;
-        // TmuxDirectPoller is the fallback for environments without cc-status-bar.
-        let ccsbURL = configStore.load().tmuxStatusBarURL
-        let ccsbAvailable = probeCCStatusBar(url: ccsbURL)
-
-        let selectedSource: TmuxSessionSource
-        if ccsbAvailable {
-            logger.log(.info, "Tmux source: cc-status-bar (\(ccsbURL))")
-            ccStatusBarClient.setPreferredWebSocketURL(ccsbURL)
-            selectedSource = ccStatusBarClient
-        } else {
-            logger.log(.info, "Tmux source: built-in direct poller (cc-status-bar unavailable)")
-            selectedSource = tmuxDirectPoller
-        }
-
-        // Install menu-refresh callback on the proxy BEFORE swapping in the
-        // underlying source (proxy will forward it when setUnderlying runs).
+        // Direct-only: the built-in TmuxDirectPoller is the only session source.
+        // CCStatusBarClient remains in the tree as a rollback point but is
+        // no longer wired into the runtime. cc-status-bar does not need to be
+        // running for ClawGate to monitor tmux sessions.
         tmuxSourceProxy.onSessionsChanged = { [weak self] in
             guard let self else { return }
             self.menuBarDelegate?.refreshSessionsMenu(sessions: self.tmuxSourceProxy.allSessions())
@@ -259,36 +244,8 @@ final class AppRuntime {
         // then swap in the real source (setUnderlying forwards callbacks),
         // then connect. The watcher is source-agnostic.
         tmuxInboundWatcher.start()
-        tmuxSourceProxy.setUnderlying(selectedSource)
+        tmuxSourceProxy.setUnderlying(tmuxDirectPoller)
         tmuxSourceProxy.connect()
-    }
-
-    /// Quick TCP probe to check if cc-status-bar is reachable.
-    private func probeCCStatusBar(url: String) -> Bool {
-        guard let parsed = URL(string: url),
-              let host = parsed.host,
-              let port = parsed.port else { return false }
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else { return false }
-        defer { close(sock) }
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(port).bigEndian
-        inet_pton(AF_INET, host, &addr.sin_addr)
-
-        let flags = fcntl(sock, F_GETFL, 0)
-        _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
-        let result = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        if result == 0 { return true }
-
-        var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
-        let ready = poll(&pfd, 1, 500)
-        return ready > 0 && (pfd.revents & Int16(POLLOUT) != 0)
     }
 
     private func persistOpsLogForMenu(_ event: BridgeEvent) {
