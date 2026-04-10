@@ -6,7 +6,7 @@ const DEFAULT_SETTINGS = {
 const statusDot = document.getElementById("status-dot");
 const statusText = document.getElementById("status-text");
 const portInput = document.getElementById("port-input");
-const tokenDisplay = document.getElementById("token-display");
+const tokenInput = document.getElementById("token-input");
 const testButton = document.getElementById("test-button");
 
 init().catch((error) => {
@@ -16,9 +16,26 @@ init().catch((error) => {
 async function init() {
   const settings = await chrome.storage.local.get(DEFAULT_SETTINGS);
   portInput.value = String(Number(settings.port) || DEFAULT_SETTINGS.port);
-  tokenDisplay.value = maskToken(settings.pairingToken || "");
+  // Show masked token if one is already stored
+  tokenInput.value = maskToken(settings.pairingToken || "");
+  tokenInput.dataset.stored = settings.pairingToken || "";
 
   portInput.addEventListener("change", savePort);
+
+  // Save token when user finishes editing
+  tokenInput.addEventListener("focus", () => {
+    // Clear masked display so user can type/paste plaintext
+    if (tokenInput.value === maskToken(tokenInput.dataset.stored || "")) {
+      tokenInput.value = "";
+    }
+  });
+  tokenInput.addEventListener("blur", saveToken);
+  tokenInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      tokenInput.blur();
+    }
+  });
+
   testButton.addEventListener("click", testConnection);
 
   chrome.runtime.onMessage.addListener((message) => {
@@ -40,10 +57,22 @@ async function savePort() {
   await chrome.storage.local.set({ port });
 }
 
+async function saveToken() {
+  const raw = tokenInput.value.trim();
+  // If the field still shows the masked version, don't overwrite
+  if (raw === maskToken(tokenInput.dataset.stored || "")) return;
+  const token = raw;
+  tokenInput.dataset.stored = token;
+  tokenInput.value = maskToken(token);
+  await chrome.storage.local.set({ pairingToken: token });
+  // Trigger reconnect
+  chrome.runtime.sendMessage({ type: "settings_updated" }).catch(() => undefined);
+  await testConnection();
+}
+
 async function testConnection() {
   const settings = await chrome.storage.local.get(DEFAULT_SETTINGS);
   const port = Number(settings.port) || DEFAULT_SETTINGS.port;
-  tokenDisplay.value = maskToken(settings.pairingToken || "");
 
   try {
     const response = await fetch(`http://127.0.0.1:${port}/v1/health`);

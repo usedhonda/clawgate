@@ -210,6 +210,9 @@ struct InlineSettingsView: View {
         return "\(peer.hostname) (\(status))"
     }
 
+    @State private var chromeToken: String = ChromeExtensionAuthStore().currentToken
+    @State private var chromeCopied = false
+
     private var systemSection: some View {
         PanelCard {
             Text("System")
@@ -219,15 +222,31 @@ struct InlineSettingsView: View {
                 Toggle("Launch at Login", isOn: launchAtLoginBinding)
             }
             Toggle("Debug Logging", isOn: $model.config.debugLogging)
-            Button("Install Chrome Extension") {
-                installChromeExtension()
+
+            HStack(spacing: 6) {
+                Button("Install Chrome Extension") {
+                    installChromeExtension()
+                }
+                .buttonStyle(.bordered)
+                if !chromeToken.isEmpty {
+                    Button(chromeCopied ? "Copied!" : "Copy Token") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(chromeToken, forType: .string)
+                        chromeCopied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { chromeCopied = false }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textSecondary)
+                }
             }
-            .buttonStyle(.bordered)
         }
     }
 
     private func installChromeExtension() {
-        let token = ChromeExtensionAuthStore().generateNewToken()
+        let store = ChromeExtensionAuthStore()
+        let token = store.generateNewToken()
+        chromeToken = token
 
         // Prefer the extension bundled in app Resources (production build).
         // Fall back to the source directory for dev builds (swift build).
