@@ -1387,12 +1387,19 @@ final class BridgeCore {
                 return String(line.dropFirst(prefix.count))
             }
 
-        let isTrusted = authorities.contains("ClawGate Dev")
-        if isTrusted {
+        // Accept either the legacy self-signed "ClawGate Dev" cert OR an Apple
+        // Developer ID Application cert. The Developer ID path gives stable TCC
+        // binding across rebuilds (Team ID + Bundle ID) and is preferred.
+        let hasDeveloperID = authorities.contains { $0.hasPrefix("Developer ID Application") }
+        let hasClawGateDev = authorities.contains("ClawGate Dev")
+        if hasDeveloperID || hasClawGateDev {
+            let authorityLabel = hasDeveloperID
+                ? (authorities.first { $0.hasPrefix("Developer ID Application") } ?? "Developer ID Application")
+                : "ClawGate Dev"
             return DoctorCheck(
                 name: "app_signature",
                 status: "ok",
-                message: "App signature authority is ClawGate Dev",
+                message: "App signature authority is \(authorityLabel)",
                 details: nil
             )
         }
@@ -1401,7 +1408,7 @@ final class BridgeCore {
         return DoctorCheck(
             name: "app_signature",
             status: "error",
-            message: "App is not signed with ClawGate Dev",
+            message: "App is not signed with ClawGate Dev or Developer ID Application",
             details: detail
         )
     }

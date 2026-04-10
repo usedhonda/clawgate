@@ -71,16 +71,32 @@ if [[ -f "$PROJECT_DIR/resources/PrivacyInfo.xcprivacy" ]]; then
 fi
 ok "Binary copied"
 
-# Sign with stable cert (not ad-hoc)
-if ! security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
-    err "'ClawGate Dev' certificate not found. Run ./scripts/setup-cert.sh once."
+# Sign with a stable identity. Prefer Developer ID Application (stable TCC
+# binding across rebuilds via Team ID). Fall back to "ClawGate Dev" self-signed.
+# Optional: set SIGNING_ID env var (or source .local/secrets/release.env) to
+# override the default Developer ID identity.
+if [[ -f "$PROJECT_DIR/.local/secrets/release.env" ]]; then
+    # shellcheck disable=SC1091
+    set -a; source "$PROJECT_DIR/.local/secrets/release.env"; set +a
+fi
+DEFAULT_DEVID="Developer ID Application: Yuzuru Honda (F588423ZWS)"
+RESOLVED_SIGNING_ID=""
+if [[ -n "${SIGNING_ID:-}" ]] && /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGNING_ID"; then
+    RESOLVED_SIGNING_ID="$SIGNING_ID"
+elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$DEFAULT_DEVID"; then
+    RESOLVED_SIGNING_ID="$DEFAULT_DEVID"
+elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
+    RESOLVED_SIGNING_ID="ClawGate Dev"
+else
+    err "No usable signing identity found (Developer ID Application or ClawGate Dev)."
+    err "Run ./scripts/setup-cert.sh to create a self-signed cert, or check Keychain Access."
     exit 1
 fi
 codesign --force --deep --options runtime \
     --identifier com.clawgate.app \
     --entitlements ClawGate.entitlements \
-    --sign "ClawGate Dev" ClawGate.app
-ok "Code signed (ClawGate Dev)"
+    --sign "$RESOLVED_SIGNING_ID" ClawGate.app
+ok "Code signed ($RESOLVED_SIGNING_ID)"
 
 # Launch
 open ClawGate.app

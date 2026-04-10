@@ -105,12 +105,27 @@ sync_plugin_dir "$PLUGIN_CLAWGATE_SRC" "$PLUGIN_CLAWGATE_DST" "clawgate"
 # sync_plugin_dir "$PLUGIN_TELEMETRY_SRC" "$PLUGIN_TELEMETRY_DST" "vibeterm-telemetry"
 
 if [[ "$SKIP_SIGN" != "true" ]]; then
-  if security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
-    echo "[4/5] Codesign (ClawGate Dev)"
+  # Prefer Developer ID Application (stable TCC binding across rebuilds).
+  # Fall back to self-signed "ClawGate Dev", then ad-hoc as last resort.
+  if [[ -f "$PROJECT_PATH/.local/secrets/release.env" ]]; then
+    # shellcheck disable=SC1091
+    set -a; source "$PROJECT_PATH/.local/secrets/release.env"; set +a
+  fi
+  DEFAULT_DEVID="Developer ID Application: Yuzuru Honda (F588423ZWS)"
+  RESOLVED_SIGNING_ID=""
+  if [[ -n "${SIGNING_ID:-}" ]] && /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGNING_ID"; then
+    RESOLVED_SIGNING_ID="$SIGNING_ID"
+  elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$DEFAULT_DEVID"; then
+    RESOLVED_SIGNING_ID="$DEFAULT_DEVID"
+  elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
+    RESOLVED_SIGNING_ID="ClawGate Dev"
+  fi
+  if [[ -n "$RESOLVED_SIGNING_ID" ]]; then
+    echo "[4/5] Codesign ($RESOLVED_SIGNING_ID)"
     codesign --force --deep --options runtime \
       --identifier com.clawgate.app \
       --entitlements ClawGate.entitlements \
-      --sign "ClawGate Dev" "$APP_PATH"
+      --sign "$RESOLVED_SIGNING_ID" "$APP_PATH"
   else
     echo "[4/5] Codesign (ad-hoc, preserves TCC permissions)"
     codesign --force --deep \
