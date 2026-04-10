@@ -52,7 +52,7 @@ struct InlineSettingsView: View {
     @State private var lineState: ConnectivityState = .unknown
     @State private var gatewayState: ConnectivityState = .unknown
     @State private var probeTimer: Timer?
-    @State private var showRegenerateAlert = false
+    @State private var tailscalePeers: [TailscalePeer] = []
 
     private var contentView: some View {
         VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
@@ -60,7 +60,6 @@ struct InlineSettingsView: View {
             if lineSectionShouldShow {
                 lineSection
             }
-            tmuxSection
             gatewaySection
             systemSection
         }
@@ -71,7 +70,7 @@ struct InlineSettingsView: View {
     ///
     /// LINE adapter only works when:
     /// 1. LINE Desktop is installed on this machine, AND
-    /// 2. The OpenClaw Gateway we're connecting to is local (on this machine)
+    /// 2. The OpenClaw Gateway we're configured to connect to is local
     ///
     /// If the Gateway is remote, this machine's LINE Desktop is unrelated to
     /// what the remote Gateway actually operates on. Hide the section.
@@ -79,11 +78,7 @@ struct InlineSettingsView: View {
         guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: "jp.naver.line.mac") != nil else {
             return false
         }
-        guard let config = readOpenClawGatewayConfig() else {
-            // No OpenClaw config on this machine — nothing uses LINE here.
-            return false
-        }
-        let host = config.host.lowercased()
+        let host = model.config.openclawHost.lowercased()
         return host == "127.0.0.1" || host == "localhost" || host == "::1"
     }
 
@@ -104,6 +99,7 @@ struct InlineSettingsView: View {
         .font(PanelTheme.bodyFont)
         .onAppear {
             refreshConnectivity()
+            loadTailscalePeers()
             startProbeTimer()
         }
         .onDisappear {
@@ -119,10 +115,9 @@ struct InlineSettingsView: View {
         .onChange(of: model.config.lineEnablePixelSignal) { _ in model.save() }
         .onChange(of: model.config.lineEnableProcessSignal) { _ in model.save() }
         .onChange(of: model.config.lineEnableNotificationStoreSignal) { _ in model.save() }
-        .onChange(of: model.config.tmuxEnabled) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.tmuxSessionModes) { _ in model.save() }
-        .onChange(of: model.config.remoteAccessEnabled) { _ in model.save(); refreshConnectivity() }
-        .onChange(of: model.config.remoteAccessToken) { _ in model.save() }
+        .onChange(of: model.config.openclawHost) { _ in model.save(); refreshConnectivity() }
+        .onChange(of: model.config.openclawPort) { _ in model.save(); refreshConnectivity() }
     }
 
     // MARK: - Header
@@ -176,84 +171,55 @@ struct InlineSettingsView: View {
         }
     }
 
-    private var tmuxSection: some View {
-        PanelCard {
-            Text("Tmux")
-                .font(PanelTheme.titleFont)
-                .foregroundStyle(PanelTheme.textPrimary)
-            Toggle("Enable tmux monitoring", isOn: $model.config.tmuxEnabled)
-            if model.config.tmuxEnabled {
-                Text("Session behavior is managed from Monitor.")
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textTertiary)
-            }
-        }
-    }
-
     private var gatewaySection: some View {
         PanelCard {
             Text("Gateway")
                 .font(PanelTheme.titleFont)
                 .foregroundStyle(PanelTheme.textPrimary)
-            Toggle("Allow Gateway to connect", isOn: $model.config.remoteAccessEnabled)
-            if model.config.remoteAccessEnabled {
-                statusRow(state: gatewayState)
-                let tokenSet = !model.config.remoteAccessToken.isEmpty
-                fieldRow("Token") {
-                    HStack(spacing: 6) {
-                        SecureField("not set", text: $model.config.remoteAccessToken)
-                            .textFieldStyle(.plain)
-                            .modifier(PanelInputModifier())
-                        if tokenSet {
-                            Button(action: copyToken) {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Copy token to clipboard")
-                            Button(action: { showRegenerateAlert = true }) {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Regenerate token (invalidates the current one)")
-                        } else {
-                            Button(action: generateToken) {
-                                Text("Generate")
-                                    .font(.system(size: 11, weight: .medium))
-                            }
-                            .buttonStyle(.bordered)
+            statusRow(state: gatewayState)
+            fieldRow("Host") {
+                HStack(spacing: 6) {
+                    TextField("127.0.0.1", text: $model.config.openclawHost)
+                        .textFieldStyle(.plain)
+                        .modifier(PanelInputModifier())
+                    Menu {
+                        Button("Use local (127.0.0.1)") {
+                            model.config.openclawHost = "127.0.0.1"
                         }
+                        if !tailscalePeers.isEmpty {
+                            Divider()
+                            ForEach(tailscalePeers) { peer in
+                                Button(peerShortLabel(peer)) {
+                                    model.config.openclawHost = peer.hostname
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("Refresh peers") { loadTailscalePeers() }
+                    } label: {
+                        Image(systemName: "chevron.down.circle")
+                            .font(.system(size: 12, weight: .medium))
                     }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Pick a Tailscale peer or reset to local")
                 }
-                Text("Paste this token into OpenClaw Gateway's ~/.openclaw/openclaw.json under channels.clawgate.default.token, then restart Gateway.")
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+            }
+            fieldRow("Port") {
+                TextField("18789", value: $model.config.openclawPort, format: .number)
+                    .textFieldStyle(.plain)
+                    .modifier(PanelInputModifier())
             }
         }
-        .alert("Regenerate Token?",
-               isPresented: $showRegenerateAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Regenerate", role: .destructive) { generateToken() }
-        } message: {
-            Text("The current token will stop working. You'll need to update OpenClaw Gateway's config with the new one.")
-        }
     }
 
-    private func generateToken() {
-        // URL-safe short UUID
-        let raw = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        model.config.remoteAccessToken = String(raw.prefix(32))
-        model.save()
-        copyToken()
+    private func loadTailscalePeers() {
+        tailscalePeers = TailscalePeerService.loadPeers()
     }
 
-    private func copyToken() {
-        guard !model.config.remoteAccessToken.isEmpty else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(model.config.remoteAccessToken, forType: .string)
+    private func peerShortLabel(_ peer: TailscalePeer) -> String {
+        let status = peer.online ? "online" : "offline"
+        return "\(peer.hostname) (\(status))"
     }
 
     private var systemSection: some View {
@@ -337,7 +303,7 @@ struct InlineSettingsView: View {
         lineState = model.config.lineEnabled
             ? (lineAppRunning() ? .online : .offline)
             : .unknown
-        gatewayState = model.config.remoteAccessEnabled ? .online : .unknown
+        gatewayState = .online
     }
 
     private func lineAppRunning() -> Bool {

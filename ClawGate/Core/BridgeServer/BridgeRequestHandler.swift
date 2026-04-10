@@ -107,8 +107,9 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
             return
         }
 
-        // Optional auth (enabled only in remote access mode)
-        if let authResult = core.checkAuthorization(headers: head.headers) {
+        // Source-IP filter: loopback + Tailscale CGNAT only
+        let remoteIP = context.channel.remoteAddress?.ipAddress
+        if let authResult = core.checkAuthorization(remoteAddress: remoteIP) {
             writeResponse(context: context, result: authResult)
             return
         }

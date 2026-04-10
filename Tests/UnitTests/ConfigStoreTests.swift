@@ -18,11 +18,10 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(cfg.includeMessageBodyInLogs, false)
         XCTAssertEqual(cfg.lineDefaultConversation, "")
         XCTAssertEqual(cfg.linePollIntervalSeconds, 1)
-        XCTAssertEqual(cfg.tmuxEnabled, false)
         XCTAssertEqual(cfg.tmuxStatusBarURL, "ws://localhost:8080/ws/sessions")
         XCTAssertEqual(cfg.tmuxSessionModes, [:])
-        XCTAssertEqual(cfg.remoteAccessEnabled, false)
-        XCTAssertEqual(cfg.remoteAccessToken, "")
+        XCTAssertEqual(cfg.openclawHost, "127.0.0.1")
+        XCTAssertEqual(cfg.openclawPort, 18789)
         XCTAssertEqual(cfg.federationEnabled, false)
         XCTAssertEqual(cfg.federationURL, "")
         XCTAssertEqual(cfg.federationToken, "")
@@ -37,10 +36,9 @@ final class ConfigStoreTests: XCTestCase {
         cfg.includeMessageBodyInLogs = true
         cfg.lineDefaultConversation = "Test User"
         cfg.linePollIntervalSeconds = 5
-        cfg.tmuxEnabled = true
         cfg.tmuxSessionModes = ["cc:project-a": "autonomous", "cc:project-b": "observe"]
-        cfg.remoteAccessEnabled = true
-        cfg.remoteAccessToken = "test-token"
+        cfg.openclawHost = "macmini.example.ts.net"
+        cfg.openclawPort = 19000
 
         store.save(cfg)
         let loaded = store.load()
@@ -49,26 +47,25 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(loaded.includeMessageBodyInLogs, true)
         XCTAssertEqual(loaded.lineDefaultConversation, "Test User")
         XCTAssertEqual(loaded.linePollIntervalSeconds, 5)
-        XCTAssertEqual(loaded.tmuxEnabled, true)
         XCTAssertEqual(loaded.tmuxSessionModes["cc:project-a"], "autonomous")
         XCTAssertEqual(loaded.tmuxSessionModes["cc:project-b"], "observe")
-        XCTAssertEqual(loaded.remoteAccessEnabled, true)
-        XCTAssertEqual(loaded.remoteAccessToken, "test-token")
+        XCTAssertEqual(loaded.openclawHost, "macmini.example.ts.net")
+        XCTAssertEqual(loaded.openclawPort, 19000)
     }
 
     func testSaveClearsLegacyRoleAndFederationKeys() {
         let defaults = freshDefaults("cfg-legacy-save-clear")
-        let store = ConfigStore(defaults: defaults)
 
         defaults.set("server", forKey: "clawgate.nodeRole")
         defaults.set("ws://legacy:8080/ws/sessions", forKey: "clawgate.tmuxStatusBarUrl")
-        defaults.set(true, forKey: "clawgate.federationEnabled")
-        defaults.set("ws://legacy:8765/federation", forKey: "clawgate.federationURL")
+        defaults.set("ws://will-be-migrated:8765/federation", forKey: "clawgate.federationURL")
         defaults.set("legacy-fed-token", forKey: "clawgate.federationToken")
         defaults.set(120, forKey: "clawgate.federationReconnectMaxSeconds")
+        defaults.set("legacy-remote-token", forKey: "clawgate.remoteAccessToken")
 
+        let store = ConfigStore(defaults: defaults)
         var cfg = store.load()
-        cfg.remoteAccessToken = "new-remote-token"
+        cfg.openclawHost = "new-host.example.ts.net"
         store.save(cfg)
 
         XCTAssertNil(defaults.object(forKey: "clawgate.nodeRole"))
@@ -77,17 +74,31 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: "clawgate.federationURL"))
         XCTAssertNil(defaults.object(forKey: "clawgate.federationToken"))
         XCTAssertNil(defaults.object(forKey: "clawgate.federationReconnectMaxSeconds"))
-        XCTAssertEqual(defaults.string(forKey: "clawgate.remoteAccessToken"), "new-remote-token")
+        XCTAssertNil(defaults.object(forKey: "clawgate.remoteAccessToken"))
+        XCTAssertEqual(defaults.string(forKey: "clawgate.openclawHost"), "new-host.example.ts.net")
     }
 
-    func testMigrationAbsorbsFederationTokenIntoRemoteAccessToken() {
-        let defaults = freshDefaults("cfg-fed-token-migrate")
-        defaults.set("legacy-fed-token", forKey: "clawgate.federationToken")
+    func testFederationURLMigratesToOpenclawHost() {
+        let defaults = freshDefaults("cfg-fed-url-migrate")
+        defaults.set("ws://macmini.example.ts.net:8765/federation", forKey: "clawgate.federationURL")
 
         let store = ConfigStore(defaults: defaults)
         let cfg = store.load()
 
-        XCTAssertEqual(cfg.remoteAccessToken, "legacy-fed-token")
+        XCTAssertEqual(cfg.openclawHost, "macmini.example.ts.net")
+        // legacy federationURL is purged
+        XCTAssertNil(defaults.object(forKey: "clawgate.federationURL"))
+    }
+
+    func testFederationURLMigrationDoesNotOverwriteExistingHost() {
+        let defaults = freshDefaults("cfg-fed-url-no-overwrite")
+        defaults.set("explicit.example.ts.net", forKey: "clawgate.openclawHost")
+        defaults.set("ws://other.example.ts.net:8765/federation", forKey: "clawgate.federationURL")
+
+        let store = ConfigStore(defaults: defaults)
+        let cfg = store.load()
+
+        XCTAssertEqual(cfg.openclawHost, "explicit.example.ts.net")
     }
 
     func testPollIntervalMigration() {

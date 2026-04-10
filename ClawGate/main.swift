@@ -156,11 +156,9 @@ final class AppRuntime {
             logger.log(.info, "LINE subsystems are disabled (lineEnabled=false)")
         }
 
-        // Start tmux subsystem if enabled
+        // Start tmux subsystem (always on — no user toggle).
         let config = configStore.load()
-        if config.tmuxEnabled {
-            startTmuxSubsystem()
-        }
+        startTmuxSubsystem()
 
         // Federation: legacy URL presence decides client-vs-server until Phase C removes federation entirely.
         if shouldStartFederationServer(config) {
@@ -172,11 +170,9 @@ final class AppRuntime {
             federationClient.start()
         }
 
-        // Gateway health monitor: direct Gateway polling matters when remote access is enabled.
-        if config.remoteAccessEnabled {
-            core.gatewayHealthMonitor = gatewayHealthMonitor
-            gatewayHealthMonitor.start()
-        }
+        // Gateway health monitor: Gateway is the entire purpose of ClawGate.
+        core.gatewayHealthMonitor = gatewayHealthMonitor
+        gatewayHealthMonitor.start()
     }
 
     private func requestPermissionPromptsIfNeeded() {
@@ -204,7 +200,7 @@ final class AppRuntime {
     }
 
     private func bindHost() -> String {
-        configStore.load().remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"
+        "0.0.0.0"
     }
 
     private func shouldStartFederationServer(_ cfg: AppConfig) -> Bool {
@@ -217,7 +213,7 @@ final class AppRuntime {
 
     private func capabilityRoleLabel() -> String {
         let cfg = configStore.load()
-        return "line=\(cfg.lineEnabled) tmux=\(cfg.tmuxEnabled) remote=\(cfg.remoteAccessEnabled)"
+        return "line=\(cfg.lineEnabled) tmux=true remote=true"
     }
 
     private func enabledAdapters() -> [AdapterProtocol] {

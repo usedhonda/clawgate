@@ -224,40 +224,48 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertTrue(parsed.checks.contains(where: { $0.name == "line_caretaker_state" }))
     }
 
-    func testAuthorizationDisabledByDefault() {
+    func testAuthorizationAllowsLoopbackIPv4() {
         let core = makeCore()
-        let result = core.checkAuthorization(headers: HTTPHeaders())
-        XCTAssertNil(result)
+        XCTAssertNil(core.checkAuthorization(remoteAddress: "127.0.0.1"))
+        XCTAssertNil(core.checkAuthorization(remoteAddress: "127.5.6.7"))
     }
 
-    func testAuthorizationRejectsInvalidBearerWhenEnabled() {
-        let defaults = UserDefaults(suiteName: "clawgate.tests.auth")!
-        defaults.removePersistentDomain(forName: "clawgate.tests.auth")
-        let cfg = ConfigStore(defaults: defaults)
-        var appCfg = cfg.load()
-        appCfg.remoteAccessEnabled = true
-        appCfg.remoteAccessToken = "secret-token"
-        cfg.save(appCfg)
+    func testAuthorizationAllowsLoopbackIPv6() {
+        let core = makeCore()
+        XCTAssertNil(core.checkAuthorization(remoteAddress: "::1"))
+    }
 
-        let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
-        let core = BridgeCore(
-            eventBus: EventBus(),
-            registry: AdapterRegistry(adapters: [FakeAdapter()]),
-            logger: AppLogger(configStore: cfg),
-            opsLogStore: OpsLogStore(),
-            configStore: cfg,
-            statsCollector: StatsCollector(filePath: statsFile)
-        )
+    func testAuthorizationAllowsTailscaleCGNAT() {
+        let core = makeCore()
+        XCTAssertNil(core.checkAuthorization(remoteAddress: "100.64.0.5"))
+        XCTAssertNil(core.checkAuthorization(remoteAddress: "100.100.50.10"))
+        XCTAssertNil(core.checkAuthorization(remoteAddress: "100.127.255.254"))
+    }
 
-        var headers = HTTPHeaders()
-        headers.add(name: "Authorization", value: "Bearer wrong")
-        let result = core.checkAuthorization(headers: headers)
-        XCTAssertEqual(result?.status, .unauthorized)
+    func testAuthorizationRejectsLAN() {
+        let core = makeCore()
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "192.168.1.5")?.status, .forbidden)
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "10.0.0.1")?.status, .forbidden)
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "172.16.0.1")?.status, .forbidden)
+    }
 
-        headers = HTTPHeaders()
-        headers.add(name: "Authorization", value: "Bearer secret-token")
-        let okResult = core.checkAuthorization(headers: headers)
-        XCTAssertNil(okResult)
+    func testAuthorizationRejectsPublicIP() {
+        let core = makeCore()
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "8.8.8.8")?.status, .forbidden)
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "1.1.1.1")?.status, .forbidden)
+    }
+
+    func testAuthorizationRejectsNonCGNAT100Range() {
+        let core = makeCore()
+        // 100.0.0.0/10 (not CGNAT) should be rejected
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "100.5.0.1")?.status, .forbidden)
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "100.128.0.1")?.status, .forbidden)
+    }
+
+    func testAuthorizationRejectsMissingAddress() {
+        let core = makeCore()
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: nil)?.status, .forbidden)
+        XCTAssertEqual(core.checkAuthorization(remoteAddress: "")?.status, .forbidden)
     }
 
     func testFederationCommandDispatchesHealth() {

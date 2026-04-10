@@ -167,7 +167,7 @@ struct MainPanelView: View {
                         PanelPill(text: "Remote Control", tint: PanelTheme.accentBlue)
                     }
 
-                    QRCodeView()
+                    QRCodeView(settingsModel: settingsModel)
                         .frame(maxWidth: .infinity, alignment: .center)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

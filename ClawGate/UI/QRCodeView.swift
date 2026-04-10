@@ -2,7 +2,9 @@ import SwiftUI
 import CoreImage.CIFilterBuiltins
 
 struct QRCodeView: View {
-    @State private var tailscaleHostname: String?
+    @ObservedObject var settingsModel: SettingsModel
+
+    @State private var advertisedHost: String?
     @State private var openClawToken: String?
     @State private var openClawPort: Int = 18789
     @State private var connectionURL: String?
@@ -51,11 +53,11 @@ struct QRCodeView: View {
                     } else if isLoading {
                         ProgressView()
                             .scaleEffect(0.8)
-                        Text("Fetching from server...")
+                        Text("Fetching from \(settingsModel.config.openclawHost)…")
                             .foregroundStyle(PanelTheme.textSecondary)
                             .font(PanelTheme.smallFont)
                     } else {
-                        Text("Loading...")
+                        Text("Loading…")
                             .foregroundStyle(PanelTheme.textSecondary)
                             .font(PanelTheme.smallFont)
                     }
@@ -65,7 +67,7 @@ struct QRCodeView: View {
             }
 
             PanelCard {
-                ConnectionInfoRow(label: "Host", value: tailscaleHostname ?? "Not available")
+                ConnectionInfoRow(label: "Host", value: advertisedHost ?? settingsModel.config.openclawHost)
                 ConnectionInfoRow(label: "Port", value: String(openClawPort))
             }
 
@@ -87,101 +89,89 @@ struct QRCodeView: View {
         .onAppear {
             loadConnectionInfo()
         }
+        .onChange(of: settingsModel.config.openclawHost) { _ in loadConnectionInfo() }
+        .onChange(of: settingsModel.config.openclawPort) { _ in loadConnectionInfo() }
     }
 
     // MARK: - Private Methods
 
     private func loadConnectionInfo() {
-        let defaults = UserDefaults.standard
-        let federationEnabled = defaults.object(forKey: "clawgate.federationEnabled") as? Bool ?? false
-        let federationURL = defaults.string(forKey: "clawgate.federationURL") ?? ""
-
-        if federationEnabled && !federationURL.isEmpty {
-            loadFromServer(federationURL: federationURL)
-        } else {
-            loadFromLocal()
+        let host = settingsModel.config.openclawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let port = settingsModel.config.openclawPort
+        guard !host.isEmpty else {
+            errorMessage = "Set Host in Settings → Gateway."
+            connectionURL = nil
+            return
         }
+        fetchOpenclawInfo(host: host, fallbackPort: port)
     }
 
-    private func loadFromServer(federationURL: String) {
-        guard let wsURL = URL(string: federationURL),
-              let host = wsURL.host else {
-            errorMessage = "Invalid federation URL"
+    private func fetchOpenclawInfo(host: String, fallbackPort: Int) {
+        // ClawGate API is assumed to live on the same host at port 8765.
+        guard let url = URL(string: "http://\(host):8765/v1/openclaw-info") else {
+            errorMessage = "Invalid host: \(host)"
+            connectionURL = nil
             return
         }
-        let bridgePort = wsURL.port ?? 8765
-
-        let defaults = UserDefaults.standard
-        let token = defaults.string(forKey: "clawgate.federationToken")
-            ?? defaults.string(forKey: "clawgate.remoteAccessToken") ?? ""
-
-        guard let url = URL(string: "http://\(host):\(bridgePort)/v1/openclaw-info") else {
-            errorMessage = "Could not build server URL"
-            return
-        }
-
         isLoading = true
         var request = URLRequest(url: url)
         request.timeoutInterval = 5
-        if !token.isEmpty {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
         URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
                 isLoading = false
                 if let error {
-                    errorMessage = "Server error: \(error.localizedDescription)"
+                    errorMessage = "Cannot reach \(host): \(error.localizedDescription)"
+                    connectionURL = nil
+                    return
+                }
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    errorMessage = "Invalid response from \(host)"
+                    connectionURL = nil
+                    return
+                }
+                guard httpResponse.statusCode == 200 else {
+                    if httpResponse.statusCode == 403 {
+                        errorMessage = "Blocked by IP filter at \(host).\nOnly loopback and Tailscale (100.64.0.0/10) are allowed."
+                    } else if httpResponse.statusCode == 404 {
+                        errorMessage = "OpenClaw not configured on \(host)"
+                    } else {
+                        errorMessage = "ClawGate at \(host) returned HTTP \(httpResponse.statusCode)"
+                    }
+                    connectionURL = nil
                     return
                 }
                 guard let data,
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let ok = json["ok"] as? Bool, ok,
-                      let remoteHost = json["host"] as? String,
-                      let remoteToken = json["token"] as? String else {
-                    errorMessage = "Invalid response from server"
+                      let respHost = json["host"] as? String,
+                      let respToken = json["token"] as? String else {
+                    errorMessage = "Invalid response from \(host)"
+                    connectionURL = nil
                     return
                 }
-                let remotePort = json["port"] as? Int ?? 18789
-
-                tailscaleHostname = remoteHost
-                openClawToken = remoteToken
-                openClawPort = remotePort
+                advertisedHost = respHost
+                openClawToken = respToken
+                openClawPort = json["port"] as? Int ?? fallbackPort
+                errorMessage = nil
                 buildConnectionURL()
             }
         }.resume()
     }
 
-    private func loadFromLocal() {
-        tailscaleHostname = TailscaleResolver.hostname()
-        if let config = getOpenClawConfig() {
-            openClawToken = config.token
-            openClawPort = config.port
-        }
-        buildConnectionURL()
-    }
-
     private func buildConnectionURL() {
-        if let host = tailscaleHostname, let token = openClawToken {
-            var components = URLComponents()
-            components.scheme = "openclaw"
-            components.host = "connect"
-            components.queryItems = [
-                URLQueryItem(name: "host", value: host),
-                URLQueryItem(name: "token", value: token),
-                URLQueryItem(name: "port", value: String(openClawPort)),
-            ]
-            connectionURL = components.string
-        } else {
-            var errors: [String] = []
-            if tailscaleHostname == nil {
-                errors.append("Tailscale not available")
-            }
-            if openClawToken == nil {
-                errors.append("OpenClaw config not found")
-            }
-            errorMessage = errors.joined(separator: "\n")
+        guard let host = advertisedHost, let token = openClawToken else {
+            connectionURL = nil
+            return
         }
+        var components = URLComponents()
+        components.scheme = "openclaw"
+        components.host = "connect"
+        components.queryItems = [
+            URLQueryItem(name: "host", value: host),
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "port", value: String(openClawPort)),
+        ]
+        connectionURL = components.string
     }
 
     private func copyURL() {
@@ -215,23 +205,6 @@ struct QRCodeView: View {
 
         return NSImage(cgImage: cgImage, size: NSSize(width: 200, height: 200))
     }
-}
-
-// MARK: - Data Fetching
-
-private func getOpenClawConfig() -> (token: String, port: Int)? {
-    let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
-    guard let data = FileManager.default.contents(atPath: configPath),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let gateway = json["gateway"] as? [String: Any],
-          let auth = gateway["auth"] as? [String: Any],
-          let token = auth["token"] as? String,
-          !token.isEmpty else {
-        return nil
-    }
-
-    let port = gateway["port"] as? Int ?? 18789
-    return (token: token, port: port)
 }
 
 private struct ConnectionInfoRow: View {

@@ -60,29 +60,74 @@ final class BridgeCore {
         )
     }
 
-    /// Optional Bearer auth for remote access mode.
-    /// Localhost default mode keeps auth disabled for backward compatibility.
-    func checkAuthorization(headers: HTTPHeaders) -> HTTPResult? {
-        let cfg = configStore.load()
-        guard cfg.remoteAccessEnabled else { return nil }
-        let token = cfg.remoteAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !token.isEmpty else { return nil }
-
-        let authHeader = headers.first(name: "Authorization") ?? ""
-        guard authHeader == "Bearer \(token)" else {
-            let payload = ErrorPayload(
-                code: "unauthorized",
-                message: "Missing or invalid bearer token",
-                retriable: false,
-                failedStep: "auth",
-                details: nil
-            )
-            return jsonResponse(
-                status: .unauthorized,
-                body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
-            )
+    /// Source-IP filter for ClawGate API. Allows loopback and Tailscale CGNAT
+    /// (100.64.0.0/10) only. Everything else gets 403. No tokens, no whitelists.
+    /// The trust boundary is "your local machine + your Tailscale tailnet".
+    func checkAuthorization(remoteAddress: String?) -> HTTPResult? {
+        guard let raw = remoteAddress, !raw.isEmpty else {
+            return forbidden(reason: "source address unavailable")
         }
-        return nil
+        // NIO surfaces "[::1]:54321" / "127.0.0.1:54321" / "100.64.0.5:54321".
+        let ip = Self.extractIP(from: raw)
+        if Self.isLoopback(ip) || Self.isTailscaleCGNAT(ip) {
+            return nil
+        }
+        return forbidden(reason: "Source IP \(ip) not allowed (loopback or Tailscale only)")
+    }
+
+    private func forbidden(reason: String) -> HTTPResult {
+        let payload = ErrorPayload(
+            code: "forbidden_source_ip",
+            message: "Request blocked by source IP filter",
+            retriable: false,
+            failedStep: "auth",
+            details: reason
+        )
+        return jsonResponse(
+            status: .forbidden,
+            body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
+        )
+    }
+
+    static func extractIP(from raw: String) -> String {
+        // Strip "[ipv6]:port" and "ipv4:port" wrappers, plus optional zone id.
+        var s = raw
+        if s.hasPrefix("[") {
+            if let close = s.firstIndex(of: "]") {
+                s = String(s[s.index(after: s.startIndex)..<close])
+            }
+        } else if let lastColon = s.lastIndex(of: ":"),
+                  s.filter({ $0 == ":" }).count == 1 {
+            // IPv4:port
+            s = String(s[..<lastColon])
+        }
+        if let pct = s.firstIndex(of: "%") {
+            s = String(s[..<pct])
+        }
+        return s
+    }
+
+    static func isLoopback(_ ip: String) -> Bool {
+        if ip == "::1" { return true }
+        if ip.hasPrefix("127.") { return true }
+        // IPv4-mapped IPv6 loopback (::ffff:127.0.0.1).
+        if ip.lowercased().hasPrefix("::ffff:127.") { return true }
+        return false
+    }
+
+    static func isTailscaleCGNAT(_ ip: String) -> Bool {
+        // Tailscale uses 100.64.0.0/10 (CGNAT range, RFC 6598).
+        var s = ip
+        if s.lowercased().hasPrefix("::ffff:") {
+            s = String(s.dropFirst("::ffff:".count))
+        }
+        let parts = s.split(separator: ".").compactMap { Int($0) }
+        guard parts.count == 4 else { return false }
+        guard (0...255).contains(parts[0]),
+              (0...255).contains(parts[1]),
+              (0...255).contains(parts[2]),
+              (0...255).contains(parts[3]) else { return false }
+        return parts[0] == 100 && (64...127).contains(parts[1])
     }
 
     // MARK: - Bubble Notify (dev session → pet notification)
@@ -131,7 +176,7 @@ final class BridgeCore {
             return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
         let port = gateway["port"] as? Int ?? 18789
-        let host = TailscaleResolver.hostname() ?? "unknown"
+        let host = OwnHostnameResolver.resolve()
 
         let result: [String: Any] = ["ok": true, "host": host, "token": token, "port": port]
         guard let body = try? JSONSerialization.data(withJSONObject: result, options: [.withoutEscapingSlashes]) else {
@@ -166,12 +211,12 @@ final class BridgeCore {
                 enableNotificationStoreSignal: cfg.lineEnableNotificationStoreSignal
             ),
             tmux: ConfigTmuxSection(
-                enabled: cfg.tmuxEnabled,
+                enabled: true,
                 statusBarURL: cfg.tmuxStatusBarURL,
                 sessionModes: cfg.tmuxSessionModes
             ),
             remote: ConfigRemoteSection(
-                accessEnabled: cfg.remoteAccessEnabled,
+                accessEnabled: true,
                 federationEnabled: cfg.federationEnabled,
                 federationURL: cfg.federationURL
             )
@@ -1165,7 +1210,7 @@ final class BridgeCore {
         }
 
         // Check 7: Port 8765 (we're already listening, so this is informational)
-        let portDetails = cfg.remoteAccessEnabled ? "0.0.0.0:8765 (remote access)" : "127.0.0.1:8765"
+        let portDetails = "0.0.0.0:8765 (remote access)"
         let federationSuffix = cfg.federationEnabled ? " + ws:/federation" : ""
         checks.append(DoctorCheck(
             name: "server_port",
@@ -1201,32 +1246,30 @@ final class BridgeCore {
             ))
         }
 
-        // Check 10: Gateway poll freshness (server role only — Gateway polls this host)
-        if cfg.remoteAccessEnabled {
-            let age = Date().timeIntervalSince(lastGatewayPollAt)
-            let staleThreshold: TimeInterval = 120
-            if lastGatewayPollAt == .distantPast {
-                checks.append(DoctorCheck(
-                    name: "gateway_poll_freshness",
-                    status: "warning",
-                    message: "Gateway has never polled",
-                    details: "No /v1/poll requests received"
-                ))
-            } else if age > staleThreshold {
-                checks.append(DoctorCheck(
-                    name: "gateway_poll_freshness",
-                    status: "error",
-                    message: "Gateway poll is stale",
-                    details: "age=\(Int(age))s threshold=\(Int(staleThreshold))s"
-                ))
-            } else {
-                checks.append(DoctorCheck(
-                    name: "gateway_poll_freshness",
-                    status: "ok",
-                    message: "Gateway poll is fresh",
-                    details: "age=\(Int(age))s"
-                ))
-            }
+        // Check 10: Gateway poll freshness — Gateway is expected to poll this host.
+        let age = Date().timeIntervalSince(lastGatewayPollAt)
+        let staleThreshold: TimeInterval = 120
+        if lastGatewayPollAt == .distantPast {
+            checks.append(DoctorCheck(
+                name: "gateway_poll_freshness",
+                status: "warning",
+                message: "Gateway has never polled",
+                details: "No /v1/poll requests received"
+            ))
+        } else if age > staleThreshold {
+            checks.append(DoctorCheck(
+                name: "gateway_poll_freshness",
+                status: "error",
+                message: "Gateway poll is stale",
+                details: "age=\(Int(age))s threshold=\(Int(staleThreshold))s"
+            ))
+        } else {
+            checks.append(DoctorCheck(
+                name: "gateway_poll_freshness",
+                status: "ok",
+                message: "Gateway poll is fresh",
+                details: "age=\(Int(age))s"
+            ))
         }
 
         // Calculate summary
@@ -1258,15 +1301,9 @@ final class BridgeCore {
         let path = components?.path ?? command.path
         let method = httpMethod(from: command.method)
 
-        if path != "/v1/health" {
-            var headerBag = HTTPHeaders()
-            for (key, value) in command.headers {
-                headerBag.add(name: key, value: value)
-            }
-            if let auth = checkAuthorization(headers: headerBag) {
-                return federationResponse(id: command.id, result: auth)
-            }
-        }
+        // Federation dispatch is vestigial — federation server is no longer
+        // started and the IP filter on the regular HTTP path already covers
+        // any reachable client. No additional auth needed here.
 
         let result: HTTPResult
         switch (method, path) {
@@ -1525,7 +1562,7 @@ final class BridgeCore {
 
     private func capabilityRoleLabel() -> String {
         let cfg = configStore.load()
-        return "line=\(cfg.lineEnabled) tmux=\(cfg.tmuxEnabled) remote=\(cfg.remoteAccessEnabled)"
+        return "line=\(cfg.lineEnabled) tmux=true remote=true"
     }
 
     private func runProcess(executable: String, arguments: [String]) -> String? {

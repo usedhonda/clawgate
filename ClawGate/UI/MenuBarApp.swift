@@ -240,7 +240,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func capabilityRoleLabel() -> String {
         let cfg = runtime.configStore.load()
-        return "line=\(cfg.lineEnabled) tmux=\(cfg.tmuxEnabled) remote=\(cfg.remoteAccessEnabled)"
+        return "line=\(cfg.lineEnabled) tmux=true remote=true"
     }
 
     @objc private func toggleMainPanel(_ sender: Any?) {

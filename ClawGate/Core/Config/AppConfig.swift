@@ -24,7 +24,6 @@ struct AppConfig: Codable {
     var lineEnableNotificationStoreSignal: Bool
 
     // Tmux
-    var tmuxEnabled: Bool
     var tmuxStatusBarURL: String
     var tmuxSessionModes: [String: String]  // project -> "observe" | "auto" | "autonomous"; absent = ignore
 
@@ -35,9 +34,11 @@ struct AppConfig: Codable {
     var ocrUsesLanguageCorrection: Bool
     var ocrCandidateCount: Int
 
-    // Remote / Federation
-    var remoteAccessEnabled: Bool
-    var remoteAccessToken: String
+    // OpenClaw Gateway endpoint (the Gateway VibeTerm should connect to)
+    var openclawHost: String
+    var openclawPort: Int
+
+    // Federation (vestigial — kept only for one-shot migration into openclawHost)
     var federationEnabled: Bool
     var federationURL: String
     var federationToken: String
@@ -61,7 +62,6 @@ struct AppConfig: Codable {
         lineEnablePixelSignal: true,
         lineEnableProcessSignal: false,
         lineEnableNotificationStoreSignal: false,
-        tmuxEnabled: false,
         tmuxStatusBarURL: "ws://localhost:8080/ws/sessions",
         tmuxSessionModes: [:],
         ocrConfidenceAccept: 0.40,
@@ -69,8 +69,8 @@ struct AppConfig: Codable {
         ocrRevision: 0,
         ocrUsesLanguageCorrection: true,
         ocrCandidateCount: 3,
-        remoteAccessEnabled: false,
-        remoteAccessToken: "",
+        openclawHost: "127.0.0.1",
+        openclawPort: 18789,
         federationEnabled: false,
         federationURL: "",
         federationToken: "",
@@ -92,7 +92,6 @@ final class ConfigStore {
         static let lineEnableProcessSignal = "clawgate.lineEnableProcessSignal"
         static let lineEnableNotificationStoreSignal = "clawgate.lineEnableNotificationStoreSignal"
         // Tmux
-        static let tmuxEnabled = "clawgate.tmuxEnabled"
         static let tmuxStatusBarURL = "clawgate.tmuxStatusBarUrl"
         static let tmuxSessionModes = "clawgate.tmuxSessionModes"
         // OCR
@@ -101,13 +100,16 @@ final class ConfigStore {
         static let ocrRevision = "clawgate.ocrRevision"
         static let ocrUsesLanguageCorrection = "clawgate.ocrUsesLanguageCorrection"
         static let ocrCandidateCount = "clawgate.ocrCandidateCount"
-        // Remote / Federation
-        static let remoteAccessEnabled = "clawgate.remoteAccessEnabled"
-        static let remoteAccessToken = "clawgate.remoteAccessToken"
+        // OpenClaw Gateway endpoint
+        static let openclawHost = "clawgate.openclawHost"
+        static let openclawPort = "clawgate.openclawPort"
+        // Federation (vestigial, only read for migration)
         static let federationEnabled = "clawgate.federationEnabled"
         static let federationURL = "clawgate.federationURL"
         static let federationToken = "clawgate.federationToken"
         static let federationReconnectMaxSeconds = "clawgate.federationReconnectMaxSeconds"
+        // Legacy: removed token field (still cleaned up on save)
+        static let legacyRemoteAccessToken = "clawgate.remoteAccessToken"
         // Legacy keys for migration
         static let legacyPollIntervalSeconds = "clawgate.pollIntervalSeconds"
         static let legacyTmuxAllowedSessions = "clawgate.tmuxAllowedSessions"
@@ -163,9 +165,6 @@ final class ConfigStore {
         }
 
         // Tmux
-        if defaults.object(forKey: Keys.tmuxEnabled) != nil {
-            cfg.tmuxEnabled = defaults.bool(forKey: Keys.tmuxEnabled)
-        }
         if let statusBarURL = defaults.string(forKey: Keys.tmuxStatusBarURL), !statusBarURL.isEmpty {
             cfg.tmuxStatusBarURL = statusBarURL
         }
@@ -192,13 +191,19 @@ final class ConfigStore {
             cfg.ocrCandidateCount = max(1, min(10, defaults.integer(forKey: Keys.ocrCandidateCount)))
         }
 
-        // Remote / Federation
-        if defaults.object(forKey: Keys.remoteAccessEnabled) != nil {
-            cfg.remoteAccessEnabled = defaults.bool(forKey: Keys.remoteAccessEnabled)
+        // OpenClaw Gateway endpoint
+        if let host = defaults.string(forKey: Keys.openclawHost),
+           !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            cfg.openclawHost = host
         }
-        if let token = defaults.string(forKey: Keys.remoteAccessToken) {
-            cfg.remoteAccessToken = token
+        if defaults.object(forKey: Keys.openclawPort) != nil {
+            let port = defaults.integer(forKey: Keys.openclawPort)
+            if port > 0 && port < 65536 {
+                cfg.openclawPort = port
+            }
         }
+
+        // Federation (vestigial)
         if defaults.object(forKey: Keys.federationEnabled) != nil {
             cfg.federationEnabled = defaults.bool(forKey: Keys.federationEnabled)
         }
@@ -210,11 +215,6 @@ final class ConfigStore {
         }
         if defaults.object(forKey: Keys.federationReconnectMaxSeconds) != nil {
             cfg.federationReconnectMaxSeconds = min(300, max(5, defaults.integer(forKey: Keys.federationReconnectMaxSeconds)))
-        }
-
-        // Backward-compat: when federation token is unset, reuse remote access token.
-        if cfg.federationToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            cfg.federationToken = cfg.remoteAccessToken
         }
 
         return cfg
@@ -233,7 +233,6 @@ final class ConfigStore {
         defaults.set(cfg.lineEnableProcessSignal, forKey: Keys.lineEnableProcessSignal)
         defaults.set(cfg.lineEnableNotificationStoreSignal, forKey: Keys.lineEnableNotificationStoreSignal)
         // Tmux
-        defaults.set(cfg.tmuxEnabled, forKey: Keys.tmuxEnabled)
         defaults.removeObject(forKey: Keys.tmuxStatusBarURL)
         if let json = try? JSONEncoder().encode(cfg.tmuxSessionModes),
            let str = String(data: json, encoding: .utf8) {
@@ -245,13 +244,16 @@ final class ConfigStore {
         defaults.set(cfg.ocrRevision, forKey: Keys.ocrRevision)
         defaults.set(cfg.ocrUsesLanguageCorrection, forKey: Keys.ocrUsesLanguageCorrection)
         defaults.set(cfg.ocrCandidateCount, forKey: Keys.ocrCandidateCount)
-        // Remote / Federation
-        defaults.set(cfg.remoteAccessEnabled, forKey: Keys.remoteAccessEnabled)
-        defaults.set(cfg.remoteAccessToken, forKey: Keys.remoteAccessToken)
+        // OpenClaw Gateway endpoint
+        defaults.set(cfg.openclawHost, forKey: Keys.openclawHost)
+        defaults.set(cfg.openclawPort, forKey: Keys.openclawPort)
+        // Federation (vestigial — purge on save)
         defaults.removeObject(forKey: Keys.federationEnabled)
         defaults.removeObject(forKey: Keys.federationURL)
         defaults.removeObject(forKey: Keys.federationToken)
         defaults.removeObject(forKey: Keys.federationReconnectMaxSeconds)
+        // Legacy token field — purge so it cannot resurface
+        defaults.removeObject(forKey: Keys.legacyRemoteAccessToken)
     }
 
     private func migrateIfNeeded() {
@@ -304,13 +306,22 @@ final class ConfigStore {
             }
         }
 
-        // One-time absorb federation token into remote access token.
-        let remoteToken = defaults.string(forKey: Keys.remoteAccessToken)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let federationToken = defaults.string(forKey: Keys.federationToken)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if remoteToken.isEmpty, !federationToken.isEmpty {
-            defaults.set(federationToken, forKey: Keys.remoteAccessToken)
+        // One-shot migration: legacy federationURL -> openclawHost.
+        // Old picker stored "ws://<host>:8765/federation"; extract <host> and put it
+        // into the new openclawHost field, then purge the legacy key.
+        if defaults.object(forKey: Keys.openclawHost) == nil,
+           let oldURL = defaults.string(forKey: Keys.federationURL),
+           let parsed = URL(string: oldURL),
+           let extractedHost = parsed.host,
+           !extractedHost.isEmpty {
+            defaults.set(extractedHost, forKey: Keys.openclawHost)
         }
+        defaults.removeObject(forKey: Keys.federationURL)
+        defaults.removeObject(forKey: Keys.federationEnabled)
+        defaults.removeObject(forKey: Keys.federationToken)
+        defaults.removeObject(forKey: Keys.federationReconnectMaxSeconds)
+
+        // Purge the legacy remoteAccessToken UserDefault so it cannot resurface.
+        defaults.removeObject(forKey: Keys.legacyRemoteAccessToken)
     }
 }

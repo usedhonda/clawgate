@@ -1,5 +1,64 @@
 import Foundation
 
+/// Resolves the best hostname this machine can advertise to peers, in order:
+///   1. Tailscale name (works from anywhere on the tailnet)
+///   2. Bonjour `<host>.local` (works on the same LAN segment)
+///   3. Primary LAN IPv4 (fragile but works on the same LAN)
+///   4. "127.0.0.1" (last resort — only useful for self-connection)
+enum OwnHostnameResolver {
+    static func resolve() -> String {
+        if let ts = TailscaleResolver.hostname() { return ts }
+        if let bonjour = bonjourHostname() { return bonjour }
+        if let lan = primaryLanIPv4() { return lan }
+        return "127.0.0.1"
+    }
+
+    private static func bonjourHostname() -> String? {
+        var name = (Host.current().localizedName ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        // Sanitize: replace spaces with hyphens (Bonjour disallows spaces).
+        name = name.replacingOccurrences(of: " ", with: "-")
+        return name.hasSuffix(".local") ? name : "\(name).local"
+    }
+
+    private static func primaryLanIPv4() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+
+        // Look for "inet 192.168.x.x" / "inet 10.x.x.x" / "inet 172.[16-31].x.x"
+        for line in output.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("inet ") else { continue }
+            let parts = trimmed.components(separatedBy: " ")
+            guard parts.count >= 2 else { continue }
+            let ip = parts[1]
+            let octets = ip.split(separator: ".").compactMap { Int($0) }
+            guard octets.count == 4 else { continue }
+            // Skip loopback and Tailscale CGNAT.
+            if octets[0] == 127 { continue }
+            if octets[0] == 100 && (64...127).contains(octets[1]) { continue }
+            // RFC1918 private ranges.
+            if octets[0] == 10 { return ip }
+            if octets[0] == 192 && octets[1] == 168 { return ip }
+            if octets[0] == 172 && (16...31).contains(octets[1]) { return ip }
+        }
+        return nil
+    }
+}
+
 /// Resolves the Tailscale hostname with a 3-tier fallback:
 ///   1. Tailscale CLI (with environment fix for App Store build)
 ///   2. Network interface reverse DNS lookup
