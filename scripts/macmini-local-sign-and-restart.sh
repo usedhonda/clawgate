@@ -32,11 +32,11 @@ fi
 
 cd "$PROJECT_PATH"
 
-echo "[1/6] Verify signing identity"
-security find-identity -v -p codesigning | grep "$CERT_NAME" >/dev/null
-
-echo "[2/6] Unlock keychain"
+echo "[1/6] Unlock keychain"
 security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+echo "[2/6] Verify signing identity"
+security find-identity -v -p codesigning | grep "$CERT_NAME" >/dev/null
 
 echo "[3/6] Configure key partition list"
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
