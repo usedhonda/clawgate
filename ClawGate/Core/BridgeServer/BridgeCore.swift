@@ -260,8 +260,15 @@ final class BridgeCore {
         }
         let port = gateway["port"] as? Int ?? 18789
         let host = OwnHostnameResolver.resolve()
+        let gatewayHost = (gateway["host"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? host
 
-        let result: [String: Any] = ["ok": true, "host": host, "token": token, "port": port]
+        let result: [String: Any] = [
+            "ok": true,
+            "host": host,
+            "gateway_host": gatewayHost,
+            "token": token,
+            "port": port
+        ]
         guard let body = try? JSONSerialization.data(withJSONObject: result, options: [.withoutEscapingSlashes]) else {
             let payload = ErrorPayload(
                 code: "encode_failed",
