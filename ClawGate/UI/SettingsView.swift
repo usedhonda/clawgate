@@ -61,6 +61,7 @@ struct InlineSettingsView: View {
             }
             gatewaySection
             systemSection
+            chromeSection
         }
         .padding(embedInScroll ? PanelTheme.padding : 0)
     }
@@ -222,14 +223,26 @@ struct InlineSettingsView: View {
                 Toggle("Launch at Login", isOn: launchAtLoginBinding)
             }
             Toggle("Debug Logging", isOn: $model.config.debugLogging)
+        }
+    }
 
-            HStack(spacing: 6) {
-                Button("Install Chrome Extension") {
+    private var chromeSection: some View {
+        PanelCard {
+            Text("Chrome Extension")
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textPrimary)
+            fieldRow("Extension") {
+                Spacer()
+                Button("Install") {
                     installChromeExtension()
                 }
                 .buttonStyle(.bordered)
-                if !chromeToken.isEmpty {
-                    Button(chromeCopied ? "Copied!" : "Copy Token") {
+                .controlSize(.small)
+            }
+            if !chromeToken.isEmpty {
+                fieldRow("Token") {
+                    Spacer()
+                    Button(chromeCopied ? "Copied ✓" : "Copy Token") {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(chromeToken, forType: .string)
                         chromeCopied = true
@@ -237,7 +250,7 @@ struct InlineSettingsView: View {
                     }
                     .buttonStyle(.borderless)
                     .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textSecondary)
+                    .foregroundStyle(PanelTheme.accentCyan)
                 }
             }
         }
