@@ -9,9 +9,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
 CERT_NAME="ClawGate Dev"
+
+# Candidate keychains that may hold the "ClawGate Dev" identity.
+# macmini history note: the working private key currently lives in
+# login_renamed_1.keychain-db (created during a past recovery on 2026-03-18).
+# The script auto-detects which keychain actually has the identity so
+# future moves don't break the flow.
+KEYCHAIN_CANDIDATES=(
+  "$HOME/Library/Keychains/login_renamed_1.keychain-db"
+  "$HOME/Library/Keychains/login.keychain-db"
+)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -32,14 +41,37 @@ fi
 
 cd "$PROJECT_PATH"
 
-echo "[1/6] Unlock keychain"
-security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+echo "[1/6] Locate signing keychain"
+SIGNING_KEYCHAIN=""
+for kc in "${KEYCHAIN_CANDIDATES[@]}"; do
+  if [[ ! -f "$kc" ]]; then
+    continue
+  fi
+  if ! security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc" >/dev/null 2>&1; then
+    echo "  - unlock failed: $kc" >&2
+    continue
+  fi
+  if security find-identity -v -p codesigning "$kc" 2>/dev/null | grep -q "$CERT_NAME"; then
+    SIGNING_KEYCHAIN="$kc"
+    echo "  - identity found in: $kc"
+    break
+  fi
+done
+if [[ -z "$SIGNING_KEYCHAIN" ]]; then
+  echo "ERROR: '$CERT_NAME' identity not found in any known keychain." >&2
+  echo "Checked:" >&2
+  printf '  - %s\n' "${KEYCHAIN_CANDIDATES[@]}" >&2
+  exit 1
+fi
 
-echo "[2/6] Verify signing identity"
-security find-identity -v -p codesigning | grep "$CERT_NAME" >/dev/null
+echo "[2/6] Ensure signing keychain is in the search list (cleans stale /tmp entries)"
+security list-keychains -d user -s \
+  "$SIGNING_KEYCHAIN" \
+  "$HOME/Library/Keychains/login.keychain-db" \
+  /Library/Keychains/System.keychain >/dev/null
 
-echo "[3/6] Configure key partition list"
-security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+echo "[3/6] Configure key partition list on signing keychain"
+security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN" >/dev/null
 
 echo "[4/6] Build"
 swift build
@@ -58,10 +90,11 @@ if [[ -d "$BUILD_BUNDLE" ]]; then
   cp -R "$BUILD_BUNDLE" "$DEST_BUNDLE"
 fi
 
-echo "[5/6] Sign with $CERT_NAME"
+echo "[5/6] Sign with $CERT_NAME (keychain: $SIGNING_KEYCHAIN)"
 codesign --force --deep --options runtime \
   --identifier com.clawgate.app \
   --entitlements ClawGate.entitlements \
+  --keychain "$SIGNING_KEYCHAIN" \
   --sign "$CERT_NAME" ClawGate.app
 
 echo "[6/6] Restart ClawGate + OpenClaw gateway"
