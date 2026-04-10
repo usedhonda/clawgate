@@ -53,33 +53,76 @@ struct MainPanelView: View {
     @ViewBuilder
     private var normalContent: some View {
         VStack(alignment: .leading, spacing: PanelTheme.spacing) {
-            // Tab bar
-            HStack(spacing: 2) {
-                ForEach(visibleTabs, id: \.rawValue) { tab in
-                    PanelTabButton(
-                        title: tab.rawValue,
-                        isSelected: selectedTab == tab,
-                        action: { selectedTab = tab }
-                    )
-                }
-                Spacer()
-                Button(action: onToggleCollapse) {
-                    Image(systemName: "sidebar.left")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(PanelTheme.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .help("Collapse panel")
-            }
-            .padding(.bottom, 2)
+            // Tab bar — wraps to two rows when the panel is too narrow
+            tabBar
+                .padding(.bottom, 2)
 
             // Tab content
             tabContent
         }
         .padding(PanelTheme.padding)
-        .frame(minWidth: 320, maxWidth: 700, minHeight: 400, maxHeight: 1400)
+        .frame(minWidth: 200, maxWidth: 700, minHeight: 400, maxHeight: 1400)
         .background(PanelTheme.background.opacity(PanelTheme.appBackgroundOpacity))
         .preferredColorScheme(.dark)
+    }
+
+    @ViewBuilder
+    private var tabBar: some View {
+        let tabs = visibleTabs
+        let midpoint = (tabs.count + 1) / 2
+        let firstHalf = Array(tabs.prefix(midpoint))
+        let secondHalf = Array(tabs.dropFirst(midpoint))
+
+        if #available(macOS 13.0, *) {
+            // ViewThatFits: prefer single-row layout; fall back to a two-row
+            // split when the panel is too narrow for all tabs on one line.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 2) {
+                    tabButtons(for: tabs)
+                    Spacer()
+                    collapseButton
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 2) {
+                        tabButtons(for: firstHalf)
+                        Spacer()
+                        collapseButton
+                    }
+                    HStack(spacing: 2) {
+                        tabButtons(for: secondHalf)
+                        Spacer()
+                    }
+                }
+            }
+        } else {
+            // macOS 12 fallback: always use single-row layout.
+            HStack(spacing: 2) {
+                tabButtons(for: tabs)
+                Spacer()
+                collapseButton
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tabButtons(for tabs: [Tab]) -> some View {
+        ForEach(tabs, id: \.rawValue) { tab in
+            PanelTabButton(
+                title: tab.rawValue,
+                isSelected: selectedTab == tab,
+                action: { selectedTab = tab }
+            )
+        }
+    }
+
+    private var collapseButton: some View {
+        Button(action: onToggleCollapse) {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(PanelTheme.textSecondary)
+        }
+        .buttonStyle(.plain)
+        .help("Collapse panel")
     }
 
     @ViewBuilder

@@ -851,14 +851,16 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         image.lockFocus()
         defer { image.unlockFocus() }
 
-        let crabRect = NSRect(x: 1, y: 0, width: 16, height: 16)
-        let crabStyle = NSMutableParagraphStyle()
-        crabStyle.alignment = .center
-        let crabAttributes: [NSAttributedString.Key: Any] = [
+        // Draw a claw glyph (the character "Chi" wears) instead of the full crab.
+        // Lobster emoji shows just the claw prominently in menu-bar size.
+        let clawRect = NSRect(x: 1, y: 0, width: 16, height: 16)
+        let clawStyle = NSMutableParagraphStyle()
+        clawStyle.alignment = .center
+        let clawAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 14),
-            .paragraphStyle: crabStyle,
+            .paragraphStyle: clawStyle,
         ]
-        ("🦀" as NSString).draw(in: crabRect, withAttributes: crabAttributes)
+        ("🦞" as NSString).draw(in: clawRect, withAttributes: clawAttributes)
 
         let badgeRect = NSRect(x: 13, y: 1, width: 8, height: 8)
         let badgePath = NSBezierPath(ovalIn: badgeRect)
