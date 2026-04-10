@@ -1,0 +1,124 @@
+:root {
+  --bg: #1C1E29;
+  --accent: #5AEFEF;
+  --text-primary: #E8EAF0;
+  --text-secondary: #8B90A8;
+  --card-bg: rgba(255,255,255,0.04);
+  --border: rgba(255,255,255,0.08);
+  --danger: #F26B6B;
+  --success: #5AEF9D;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  width: 240px;
+  background: var(--bg);
+  color: var(--text-primary);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.popup-shell {
+  padding: 14px;
+}
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.hero-icon {
+  width: 48px;
+  height: 48px;
+  display: block;
+}
+
+.status-card,
+.field,
+.primary-button {
+  width: 100%;
+}
+
+.status-card,
+.field {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.status-online {
+  background: var(--success);
+}
+
+.status-offline {
+  background: var(--danger);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.05);
+  color: var(--text-primary);
+  padding: 8px 9px;
+  font: inherit;
+}
+
+input[readonly] {
+  color: var(--text-secondary);
+}
+
+.primary-button {
+  border: 0;
+  border-radius: 10px;
+  background: var(--accent);
+  color: #0D111B;
+  padding: 10px 12px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-button:hover {
+  filter: brightness(1.05);
+}

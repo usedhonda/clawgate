@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClawGate</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="hero">
+        <img class="hero-icon" src="../icons/icon48.png" alt="Chi icon">
+        <h1>ClawGate</h1>
+      </header>
+
+      <section class="status-card">
+        <div class="status-row">
+          <span id="status-dot" class="status-dot status-offline"></span>
+          <span id="status-text">Disconnected</span>
+        </div>
+      </section>
+
+      <label class="field">
+        <span class="field-label">Port</span>
+        <input id="port-input" type="number" min="1" max="65535" inputmode="numeric">
+      </label>
+
+      <label class="field">
+        <span class="field-label">Pairing Token</span>
+        <input id="token-display" type="password" readonly>
+      </label>
+
+      <button id="test-button" class="primary-button" type="button">Test Connection</button>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
