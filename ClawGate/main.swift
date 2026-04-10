@@ -10,10 +10,12 @@ final class AppRuntime {
     private lazy var recentSendTracker = RecentSendTracker()
     private lazy var lineAdapter = LINEAdapter(logger: logger, recentSendTracker: recentSendTracker)
 
-    // Tmux
+    // Tmux — source is selected at startup (cc-status-bar if available, else direct poller)
     private lazy var ccStatusBarClient = CCStatusBarClient(logger: logger)
+    private lazy var tmuxDirectPoller = TmuxDirectPoller(logger: logger)
+    private lazy var tmuxSessionSource: TmuxSessionSource = ccStatusBarClient  // swapped in startTmuxSubsystem()
     private lazy var tmuxAdapter = TmuxAdapter(
-        ccClient: ccStatusBarClient,
+        ccClient: tmuxSessionSource,
         configStore: configStore,
         logger: logger
     )
@@ -84,7 +86,7 @@ final class AppRuntime {
         recentSendTracker: recentSendTracker
     )
     private lazy var tmuxInboundWatcher = TmuxInboundWatcher(
-        ccClient: ccStatusBarClient,
+        ccClient: tmuxSessionSource,
         eventBus: eventBus,
         logger: logger,
         configStore: configStore
@@ -228,14 +230,56 @@ final class AppRuntime {
 
     func startTmuxSubsystem() {
         logger.log(.info, "Tmux subsystem starting")
-        ccStatusBarClient.setPreferredWebSocketURL(configStore.load().tmuxStatusBarURL)
-        ccStatusBarClient.onSessionsChanged = { [weak self] in
-            guard let self else { return }
-            self.menuBarDelegate?.refreshSessionsMenu(sessions: self.ccStatusBarClient.allSessions())
+
+        // Source selection: try cc-status-bar first, fall back to direct poller
+        let ccsbURL = configStore.load().tmuxStatusBarURL
+        let ccsbAvailable = probeCCStatusBar(url: ccsbURL)
+
+        if ccsbAvailable {
+            logger.log(.info, "Tmux source: cc-status-bar (\(ccsbURL))")
+            tmuxSessionSource = ccStatusBarClient
+            ccStatusBarClient.setPreferredWebSocketURL(ccsbURL)
+        } else {
+            logger.log(.info, "Tmux source: built-in direct poller (cc-status-bar unavailable)")
+            tmuxSessionSource = tmuxDirectPoller
         }
-        // Start watcher BEFORE connecting — so onStateChange is set when sessions.list arrives.
+
+        tmuxSessionSource.onSessionsChanged = { [weak self] in
+            guard let self else { return }
+            self.menuBarDelegate?.refreshSessionsMenu(sessions: self.tmuxSessionSource.allSessions())
+        }
+        // Start watcher BEFORE connecting — so onStateChange is set when sessions arrive.
         tmuxInboundWatcher.start()
-        ccStatusBarClient.connect()
+        tmuxSessionSource.connect()
+    }
+
+    /// Quick TCP probe to check if cc-status-bar is reachable.
+    private func probeCCStatusBar(url: String) -> Bool {
+        guard let parsed = URL(string: url),
+              let host = parsed.host,
+              let port = parsed.port else { return false }
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        inet_pton(AF_INET, host, &addr.sin_addr)
+
+        // Non-blocking connect with 500ms timeout
+        let flags = fcntl(sock, F_GETFL, 0)
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK)
+        let result = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if result == 0 { return true }
+
+        var pfd = pollfd(fd: sock, events: Int16(POLLOUT), revents: 0)
+        let ready = poll(&pfd, 1, 500)  // 500ms
+        return ready > 0 && (pfd.revents & Int16(POLLOUT) != 0)
     }
 
     private func persistOpsLogForMenu(_ event: BridgeEvent) {

@@ -17,49 +17,47 @@ final class PetStateMachineTests: XCTestCase {
     func testAssistantStartedTransitionsToSpeak() {
         let sm = PetStateMachine()
         sm.handle(.assistantStarted)
-        let speakStates: [PetState] = [.speak, .speakMix, .speakTilt, .talk]
-        XCTAssertTrue(speakStates.contains(sm.current), "Should be in a speak state, got \(sm.current)")
-        XCTAssertTrue(sm.isBubbleVisible)
+        let speakStates: [PetExpression] = [.speak, .speakMix, .speakTilt, .talk]
+        XCTAssertTrue(speakStates.contains(sm.expression), "Should be in a speak state, got \(sm.expression)")
     }
 
     func testAssistantFinishedReturnsToIdle() {
         let sm = PetStateMachine()
         sm.handle(.assistantStarted)
         sm.handle(.assistantFinished)
-        XCTAssertEqual(sm.current, .idle)
+        XCTAssertEqual(sm.expression, .idle)
     }
 
-    // MARK: - Click Behavior
+    // MARK: - Click Behavior (Chat Toggle)
 
-    func testUserClickShowsBubble() {
+    func testUserClickOpensChatWhenClosed() {
         let sm = PetStateMachine()
         sm.handle(.userClicked)
-        XCTAssertTrue(sm.isBubbleVisible)
-    }
-
-    func testUserClickOnBubbleOpensChatWhenBubbleVisible() {
-        let sm = PetStateMachine()
-        sm.handle(.userClicked)       // shows bubble
-        XCTAssertTrue(sm.isBubbleVisible)
-        sm.handle(.userClicked)       // bubble visible -> open chat
         XCTAssertTrue(sm.isChatOpen)
     }
 
-    func testDoubleClickOpensChat() {
+    func testUserClickClosesChatWhenOpen() {
+        let sm = PetStateMachine()
+        sm.handle(.userClicked)   // open
+        sm.handle(.userClicked)   // close
+        XCTAssertFalse(sm.isChatOpen)
+    }
+
+    func testDoubleClickOpensChatWhenClosed() {
         let sm = PetStateMachine()
         sm.handle(.userDoubleClicked)
         XCTAssertTrue(sm.isChatOpen)
-        XCTAssertFalse(sm.isBubbleVisible)
     }
 
     // MARK: - Bubble Dismiss
 
-    func testBubbleDismissed() {
+    func testBubbleDismissedDoesNotAffectChat() {
         let sm = PetStateMachine()
-        sm.handle(.userClicked)
+        sm.handle(.userClicked)       // open chat
+        sm.isBubbleVisible = true     // simulate notification
         sm.handle(.bubbleDismissed)
         XCTAssertFalse(sm.isBubbleVisible)
-        XCTAssertFalse(sm.isChatOpen)
+        XCTAssertTrue(sm.isChatOpen)  // chat stays open
     }
 
     // MARK: - Connection States
@@ -67,14 +65,14 @@ final class PetStateMachineTests: XCTestCase {
     func testDisconnectedGoesToSleep() {
         let sm = PetStateMachine()
         sm.handle(.disconnected)
-        XCTAssertEqual(sm.current, .sleep)
+        XCTAssertEqual(sm.expression, .sleep)
     }
 
     func testReconnectedGoesToIdle() {
         let sm = PetStateMachine()
         sm.handle(.disconnected)
         sm.handle(.reconnected)
-        XCTAssertEqual(sm.current, .idle)
+        XCTAssertEqual(sm.expression, .idle)
     }
 
     // MARK: - Special Events
@@ -82,42 +80,96 @@ final class PetStateMachineTests: XCTestCase {
     func testGreetingGoesToWave() {
         let sm = PetStateMachine()
         sm.handle(.greeting)
-        XCTAssertEqual(sm.current, .wave)
+        XCTAssertEqual(sm.expression, .wave)
     }
 
     func testErrorGoesToReact() {
         let sm = PetStateMachine()
         sm.handle(.error)
-        XCTAssertEqual(sm.current, .react)
+        XCTAssertEqual(sm.expression, .react)
     }
 
     func testSuccessGoesToReact() {
         let sm = PetStateMachine()
         sm.handle(.success)
-        XCTAssertEqual(sm.current, .react)
+        XCTAssertEqual(sm.expression, .react)
     }
 
     func testLateNightGoesToSleep() {
         let sm = PetStateMachine()
         sm.handle(.lateNight)
-        XCTAssertEqual(sm.current, .sleep)
+        XCTAssertEqual(sm.expression, .sleep)
     }
 
     func testIdleTimeoutChangesState() {
         let sm = PetStateMachine()
         sm.handle(.idleTimeout)
-        let expectedStates: [PetState] = [.idleBreathe, .blink, .secretary, .funny]
-        XCTAssertTrue(expectedStates.contains(sm.current), "Should be idle variation, got \(sm.current)")
+        let expectedStates: [PetExpression] = [.idleBreathe, .blink, .secretary, .funny]
+        XCTAssertTrue(expectedStates.contains(sm.expression), "Should be idle variation, got \(sm.expression)")
     }
 
     // MARK: - Animation Name
 
-    func testAnimationNameMatchesState() {
+    func testAnimationNameMatchesExpression() {
         let sm = PetStateMachine()
-        XCTAssertEqual(sm.animationName, "idle")
+        XCTAssertEqual(sm.resolvedAnimationName, "idle")
         sm.handle(.disconnected)
-        XCTAssertEqual(sm.animationName, "sleep")
+        XCTAssertEqual(sm.resolvedAnimationName, "sleep")
         sm.handle(.greeting)
-        XCTAssertEqual(sm.animationName, "wave")
+        XCTAssertEqual(sm.resolvedAnimationName, "wave")
+    }
+
+    // MARK: - Walk Direction
+
+    func testWalkDirectionOverridesExpression() {
+        let sm = PetStateMachine()
+        sm.locomotion = .walking(.right)
+        XCTAssertEqual(sm.resolvedAnimationName, "walk-right")
+        sm.locomotion = .walking(.left)
+        XCTAssertEqual(sm.resolvedAnimationName, "walk-left")
+    }
+
+    func testStationaryUsesExpression() {
+        let sm = PetStateMachine()
+        sm.expression = .wave
+        sm.locomotion = .stationary
+        XCTAssertEqual(sm.resolvedAnimationName, "wave")
+    }
+
+    // MARK: - Expression Lock (Hide)
+
+    func testExpressionLockBlocksChanges() {
+        let sm = PetStateMachine()
+        sm.isExpressionLocked = true
+        sm.expression = .hideClaw
+        sm.handle(.assistantStarted)
+        // Expression should stay as hideClaw, not change to speak
+        XCTAssertEqual(sm.expression, .hideClaw)
+    }
+
+    func testExpressionLockAllowsClick() {
+        let sm = PetStateMachine()
+        sm.isExpressionLocked = true
+        sm.handle(.userClicked)
+        // Click should still work (toggle chat)
+        XCTAssertTrue(sm.isChatOpen)
+    }
+
+    // MARK: - Hide Animation Suffix
+
+    func testHideAnimationSuffix() {
+        let sm = PetStateMachine()
+        sm.expression = .hideClaw
+        sm.hideAnimationSuffix = "-left"
+        sm.locomotion = .stationary
+        XCTAssertEqual(sm.resolvedAnimationName, "hide-claw-left")
+    }
+
+    func testHideAnimationSuffixEmpty() {
+        let sm = PetStateMachine()
+        sm.expression = .hideEmerge
+        sm.hideAnimationSuffix = ""
+        sm.locomotion = .stationary
+        XCTAssertEqual(sm.resolvedAnimationName, "hide-emerge")
     }
 }
