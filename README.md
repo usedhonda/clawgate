@@ -287,14 +287,16 @@ The built-in messenger adapter currently targets LINE Desktop via the macOS Acce
 - **Receive**: Hybrid inbound detection combining notification banner monitoring, AX structure analysis, and pixel diff
 - **Echo Suppression**: Temporal-window filtering to distinguish self-sent messages from inbound
 
-### Server Mode (Remote Access)
+### Remote Access (Direct Gateway Connection)
 
-To expose ClawGate's API to other hosts (e.g., for Federation):
+If OpenClaw Gateway runs on a different machine, enable remote access so Gateway can poll ClawGate directly:
 
-1. Enable remote access in Settings (`remoteAccessEnabled = true`)
-2. Set a Bearer token (`remoteAccessToken`)
-3. ClawGate binds to `0.0.0.0:8765` instead of `127.0.0.1`
-4. All requests require `Authorization: Bearer <token>`
+1. In ClawGate settings (Gateway section): enable "Allow Gateway to connect" and set a token
+2. ClawGate binds to `0.0.0.0:8765` instead of `127.0.0.1`
+3. All requests require `Authorization: Bearer <token>`
+4. In Gateway's `openclaw.json`: set `apiUrl` to `http://clawgate-host:8765` and `token`
+
+See [Direct Gateway Setup](docs/runbooks/direct-gateway-setup.md) for full instructions.
 
 ### Messenger Recovery (LINE Adapter)
 

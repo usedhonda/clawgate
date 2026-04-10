@@ -99,12 +99,12 @@ Phase A/B 安定後に着手。
 
 | # | タスク | 担当 | 依存 |
 |---|--------|------|------|
-| C1 | Gateway poll target 切替設計（OpenClaw plugin の apiUrl 変更方針） | CC | B6 |
-| C2 | ClawGate 側 direct-access hardening（Tailscale/allowlist/token） | Cdx | C1 |
-| C3 | health/doctor 表示修正（「誰が poll されるか」の意味変更） | Cdx | C2 |
-| C4 | federation fallback の段階的除去（BridgeCore の send path） | Cdx | C3 |
-| C5 | runbook 整備（security / Tailscale 前提） | CC | C4 |
-| C6 | 統合テスト: Federation 完全無効で動作確認 | CC+Cdx | C5 |
+| C1 | ✅ Gateway poll target 切替設計 — コード変更不要。apiUrl + token で既に動く | CC | B6 |
+| C2 | ✅ direct-access — remoteAccessEnabled + token が既存。hardening 不要 | — | C1 |
+| C3 | ✅ health/doctor — Phase A9 で対応済み | Cdx | C2 |
+| C4 | federation fallback の段階的除去（BridgeCore の send path）→ Phase D に延期 | Cdx | C3 |
+| C5 | ✅ runbook 整備 — docs/runbooks/direct-gateway-setup.md 作成済み | CC | — |
+| C6 | 統合テスト: Federation 無効で動作確認 | CC+Cdx | C5 |
 
 ### Phase D: 将来検討
 
