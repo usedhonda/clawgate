@@ -171,11 +171,11 @@ final class ScreenshotWatcher {
         if let until = suppressUntil, Date() < until { return }
         guard let image = NSImage(pasteboard: pasteboard) else { return }
 
-        // Lazily start directory watch on first clipboard image
-        if !directoryWatchStarted {
-            directoryWatchStarted = true
-            configureDirectoryWatch()
-        }
+        // Intentionally NOT starting the Desktop directory watch.
+        // Watching ~/Desktop triggers macOS "Files and Folders > Desktop" TCC
+        // prompts on every identity change and is noisy. Users who want Chi to
+        // notice a screenshot can simply copy it to the clipboard — that is
+        // already handled by the clipboard path below.
 
         emitCandidate(from: image, sourceKind: .clipboardImage, originalPath: nil)
     }
