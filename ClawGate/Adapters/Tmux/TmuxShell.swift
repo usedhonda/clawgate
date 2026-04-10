@@ -12,6 +12,7 @@ enum TmuxShell {
         let currentPath: String
         let tty: String
         let isAttached: Bool
+        let panePID: Int32
 
         var target: String { "\(session):\(window).\(pane)" }
     }
@@ -91,14 +92,14 @@ enum TmuxShell {
     static func listPanes() throws -> [PaneDescriptor] {
         let output = try run(arguments: [
             "list-panes", "-a", "-F",
-            "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}\t#{pane_current_path}\t#{pane_tty}\t#{session_attached}"
+            "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}\t#{pane_current_path}\t#{pane_tty}\t#{session_attached}\t#{pane_pid}"
         ])
 
         return output
             .split(separator: "\n", omittingEmptySubsequences: true)
             .compactMap { line in
                 let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
-                guard parts.count >= 8 else { return nil }
+                guard parts.count >= 9 else { return nil }
                 return PaneDescriptor(
                     session: parts[0],
                     window: parts[1],
@@ -107,9 +108,75 @@ enum TmuxShell {
                     title: parts[4],
                     currentPath: parts[5],
                     tty: parts[6],
-                    isAttached: parts[7] == "1"
+                    isAttached: parts[7] == "1",
+                    panePID: Int32(parts[8]) ?? 0
                 )
             }
+    }
+
+    /// Walk the process tree starting at `rootPID` and return all descendant
+    /// process argument lines. Uses a single `ps` invocation and filters in
+    /// Swift to avoid multiple exec calls.
+    static func descendantProcessArgs(rootPID: Int32, maxDepth: Int = 3) -> [String] {
+        guard rootPID > 0 else { return [] }
+        // Single ps snapshot: pid, ppid, args
+        guard let raw = try? run(arguments: [], launchPath: "/bin/ps", psArgs: ["-A", "-o", "pid=,ppid=,command="]) else {
+            return []
+        }
+        struct ProcRow {
+            let pid: Int32
+            let ppid: Int32
+            let command: String
+        }
+        var rows: [ProcRow] = []
+        for line in raw.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            // Parse: "<pid> <ppid> <command...>"
+            let scanner = Scanner(string: trimmed)
+            scanner.charactersToBeSkipped = .whitespaces
+            var pidVal: Int64 = 0
+            var ppidVal: Int64 = 0
+            guard scanner.scanInt64(&pidVal), scanner.scanInt64(&ppidVal) else { continue }
+            let cmd = String(trimmed[trimmed.index(trimmed.startIndex, offsetBy: scanner.currentIndex.utf16Offset(in: trimmed))...])
+                .trimmingCharacters(in: .whitespaces)
+            rows.append(ProcRow(pid: Int32(pidVal), ppid: Int32(ppidVal), command: cmd))
+        }
+        // BFS from rootPID
+        var result: [String] = []
+        var queue: [(pid: Int32, depth: Int)] = [(rootPID, 0)]
+        var visited = Set<Int32>([rootPID])
+        while let (pid, depth) = queue.first {
+            queue.removeFirst()
+            if depth > 0 {  // skip root itself
+                if let row = rows.first(where: { $0.pid == pid }) {
+                    result.append(row.command)
+                }
+            }
+            if depth >= maxDepth { continue }
+            for child in rows where child.ppid == pid && !visited.contains(child.pid) {
+                visited.insert(child.pid)
+                queue.append((child.pid, depth + 1))
+            }
+        }
+        return result
+    }
+
+    /// Overload that allows running an arbitrary executable (used for /bin/ps above).
+    /// IMPORTANT: drain the pipe BEFORE waiting for exit. Otherwise large outputs
+    /// (e.g. `ps -A`) can fill the pipe buffer (~64KB) and deadlock both sides.
+    private static func run(arguments: [String], launchPath: String, psArgs: [String]) throws -> String {
+        let process = Process()
+        process.launchPath = launchPath
+        process.arguments = psArgs
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try process.run()
+        // Drain stdout first — readDataToEndOfFile blocks until EOF (process exit)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()  // cleanup after drain
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     /// Keys that must NEVER be sent — they exit Claude Code to raw shell.

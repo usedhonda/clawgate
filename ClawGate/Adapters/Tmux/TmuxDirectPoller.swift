@@ -25,13 +25,13 @@ final class TmuxDirectPoller: TmuxSessionSource {
         lock.lock()
         defer { lock.unlock() }
         guard timer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: pollInterval)
-        timer.setEventHandler { [weak self] in
+        let newTimer = DispatchSource.makeTimerSource(queue: queue)
+        newTimer.schedule(deadline: .now() + 0.1, repeating: pollInterval)
+        newTimer.setEventHandler { [weak self] in
             self?.pollOnce()
         }
-        self.timer = timer
-        timer.resume()
+        self.timer = newTimer
+        newTimer.resume()
         logger.log(.info, "TmuxDirectPoller: started")
     }
 
@@ -195,22 +195,57 @@ final class TmuxDirectPoller: TmuxSessionSource {
         if cmd == "claude" || cmd.hasPrefix("claude-") { return "claude_code" }
         if cmd == "codex" || cmd.hasPrefix("codex-") { return "codex" }
 
-        // 3. Fuzzy contains (legacy behavior, still useful as fallback)
-        let haystack = [cmd, title].joined(separator: " ")
-        if haystack.contains("codex") { return "codex" }
-        if haystack.contains("claude") { return "claude_code" }
+        // 3. Fuzzy contains on title + cmd
+        let haystackCmdTitle = [cmd, title].joined(separator: " ")
+        if haystackCmdTitle.contains("codex") { return "codex" }
+        if haystackCmdTitle.contains("claude") { return "claude_code" }
+
+        // 4. Descendant process args probe (unresolved only, expensive)
+        //    Walks the pane's process tree and checks for claude/codex binaries.
+        //    This catches cases where Claude Code runs as "2.1.97" (version
+        //    number as process name) or Codex runs as "node" (wrapper script).
+        if pane.panePID > 0 {
+            let args = TmuxShell.descendantProcessArgs(rootPID: pane.panePID, maxDepth: 3)
+            for line in args {
+                let lower = line.lowercased()
+                // Check for explicit binary references
+                if lower.contains("/codex") || lower.contains(" codex ") || lower.hasSuffix(" codex") {
+                    return "codex"
+                }
+                if lower.contains("/claude") || lower.contains(" claude ") || lower.hasSuffix(" claude") {
+                    return "claude_code"
+                }
+                // Check for CLI package references (node + claude-code / codex-cli)
+                if lower.contains("@anthropic-ai/claude") || lower.contains("claude-code") {
+                    return "claude_code"
+                }
+                if lower.contains("@openai/codex") || lower.contains("codex-cli") {
+                    return "codex"
+                }
+            }
+        }
 
         return nil
     }
 
     private func inferProject(from pane: TmuxShell.PaneDescriptor) -> String {
-        let title = pane.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !title.isEmpty, title.lowercased() != pane.currentCommand.lowercased() {
-            return title
-        }
+        // Prefer pane_current_path basename — it's the most stable project identifier
+        // and matches how cc-status-bar reports projects (by repo root).
         let path = NSString(string: pane.currentPath).expandingTildeInPath
         let basename = URL(fileURLWithPath: path).lastPathComponent
-        if !basename.isEmpty { return basename }
+        if !basename.isEmpty && basename != "/" { return basename }
+
+        // Fall back to pane title, stripping known role suffixes (.cc, .cdx, etc.)
+        let title = pane.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty, title.lowercased() != pane.currentCommand.lowercased() {
+            for suffix in [".cdx", ".cc", ".codex", ".claude"] {
+                if title.lowercased().hasSuffix(suffix) {
+                    return String(title.dropLast(suffix.count))
+                }
+            }
+            return title
+        }
+
         return pane.session
     }
 

@@ -100,3 +100,67 @@ protocol TmuxSessionSource: AnyObject {
     func sessions(forProject project: String) -> [SessionSnapshot]
     func allSessions() -> [SessionSnapshot]
 }
+
+/// Proxy that holds a swappable underlying TmuxSessionSource.
+///
+/// Passed to downstream consumers (TmuxAdapter, TmuxInboundWatcher) so the
+/// real source can be selected at startup time (after probing cc-status-bar)
+/// without re-initializing the consumers. Callbacks are held on the proxy
+/// and forwarded to whichever underlying source is currently active.
+final class TmuxSessionSourceProxy: TmuxSessionSource {
+    private var underlying: TmuxSessionSource?
+
+    private var _onStateChange: ((SessionSnapshot, String, String) -> Void)?
+    private var _onProgress: ((SessionSnapshot) -> Void)?
+    private var _onSessionsChanged: (() -> Void)?
+
+    var onStateChange: ((SessionSnapshot, String, String) -> Void)? {
+        get { _onStateChange }
+        set {
+            _onStateChange = newValue
+            underlying?.onStateChange = newValue
+        }
+    }
+    var onProgress: ((SessionSnapshot) -> Void)? {
+        get { _onProgress }
+        set {
+            _onProgress = newValue
+            underlying?.onProgress = newValue
+        }
+    }
+    var onSessionsChanged: (() -> Void)? {
+        get { _onSessionsChanged }
+        set {
+            _onSessionsChanged = newValue
+            underlying?.onSessionsChanged = newValue
+        }
+    }
+
+    /// Swap in a new underlying source. Existing callbacks are forwarded.
+    /// Old source is cleanly detached (callbacks nil'd, disconnected) before
+    /// the new one is wired up, so late emits from the old source are ignored.
+    func setUnderlying(_ source: TmuxSessionSource) {
+        if let old = underlying {
+            old.onStateChange = nil
+            old.onProgress = nil
+            old.onSessionsChanged = nil
+            old.disconnect()
+        }
+        underlying = source
+        source.onStateChange = _onStateChange
+        source.onProgress = _onProgress
+        source.onSessionsChanged = _onSessionsChanged
+    }
+
+    func connect() { underlying?.connect() }
+    func disconnect() { underlying?.disconnect() }
+    func session(forProject project: String) -> SessionSnapshot? {
+        underlying?.session(forProject: project)
+    }
+    func sessions(forProject project: String) -> [SessionSnapshot] {
+        underlying?.sessions(forProject: project) ?? []
+    }
+    func allSessions() -> [SessionSnapshot] {
+        underlying?.allSessions() ?? []
+    }
+}

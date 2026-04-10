@@ -10,12 +10,12 @@ final class AppRuntime {
     private lazy var recentSendTracker = RecentSendTracker()
     private lazy var lineAdapter = LINEAdapter(logger: logger, recentSendTracker: recentSendTracker)
 
-    // Tmux — source is selected at startup (cc-status-bar if available, else direct poller)
+    // Tmux — always route through proxy so the real source can be swapped at startup
     private lazy var ccStatusBarClient = CCStatusBarClient(logger: logger)
     private lazy var tmuxDirectPoller = TmuxDirectPoller(logger: logger)
-    private lazy var tmuxSessionSource: TmuxSessionSource = ccStatusBarClient  // swapped in startTmuxSubsystem()
+    private let tmuxSourceProxy = TmuxSessionSourceProxy()
     private lazy var tmuxAdapter = TmuxAdapter(
-        ccClient: tmuxSessionSource,
+        ccClient: tmuxSourceProxy,
         configStore: configStore,
         logger: logger
     )
@@ -86,7 +86,7 @@ final class AppRuntime {
         recentSendTracker: recentSendTracker
     )
     private lazy var tmuxInboundWatcher = TmuxInboundWatcher(
-        ccClient: tmuxSessionSource,
+        ccClient: tmuxSourceProxy,
         eventBus: eventBus,
         logger: logger,
         configStore: configStore
@@ -238,22 +238,29 @@ final class AppRuntime {
         let ccsbURL = configStore.load().tmuxStatusBarURL
         let ccsbAvailable = probeCCStatusBar(url: ccsbURL)
 
+        let selectedSource: TmuxSessionSource
         if ccsbAvailable {
             logger.log(.info, "Tmux source: cc-status-bar (\(ccsbURL))")
-            tmuxSessionSource = ccStatusBarClient
             ccStatusBarClient.setPreferredWebSocketURL(ccsbURL)
+            selectedSource = ccStatusBarClient
         } else {
             logger.log(.info, "Tmux source: built-in direct poller (cc-status-bar unavailable)")
-            tmuxSessionSource = tmuxDirectPoller
+            selectedSource = tmuxDirectPoller
         }
 
-        tmuxSessionSource.onSessionsChanged = { [weak self] in
+        // Install menu-refresh callback on the proxy BEFORE swapping in the
+        // underlying source (proxy will forward it when setUnderlying runs).
+        tmuxSourceProxy.onSessionsChanged = { [weak self] in
             guard let self else { return }
-            self.menuBarDelegate?.refreshSessionsMenu(sessions: self.tmuxSessionSource.allSessions())
+            self.menuBarDelegate?.refreshSessionsMenu(sessions: self.tmuxSourceProxy.allSessions())
         }
-        // Start watcher BEFORE connecting — so onStateChange is set when sessions arrive.
+
+        // Start watcher first so its callbacks are installed on the proxy,
+        // then swap in the real source (setUnderlying forwards callbacks),
+        // then connect. The watcher is source-agnostic.
         tmuxInboundWatcher.start()
-        tmuxSessionSource.connect()
+        tmuxSourceProxy.setUnderlying(selectedSource)
+        tmuxSourceProxy.connect()
     }
 
     /// Quick TCP probe to check if cc-status-bar is reachable.
