@@ -43,6 +43,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/project-context-read"),
         (.POST, "/v1/line/ensure-conversation"),
         (.POST, "/v1/debug/reset-line-baseline"),
+        (.POST, "/v1/chrome/page-capture"),
+        (.GET,  "/v1/chrome/recent-pages"),
     ]
 
     private var requestHead: HTTPRequestHead?
@@ -223,6 +225,10 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.ensureLineConversation(body: bodyData)
             } else if method == .POST && path == "/v1/debug/reset-line-baseline" {
                 result = core.resetLineBaseline()
+            } else if method == .POST && path == "/v1/chrome/page-capture" {
+                result = core.chromePageCapture(body: bodyData, headers: head.headers)
+            } else if method == .GET && path == "/v1/chrome/recent-pages" {
+                result = core.chromeRecentPages(headers: head.headers)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()

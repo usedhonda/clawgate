@@ -69,6 +69,10 @@ fi
 if [[ -f "$PROJECT_DIR/resources/PrivacyInfo.xcprivacy" ]]; then
     cp "$PROJECT_DIR/resources/PrivacyInfo.xcprivacy" ClawGate.app/Contents/Resources/PrivacyInfo.xcprivacy
 fi
+# Copy Chrome extension
+if [[ -d "$PROJECT_DIR/extensions/clawgate-chrome" ]]; then
+    rsync -a --delete "$PROJECT_DIR/extensions/clawgate-chrome/" ClawGate.app/Contents/Resources/clawgate-chrome/
+fi
 ok "Binary copied"
 
 # Sign with a stable identity. Prefer Developer ID Application (stable TCC

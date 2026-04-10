@@ -43,10 +43,82 @@ final class BridgeCore {
         self.jsonEncoder.outputFormatting = [.withoutEscapingSlashes]
     }
 
-    /// CSRF protection: reject POST requests that carry an Origin header (browser-initiated).
+    // MARK: - Chrome Extension
+
+    var chromePageStore: ChromePageStore?
+    var chromeExtensionAuthStore: ChromeExtensionAuthStore?
+
+    /// Validate the pairing token sent by the Chrome extension.
+    /// Returns nil (allowed) when token is empty (pairing not yet configured).
+    func checkChromeToken(headers: HTTPHeaders) -> HTTPResult? {
+        guard let store = chromeExtensionAuthStore, !store.currentToken.isEmpty else {
+            return nil
+        }
+        let token = headers.first(name: "X-ClawGate-Token") ?? ""
+        guard token == store.currentToken else {
+            let payload = ErrorPayload(
+                code: "invalid_chrome_token",
+                message: "Invalid Chrome extension pairing token",
+                retriable: false,
+                failedStep: "chrome_auth",
+                details: nil
+            )
+            return jsonResponse(status: .forbidden, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+        }
+        return nil
+    }
+
+    private struct ChromePageCapturePayload: Decodable {
+        let url: String
+        let title: String
+        let content: String
+    }
+
+    private struct ChromeRecentPagesResult: Codable {
+        let pages: [CapturedPageFull]
+    }
+
+    func chromePageCapture(body: Data, headers: HTTPHeaders) -> HTTPResult {
+        if let err = checkChromeToken(headers: headers) { return err }
+
+        guard let payload = try? jsonDecoder.decode(ChromePageCapturePayload.self, from: body),
+              !payload.url.isEmpty else {
+            let err = ErrorPayload(code: "invalid_payload", message: "Missing url field", retriable: false, failedStep: "decode", details: nil)
+            return jsonResponse(status: .badRequest, body: encode(APIResponse<String>(ok: false, result: nil, error: err)))
+        }
+
+        chromePageStore?.add(url: payload.url, title: payload.title, content: payload.content)
+        NSLog("[Chrome] page captured: %@", String(payload.url.prefix(80)))
+
+        let url = payload.url
+        let title = payload.title
+        let content = payload.content
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .petChromePage,
+                object: nil,
+                userInfo: ["url": url, "title": title, "content": content]
+            )
+        }
+        return jsonResponse(status: .ok, body: encode(["ok": true] as [String: Bool]))
+    }
+
+    func chromeRecentPages(headers: HTTPHeaders) -> HTTPResult {
+        if let err = checkChromeToken(headers: headers) { return err }
+        let pages = chromePageStore?.recentForAPI() ?? []
+        let result = ChromeRecentPagesResult(pages: pages)
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil as ErrorPayload?)))
+    }
+
+    // MARK: - CSRF protection
+
+    /// Reject POST requests that carry an Origin header (browser-initiated).
+    /// Chrome extensions are explicitly allowed since they use a chrome-extension:// origin
+    /// and are additionally protected by the pairing token check.
     func checkOrigin(method: HTTPMethod, headers: HTTPHeaders) -> HTTPResult? {
         guard method == .POST else { return nil }
         guard let origin = headers.first(name: "Origin"), !origin.isEmpty else { return nil }
+        if origin.hasPrefix("chrome-extension://") { return nil }
         let payload = ErrorPayload(
             code: "browser_origin_rejected",
             message: "Requests from browsers are rejected",

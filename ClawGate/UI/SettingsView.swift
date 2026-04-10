@@ -219,7 +219,41 @@ struct InlineSettingsView: View {
                 Toggle("Launch at Login", isOn: launchAtLoginBinding)
             }
             Toggle("Debug Logging", isOn: $model.config.debugLogging)
+            Button("Install Chrome Extension") {
+                installChromeExtension()
+            }
+            .buttonStyle(.bordered)
         }
+    }
+
+    private func installChromeExtension() {
+        let token = ChromeExtensionAuthStore().generateNewToken()
+
+        // Prefer the extension bundled in app Resources (production build).
+        // Fall back to the source directory for dev builds (swift build).
+        let bundledPath = Bundle.main.resourceURL?.appendingPathComponent("clawgate-chrome")
+        let devPath = Bundle.main.executableURL?
+            .deletingLastPathComponent()   // MacOS
+            .deletingLastPathComponent()   // Contents
+            .deletingLastPathComponent()   // ClawGate.app
+            .deletingLastPathComponent()   // debug / release
+            .deletingLastPathComponent()   // .build
+            .appendingPathComponent("extensions/clawgate-chrome")
+
+        let fm = FileManager.default
+        guard let extDir = [bundledPath, devPath]
+            .compactMap({ $0 })
+            .first(where: { fm.fileExists(atPath: $0.path) })
+        else { return }
+
+        let task = Process()
+        task.launchPath = "/usr/bin/open"
+        task.arguments = [
+            "-a", "Google Chrome", "--args",
+            "--load-extension=\(extDir.path)",
+            "--clawgate-token=\(token)",
+        ]
+        try? task.run()
     }
 
     @available(macOS 13.0, *)

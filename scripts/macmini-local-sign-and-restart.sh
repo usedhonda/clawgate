@@ -116,6 +116,10 @@ if [[ -d "$BUILD_BUNDLE" ]]; then
   rm -rf "$DEST_BUNDLE"
   cp -R "$BUILD_BUNDLE" "$DEST_BUNDLE"
 fi
+# Copy Chrome extension
+if [[ -d "$PROJECT_PATH/extensions/clawgate-chrome" ]]; then
+  rsync -a --delete "$PROJECT_PATH/extensions/clawgate-chrome/" ClawGate.app/Contents/Resources/clawgate-chrome/
+fi
 
 echo "[5/6] Sign with $RESOLVED_SIGNING_ID (keychain: $SIGNING_KEYCHAIN)"
 codesign --force --deep --options runtime \

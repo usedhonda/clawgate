@@ -326,6 +326,19 @@ private final class PetContentView: NSView {
             }))
         }
 
+        let browserBundles: Set<String> = [
+            "com.google.Chrome", "com.google.Chrome.beta",
+            "org.mozilla.firefox", "com.apple.Safari",
+        ]
+        let isBrowser = browserBundles.contains(model.lastTrackedApp?.bundleIdentifier ?? "")
+        if isBrowser {
+            items.insert(MenuItem(
+                iconImage: emojiIconImage("🌐"),
+                title: "Get this page",
+                action: { [weak self] in self?.model.requestChromePage() }
+            ), at: 0)
+        }
+
         let outerPadding: CGFloat = 6
         let itemHeight: CGFloat = 30
         let headerHeight: CGFloat = 28
