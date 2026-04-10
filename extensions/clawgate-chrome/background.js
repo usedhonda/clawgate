@@ -1,56 +1,74 @@
 const DEFAULT_SETTINGS = {
-  port: 8765,
-  pairingToken: "",
+  bridgePort: 8765,
+  gatewayURL: '',
+  gatewayToken: '',
 };
 
-const CONTEXT_MENU_ID = "clawgate-send-to-chi";
+const CONTEXT_MENU_ID = 'clawgate-send-to-chi';
 const POLL_INTERVAL_MS = 2500;
 const POLL_ERROR_BACKOFF_MS = 5000;
 
-let cursor = "";
+let cursor = '';
 let pollTimer = null;
 let pollInFlight = false;
-const sentURLs = new Set();
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const current = await chrome.storage.local.get(DEFAULT_SETTINGS);
-  const next = {
-    port: Number.isFinite(Number(current.port)) ? Number(current.port) : DEFAULT_SETTINGS.port,
-    pairingToken: typeof current.pairingToken === "string" ? current.pairingToken : DEFAULT_SETTINGS.pairingToken,
-  };
-  await chrome.storage.local.set(next);
-  chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: CONTEXT_MENU_ID,
-      title: "Send to Chi",
-      contexts: ["page"],
-    });
-  });
+  await ensureDefaults();
+  await createContextMenu();
   await restoreCursor();
+  await refreshBadge();
   startPolling();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
+  await ensureDefaults();
+  await createContextMenu();
   await restoreCursor();
+  await refreshBadge();
   startPolling();
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
-  if (info.menuItemId !== CONTEXT_MENU_ID || !tab?.id) return;
+  if (info.menuItemId !== CONTEXT_MENU_ID || !tab?.id) {
+    return;
+  }
   await captureAndSend(tab);
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local") return;
-  if (changes.port || changes.pairingToken) {
-    cursor = "";
-    startPolling();
+  if (areaName !== 'local') {
+    return;
+  }
+  if (changes.bridgePort || changes.gatewayURL || changes.gatewayToken) {
+    cursor = '';
+    refreshBadge().catch(() => undefined);
+    startPolling().catch(() => undefined);
+    notifySettingsUpdated().catch(() => undefined);
   }
 });
 
+async function ensureDefaults() {
+  const current = await chrome.storage.local.get(DEFAULT_SETTINGS);
+  const next = {
+    bridgePort: normalizePort(current.bridgePort),
+    gatewayURL: typeof current.gatewayURL === 'string' ? current.gatewayURL : DEFAULT_SETTINGS.gatewayURL,
+    gatewayToken: typeof current.gatewayToken === 'string' ? current.gatewayToken : DEFAULT_SETTINGS.gatewayToken,
+  };
+  await chrome.storage.local.set(next);
+}
+
+async function createContextMenu() {
+  await chrome.contextMenus.removeAll();
+  chrome.contextMenus.create({
+    id: CONTEXT_MENU_ID,
+    title: 'Send to Chi',
+    contexts: ['page'],
+  });
+}
+
 async function restoreCursor() {
-  const stored = await chrome.storage.local.get({ pollCursor: "" });
-  cursor = stored.pollCursor || "";
+  const stored = await chrome.storage.local.get({ pollCursor: '' });
+  cursor = stored.pollCursor || '';
 }
 
 async function saveCursor(value) {
@@ -61,56 +79,72 @@ async function saveCursor(value) {
 async function getSettings() {
   const settings = await chrome.storage.local.get(DEFAULT_SETTINGS);
   return {
-    port: Number.isFinite(Number(settings.port)) ? Number(settings.port) : DEFAULT_SETTINGS.port,
-    pairingToken: typeof settings.pairingToken === "string" ? settings.pairingToken : DEFAULT_SETTINGS.pairingToken,
+    bridgePort: normalizePort(settings.bridgePort),
+    gatewayURL: typeof settings.gatewayURL === 'string' ? settings.gatewayURL : '',
+    gatewayToken: typeof settings.gatewayToken === 'string' ? settings.gatewayToken : '',
   };
 }
 
-function notifySettingsUpdated(payload = {}) {
-  chrome.runtime.sendMessage({ type: "settings_updated", ...payload }).catch(() => undefined);
+function normalizePort(value) {
+  const port = Number(value);
+  return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : DEFAULT_SETTINGS.bridgePort;
+}
+
+async function notifySettingsUpdated(extra = {}) {
+  const settings = await getSettings();
+  chrome.runtime.sendMessage({
+    type: 'settings_updated',
+    ...settings,
+    ...extra,
+  }).catch(() => undefined);
+}
+
+async function refreshBadge() {
+  const { gatewayURL, gatewayToken } = await getSettings();
+  const configured = Boolean(gatewayURL && gatewayToken);
+  await chrome.action.setBadgeBackgroundColor({ color: configured ? '#0D111B' : '#F26B6B' });
+  await chrome.action.setBadgeText({ text: configured ? '' : '!' });
 }
 
 function scheduleNextPoll(delayMs = POLL_INTERVAL_MS) {
-  if (pollTimer) clearTimeout(pollTimer);
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+  }
   pollTimer = setTimeout(() => {
     startPolling().catch(() => undefined);
   }, delayMs);
 }
 
 async function startPolling() {
-  if (pollInFlight) return;
+  if (pollInFlight) {
+    return;
+  }
   pollInFlight = true;
   try {
-    const { port, pairingToken } = await getSettings();
-    if (!pairingToken) {
-      notifySettingsUpdated({ connected: false, reason: "missing_token" });
-      scheduleNextPoll(POLL_INTERVAL_MS);
-      return;
+    const { bridgePort } = await getSettings();
+    const url = new URL(`http://127.0.0.1:${bridgePort}/v1/poll`);
+    if (cursor) {
+      url.searchParams.set('since', cursor);
     }
 
-    const url = new URL(`http://127.0.0.1:${port}/v1/poll`);
-    if (cursor) url.searchParams.set("since", cursor);
-
-    const response = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        "X-ClawGate-Token": pairingToken,
-      },
-    });
-
+    const response = await fetch(url.toString(), { method: 'GET' });
     if (!response.ok) {
-      notifySettingsUpdated({ connected: false, reason: `poll_${response.status}` });
+      await notifySettingsUpdated({ bridgeConnected: false, reason: `poll_${response.status}` });
       scheduleNextPoll(POLL_ERROR_BACKOFF_MS);
       return;
     }
 
     const data = await response.json();
-    if (data?.next_cursor != null) await saveCursor(String(data.next_cursor));
-    notifySettingsUpdated({ connected: true, cursor });
+    if (data?.next_cursor != null) {
+      await saveCursor(String(data.next_cursor));
+    }
+    await notifySettingsUpdated({ bridgeConnected: true });
 
     const events = Array.isArray(data?.events) ? data.events : [];
     for (const event of events) {
-      if (event?.type !== "chrome_capture_request") continue;
+      if (event?.type !== 'chrome_capture_request') {
+        continue;
+      }
       const tab = await getActiveTab();
       if (tab?.id) {
         await captureAndSend(tab);
@@ -119,7 +153,7 @@ async function startPolling() {
 
     scheduleNextPoll(POLL_INTERVAL_MS);
   } catch (error) {
-    notifySettingsUpdated({ connected: false, reason: error?.message || "poll_error" });
+    await notifySettingsUpdated({ bridgeConnected: false, reason: error?.message || 'poll_error' });
     scheduleNextPoll(POLL_ERROR_BACKOFF_MS);
   } finally {
     pollInFlight = false;
@@ -132,30 +166,77 @@ async function getActiveTab() {
 }
 
 async function captureAndSend(tab) {
-  const { port, pairingToken } = await getSettings();
-  if (!tab?.id) return;
-  const url = tab.url || "";
-  if (sentURLs.has(url)) return;
-  sentURLs.add(url);
+  const { gatewayURL, gatewayToken } = await getSettings();
+  if (!tab?.id) {
+    return;
+  }
+  if (!gatewayURL || !gatewayToken) {
+    await refreshBadge();
+    await notifySettingsUpdated({ gatewayConnected: false, reason: 'missing_gateway_config' });
+    return;
+  }
 
-  const result = await chrome.tabs.sendMessage(tab.id, { type: "extract_content" });
+  const result = await chrome.tabs.sendMessage(tab.id, { type: 'extract_content' });
+  const content = typeof result?.content === 'string' ? result.content : '';
+  const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+  const url = tab.url || result?.url || '';
+  const title = tab.title || result?.title || '';
+  const domain = safeHostname(url);
+
   const payload = {
-    url: tab.url || "",
-    title: tab.title || "",
-    content: result?.text || "",
+    entries: [{
+      id: makeUUID(),
+      url,
+      title,
+      domain,
+      content,
+      visitedAt: new Date().toISOString(),
+      meta: {
+        description: meta.description || '',
+        ogTitle: meta.ogTitle || '',
+        ogImage: meta.ogImage || '',
+      },
+      engagement: {
+        activeSeconds: 0,
+        scrollDepthPct: 0,
+        engaged: false,
+      },
+      userInitiated: true,
+    }],
   };
 
-  await fetch(`http://127.0.0.1:${port}/v1/chrome/page-capture`, {
-    method: "POST",
+  const endpoint = new URL('/api/web-history', gatewayURL).toString();
+  const response = await fetch(endpoint, {
+    method: 'POST',
     headers: {
-      "Content-Type": "application/json",
-      "X-ClawGate-Token": pairingToken,
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${gatewayToken}`,
     },
     body: JSON.stringify(payload),
   });
 
-  await chrome.action.setBadgeText({ text: "✓" });
+  if (!response.ok) {
+    throw new Error(`Gateway rejected capture (${response.status})`);
+  }
+
+  await chrome.action.setBadgeText({ text: '✓' });
   setTimeout(() => {
-    chrome.action.setBadgeText({ text: "" }).catch(() => undefined);
+    chrome.action.setBadgeText({ text: '' }).catch(() => undefined);
   }, 1000);
+  await notifySettingsUpdated({ gatewayConnected: true, lastCaptureURL: url });
+}
+
+function safeHostname(value) {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return '';
+  }
+}
+
+function makeUUID() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+  return `cg-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 }

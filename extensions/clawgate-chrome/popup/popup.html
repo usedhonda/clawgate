@@ -10,6 +10,7 @@
     <main class="popup-shell">
       <header class="hero">
         <img class="hero-icon" src="../icons/icon48.png" alt="Chi">
+        <h1 class="hero-title">ClawGate</h1>
       </header>
 
       <section class="status-card">
@@ -20,16 +21,19 @@
       </section>
 
       <label class="field">
-        <span class="field-label">Port</span>
-        <input id="port-input" type="number" min="1" max="65535" inputmode="numeric">
+        <span class="field-label">Gateway URL</span>
+        <input id="gateway-url" type="text" readonly placeholder="Connect to ClawGate first">
       </label>
 
       <label class="field">
-        <span class="field-label">Pairing Token</span>
-        <input id="token-input" type="password" placeholder="Paste token from Settings…">
+        <span class="field-label">Gateway Token</span>
+        <input id="gateway-token" type="text" readonly placeholder="Not connected">
       </label>
 
-      <button id="test-button" class="primary-button" type="button">Test Connection</button>
+      <div class="actions">
+        <button id="connect-button" class="primary-button" type="button">Connect to ClawGate</button>
+        <button id="test-button" class="secondary-button" type="button">Test Connection</button>
+      </div>
     </main>
 
     <script type="module" src="popup.js"></script>
