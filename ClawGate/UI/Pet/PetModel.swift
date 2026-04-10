@@ -146,9 +146,6 @@ final class PetModel: NSObject, ObservableObject {
     private var hideCheckTimer: Timer?
     private var clawWaveTimer: Timer?
     private var unhideWaveOnArrival = false
-    /// AX window reference Chi entered hiding behind. Used to detect
-    /// when that specific window is closed so we can unhide immediately.
-    private var hidingWindow: AXUIElement?
 
     /// Pet interaction mode (right-click menu)
     enum PetMode: String, CaseIterable {
@@ -608,24 +605,18 @@ final class PetModel: NSObject, ObservableObject {
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
         guard let focusedWin = AXQuery.focusedWindow(appElement: appElement),
               let frame = AXQuery.copyFrameAttribute(focusedWin) else {
-            // The tracked app has no focused window anymore. If Chi was
-            // hiding behind one of its windows, that window is gone —
-            // emerge so Chi doesn't stay stuck peeking at nothing.
+            // The tracked app currently has no focusable window. If Chi was
+            // hiding, there is nothing left to hide behind — emerge so she
+            // doesn't peek at empty space. NOTE: this triggers ONLY when
+            // focusedWindow disappears entirely. A simple focus change to
+            // another window of the same (or any) app is *not* an unhide
+            // trigger; Chi just teleports to the new edge below.
             if isHiding {
-                NSLog("[PetHide] Host window closed — unhiding")
+                NSLog("[PetHide] No focusable window left — unhiding")
                 unhide()
             } else {
                 moveController.stop()
             }
-            return
-        }
-
-        // If Chi is hiding and the focused window has changed out from
-        // under her (original window closed, another window took focus),
-        // emerge instead of silently teleporting behind the new window.
-        if isHiding, let pinned = hidingWindow, !CFEqual(pinned, focusedWin) {
-            NSLog("[PetHide] Host window replaced — unhiding")
-            unhide()
             return
         }
 
@@ -819,7 +810,6 @@ final class PetModel: NSObject, ObservableObject {
         guard !isHiding, characterManager.selectedName == "chi-claw" else { return }
         isHiding = true
         hidingSide = lastPlacementSide
-        hidingWindow = lastTrackedWindow
 
         // Instant: lock expression, stop cycle, switch sprite
         cycleWorkItem?.cancel()
@@ -854,7 +844,6 @@ final class PetModel: NSObject, ObservableObject {
     func unhide() {
         guard isHiding else { return }
         isHiding = false
-        hidingWindow = nil
         clawWaveTimer?.invalidate()
         clawWaveTimer = nil
         lastActivityTime = Date()
