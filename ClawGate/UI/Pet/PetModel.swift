@@ -47,21 +47,63 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Persistence keys (UserDefaults)
+    private enum PersistKey {
+        static let isVisible           = "pet.isVisible"
+        static let isTrackingEnabled   = "pet.isTrackingEnabled"
+        static let isBubbleEnabled     = "pet.isBubbleEnabled"
+        static let isWhisperEnabled    = "pet.isWhisperEnabled"
+        static let characterSize       = "pet.characterSize"
+        static let opacity             = "pet.opacity"
+        static let hideAfterMinutes    = "pet.hideAfterMinutes"
+    }
+
     @Published var messages: [OpenClawChatMessage] = []
     @Published var inputText: String = ""
     @Published var connectionState: ConnectionState = .disconnected
     @Published var isStreaming = false
-    @Published var opacity: Double = 1.0
+    @Published var opacity: Double = PetModel.loadOpacity() {
+        didSet { UserDefaults.standard.set(opacity, forKey: PersistKey.opacity) }
+    }
     @Published var streamingText: String = ""
     @Published var whisperText: String?       // Layer 1: brief reaction text
     @Published var notificationMessage: OpenClawChatMessage?  // Independent notification
     @Published var pendingScreenshotOffer: ScreenshotOffer?
     @Published var petMode: PetMode = .secretary
-    @Published var isVisible: Bool = true
-    @Published var isTrackingEnabled: Bool = true
-    @Published var isBubbleEnabled: Bool = true
-    @Published var isWhisperEnabled: Bool = true
-    @Published var characterSize: CGFloat = 128
+    @Published var isVisible: Bool = PetModel.loadBool(PersistKey.isVisible, default: true) {
+        didSet { UserDefaults.standard.set(isVisible, forKey: PersistKey.isVisible) }
+    }
+    @Published var isTrackingEnabled: Bool = PetModel.loadBool(PersistKey.isTrackingEnabled, default: true) {
+        didSet { UserDefaults.standard.set(isTrackingEnabled, forKey: PersistKey.isTrackingEnabled) }
+    }
+    @Published var isBubbleEnabled: Bool = PetModel.loadBool(PersistKey.isBubbleEnabled, default: true) {
+        didSet { UserDefaults.standard.set(isBubbleEnabled, forKey: PersistKey.isBubbleEnabled) }
+    }
+    @Published var isWhisperEnabled: Bool = PetModel.loadBool(PersistKey.isWhisperEnabled, default: true) {
+        didSet { UserDefaults.standard.set(isWhisperEnabled, forKey: PersistKey.isWhisperEnabled) }
+    }
+    @Published var characterSize: CGFloat = PetModel.loadCharacterSize() {
+        didSet { UserDefaults.standard.set(Double(characterSize), forKey: PersistKey.characterSize) }
+    }
+
+    private static func loadBool(_ key: String, default defaultValue: Bool) -> Bool {
+        if UserDefaults.standard.object(forKey: key) == nil { return defaultValue }
+        return UserDefaults.standard.bool(forKey: key)
+    }
+    private static func loadOpacity() -> Double {
+        if UserDefaults.standard.object(forKey: PersistKey.opacity) == nil { return 1.0 }
+        let v = UserDefaults.standard.double(forKey: PersistKey.opacity)
+        return (v > 0) ? v : 1.0
+    }
+    private static func loadCharacterSize() -> CGFloat {
+        if UserDefaults.standard.object(forKey: PersistKey.characterSize) == nil { return 128 }
+        let v = UserDefaults.standard.double(forKey: PersistKey.characterSize)
+        return (v > 0) ? CGFloat(v) : 128
+    }
+    private static func loadHideAfterMinutes() -> Double {
+        if UserDefaults.standard.object(forKey: PersistKey.hideAfterMinutes) == nil { return 0.5 }
+        return UserDefaults.standard.double(forKey: PersistKey.hideAfterMinutes)
+    }
     @Published var notificationHistory: [NotificationEntry] = []
     @Published var summonResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
@@ -92,7 +134,9 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Hide behind window
     @Published var isHiding = false
     /// Minutes of idle before hiding. 0 = disabled. Min 0.5.
-    var hideAfterMinutes: Double = 0.5  // Debug: 30s
+    var hideAfterMinutes: Double = PetModel.loadHideAfterMinutes() {
+        didSet { UserDefaults.standard.set(hideAfterMinutes, forKey: PersistKey.hideAfterMinutes) }
+    }
     private var lastActivityTime = Date()
     private var hideCheckTimer: Timer?
     private var clawWaveTimer: Timer?

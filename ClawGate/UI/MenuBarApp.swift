@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 private extension NSColor {
@@ -39,6 +40,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var normalPanelOrigin: NSPoint = .zero
     private static let collapsedWidth: CGFloat = 14
     private var activationObserver: NSObjectProtocol?
+    private var petVisibilityObserver: AnyCancellable?
     private var lastAppliedPanelLevel: NSWindow.Level?
     private let mainPanelLogLimit = 30
     private let ghosttyBundleID = "com.mitchellh.ghostty"
@@ -79,10 +81,28 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         refreshStatsAndTimeline()
         startRefreshTimer()
 
-        // Start pet character
+        // Start pet character.
+        // Honor persisted isVisible so that turning the avatar off in Settings
+        // survives app restarts. Pet bookkeeping (start()) still runs so that
+        // toggling the avatar back on works without a restart.
         petWindowController = PetWindowController(model: petModel)
         petModel.start()
-        petWindowController?.show()
+        if petModel.isVisible {
+            petWindowController?.show()
+        }
+        // React to Settings toggle at runtime so users can hide/show the pet
+        // without restarting the app.
+        petVisibilityObserver = petModel.$isVisible
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] visible in
+                guard let self else { return }
+                if visible {
+                    self.petWindowController?.show()
+                } else {
+                    self.petWindowController?.hide()
+                }
+            }
     }
 
     private func configureStatusButton() {
