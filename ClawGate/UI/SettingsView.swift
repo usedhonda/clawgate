@@ -61,7 +61,6 @@ struct InlineSettingsView: View {
             tmuxSection
             gatewaySection
             systemSection
-            utilitiesSection
         }
         .padding(embedInScroll ? PanelTheme.padding : 0)
     }
@@ -108,27 +107,9 @@ struct InlineSettingsView: View {
 
     private var headerCard: some View {
         PanelCard {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text("ClawGate")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                Text("Standalone")
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textSecondary)
-            }
-
-            Text("Capabilities are configured directly. LINE is the only machine-local branch.")
-                .font(PanelTheme.bodyFont)
-                .foregroundStyle(PanelTheme.textTertiary)
-
-            HStack(spacing: 8) {
-                ActionButton(title: "Apply Recommended", tone: .primary) {
-                    applyRecommended()
-                }
-                Text("tmux direct poll + Gateway direct access")
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textTertiary)
-            }
+            Text("ClawGate")
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textPrimary)
         }
     }
 
@@ -138,8 +119,8 @@ struct InlineSettingsView: View {
                 .font(PanelTheme.titleFont)
                 .foregroundStyle(PanelTheme.textPrimary)
             Toggle("Enable LINE adapter", isOn: $model.config.lineEnabled)
-            statusRow(state: lineState)
             if model.config.lineEnabled {
+                statusRow(state: lineState)
                 fieldRow("Conversation") {
                     TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
                         .textFieldStyle(.plain)
@@ -149,18 +130,26 @@ struct InlineSettingsView: View {
                         value: $model.config.linePollIntervalSeconds, in: 1...30)
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(PanelTheme.textSecondary)
-                fieldRow("Detect") {
-                    TextField("hybrid", text: $model.config.lineDetectionMode)
-                        .textFieldStyle(.plain)
-                        .modifier(PanelInputModifier())
+
+                DisclosureGroup("Advanced") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        fieldRow("Detect") {
+                            TextField("hybrid", text: $model.config.lineDetectionMode)
+                                .textFieldStyle(.plain)
+                                .modifier(PanelInputModifier())
+                        }
+                        Stepper("Fusion: \(model.config.lineFusionThreshold)",
+                                value: $model.config.lineFusionThreshold, in: 1...100)
+                            .font(PanelTheme.bodyFont)
+                            .foregroundStyle(PanelTheme.textSecondary)
+                        Toggle("Pixel signal", isOn: $model.config.lineEnablePixelSignal)
+                        Toggle("Process signal", isOn: $model.config.lineEnableProcessSignal)
+                        Toggle("Notification-store signal", isOn: $model.config.lineEnableNotificationStoreSignal)
+                    }
+                    .padding(.top, 4)
                 }
-                Stepper("Fusion: \(model.config.lineFusionThreshold)",
-                        value: $model.config.lineFusionThreshold, in: 1...100)
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textSecondary)
-                Toggle("Pixel signal", isOn: $model.config.lineEnablePixelSignal)
-                Toggle("Process signal", isOn: $model.config.lineEnableProcessSignal)
-                Toggle("Notification-store signal", isOn: $model.config.lineEnableNotificationStoreSignal)
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textSecondary)
             }
         }
     }
@@ -171,31 +160,11 @@ struct InlineSettingsView: View {
                 .font(PanelTheme.titleFont)
                 .foregroundStyle(PanelTheme.textPrimary)
             Toggle("Enable tmux monitoring", isOn: $model.config.tmuxEnabled)
-            statusRow(state: tmuxState)
-            Text("Source: Built-in tmux poller")
-                .font(PanelTheme.bodyFont)
-                .foregroundStyle(PanelTheme.textTertiary)
-            if model.config.tmuxSessionModes.isEmpty {
-                Text("Session modes are managed from Monitor.")
+            if model.config.tmuxEnabled {
+                statusRow(state: tmuxState)
+                Text("Session behavior is managed from Monitor.")
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(PanelTheme.textTertiary)
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Session modes")
-                        .font(PanelTheme.titleFont)
-                        .foregroundStyle(PanelTheme.textSecondary)
-                    ForEach(model.config.tmuxSessionModes.keys.sorted(), id: \.self) { key in
-                        HStack(spacing: 8) {
-                            Text(key)
-                                .font(PanelTheme.smallFont)
-                                .foregroundStyle(PanelTheme.textSecondary)
-                            Spacer(minLength: 0)
-                            Text(model.config.tmuxSessionModes[key] ?? "ignore")
-                                .font(PanelTheme.smallFont)
-                                .foregroundStyle(PanelTheme.textPrimary)
-                        }
-                    }
-                }
             }
         }
     }
@@ -206,15 +175,14 @@ struct InlineSettingsView: View {
                 .font(PanelTheme.titleFont)
                 .foregroundStyle(PanelTheme.textPrimary)
             Toggle("Allow Gateway to connect", isOn: $model.config.remoteAccessEnabled)
-            statusRow(state: gatewayState)
-            fieldRow("Token") {
-                SecureField("gateway token", text: $model.config.remoteAccessToken)
-                    .textFieldStyle(.plain)
-                    .modifier(PanelInputModifier())
+            if model.config.remoteAccessEnabled {
+                statusRow(state: gatewayState)
+                fieldRow("Token") {
+                    SecureField("gateway token", text: $model.config.remoteAccessToken)
+                        .textFieldStyle(.plain)
+                        .modifier(PanelInputModifier())
+                }
             }
-            Text(model.config.remoteAccessEnabled ? "Binding on 0.0.0.0:8765" : "Binding on 127.0.0.1:8765")
-                .font(PanelTheme.bodyFont)
-                .foregroundStyle(PanelTheme.textTertiary)
         }
     }
 
@@ -227,20 +195,11 @@ struct InlineSettingsView: View {
                 Toggle("Launch at Login", isOn: launchAtLoginBinding)
             }
             Toggle("Debug Logging", isOn: $model.config.debugLogging)
-            Toggle("Include message body in logs", isOn: $model.config.includeMessageBodyInLogs)
-        }
-    }
-
-    @ViewBuilder
-    private var utilitiesSection: some View {
-        if let onOpenQRCode {
-            PanelCard {
-                Text("Utilities")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                ActionButton(title: "Show QR Code for [VibeTerm]", tone: .neutral) {
-                    onOpenQRCode()
-                }
+            if model.config.debugLogging {
+                Toggle("Include message body", isOn: $model.config.includeMessageBodyInLogs)
+                    .padding(.leading, 16)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textSecondary)
             }
         }
     }
@@ -290,16 +249,6 @@ struct InlineSettingsView: View {
                 .frame(width: 84, alignment: .leading)
             content()
         }
-    }
-
-    private func applyRecommended() {
-        model.config.tmuxEnabled = true
-        model.config.remoteAccessEnabled = true
-        if lineAppRunning() {
-            model.config.lineEnabled = true
-        }
-        model.save()
-        refreshConnectivity()
     }
 
     private func startProbeTimer() {
