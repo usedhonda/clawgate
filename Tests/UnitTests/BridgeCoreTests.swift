@@ -276,12 +276,12 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertTrue(response.body.contains("\"ok\":true"))
     }
 
-    func testLineSendIsRejectedOnClientRole() {
+    func testLineSendIsRejectedWhenLineDisabled() {
         let defaults = UserDefaults(suiteName: "clawgate.tests.rolegate.send")!
         defaults.removePersistentDomain(forName: "clawgate.tests.rolegate.send")
         let cfg = ConfigStore(defaults: defaults)
         var appCfg = cfg.load()
-        appCfg.nodeRole = .client
+        appCfg.lineEnabled = false
         cfg.save(appCfg)
 
         let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
@@ -299,15 +299,15 @@ final class BridgeCoreTests: XCTestCase {
         let response = core.send(body: Data(json.utf8), traceID: nil)
         XCTAssertEqual(response.status, .forbidden)
         let parsed = try! JSONDecoder().decode(APIResponse<SendResult>.self, from: response.body)
-        XCTAssertEqual(parsed.error?.code, "line_disabled_on_client")
+        XCTAssertEqual(parsed.error?.code, "line_disabled")
     }
 
-    func testConfigIncludesNodeRole() {
+    func testConfigOmitsLegacyNodeRole() {
         let defaults = UserDefaults(suiteName: "clawgate.tests.rolegate.config")!
         defaults.removePersistentDomain(forName: "clawgate.tests.rolegate.config")
         let cfg = ConfigStore(defaults: defaults)
         var appCfg = cfg.load()
-        appCfg.nodeRole = .client
+        appCfg.lineEnabled = true
         cfg.save(appCfg)
 
         let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
@@ -325,7 +325,7 @@ final class BridgeCoreTests: XCTestCase {
         let json = try! JSONSerialization.jsonObject(with: response.body) as! [String: Any]
         let result = json["result"] as! [String: Any]
         let remote = result["remote"] as! [String: Any]
-        XCTAssertEqual(remote["node_role"] as? String, "client")
+        XCTAssertNil(remote["node_role"])
     }
 
     // MARK: - Helpers
@@ -335,7 +335,7 @@ final class BridgeCoreTests: XCTestCase {
         defaults.removePersistentDomain(forName: "clawgate.tests.core")
         let cfg = ConfigStore(defaults: defaults)
         var appCfg = cfg.load()
-        appCfg.nodeRole = .server
+        appCfg.lineEnabled = true
         cfg.save(appCfg)
 
         let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"

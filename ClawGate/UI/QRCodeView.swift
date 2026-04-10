@@ -93,10 +93,10 @@ struct QRCodeView: View {
 
     private func loadConnectionInfo() {
         let defaults = UserDefaults.standard
-        let nodeRole = defaults.string(forKey: "clawgate.nodeRole") ?? "client"
+        let federationEnabled = defaults.object(forKey: "clawgate.federationEnabled") as? Bool ?? false
         let federationURL = defaults.string(forKey: "clawgate.federationURL") ?? ""
 
-        if nodeRole == "client" && !federationURL.isEmpty {
+        if federationEnabled && !federationURL.isEmpty {
             loadFromServer(federationURL: federationURL)
         } else {
             loadFromLocal()

@@ -204,13 +204,11 @@ struct ConfigTmuxSection: Codable {
 }
 
 struct ConfigRemoteSection: Codable {
-    let nodeRole: String
     let accessEnabled: Bool
     let federationEnabled: Bool
     let federationURL: String
 
     enum CodingKeys: String, CodingKey {
-        case nodeRole = "node_role"
         case accessEnabled = "access_enabled"
         case federationEnabled = "federation_enabled"
         case federationURL = "federation_url"

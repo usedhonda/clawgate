@@ -156,7 +156,7 @@ final class BridgeCore {
                 includeMessageBodyInLogs: cfg.includeMessageBodyInLogs
             ),
             line: ConfigLineSection(
-                enabled: cfg.lineEnabled && cfg.nodeRole != .client,
+                enabled: cfg.lineEnabled,
                 defaultConversation: cfg.lineDefaultConversation,
                 pollIntervalSeconds: cfg.linePollIntervalSeconds,
                 detectionMode: cfg.lineDetectionMode,
@@ -171,7 +171,6 @@ final class BridgeCore {
                 sessionModes: cfg.tmuxSessionModes
             ),
             remote: ConfigRemoteSection(
-                nodeRole: cfg.nodeRole.rawValue,
                 accessEnabled: cfg.remoteAccessEnabled,
                 federationEnabled: cfg.federationEnabled,
                 federationURL: cfg.federationURL
@@ -915,7 +914,7 @@ final class BridgeCore {
 
     func autonomousStatus() -> HTTPResult {
         let snapshot = autonomousStatusSnapshot()
-        let role = configStore.load().nodeRole.rawValue
+        let role = capabilityRoleLabel()
         opsLogStore.append(
             level: "info",
             event: "autonomous.status_snapshot",
@@ -931,7 +930,7 @@ final class BridgeCore {
 
     func autonomousStatusSnapshot() -> AutonomousStatusResult {
         let config = configStore.load()
-        let localLineSendExpected = config.nodeRole != .client && config.lineEnabled
+        let localLineSendExpected = config.lineEnabled
         let candidates = config.tmuxSessionModes
             .filter { (key, mode) in
                 key.hasPrefix("codex:") && (mode == "autonomous" || mode == "auto")
@@ -1123,7 +1122,7 @@ final class BridgeCore {
     func doctor() -> HTTPResult {
         var checks: [DoctorCheck] = []
         let cfg = configStore.load()
-        let lineEnabled = cfg.nodeRole != .client && cfg.lineEnabled
+        let lineEnabled = cfg.lineEnabled
 
         // Check 1: App signature authority (avoid TCC re-prompt churn)
         checks.append(appSignatureCheck())
@@ -1142,7 +1141,7 @@ final class BridgeCore {
         checks.append(DoctorCheck(
             name: "line_running",
             status: lineEnabled ? (lineRunning ? "ok" : "warning") : "ok",
-            message: lineEnabled ? (lineRunning ? "Messenger app (LINE) is running" : "Messenger app (LINE) is not running") : "Messenger checks disabled (client role or messenger disabled)",
+            message: lineEnabled ? (lineRunning ? "Messenger app (LINE) is running" : "Messenger app (LINE) is not running") : "Messenger checks disabled",
             details: lineEnabled ? (lineRunning ? nil : "Please launch LINE") : "Enable Messenger (LINE) in Settings when needed"
         ))
 
@@ -1161,13 +1160,13 @@ final class BridgeCore {
                 name: "line_window_accessible",
                 status: lineEnabled ? "warning" : "ok",
                 message: "Messenger window check skipped (LINE adapter)",
-                details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE app is not running") : "nodeRole=client or lineEnabled=false"
+                details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE app is not running") : "lineEnabled=false"
             ))
         }
 
         // Check 7: Port 8765 (we're already listening, so this is informational)
         let portDetails = cfg.remoteAccessEnabled ? "0.0.0.0:8765 (remote access)" : "127.0.0.1:8765"
-        let federationSuffix = (cfg.nodeRole == .server && cfg.federationEnabled) ? " + ws:/federation" : ""
+        let federationSuffix = cfg.federationEnabled ? " + ws:/federation" : ""
         checks.append(DoctorCheck(
             name: "server_port",
             status: "ok",
@@ -1185,7 +1184,7 @@ final class BridgeCore {
         ))
 
         // Check 9: Federation status
-        if cfg.nodeRole == .server && cfg.federationEnabled {
+        if cfg.federationEnabled && cfg.federationURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let clientCount = federationServer?.clientCount() ?? 0
             checks.append(DoctorCheck(
                 name: "federation",
@@ -1193,7 +1192,7 @@ final class BridgeCore {
                 message: "Federation server active (\(clientCount) client\(clientCount == 1 ? "" : "s") connected)",
                 details: "Accepting connections on /federation"
             ))
-        } else if cfg.nodeRole == .client && cfg.federationEnabled {
+        } else if cfg.federationEnabled {
             checks.append(DoctorCheck(
                 name: "federation",
                 status: "ok",
@@ -1203,7 +1202,7 @@ final class BridgeCore {
         }
 
         // Check 10: Gateway poll freshness (server role only — Gateway polls this host)
-        if cfg.nodeRole != .client {
+        if cfg.remoteAccessEnabled {
             let age = Date().timeIntervalSince(lastGatewayPollAt)
             let staleThreshold: TimeInterval = 120
             if lastGatewayPollAt == .distantPast {
@@ -1413,7 +1412,7 @@ final class BridgeCore {
                 name: "line_inbound_watcher_freshness",
                 status: "ok",
                 message: "LINE watcher freshness check skipped",
-                details: "nodeRole=client or lineEnabled=false"
+                details: "lineEnabled=false"
             )
         }
         guard lineRunning else {
@@ -1448,7 +1447,7 @@ final class BridgeCore {
                 name: "line_caretaker_state",
                 status: "ok",
                 message: "LINE caretaker check skipped",
-                details: "nodeRole=client or lineEnabled=false"
+                details: "lineEnabled=false"
             )
         }
         let snapshot = lineHealthCaretaker?.snapshot() ?? defaultLineCaretakerSnapshot()
@@ -1517,6 +1516,11 @@ final class BridgeCore {
         return Self.isoFormatter.date(from: raw)
     }
 
+    private func capabilityRoleLabel() -> String {
+        let cfg = configStore.load()
+        return "line=\(cfg.lineEnabled) tmux=\(cfg.tmuxEnabled) remote=\(cfg.remoteAccessEnabled)"
+    }
+
     private func runProcess(executable: String, arguments: [String]) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
@@ -1582,13 +1586,13 @@ final class BridgeCore {
 
     private func rejectLineOnClient(adapterName: String) -> HTTPResult? {
         let cfg = configStore.load()
-        guard cfg.nodeRole == .client, adapterName == "line" else { return nil }
+        guard !cfg.lineEnabled, adapterName == "line" else { return nil }
         let payload = ErrorPayload(
-            code: "line_disabled_on_client",
-            message: "line adapter is disabled on client node role",
+            code: "line_disabled",
+            message: "line adapter is disabled",
             retriable: false,
-            failedStep: "role_gate",
-            details: "nodeRole=client"
+            failedStep: "line_gate",
+            details: "lineEnabled=false"
         )
         return jsonResponse(
             status: .forbidden,
@@ -1668,7 +1672,7 @@ final class BridgeCore {
         }
         autonomousStatusLock.unlock()
 
-        let role = configStore.load().nodeRole.rawValue
+        let role = capabilityRoleLabel()
         let traceField = normalizedTrace.isEmpty ? "trace_id=unknown" : "trace_id=\(normalizedTrace)"
         opsLogStore.append(
             level: "warning",
@@ -1696,7 +1700,7 @@ final class BridgeCore {
         errorMessage: String?,
         latencyMs: Int?
     ) {
-        let role = configStore.load().nodeRole.rawValue
+        let role = capabilityRoleLabel()
         let parts: [String] = [
             "trace_id=\(traceID)",
             "stage=\(stage)",

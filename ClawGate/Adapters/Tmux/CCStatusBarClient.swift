@@ -3,7 +3,7 @@ import Foundation
 /// WebSocket client for cc-status-bar.
 /// Auto-scans ports 8080-8089 to find the running instance.
 /// Tracks Claude Code session state and notifies on status changes.
-final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
+final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate, TmuxSessionSource {
 
     /// A Claude Code or Codex session reported by cc-status-bar.
     struct CCSession {
@@ -35,10 +35,10 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     /// Callback: (session, oldStatus, newStatus)
-    var onStateChange: ((CCSession, String, String) -> Void)?
+    var onStateChange: ((SessionSnapshot, String, String) -> Void)?
 
     /// Callback: fired when session.progress arrives with pane_capture
-    var onProgress: ((CCSession) -> Void)?
+    var onProgress: ((SessionSnapshot) -> Void)?
 
     /// Callback: fired when the sessions dictionary is updated (for UI refresh)
     var onSessionsChanged: (() -> Void)?
@@ -85,24 +85,27 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
         isConnected = false
     }
 
-    func session(forProject project: String) -> CCSession? {
+    func session(forProject project: String) -> SessionSnapshot? {
         lock.lock()
         defer { lock.unlock() }
-        return _sessions.values.first { $0.project == project }
+        return _sessions.values.first { $0.project == project }?.toSnapshot()
     }
 
     /// Returns all sessions matching a project name (may include both CC and Codex).
-    func sessions(forProject project: String) -> [CCSession] {
+    func sessions(forProject project: String) -> [SessionSnapshot] {
         lock.lock()
         defer { lock.unlock() }
-        return _sessions.values.filter { $0.project == project }
+        return _sessions.values
+            .filter { $0.project == project }
+            .map { $0.toSnapshot() }
     }
 
-    func allSessions() -> [CCSession] {
+    func allSessions() -> [SessionSnapshot] {
         lock.lock()
         defer { lock.unlock() }
         return _sessions.values
             .sorted { $0.project < $1.project }
+            .map { $0.toSnapshot() }
     }
 
     // MARK: - URLSessionWebSocketDelegate
@@ -248,7 +251,7 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
                 if let oldSession = oldSessions.values.first(where: { $0.project == newSession.project }),
                    oldSession.status != newSession.status {
                     logger.log(.info, "CCStatusBarClient: \(newSession.project) status \(oldSession.status) -> \(newSession.status) (via sessions.list diff)")
-                    onStateChange?(newSession, oldSession.status, newSession.status)
+                    onStateChange?(newSession.toSnapshot(), oldSession.status, newSession.status)
                     diffFiredProjects.insert(newSession.project)
                 }
             }
@@ -283,7 +286,7 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
                 bootstrapLog += "  firing (hasHandler=\(hasHandler)) waitingReason=\(session.waitingReason ?? "nil")\n"
                 // Use "bootstrap" as oldStatus so TmuxInboundWatcher can skip
                 // permission auto-approve (which may be stale at startup).
-                onStateChange?(session, "bootstrap", "waiting_input")
+                onStateChange?(session.toSnapshot(), "bootstrap", "waiting_input")
                 bootstrapLog += "  fired\n"
             }
             try? bootstrapLog.write(toFile: "/tmp/clawgate-bootstrap.log", atomically: true, encoding: .utf8)
@@ -299,7 +302,7 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
             if oldStatus != session.status {
                 logger.log(.info, "CCStatusBarClient: \(session.project) status \(oldStatus) -> \(session.status)")
-                onStateChange?(session, oldStatus, session.status)
+                onStateChange?(session.toSnapshot(), oldStatus, session.status)
             }
             onSessionsChanged?()
 
@@ -315,10 +318,10 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
             if let old = oldProgressStatus, old != session.status {
                 logger.log(.info, "CCStatusBarClient: \(session.project) status \(old) -> \(session.status) (via progress)")
-                onStateChange?(session, old, session.status)
+                onStateChange?(session.toSnapshot(), old, session.status)
             }
 
-            onProgress?(session)
+            onProgress?(session.toSnapshot())
 
         case "session.added":
             guard let sessionData = json["session"] as? [String: Any],
@@ -336,7 +339,7 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
 
             if let existing = existingForProject, existing.status != session.status {
                 logger.log(.info, "CCStatusBarClient: \(session.project) status \(existing.status) -> \(session.status) (via added, project match)")
-                onStateChange?(session, existing.status, session.status)
+                onStateChange?(session.toSnapshot(), existing.status, session.status)
             }
 
             onSessionsChanged?()
@@ -381,6 +384,28 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate {
             questionText: dict["question_text"] as? String,
             questionOptions: dict["question_options"] as? [String],
             questionSelected: dict["question_selected"] as? Int
+        )
+    }
+}
+
+private extension CCStatusBarClient.CCSession {
+    func toSnapshot() -> SessionSnapshot {
+        SessionSnapshot(
+            id: id,
+            project: project,
+            sessionType: sessionType,
+            tmuxSession: tmuxSession,
+            tmuxWindow: tmuxWindow,
+            tmuxPane: tmuxPane,
+            status: status,
+            waitingReason: waitingReason,
+            attentionLevel: attentionLevel,
+            questionText: questionText,
+            questionOptions: questionOptions,
+            questionSelected: questionSelected,
+            paneCapture: paneCapture,
+            captureSource: paneCapture == nil ? nil : .websocket,
+            isAttached: isAttached
         )
     }
 }

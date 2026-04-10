@@ -9,8 +9,8 @@ struct MainPanelLogLine: Identifiable {
 }
 
 final class MainPanelModel: ObservableObject {
-    @Published var codexSessions: [CCStatusBarClient.CCSession] = []
-    @Published var claudeSessions: [CCStatusBarClient.CCSession] = []
+    @Published var codexSessions: [SessionSnapshot] = []
+    @Published var claudeSessions: [SessionSnapshot] = []
     @Published var sessionModes: [String: String] = [:]
     @Published var logs: [MainPanelLogLine] = []
     @Published var isCollapsed = false
@@ -36,10 +36,7 @@ struct MainPanelView: View {
     @State private var selectedTab: Tab = .monitor
 
     private var visibleTabs: [Tab] {
-        Tab.allCases.filter { tab in
-            if tab == .vibeterm { return settingsModel.config.nodeRole == .server }
-            return true
-        }
+        Tab.allCases
     }
 
     var body: some View {
@@ -138,7 +135,7 @@ struct MainPanelView: View {
     // MARK: - Sessions
 
     @ViewBuilder
-    private func sessionSection(title: String, sessions: [CCStatusBarClient.CCSession]) -> some View {
+    private func sessionSection(title: String, sessions: [SessionSnapshot]) -> some View {
         PanelSectionHeader(title: title)
         if sessions.isEmpty {
             Text("No active sessions")
@@ -152,7 +149,7 @@ struct MainPanelView: View {
         }
     }
 
-    private func sessionRow(_ session: CCStatusBarClient.CCSession) -> some View {
+    private func sessionRow(_ session: SessionSnapshot) -> some View {
         let currentMode = panelModel.sessionModes[
             AppConfig.modeKey(sessionType: session.sessionType, project: session.project)
         ] ?? "ignore"
@@ -217,7 +214,7 @@ struct MainPanelView: View {
 // MARK: - SessionRowView (tproj card style)
 
 private struct SessionRowView: View {
-    let session: CCStatusBarClient.CCSession
+    let session: SessionSnapshot
     let currentMode: String
     let modeOrder: [String]
     let onSetSessionMode: (String, String, String) -> Void

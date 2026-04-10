@@ -30,7 +30,7 @@ final class AppRuntime {
     )
     private lazy var federationServerInstance: FederationServer? = {
         let cfg = configStore.load()
-        guard cfg.nodeRole == .server && cfg.federationEnabled else { return nil }
+        guard shouldStartFederationServer(cfg) else { return nil }
         return FederationServer(eventBus: eventBus, configStore: configStore, core: core, logger: logger)
     }()
     private lazy var server = BridgeServer(
@@ -94,7 +94,7 @@ final class AppRuntime {
     weak var menuBarDelegate: MenuBarAppDelegate?
 
     /// All current CC sessions (for menu refresh).
-    func allCCSessions() -> [CCStatusBarClient.CCSession] {
+    func allCCSessions() -> [SessionSnapshot] {
         ccStatusBarClient.allSessions()
     }
 
@@ -146,12 +146,12 @@ final class AppRuntime {
         core.lineInboundWatcher = inboundWatcher
         core.lineHealthCaretaker = lineHealthCaretaker
 
-        if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
+        if configStore.load().lineEnabled {
             inboundWatcher.start()
             lineHealthCaretaker.start()
             notificationBannerWatcher.start()
         } else {
-            logger.log(.info, "LINE subsystems are disabled (nodeRole=client or lineEnabled=false)")
+            logger.log(.info, "LINE subsystems are disabled (lineEnabled=false)")
         }
 
         // Start tmux subsystem if enabled
@@ -160,18 +160,18 @@ final class AppRuntime {
             startTmuxSubsystem()
         }
 
-        // Federation: server mode starts FederationServer; client mode starts FederationClient
-        if config.nodeRole == .server && config.federationEnabled {
+        // Federation: legacy URL presence decides client-vs-server until Phase C removes federation entirely.
+        if shouldStartFederationServer(config) {
             federationServerInstance?.start()
             // Store reference in BridgeCore for command forwarding
             core.federationServer = federationServerInstance
             logger.log(.info, "FederationServer mode: accepting clients on ws://\(bindHost()):8765/federation")
-        } else if config.nodeRole == .client && config.federationEnabled {
+        } else if shouldStartFederationClient(config) {
             federationClient.start()
         }
 
-        // Gateway health monitor: auto-restart Gateway when poll goes stale (server role only)
-        if config.nodeRole == .server {
+        // Gateway health monitor: direct Gateway polling matters when remote access is enabled.
+        if config.remoteAccessEnabled {
             core.gatewayHealthMonitor = gatewayHealthMonitor
             gatewayHealthMonitor.start()
         }
@@ -187,7 +187,7 @@ final class AppRuntime {
     }
 
     func stopServer() {
-        if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
+        if configStore.load().lineEnabled {
             notificationBannerWatcher.stop()
             lineHealthCaretaker.stop()
             inboundWatcher.stop()
@@ -205,9 +205,22 @@ final class AppRuntime {
         configStore.load().remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"
     }
 
+    private func shouldStartFederationServer(_ cfg: AppConfig) -> Bool {
+        cfg.federationEnabled && cfg.federationURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func shouldStartFederationClient(_ cfg: AppConfig) -> Bool {
+        cfg.federationEnabled && !cfg.federationURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func capabilityRoleLabel() -> String {
+        let cfg = configStore.load()
+        return "line=\(cfg.lineEnabled) tmux=\(cfg.tmuxEnabled) remote=\(cfg.remoteAccessEnabled)"
+    }
+
     private func enabledAdapters() -> [AdapterProtocol] {
         var adapters: [AdapterProtocol] = [tmuxAdapter]
-        if configStore.load().nodeRole != .client && configStore.load().lineEnabled {
+        if configStore.load().lineEnabled {
             adapters.insert(lineAdapter, at: 0)
         }
         return adapters
@@ -226,7 +239,7 @@ final class AppRuntime {
     }
 
     private func persistOpsLogForMenu(_ event: BridgeEvent) {
-        let role = configStore.load().nodeRole.rawValue
+        let role = capabilityRoleLabel()
         switch event.type {
         case "federation_status":
             guard event.adapter == "federation" else { return }

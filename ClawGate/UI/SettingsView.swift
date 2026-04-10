@@ -1,5 +1,4 @@
 import SwiftUI
-import Network
 import Foundation
 import ServiceManagement
 import AppKit
@@ -50,22 +49,19 @@ struct InlineSettingsView: View {
     }
 
     @ObservedObject var model: SettingsModel
-    @State private var tailscalePeers: [TailscalePeer] = []
+    @State private var lineState: ConnectivityState = .unknown
     @State private var tmuxState: ConnectivityState = .unknown
-    @State private var federationState: ConnectivityState = .unknown
+    @State private var gatewayState: ConnectivityState = .unknown
     @State private var probeTimer: Timer?
-    @State private var suppressNodeRoleChange = false
-    @State private var showServerRoleBlockedAlert = false
-    @State private var serverRoleBlockedMessage = ""
 
     private var contentView: some View {
         VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
             headerCard
-            if model.config.nodeRole == .server {
-                serverSection
-            } else {
-                clientSection
-            }
+            lineSection
+            tmuxSection
+            gatewaySection
+            systemSection
+            utilitiesSection
         }
         .padding(embedInScroll ? PanelTheme.padding : 0)
     }
@@ -86,48 +82,26 @@ struct InlineSettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(PanelTheme.bodyFont)
         .onAppear {
-            loadTailscalePeers()
             refreshConnectivity()
             startProbeTimer()
         }
         .onDisappear {
             stopProbeTimer()
         }
-        .onChange(of: model.config.nodeRole) { newRole in
-            if suppressNodeRoleChange {
-                suppressNodeRoleChange = false
-                return
-            }
-            if newRole == .server {
-                let check = evaluateServerRolePrerequisites()
-                if !check.ok {
-                    suppressNodeRoleChange = true
-                    model.config.nodeRole = .client
-                    applyRecommendedIfNeeded()
-                    model.save()
-                    serverRoleBlockedMessage = check.message
-                    showServerRoleBlockedAlert = true
-                    return
-                }
-            }
-            applyRecommendedIfNeeded()
-            model.save()
-        }
         .onChange(of: model.config.debugLogging) { _ in model.save() }
-        .onChange(of: model.config.lineEnabled) { _ in model.save() }
+        .onChange(of: model.config.includeMessageBodyInLogs) { _ in model.save() }
+        .onChange(of: model.config.lineEnabled) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.lineDefaultConversation) { _ in model.save() }
         .onChange(of: model.config.linePollIntervalSeconds) { _ in model.save() }
+        .onChange(of: model.config.lineDetectionMode) { _ in model.save() }
+        .onChange(of: model.config.lineFusionThreshold) { _ in model.save() }
+        .onChange(of: model.config.lineEnablePixelSignal) { _ in model.save() }
+        .onChange(of: model.config.lineEnableProcessSignal) { _ in model.save() }
+        .onChange(of: model.config.lineEnableNotificationStoreSignal) { _ in model.save() }
         .onChange(of: model.config.tmuxEnabled) { _ in model.save(); refreshConnectivity() }
-        .onChange(of: model.config.tmuxStatusBarURL) { _ in model.save(); refreshConnectivity() }
-        .onChange(of: model.config.federationEnabled) { _ in model.save(); refreshConnectivity() }
-        .onChange(of: model.config.federationURL) { _ in model.save(); refreshConnectivity() }
-        .onChange(of: model.config.federationToken) { _ in model.save() }
-        .onChange(of: model.config.remoteAccessEnabled) { _ in model.save() }
-        .alert("Cannot enable Server role", isPresented: $showServerRoleBlockedAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(serverRoleBlockedMessage)
-        }
+        .onChange(of: model.config.tmuxSessionModes) { _ in model.save() }
+        .onChange(of: model.config.remoteAccessEnabled) { _ in model.save(); refreshConnectivity() }
+        .onChange(of: model.config.remoteAccessToken) { _ in model.save() }
     }
 
     // MARK: - Header
@@ -138,183 +112,124 @@ struct InlineSettingsView: View {
                 Text("ClawGate")
                     .font(PanelTheme.titleFont)
                     .foregroundStyle(PanelTheme.textPrimary)
-                Text(model.config.nodeRole == .server ? "Server" : "Client")
+                Text("Standalone")
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(PanelTheme.textSecondary)
             }
 
-            Picker("Role", selection: $model.config.nodeRole) {
-                Text("Server").tag(NodeRole.server)
-                Text("Client").tag(NodeRole.client)
-            }
-            .pickerStyle(.segmented)
+            Text("Capabilities are configured directly. LINE is the only machine-local branch.")
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textTertiary)
 
             HStack(spacing: 8) {
                 ActionButton(title: "Apply Recommended", tone: .primary) {
-                    applyRecommended(force: true)
+                    applyRecommended()
                 }
-                Text("Tailscale LAN defaults")
+                Text("tmux direct poll + Gateway direct access")
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(PanelTheme.textTertiary)
             }
         }
     }
 
-    // MARK: - Server Section
-
-    private var serverSection: some View {
-        Group {
-            PanelCard {
-                Text("Tmux")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                Toggle("Enabled", isOn: $model.config.tmuxEnabled)
-                statusRow(state: tmuxState)
-                Text("Feed: \(model.config.tmuxStatusBarURL)")
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textTertiary)
-                    .lineLimit(1)
-            }
-
-            PanelCard {
-                Text("Messenger (LINE)")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                Toggle("Enabled", isOn: $model.config.lineEnabled)
-                if model.config.lineEnabled {
-                    fieldRow("Conversation") {
-                        TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
-                            .textFieldStyle(.plain)
-                            .modifier(PanelInputModifier())
-                    }
-                    Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
-                            value: $model.config.linePollIntervalSeconds, in: 1...30)
+    private var lineSection: some View {
+        PanelCard {
+            Text("LINE")
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textPrimary)
+            Toggle("Enable LINE adapter", isOn: $model.config.lineEnabled)
+            statusRow(state: lineState)
+            if model.config.lineEnabled {
+                fieldRow("Conversation") {
+                    TextField("e.g. John Doe", text: $model.config.lineDefaultConversation)
+                        .textFieldStyle(.plain)
+                        .modifier(PanelInputModifier())
+                }
+                Stepper("Poll: \(model.config.linePollIntervalSeconds)s",
+                        value: $model.config.linePollIntervalSeconds, in: 1...30)
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(PanelTheme.textSecondary)
+                fieldRow("Detect") {
+                    TextField("hybrid", text: $model.config.lineDetectionMode)
+                        .textFieldStyle(.plain)
+                        .modifier(PanelInputModifier())
                 }
+                Stepper("Fusion: \(model.config.lineFusionThreshold)",
+                        value: $model.config.lineFusionThreshold, in: 1...100)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textSecondary)
+                Toggle("Pixel signal", isOn: $model.config.lineEnablePixelSignal)
+                Toggle("Process signal", isOn: $model.config.lineEnableProcessSignal)
+                Toggle("Notification-store signal", isOn: $model.config.lineEnableNotificationStoreSignal)
             }
-
-            PanelCard {
-                Text("Federation")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                Toggle("Enabled", isOn: $model.config.federationEnabled)
-                if model.config.federationEnabled {
-                    Toggle("Remote Access (0.0.0.0)", isOn: $model.config.remoteAccessEnabled)
-                    if !model.config.remoteAccessEnabled {
-                        Text("Remote Access is off — only local clients can connect")
-                            .font(PanelTheme.bodyFont)
-                            .foregroundStyle(PanelTheme.accentYellow)
-                    }
-                    statusRow(state: federationState)
-                    Text("Accepting clients on ws://\(model.config.remoteAccessEnabled ? "0.0.0.0" : "127.0.0.1"):8765/federation")
-                        .font(PanelTheme.bodyFont)
-                        .foregroundStyle(PanelTheme.textTertiary)
-                        .lineLimit(2)
-                    fieldRow("Token") {
-                        SecureField("federation token", text: $model.config.federationToken)
-                            .textFieldStyle(.plain)
-                            .modifier(PanelInputModifier())
-                    }
-                }
-            }
-
-            PanelCard {
-                Text("System")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                if #available(macOS 13.0, *) {
-                    Toggle("Launch at Login", isOn: launchAtLoginBinding)
-                }
-                Toggle("Debug Logging", isOn: $model.config.debugLogging)
-            }
-
-            utilitiesSection
         }
     }
 
-    // MARK: - Client Section
-
-    private var clientSection: some View {
-        Group {
-            PanelCard {
-                Text("Tmux")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                Toggle("Enabled", isOn: $model.config.tmuxEnabled)
-                statusRow(state: tmuxState)
-                Text("Feed: \(model.config.tmuxStatusBarURL)")
+    private var tmuxSection: some View {
+        PanelCard {
+            Text("Tmux")
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textPrimary)
+            Toggle("Enable tmux monitoring", isOn: $model.config.tmuxEnabled)
+            statusRow(state: tmuxState)
+            Text("Source: Built-in tmux poller")
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textTertiary)
+            if model.config.tmuxSessionModes.isEmpty {
+                Text("Session modes are managed from Monitor.")
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(PanelTheme.textTertiary)
-                    .lineLimit(1)
-            }
-
-            PanelCard {
-                Text("Federation")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                Toggle("Enabled", isOn: $model.config.federationEnabled)
-                if model.config.federationEnabled {
-                    statusRow(state: federationState)
-                    fieldRow("Server") {
-                        Menu {
-                            Button("Manual") {
-                                model.config.federationURL = ""
-                            }
-                            Divider()
-                            ForEach(tailscalePeers) { peer in
-                                Button(peerShortLabel(peer)) {
-                                    federationHostBinding.wrappedValue = peer.hostname
-                                }
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text(selectedServerLabel())
-                                    .font(PanelTheme.bodyFont)
-                                    .foregroundStyle(PanelTheme.textPrimary)
-                                    .lineLimit(1)
-                                Spacer(minLength: 0)
-                                Image(systemName: "chevron.down")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(PanelTheme.textSecondary)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .modifier(PanelInputModifier())
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Session modes")
+                        .font(PanelTheme.titleFont)
+                        .foregroundStyle(PanelTheme.textSecondary)
+                    ForEach(model.config.tmuxSessionModes.keys.sorted(), id: \.self) { key in
+                        HStack(spacing: 8) {
+                            Text(key)
+                                .font(PanelTheme.smallFont)
+                                .foregroundStyle(PanelTheme.textSecondary)
+                            Spacer(minLength: 0)
+                            Text(model.config.tmuxSessionModes[key] ?? "ignore")
+                                .font(PanelTheme.smallFont)
+                                .foregroundStyle(PanelTheme.textPrimary)
                         }
-                    }
-
-                    if federationPeerSelectionBinding.wrappedValue.isEmpty {
-                        TextField("server.tailnet.ts.net", text: federationHostBinding)
-                            .textFieldStyle(.plain)
-                            .modifier(PanelInputModifier())
-                    }
-
-                    HStack(spacing: 8) {
-                        ActionButton(title: "Refresh Hosts", tone: .neutral) {
-                            loadTailscalePeers()
-                        }
-                        Text("Detected: \(tailscalePeers.count)")
-                            .font(PanelTheme.bodyFont)
-                            .foregroundStyle(PanelTheme.textTertiary)
                     }
                 }
             }
-
-            PanelCard {
-                Text("System")
-                    .font(PanelTheme.titleFont)
-                    .foregroundStyle(PanelTheme.textPrimary)
-                if #available(macOS 13.0, *) {
-                    Toggle("Launch at Login", isOn: launchAtLoginBinding)
-                }
-                Toggle("Debug Logging", isOn: $model.config.debugLogging)
-            }
-
-            utilitiesSection
         }
     }
 
-    // MARK: - Utilities
+    private var gatewaySection: some View {
+        PanelCard {
+            Text("Gateway")
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textPrimary)
+            Toggle("Allow Gateway to connect", isOn: $model.config.remoteAccessEnabled)
+            statusRow(state: gatewayState)
+            fieldRow("Token") {
+                SecureField("gateway token", text: $model.config.remoteAccessToken)
+                    .textFieldStyle(.plain)
+                    .modifier(PanelInputModifier())
+            }
+            Text(model.config.remoteAccessEnabled ? "Binding on 0.0.0.0:8765" : "Binding on 127.0.0.1:8765")
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textTertiary)
+        }
+    }
+
+    private var systemSection: some View {
+        PanelCard {
+            Text("System")
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textPrimary)
+            if #available(macOS 13.0, *) {
+                Toggle("Launch at Login", isOn: launchAtLoginBinding)
+            }
+            Toggle("Debug Logging", isOn: $model.config.debugLogging)
+            Toggle("Include message body in logs", isOn: $model.config.includeMessageBodyInLogs)
+        }
+    }
 
     @ViewBuilder
     private var utilitiesSection: some View {
@@ -329,8 +244,6 @@ struct InlineSettingsView: View {
             }
         }
     }
-
-    // MARK: - Launch at Login
 
     @available(macOS 13.0, *)
     private var launchAtLoginBinding: Binding<Bool> {
@@ -349,8 +262,6 @@ struct InlineSettingsView: View {
             }
         )
     }
-
-    // MARK: - Status Row
 
     private func statusRow(state: ConnectivityState) -> some View {
         HStack(spacing: 6) {
@@ -371,8 +282,6 @@ struct InlineSettingsView: View {
         )
     }
 
-    // MARK: - Field Row
-
     private func fieldRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .center, spacing: 8) {
             Text(title)
@@ -383,162 +292,15 @@ struct InlineSettingsView: View {
         }
     }
 
-    // MARK: - Federation Bindings
-
-    private var federationHostBinding: Binding<String> {
-        Binding(
-            get: {
-                let (host, _) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
-                return host
-            },
-            set: { newHost in
-                let trimmed = newHost.trimmingCharacters(in: .whitespacesAndNewlines)
-                model.config.federationURL = trimmed.isEmpty ? "" : buildWSURL(host: trimmed, port: 8765, path: "/federation")
-            }
-        )
-    }
-
-    private var federationPeerSelectionBinding: Binding<String> {
-        Binding(
-            get: {
-                let host = federationHostBinding.wrappedValue
-                return tailscalePeers.contains(where: { $0.hostname == host }) ? host : ""
-            },
-            set: { selected in
-                if selected.isEmpty {
-                    model.config.federationURL = ""
-                    return
-                }
-                federationHostBinding.wrappedValue = selected
-            }
-        )
-    }
-
-    private func parseWSURL(_ value: String, defaultHost: String, defaultPort: Int) -> (String, Int) {
-        guard let url = URL(string: value), let host = url.host, !host.isEmpty else {
-            return (defaultHost, defaultPort)
+    private func applyRecommended() {
+        model.config.tmuxEnabled = true
+        model.config.remoteAccessEnabled = true
+        if lineAppRunning() {
+            model.config.lineEnabled = true
         }
-        return (host, url.port ?? defaultPort)
-    }
-
-    private func buildWSURL(host: String, port: Int, path: String) -> String {
-        "ws://\(host):\(port)\(path)"
-    }
-
-    private func peerShortLabel(_ peer: TailscalePeer) -> String {
-        let status = peer.online ? "online" : "offline"
-        return "\(peer.hostname) (\(status))"
-    }
-
-    private func loadTailscalePeers() {
-        tailscalePeers = TailscalePeerService.loadPeers()
-    }
-
-    private func selectedServerLabel() -> String {
-        let selected = federationPeerSelectionBinding.wrappedValue
-        if selected.isEmpty { return "Manual (select server)" }
-        if let peer = tailscalePeers.first(where: { $0.hostname == selected }) {
-            return peerShortLabel(peer)
-        }
-        return selected
-    }
-
-    // MARK: - Server Prerequisites
-
-    private func evaluateServerRolePrerequisites() -> (ok: Bool, message: String) {
-        let openClawReady: Bool
-        if let gateway = readOpenClawGatewayConfig() {
-            openClawReady = probeTCPBlocking(host: "127.0.0.1", port: gateway.port, timeout: 0.8)
-        } else {
-            openClawReady = false
-        }
-
-        let lineReady = NSRunningApplication
-            .runningApplications(withBundleIdentifier: "jp.naver.line.mac")
-            .first != nil
-
-        guard openClawReady && lineReady else {
-            var lines: [String] = []
-            if !openClawReady {
-                lines.append("OpenClaw gateway is not running on this machine.")
-            }
-            if !lineReady {
-                lines.append("Messenger app (LINE) is not running.")
-            }
-            lines.append("Start both, then select Server again.")
-            return (false, lines.joined(separator: "\n"))
-        }
-        return (true, "")
-    }
-
-    private func readOpenClawGatewayConfig() -> (port: Int, token: String)? {
-        let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
-        guard let data = FileManager.default.contents(atPath: configPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let gateway = json["gateway"] as? [String: Any],
-              let auth = gateway["auth"] as? [String: Any],
-              let token = auth["token"] as? String,
-              !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
-        }
-        let port = gateway["port"] as? Int ?? 18789
-        guard (1...65535).contains(port) else { return nil }
-        return (port: port, token: token)
-    }
-
-    // MARK: - Recommended Settings
-
-    private func applyRecommended(force: Bool = false) {
-        if force || model.config.tmuxStatusBarURL.isEmpty {
-            model.config.tmuxStatusBarURL = "ws://localhost:8080/ws/sessions"
-        }
-
-        switch model.config.nodeRole {
-        case .server:
-            if force || !model.config.lineEnabled {
-                model.config.lineEnabled = true
-            }
-            if force || !model.config.federationEnabled {
-                model.config.federationEnabled = true
-            }
-            if force || !model.config.tmuxEnabled {
-                model.config.tmuxEnabled = true
-            }
-            if force || !model.config.remoteAccessEnabled {
-                model.config.remoteAccessEnabled = true
-            }
-        case .client:
-            if force || !model.config.tmuxEnabled {
-                model.config.tmuxEnabled = true
-            }
-            if force || !model.config.federationEnabled {
-                model.config.federationEnabled = true
-            }
-            if force || model.config.lineEnabled {
-                model.config.lineEnabled = false
-            }
-            if force || model.config.federationURL.isEmpty {
-                let preferredHost = tailscalePeers.first(where: { $0.online && $0.hostname != localMachineName() })?.hostname
-                    ?? tailscalePeers.first(where: { $0.online })?.hostname
-                    ?? tailscalePeers.first?.hostname
-                    ?? "sshmacmini"
-                model.config.federationURL = buildWSURL(host: preferredHost, port: 8765, path: "/federation")
-            }
-        }
-
         model.save()
         refreshConnectivity()
     }
-
-    private func applyRecommendedIfNeeded() {
-        applyRecommended(force: false)
-    }
-
-    private func localMachineName() -> String {
-        Host.current().localizedName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-    }
-
-    // MARK: - Connectivity Probes
 
     private func startProbeTimer() {
         stopProbeTimer()
@@ -553,8 +315,17 @@ struct InlineSettingsView: View {
     }
 
     private func refreshConnectivity() {
+        lineState = model.config.lineEnabled
+            ? (lineAppRunning() ? .online : .offline)
+            : .unknown
         probeTmux()
-        probeFederation()
+        gatewayState = model.config.remoteAccessEnabled ? .online : .unknown
+    }
+
+    private func lineAppRunning() -> Bool {
+        NSRunningApplication
+            .runningApplications(withBundleIdentifier: "jp.naver.line.mac")
+            .first != nil
     }
 
     private func probeTmux() {
@@ -562,106 +333,12 @@ struct InlineSettingsView: View {
             tmuxState = .unknown
             return
         }
-        let (host, port) = parseWSURL(model.config.tmuxStatusBarURL, defaultHost: "localhost", defaultPort: 8080)
-        guard !host.isEmpty else {
-            tmuxState = .unknown
-            return
-        }
         tmuxState = .checking
-        probeTCP(host: host, port: port) { ok in
-            tmuxState = ok ? .online : .offline
-        }
-    }
-
-    private func probeFederation() {
-        guard model.config.federationEnabled else {
-            federationState = .unknown
-            return
-        }
-        if model.config.nodeRole == .server {
-            federationState = .online
-            return
-        }
-        let (host, port) = parseWSURL(model.config.federationURL, defaultHost: "", defaultPort: 8765)
-        guard !host.isEmpty else {
-            federationState = .unknown
-            return
-        }
-        federationState = .checking
-        probeTCP(host: host, port: port) { ok in
-            federationState = ok ? .online : .offline
-        }
-    }
-
-    private func probeTCP(host: String, port: Int, timeout: TimeInterval = 1.2, completion: @escaping (Bool) -> Void) {
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-            completion(false)
-            return
-        }
-
-        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
-        let queue = DispatchQueue(label: "clawgate.settings.probe", qos: .utility)
-        var done = false
-
-        func finish(_ ok: Bool) {
-            if done { return }
-            done = true
-            conn.cancel()
-            DispatchQueue.main.async { completion(ok) }
-        }
-
-        conn.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                finish(true)
-            case .failed, .cancelled:
-                finish(false)
-            default:
-                break
+        DispatchQueue.global(qos: .utility).async {
+            let ok = ((try? TmuxShell.listSessions())?.isEmpty == false)
+            DispatchQueue.main.async {
+                tmuxState = ok ? .online : .offline
             }
         }
-
-        conn.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + timeout) {
-            finish(false)
-        }
-    }
-
-    private func probeTCPBlocking(host: String, port: Int, timeout: TimeInterval) -> Bool {
-        guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
-            return false
-        }
-
-        let conn = NWConnection(host: NWEndpoint.Host(host), port: nwPort, using: .tcp)
-        let queue = DispatchQueue(label: "clawgate.settings.server-gate.probe", qos: .utility)
-        let semaphore = DispatchSemaphore(value: 0)
-        var result = false
-        var done = false
-
-        func finish(_ ok: Bool) {
-            if done { return }
-            done = true
-            result = ok
-            conn.cancel()
-            semaphore.signal()
-        }
-
-        conn.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                finish(true)
-            case .failed, .cancelled:
-                finish(false)
-            default:
-                break
-            }
-        }
-
-        conn.start(queue: queue)
-        queue.asyncAfter(deadline: .now() + timeout) {
-            finish(false)
-        }
-        _ = semaphore.wait(timeout: .now() + timeout + 0.2)
-        return result
     }
 }

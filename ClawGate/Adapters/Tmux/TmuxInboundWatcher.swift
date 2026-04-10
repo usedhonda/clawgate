@@ -23,7 +23,7 @@ final class TmuxInboundWatcher {
         let questionID: String
     }
 
-    private let ccClient: CCStatusBarClient
+    private let sessionSource: TmuxSessionSource
     private let eventBus: EventBus
     private let logger: AppLogger
     private let configStore: ConfigStore
@@ -56,34 +56,34 @@ final class TmuxInboundWatcher {
     private var lastEmittedQuestionFingerprint: [String: QuestionDedupState] = [:]
     private let questionDedupInterval: TimeInterval = 300 // 5 minutes
 
-    init(ccClient: CCStatusBarClient, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
-        self.ccClient = ccClient
+    init(ccClient: TmuxSessionSource, eventBus: EventBus, logger: AppLogger, configStore: ConfigStore) {
+        self.sessionSource = ccClient
         self.eventBus = eventBus
         self.logger = logger
         self.configStore = configStore
     }
 
     func start() {
-        ccClient.onStateChange = { [weak self] session, oldStatus, newStatus in
+        sessionSource.onStateChange = { [weak self] session, oldStatus, newStatus in
             self?.handleStateChange(session: session, oldStatus: oldStatus, newStatus: newStatus, source: "ws")
         }
-        ccClient.onProgress = { [weak self] session in
+        sessionSource.onProgress = { [weak self] session in
             self?.handleProgress(session: session)
         }
         startProgressTimer()
         initializePromptStates()
-        logger.log(.info, "TmuxInboundWatcher: started (ws only)")
+        logger.log(.info, "TmuxInboundWatcher: started")
     }
 
     func stop() {
-        ccClient.onStateChange = nil
-        ccClient.onProgress = nil
+        sessionSource.onStateChange = nil
+        sessionSource.onProgress = nil
         stopProgressTimer()
         resetPromptStates()
         logger.log(.info, "TmuxInboundWatcher: stopped")
     }
 
-    private func handleStateChange(session: CCStatusBarClient.CCSession,
+    private func handleStateChange(session: SessionSnapshot,
                                    oldStatus: String, newStatus: String,
                                    source: String = "ws") {
         // Time-based dedup: suppress duplicate fires for the same project+status within 5 seconds
@@ -260,7 +260,7 @@ final class TmuxInboundWatcher {
         }
     }
 
-    private func autoApprovePermission(session: CCStatusBarClient.CCSession) {
+    private func autoApprovePermission(session: SessionSnapshot) {
         guard let target = session.tmuxTarget else { return }
         do {
             try TmuxShell.sendSpecialKey(target: target, key: "y")
@@ -306,7 +306,7 @@ final class TmuxInboundWatcher {
 
     /// Emit a question event to the EventBus so the reviewer agent can receive it.
     /// Used from both the permission_prompt branch and captureAndEmit.
-    private func emitQuestionEvent(session: CCStatusBarClient.CCSession, question: DetectedQuestion, mode: String, context: String? = nil, optionsContext: String? = nil) {
+    private func emitQuestionEvent(session: SessionSnapshot, question: DetectedQuestion, mode: String, context: String? = nil, optionsContext: String? = nil) {
         // Question fingerprint dedup: suppress re-emit of the same question within 5 minutes.
         // In observe mode no one auto-answers, so the same question can re-trigger on state cycles.
         let fingerprint = (question.questionText + question.options.joined()).hashValue
@@ -363,7 +363,7 @@ final class TmuxInboundWatcher {
 
     private func emitProgressForRunningSessions() {
         let config = configStore.load()
-        let sessions = ccClient.allSessions()
+        let sessions = sessionSource.allSessions()
 
         for session in sessions {
             guard session.status == "running" else { continue }
@@ -452,7 +452,7 @@ final class TmuxInboundWatcher {
 
     /// Set all currently known sessions to `unknown` at startup.
     private func initializePromptStates() {
-        let sessions = ccClient.allSessions()
+        let sessions = sessionSource.allSessions()
         BlockingWork.queue.async { [weak self] in
             guard let self else { return }
             for session in sessions {
@@ -464,7 +464,7 @@ final class TmuxInboundWatcher {
 
     /// Reset all currently known sessions to `unknown` at shutdown.
     private func resetPromptStates() {
-        let sessions = ccClient.allSessions()
+        let sessions = sessionSource.allSessions()
         BlockingWork.queue.async { [weak self] in
             guard let self else { return }
             for session in sessions {
@@ -479,7 +479,7 @@ final class TmuxInboundWatcher {
     /// Answer a single question step, then check for follow-up wizard steps.
     /// Multi-step wizards (AskUserQuestion with tabs) keep the session in waiting_input
     /// without triggering a state change, so we retry after each answer.
-    private func autoAnswerQuestion(session: CCStatusBarClient.CCSession,
+    private func autoAnswerQuestion(session: SessionSnapshot,
                                     question: DetectedQuestion, target: String) {
         answerSingleQuestion(question: question, target: target, project: session.project)
 
@@ -541,10 +541,10 @@ final class TmuxInboundWatcher {
 
     /// Returns true if this session is the most-active one for its (sessionType, project).
     /// Peers with higher status priority -> this session is NOT the representative -> return false.
-    private func isRepresentativeSession(_ session: CCStatusBarClient.CCSession) -> Bool {
+    private func isRepresentativeSession(_ session: SessionSnapshot) -> Bool {
         let priority = ["running": 2, "waiting_input": 1]
         let selfPriority = priority[session.status] ?? 0
-        let peers = ccClient.sessions(forProject: session.project)
+        let peers = sessionSource.sessions(forProject: session.project)
             .filter { $0.sessionType == session.sessionType && $0.id != session.id }
             .filter { $0.tmuxTarget != nil }  // Exclude stale sessions without tmux target
         return !peers.contains { (priority[$0.status] ?? 0) > selfPriority }
@@ -558,7 +558,7 @@ final class TmuxInboundWatcher {
     }
 
     /// Handle progress events from cc-status-bar WS (session.progress with pane_capture)
-    private func handleProgress(session: CCStatusBarClient.CCSession) {
+    private func handleProgress(session: SessionSnapshot) {
         let config = configStore.load()
         let mode = config.tmuxSessionModes[AppConfig.modeKey(sessionType: session.sessionType, project: session.project)] ?? "ignore"
         guard mode != "ignore" else { return }
@@ -603,7 +603,7 @@ final class TmuxInboundWatcher {
         logger.log(.debug, "TmuxInboundWatcher: emitted ws-progress for \(session.project)")
     }
 
-    private func captureAndEmit(session: CCStatusBarClient.CCSession, mode: String) {
+    private func captureAndEmit(session: SessionSnapshot, mode: String) {
         debugLog("START project=\(session.project) sessionType=\(session.sessionType) mode=\(mode) tmuxTarget=\(session.tmuxTarget ?? "nil")")
 
         guard let target = session.tmuxTarget else {

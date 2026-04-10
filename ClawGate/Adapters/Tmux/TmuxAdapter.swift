@@ -6,33 +6,33 @@ final class TmuxAdapter: AdapterProtocol {
     let name = "tmux"
     let bundleIdentifier = "" // No AX dump support
 
-    private let ccClient: CCStatusBarClient
+    private let sessionSource: TmuxSessionSource
     private let configStore: ConfigStore
     private let logger: AppLogger
 
-    init(ccClient: CCStatusBarClient, configStore: ConfigStore, logger: AppLogger) {
-        self.ccClient = ccClient
+    init(ccClient: TmuxSessionSource, configStore: ConfigStore, logger: AppLogger) {
+        self.sessionSource = ccClient
         self.configStore = configStore
         self.logger = logger
     }
 
     /// Returns the mode for a session: "ignore", "observe", "auto", or "autonomous".
-    private func sessionMode(for session: CCStatusBarClient.CCSession) -> String {
+    private func sessionMode(for session: SessionSnapshot) -> String {
         let modes = configStore.load().tmuxSessionModes
         return modes[AppConfig.modeKey(sessionType: session.sessionType, project: session.project)] ?? "ignore"
     }
 
     /// Returns sessions that have a mode set (observe or autonomous).
-    private func activeSessions() -> [CCStatusBarClient.CCSession] {
+    private func activeSessions() -> [SessionSnapshot] {
         let modes = configStore.load().tmuxSessionModes
-        return ccClient.allSessions().filter {
+        return sessionSource.allSessions().filter {
             modes[AppConfig.modeKey(sessionType: $0.sessionType, project: $0.project)] != nil
         }
     }
 
     /// Returns all sessions discovered from cc-status-bar, regardless of mode.
-    private func discoveredSessions() -> [CCStatusBarClient.CCSession] {
-        ccClient.allSessions()
+    private func discoveredSessions() -> [SessionSnapshot] {
+        sessionSource.allSessions()
     }
 
     func sendMessage(payload: SendPayload) throws -> (SendResult, [StepLog]) {
@@ -53,19 +53,19 @@ final class TmuxAdapter: AdapterProtocol {
 
         // Resolve session: pick the one with an authoritative mode (autonomous/auto).
         // A project may have both CC and Codex sessions; only the configured one should be used.
-        let candidates = ccClient.sessions(forProject: project)
+        let candidates = sessionSource.sessions(forProject: project)
         guard !candidates.isEmpty else {
             throw BridgeRuntimeError(
                 code: "session_not_found",
                 message: "No Claude Code session found for project '\(project)'",
                 retriable: true,
                 failedStep: "resolve_target",
-                details: "Available: \(ccClient.allSessions().map(\.project).joined(separator: ", "))"
+                details: "Available: \(sessionSource.allSessions().map(\.project).joined(separator: ", "))"
             )
         }
 
         // Find the session whose mode allows sending (autonomous or auto)
-        let sessionWithMode: (session: CCStatusBarClient.CCSession, mode: String)? = candidates.lazy.compactMap { [self] candidate in
+        let sessionWithMode: (session: SessionSnapshot, mode: String)? = candidates.lazy.compactMap { [self] candidate in
             let m = sessionMode(for: candidate)
             return (m == "autonomous" || m == "auto") ? (candidate, m) : nil
         }.first
@@ -243,14 +243,14 @@ final class TmuxAdapter: AdapterProtocol {
     /// Capture pane output for a specific project by name.
     /// Searches all known sessions (not just active/configured ones) so the reviewer agent can inspect any tmux pane.
     func getMessages(limit: Int, forProject project: String) throws -> MessageList {
-        let candidates = ccClient.sessions(forProject: project)
+        let candidates = sessionSource.sessions(forProject: project)
         guard let session = candidates.first, let target = session.tmuxTarget else {
             throw BridgeRuntimeError(
                 code: "session_not_found",
                 message: "No tmux session found for project '\(project)'",
                 retriable: false,
                 failedStep: "resolve_target",
-                details: "Available: \(ccClient.allSessions().map(\.project).joined(separator: ", "))"
+                details: "Available: \(sessionSource.allSessions().map(\.project).joined(separator: ", "))"
             )
         }
 
@@ -505,7 +505,7 @@ final class TmuxAdapter: AdapterProtocol {
         // Show all discovered sessions so mode can be changed from ignore -> observe/auto/autonomous.
         let sessions = discoveredSessions()
         let statusPriority = ["running": 2, "waiting_input": 1]
-        var bestByProject: [String: CCStatusBarClient.CCSession] = [:]
+        var bestByProject: [String: SessionSnapshot] = [:]
         for session in sessions {
             if let existing = bestByProject[session.project] {
                 let existingScore = statusPriority[existing.status] ?? 0
@@ -544,7 +544,7 @@ final class TmuxAdapter: AdapterProtocol {
 
     /// Public wrapper for detectPromptDraftState — used by /v1/tmux/prompt-state endpoint.
     func detectPromptState(forProject project: String) -> PromptDraftDetection {
-        let candidates = ccClient.sessions(forProject: project)
+        let candidates = sessionSource.sessions(forProject: project)
         guard let session = candidates.first, let target = session.tmuxTarget else {
             return PromptDraftDetection(state: .unknown, draft: "", reason: "session_not_found")
         }

@@ -218,6 +218,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         panel.setContentSize(NSSize(width: w, height: h))
     }
 
+    private func capabilityRoleLabel() -> String {
+        let cfg = runtime.configStore.load()
+        return "line=\(cfg.lineEnabled) tmux=\(cfg.tmuxEnabled) remote=\(cfg.remoteAccessEnabled)"
+    }
+
     @objc private func toggleMainPanel(_ sender: Any?) {
         // Right-click → show context menu with Quit
         if let event = NSApp.currentEvent, event.type == .rightMouseUp {
@@ -298,7 +303,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func logGhosttyFollow(_ message: String, level: String = "debug") {
         guard shouldDebugGhosttyFollow() else { return }
-        let role = runtime.configStore.load().nodeRole.rawValue
+        let role = capabilityRoleLabel()
         opsLogStore.append(
             level: level,
             event: "ghostty_follow",
@@ -773,7 +778,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     /// Called by AppRuntime after CCStatusBarClient updates sessions.
-    func refreshSessionsMenu(sessions: [CCStatusBarClient.CCSession]) {
+    func refreshSessionsMenu(sessions: [SessionSnapshot]) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.updateStatusIcon()
@@ -790,10 +795,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// Deduplicate sessions by (sessionType, project): keep the most-active one.
     /// Priority: running (2) > waiting_input (1) > other (0)
     private func deduplicateByProject(
-        _ sessions: [CCStatusBarClient.CCSession]
-    ) -> [CCStatusBarClient.CCSession] {
+        _ sessions: [SessionSnapshot]
+    ) -> [SessionSnapshot] {
         let priority = ["running": 2, "waiting_input": 1]
-        var best: [String: CCStatusBarClient.CCSession] = [:]
+        var best: [String: SessionSnapshot] = [:]
         for session in sessions {
             let key = "\(session.sessionType):\(session.project)"
             if let existing = best[key] {

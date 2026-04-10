@@ -131,7 +131,7 @@ final class LineHealthCaretaker {
 
         let config = configStore.load()
         let defaultConversation = config.lineDefaultConversation.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard config.nodeRole != .client, config.lineEnabled else {
+        guard config.lineEnabled else {
             updateState(lastAssessmentReason: "inactive_line_disabled")
             return
         }

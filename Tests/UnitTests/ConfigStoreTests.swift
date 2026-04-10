@@ -29,43 +29,65 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(cfg.federationReconnectMaxSeconds, 60)
     }
 
-    func testSaveLoadRoundTrip() {
+    func testSaveLoadRoundTripForSupportedSettings() {
         let store = ConfigStore(defaults: freshDefaults("cfg-roundtrip"))
 
         var cfg = AppConfig.default
-        cfg.nodeRole = .client
         cfg.debugLogging = true
         cfg.includeMessageBodyInLogs = true
         cfg.lineDefaultConversation = "Test User"
         cfg.linePollIntervalSeconds = 5
         cfg.tmuxEnabled = true
-        cfg.tmuxStatusBarURL = "ws://custom:9999/sessions"
         cfg.tmuxSessionModes = ["cc:project-a": "autonomous", "cc:project-b": "observe"]
         cfg.remoteAccessEnabled = true
         cfg.remoteAccessToken = "test-token"
-        cfg.federationEnabled = true
-        cfg.federationURL = "ws://remote:9100/federation"
-        cfg.federationToken = "fed-token"
-        cfg.federationReconnectMaxSeconds = 120
 
         store.save(cfg)
         let loaded = store.load()
 
-        XCTAssertEqual(loaded.nodeRole, .client)
         XCTAssertEqual(loaded.debugLogging, true)
         XCTAssertEqual(loaded.includeMessageBodyInLogs, true)
         XCTAssertEqual(loaded.lineDefaultConversation, "Test User")
         XCTAssertEqual(loaded.linePollIntervalSeconds, 5)
         XCTAssertEqual(loaded.tmuxEnabled, true)
-        XCTAssertEqual(loaded.tmuxStatusBarURL, "ws://custom:9999/sessions")
         XCTAssertEqual(loaded.tmuxSessionModes["cc:project-a"], "autonomous")
         XCTAssertEqual(loaded.tmuxSessionModes["cc:project-b"], "observe")
         XCTAssertEqual(loaded.remoteAccessEnabled, true)
         XCTAssertEqual(loaded.remoteAccessToken, "test-token")
-        XCTAssertEqual(loaded.federationEnabled, true)
-        XCTAssertEqual(loaded.federationURL, "ws://remote:9100/federation")
-        XCTAssertEqual(loaded.federationToken, "fed-token")
-        XCTAssertEqual(loaded.federationReconnectMaxSeconds, 120)
+    }
+
+    func testSaveClearsLegacyRoleAndFederationKeys() {
+        let defaults = freshDefaults("cfg-legacy-save-clear")
+        let store = ConfigStore(defaults: defaults)
+
+        defaults.set("server", forKey: "clawgate.nodeRole")
+        defaults.set("ws://legacy:8080/ws/sessions", forKey: "clawgate.tmuxStatusBarUrl")
+        defaults.set(true, forKey: "clawgate.federationEnabled")
+        defaults.set("ws://legacy:8765/federation", forKey: "clawgate.federationURL")
+        defaults.set("legacy-fed-token", forKey: "clawgate.federationToken")
+        defaults.set(120, forKey: "clawgate.federationReconnectMaxSeconds")
+
+        var cfg = store.load()
+        cfg.remoteAccessToken = "new-remote-token"
+        store.save(cfg)
+
+        XCTAssertNil(defaults.object(forKey: "clawgate.nodeRole"))
+        XCTAssertNil(defaults.object(forKey: "clawgate.tmuxStatusBarUrl"))
+        XCTAssertNil(defaults.object(forKey: "clawgate.federationEnabled"))
+        XCTAssertNil(defaults.object(forKey: "clawgate.federationURL"))
+        XCTAssertNil(defaults.object(forKey: "clawgate.federationToken"))
+        XCTAssertNil(defaults.object(forKey: "clawgate.federationReconnectMaxSeconds"))
+        XCTAssertEqual(defaults.string(forKey: "clawgate.remoteAccessToken"), "new-remote-token")
+    }
+
+    func testMigrationAbsorbsFederationTokenIntoRemoteAccessToken() {
+        let defaults = freshDefaults("cfg-fed-token-migrate")
+        defaults.set("legacy-fed-token", forKey: "clawgate.federationToken")
+
+        let store = ConfigStore(defaults: defaults)
+        let cfg = store.load()
+
+        XCTAssertEqual(cfg.remoteAccessToken, "legacy-fed-token")
     }
 
     func testPollIntervalMigration() {

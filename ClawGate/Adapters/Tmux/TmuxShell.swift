@@ -3,6 +3,18 @@ import Foundation
 /// Thin wrapper around the `tmux` CLI.
 /// All methods are synchronous and should be called from `BlockingWork.queue`.
 enum TmuxShell {
+    struct PaneDescriptor {
+        let session: String
+        let window: String
+        let pane: String
+        let currentCommand: String
+        let title: String
+        let currentPath: String
+        let tty: String
+        let isAttached: Bool
+
+        var target: String { "\(session):\(window).\(pane)" }
+    }
 
     private static let candidatePaths = [
         "/opt/homebrew/bin/tmux",
@@ -73,6 +85,31 @@ enum TmuxShell {
             .split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    /// List all panes with enough metadata for direct session discovery.
+    static func listPanes() throws -> [PaneDescriptor] {
+        let output = try run(arguments: [
+            "list-panes", "-a", "-F",
+            "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_current_command}\t#{pane_title}\t#{pane_current_path}\t#{pane_tty}\t#{session_attached}"
+        ])
+
+        return output
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                let parts = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+                guard parts.count >= 8 else { return nil }
+                return PaneDescriptor(
+                    session: parts[0],
+                    window: parts[1],
+                    pane: parts[2],
+                    currentCommand: parts[3],
+                    title: parts[4],
+                    currentPath: parts[5],
+                    tty: parts[6],
+                    isAttached: parts[7] == "1"
+                )
+            }
     }
 
     /// Keys that must NEVER be sent — they exit Claude Code to raw shell.

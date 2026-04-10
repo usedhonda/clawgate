@@ -222,7 +222,7 @@ final class ConfigStore {
 
     func save(_ cfg: AppConfig) {
         defaults.set(cfg.debugLogging, forKey: Keys.debugLogging)
-        defaults.set(cfg.nodeRole.rawValue, forKey: Keys.nodeRole)
+        defaults.removeObject(forKey: Keys.nodeRole)
         defaults.set(cfg.includeMessageBodyInLogs, forKey: Keys.includeMessageBodyInLogs)
         defaults.set(cfg.lineEnabled, forKey: Keys.lineEnabled)
         defaults.set(cfg.lineDefaultConversation, forKey: Keys.lineDefaultConversation)
@@ -234,7 +234,7 @@ final class ConfigStore {
         defaults.set(cfg.lineEnableNotificationStoreSignal, forKey: Keys.lineEnableNotificationStoreSignal)
         // Tmux
         defaults.set(cfg.tmuxEnabled, forKey: Keys.tmuxEnabled)
-        defaults.set(cfg.tmuxStatusBarURL, forKey: Keys.tmuxStatusBarURL)
+        defaults.removeObject(forKey: Keys.tmuxStatusBarURL)
         if let json = try? JSONEncoder().encode(cfg.tmuxSessionModes),
            let str = String(data: json, encoding: .utf8) {
             defaults.set(str, forKey: Keys.tmuxSessionModes)
@@ -248,10 +248,10 @@ final class ConfigStore {
         // Remote / Federation
         defaults.set(cfg.remoteAccessEnabled, forKey: Keys.remoteAccessEnabled)
         defaults.set(cfg.remoteAccessToken, forKey: Keys.remoteAccessToken)
-        defaults.set(cfg.federationEnabled, forKey: Keys.federationEnabled)
-        defaults.set(cfg.federationURL, forKey: Keys.federationURL)
-        defaults.set(cfg.federationToken, forKey: Keys.federationToken)
-        defaults.set(cfg.federationReconnectMaxSeconds, forKey: Keys.federationReconnectMaxSeconds)
+        defaults.removeObject(forKey: Keys.federationEnabled)
+        defaults.removeObject(forKey: Keys.federationURL)
+        defaults.removeObject(forKey: Keys.federationToken)
+        defaults.removeObject(forKey: Keys.federationReconnectMaxSeconds)
     }
 
     private func migrateIfNeeded() {
@@ -302,6 +302,15 @@ final class ConfigStore {
                     defaults.set(str, forKey: Keys.tmuxSessionModes)
                 }
             }
+        }
+
+        // One-time absorb federation token into remote access token.
+        let remoteToken = defaults.string(forKey: Keys.remoteAccessToken)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let federationToken = defaults.string(forKey: Keys.federationToken)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if remoteToken.isEmpty, !federationToken.isEmpty {
+            defaults.set(federationToken, forKey: Keys.remoteAccessToken)
         }
     }
 }
