@@ -206,7 +206,7 @@ struct InlineSettingsView: View {
                 }
             }
             fieldRow("Port") {
-                TextField("18789", value: $model.config.openclawPort, format: .number)
+                TextField("18789", value: $model.config.openclawPort, format: .number.grouping(.never))
                     .textFieldStyle(.plain)
                     .modifier(PanelInputModifier())
             }
