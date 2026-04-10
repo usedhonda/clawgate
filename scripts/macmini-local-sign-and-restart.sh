@@ -10,16 +10,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
-CERT_NAME="ClawGate Dev"
 
-# Candidate keychains that may hold the "ClawGate Dev" identity.
-# macmini history note: the working private key currently lives in
-# login_renamed_1.keychain-db (created during a past recovery on 2026-03-18).
-# The script auto-detects which keychain actually has the identity so
-# future moves don't break the flow.
+# Pull in SIGNING_ID from release.env if present. Preferred signing identity
+# is Developer ID Application (stable TCC binding across rebuilds via Team ID).
+# Legacy self-signed "ClawGate Dev" is kept as a fallback for older macmini
+# setups that were never migrated.
+if [[ -f "$PROJECT_PATH/.local/secrets/release.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a; source "$PROJECT_PATH/.local/secrets/release.env"; set +a
+fi
+DEFAULT_DEVID="Developer ID Application: Yuzuru Honda (F588423ZWS)"
+PREFERRED_SIGNING_ID="${SIGNING_ID:-$DEFAULT_DEVID}"
+LEGACY_CERT_NAME="ClawGate Dev"
+
+# Candidate keychains that may hold a usable signing identity. Order matters:
+# the primary login keychain is preferred (Developer ID lives there after the
+# 2026-04-10 migration); login_renamed_1 is kept as a fallback because the
+# legacy ClawGate Dev self-signed cert still lives there.
 KEYCHAIN_CANDIDATES=(
-  "$HOME/Library/Keychains/login_renamed_1.keychain-db"
   "$HOME/Library/Keychains/login.keychain-db"
+  "$HOME/Library/Keychains/login_renamed_1.keychain-db"
 )
 
 while [[ $# -gt 0 ]]; do
@@ -43,24 +53,41 @@ cd "$PROJECT_PATH"
 
 echo "[1/6] Locate signing keychain"
 SIGNING_KEYCHAIN=""
+RESOLVED_SIGNING_ID=""
+# Unlock every candidate keychain so find-identity can see it, and prefer
+# the Developer ID identity. Fall back to the legacy self-signed cert.
 for kc in "${KEYCHAIN_CANDIDATES[@]}"; do
-  if [[ ! -f "$kc" ]]; then
-    continue
-  fi
-  if ! security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc" >/dev/null 2>&1; then
+  [[ -f "$kc" ]] || continue
+  security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc" >/dev/null 2>&1 || {
     echo "  - unlock failed: $kc" >&2
     continue
-  fi
-  if security find-identity -v -p codesigning "$kc" 2>/dev/null | grep -q "$CERT_NAME"; then
+  }
+done
+for kc in "${KEYCHAIN_CANDIDATES[@]}"; do
+  [[ -f "$kc" ]] || continue
+  if security find-identity -v -p codesigning "$kc" 2>/dev/null | grep -qF "$PREFERRED_SIGNING_ID"; then
     SIGNING_KEYCHAIN="$kc"
-    echo "  - identity found in: $kc"
+    RESOLVED_SIGNING_ID="$PREFERRED_SIGNING_ID"
+    echo "  - Developer ID identity found in: $kc"
     break
   fi
 done
 if [[ -z "$SIGNING_KEYCHAIN" ]]; then
-  echo "ERROR: '$CERT_NAME' identity not found in any known keychain." >&2
-  echo "Checked:" >&2
-  printf '  - %s\n' "${KEYCHAIN_CANDIDATES[@]}" >&2
+  for kc in "${KEYCHAIN_CANDIDATES[@]}"; do
+    [[ -f "$kc" ]] || continue
+    if security find-identity -v -p codesigning "$kc" 2>/dev/null | grep -q "$LEGACY_CERT_NAME"; then
+      SIGNING_KEYCHAIN="$kc"
+      RESOLVED_SIGNING_ID="$LEGACY_CERT_NAME"
+      echo "  - legacy '$LEGACY_CERT_NAME' identity found in: $kc"
+      break
+    fi
+  done
+fi
+if [[ -z "$SIGNING_KEYCHAIN" ]]; then
+  echo "ERROR: no usable signing identity found." >&2
+  echo "  Wanted: '$PREFERRED_SIGNING_ID' (preferred) or '$LEGACY_CERT_NAME' (fallback)" >&2
+  echo "  Checked:" >&2
+  printf '    - %s\n' "${KEYCHAIN_CANDIDATES[@]}" >&2
   exit 1
 fi
 
@@ -90,12 +117,12 @@ if [[ -d "$BUILD_BUNDLE" ]]; then
   cp -R "$BUILD_BUNDLE" "$DEST_BUNDLE"
 fi
 
-echo "[5/6] Sign with $CERT_NAME (keychain: $SIGNING_KEYCHAIN)"
+echo "[5/6] Sign with $RESOLVED_SIGNING_ID (keychain: $SIGNING_KEYCHAIN)"
 codesign --force --deep --options runtime \
   --identifier com.clawgate.app \
   --entitlements ClawGate.entitlements \
   --keychain "$SIGNING_KEYCHAIN" \
-  --sign "$CERT_NAME" ClawGate.app
+  --sign "$RESOLVED_SIGNING_ID" ClawGate.app
 
 echo "[6/6] Restart ClawGate + OpenClaw gateway"
 ./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-sign
