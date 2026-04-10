@@ -92,7 +92,7 @@ async function startPolling() {
     }
 
     const data = await response.json();
-    cursor = typeof data?.nextCursor === "string" ? data.nextCursor : cursor;
+    if (data?.next_cursor != null) cursor = String(data.next_cursor);
     notifySettingsUpdated({ connected: true, cursor });
 
     const events = Array.isArray(data?.events) ? data.events : [];
