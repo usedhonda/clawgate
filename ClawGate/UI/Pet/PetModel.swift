@@ -743,15 +743,6 @@ final class PetModel: NSObject, ObservableObject {
         startScreenshotWatcher()
         startHideCheck()
 
-        // Listen for chrome page capture from bridge
-        NotificationCenter.default.addObserver(forName: .petChromePage, object: nil, queue: .main) { [weak self] notif in
-            guard let self,
-                  let url = notif.userInfo?["url"] as? String,
-                  let title = notif.userInfo?["title"] as? String,
-                  let content = notif.userInfo?["content"] as? String else { return }
-            self.summonChromePage(url: url, title: title, content: content)
-        }
-
         // Listen for bubble_notify from bridge
         NotificationCenter.default.addObserver(forName: .petBubbleNotify, object: nil, queue: .main) { [weak self] notif in
             guard let self, let text = notif.userInfo?["text"] as? String else {
@@ -1213,13 +1204,6 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func addSummonResult(text: String, source: String) {
-        // Chrome page response: show in bubble (🌐 prefix → VibeTerm TTS mirror) + summon history
-        if source == "chrome_page" {
-            let msg = OpenClawChatMessage(role: .assistant, text: "🌐 " + text)
-            showNotification(msg)
-            appendSummonEntry(text: text, source: source)
-            return
-        }
         // Draft reply detection: if messaging app + <draft_reply> tag → place in input field
         if source == "omakase",
            let ctx = pendingOmakaseContext,
@@ -1384,8 +1368,6 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Timeout for waiting on Chrome extension response (seconds).
     private var pendingChromeCapture = false
-    /// URLs already summoned — same URL is never sent to Chi twice.
-    private var sentChromeURLs: Set<String> = []
 
     /// User clicked "Get this page" from the right-click menu.
     /// Fires chrome_capture_request into the EventBus so the Chrome extension can pick it up.
@@ -1396,30 +1378,8 @@ final class PetModel: NSObject, ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
             guard let self, self.pendingChromeCapture else { return }
             self.pendingChromeCapture = false
-            self.showWhisper("Chrome plugin not responding. Is it installed?")
+            self.showWhisper("Chrome extension or Gateway is not responding.")
         }
-    }
-
-    /// Called when the Chrome extension posts a page capture.
-    func summonChromePage(url: String, title: String, content: String) {
-        pendingChromeCapture = false
-        guard !sentChromeURLs.contains(url) else { return }
-        sentChromeURLs.insert(url)
-        guard sessionKey != nil else {
-            showWhisper("Not connected to Gateway")
-            return
-        }
-        let snippet = content.prefix(2000)
-        let prompt = """
-        You are Chi. The user just sent you this page. Respond like you casually glanced at it.
-        Rules: 1-2 sentences max. Personal reaction + one useful hint or opinion. NO summary ("この記事は〜"). Stay in character.
-
-        Title: \(title)
-        URL: \(url)
-
-        \(snippet)
-        """
-        sendSummon(prompt, source: "chrome_page")
     }
 
     // MARK: - Notification History
