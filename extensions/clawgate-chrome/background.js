@@ -10,6 +10,7 @@ const POLL_ERROR_BACKOFF_MS = 5000;
 let cursor = "";
 let pollTimer = null;
 let pollInFlight = false;
+const sentURLs = new Set();
 
 chrome.runtime.onInstalled.addListener(async () => {
   const current = await chrome.storage.local.get(DEFAULT_SETTINGS);
@@ -25,10 +26,12 @@ chrome.runtime.onInstalled.addListener(async () => {
       contexts: ["page"],
     });
   });
+  await restoreCursor();
   startPolling();
 });
 
-chrome.runtime.onStartup.addListener(() => {
+chrome.runtime.onStartup.addListener(async () => {
+  await restoreCursor();
   startPolling();
 });
 
@@ -44,6 +47,16 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     startPolling();
   }
 });
+
+async function restoreCursor() {
+  const stored = await chrome.storage.local.get({ pollCursor: "" });
+  cursor = stored.pollCursor || "";
+}
+
+async function saveCursor(value) {
+  cursor = value;
+  await chrome.storage.local.set({ pollCursor: value });
+}
 
 async function getSettings() {
   const settings = await chrome.storage.local.get(DEFAULT_SETTINGS);
@@ -92,7 +105,7 @@ async function startPolling() {
     }
 
     const data = await response.json();
-    if (data?.next_cursor != null) cursor = String(data.next_cursor);
+    if (data?.next_cursor != null) await saveCursor(String(data.next_cursor));
     notifySettingsUpdated({ connected: true, cursor });
 
     const events = Array.isArray(data?.events) ? data.events : [];
@@ -121,6 +134,9 @@ async function getActiveTab() {
 async function captureAndSend(tab) {
   const { port, pairingToken } = await getSettings();
   if (!tab?.id) return;
+  const url = tab.url || "";
+  if (sentURLs.has(url)) return;
+  sentURLs.add(url);
 
   const result = await chrome.tabs.sendMessage(tab.id, { type: "extract_content" });
   const payload = {
