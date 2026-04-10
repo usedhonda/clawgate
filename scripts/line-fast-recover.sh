@@ -11,14 +11,20 @@ set -euo pipefail
 #   ./scripts/line-fast-recover.sh
 #   ./scripts/line-fast-recover.sh --remote-host macmini
 #   ./scripts/line-fast-recover.sh --restart-hosta-app
-#   KEYCHAIN_PASSWORD='...' ./scripts/line-fast-recover.sh --setup-cert
 
 REMOTE_HOST="macmini"
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 RESTART_GATEWAY=true
 RESTART_HOSTA_APP=false
-RUN_CERT_SETUP=false
+
+# Canonical signing identity. Sources .local/secrets/release.env and falls
+# back to the default Developer ID Application when SIGNING_ID is not set.
+if [[ -f "$PROJECT_PATH/.local/secrets/release.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a; source "$PROJECT_PATH/.local/secrets/release.env"; set +a
+fi
+: "${SIGNING_ID:=Developer ID Application: Yuzuru Honda (F588423ZWS)}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,8 +40,6 @@ while [[ $# -gt 0 ]]; do
       RESTART_HOSTA_APP=true; shift ;;
     --no-restart-hosta-app)
       RESTART_HOSTA_APP=false; shift ;;
-    --setup-cert)
-      RUN_CERT_SETUP=true; shift ;;
     *)
       echo "Unknown arg: $1" >&2
       exit 2 ;;
@@ -47,7 +51,6 @@ echo "Remote host: $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
 echo "Restart gateway: $RESTART_GATEWAY"
 echo "Restart hostA app: $RESTART_HOSTA_APP"
-echo "Run cert setup: $RUN_CERT_SETUP"
 
 if [[ "$RESTART_HOSTA_APP" != "true" ]]; then
   echo "Policy: Host A app restart is disabled by default to avoid permission re-prompts."
@@ -57,17 +60,6 @@ if [[ "$RESTART_GATEWAY" != "true" ]]; then
   echo "ERROR: --no-restart-gateway is not allowed for LINE fast recovery." >&2
   echo "       Use this script with gateway restart enabled." >&2
   exit 2
-fi
-
-if [[ "$RUN_CERT_SETUP" == "true" ]]; then
-  if [[ -z "${KEYCHAIN_PASSWORD:-}" ]]; then
-    echo "ERROR: --setup-cert requires KEYCHAIN_PASSWORD env." >&2
-    exit 1
-  fi
-  ./scripts/setup-cert-macmini.sh \
-    --remote-host "$REMOTE_HOST" \
-    --project-path "$PROJECT_PATH" \
-    --keychain-password "$KEYCHAIN_PASSWORD"
 fi
 
 if [[ "$RESTART_HOSTA_APP" == "true" ]]; then
@@ -117,16 +109,19 @@ SCREEN_STATUS="$(echo "$CHECK_STATUS" | cut -d'|' -f3)"
 if [[ -z "$SIG_STATUS" ]]; then
   echo "[remote] doctor has no app_signature; falling back to codesign authority check"
   REMOTE_AUTH="$(ssh "$REMOTE_HOST" "codesign -dv --verbose=4 '$PROJECT_PATH/ClawGate.app' 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true" | tr -d '\r')"
-  if [[ "$REMOTE_AUTH" == "ClawGate Dev" ]]; then
-    SIG_STATUS="ok"
-  else
-    echo "ERROR: Host A signature authority is '$REMOTE_AUTH' (expected ClawGate Dev)." >&2
-    exit 1
-  fi
+  case "$REMOTE_AUTH" in
+    "Developer ID Application"*|"ClawGate Dev")
+      SIG_STATUS="ok"
+      ;;
+    *)
+      echo "ERROR: Host A signature authority is '$REMOTE_AUTH' (expected '$SIGNING_ID')." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 if [[ "$SIG_STATUS" != "ok" ]]; then
-  echo "ERROR: Host A app signature is not ClawGate Dev. Re-sign on Host A local session." >&2
+  echo "ERROR: Host A app signature is not a trusted identity. Re-sign on Host A local session." >&2
   exit 1
 fi
 

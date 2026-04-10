@@ -67,6 +67,16 @@ APP_PATH=\"\$PROJECT_PATH/ClawGate.app\"
 APP_BIN=\"\$APP_PATH/Contents/MacOS/ClawGate\"
 TMP_BACKUP=\"/tmp/ClawGate.app.backup.\$\$\"
 
+# Canonical signing identity. Sources .local/secrets/release.env and
+# falls back to the default Developer ID Application when SIGNING_ID is
+# not already set.
+if [[ -f \"\$PROJECT_PATH/.local/secrets/release.env\" ]]; then
+  set -a
+  source \"\$PROJECT_PATH/.local/secrets/release.env\"
+  set +a
+fi
+: \"\${SIGNING_ID:=Developer ID Application: Yuzuru Honda (F588423ZWS)}\"
+
 if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
   echo \"[remote] swift build (Intel)\"
   swift build
@@ -79,9 +89,11 @@ if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
   fi
 
   cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
-  # Always use stable cert to avoid TCC/Accessibility re-prompt churn.
-  if ! security find-identity -v -p codesigning 2>/dev/null | grep -q \"ClawGate Dev\"; then
-    echo \"[remote] missing ClawGate Dev codesign identity. run: ./scripts/setup-cert.sh\" >&2
+  # Use the canonical Developer ID Application identity (stable TCC binding
+  # across rebuilds via Team ID).
+  if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF \"\$SIGNING_ID\"; then
+    echo \"[remote] missing '\$SIGNING_ID' codesign identity. Import the Developer ID\" >&2
+    echo \"[remote] cert into login.keychain-db or rerun with a different SIGNING_ID.\" >&2
     exit 1
   fi
   rm -rf \"\$TMP_BACKUP\"
@@ -90,7 +102,7 @@ if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
   codesign --force --deep --options runtime \
     --identifier com.clawgate.app \
     --entitlements ClawGate.entitlements \
-    --sign \"ClawGate Dev\" \"\$APP_PATH\"
+    --sign \"\$SIGNING_ID\" \"\$APP_PATH\"
   SIGN_EXIT=\$?
   set -e
   if [[ \"\$SIGN_EXIT\" != \"0\" ]]; then
@@ -105,10 +117,13 @@ if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
 else
   echo \"[remote] restart-only mode (skip build/deploy/sign)\"
   CURRENT_AUTH=\$(codesign -dv --verbose=4 ClawGate.app 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true)
-  if [[ \"\$CURRENT_AUTH\" != \"ClawGate Dev\" ]]; then
-    echo \"[remote] WARN: current app signature authority is '\$CURRENT_AUTH' (expected ClawGate Dev).\"
-    echo \"[remote]       run ./scripts/setup-cert.sh and rebuild/sign to reduce TCC re-prompts.\"
-  fi
+  case \"\$CURRENT_AUTH\" in
+    Developer\\ ID\\ Application*|ClawGate\\ Dev) : ;;
+    *)
+      echo \"[remote] WARN: current app signature authority is '\$CURRENT_AUTH'.\"
+      echo \"[remote]       expected '\$SIGNING_ID' or legacy 'ClawGate Dev' fallback.\"
+      ;;
+  esac
 fi
 
 # Canonical local restart path (single source of truth)
