@@ -1384,8 +1384,8 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Timeout for waiting on Chrome extension response (seconds).
     private var pendingChromeCapture = false
-    /// Throttle: timestamp of last chrome summon. Prevents rapid-fire duplicates.
-    private var lastChromeSummonDate: Date = .distantPast
+    /// URLs already summoned — same URL is never sent to Chi twice.
+    private var sentChromeURLs: Set<String> = []
 
     /// User clicked "Get this page" from the right-click menu.
     /// Fires chrome_capture_request into the EventBus so the Chrome extension can pick it up.
@@ -1403,10 +1403,8 @@ final class PetModel: NSObject, ObservableObject {
     /// Called when the Chrome extension posts a page capture.
     func summonChromePage(url: String, title: String, content: String) {
         pendingChromeCapture = false
-        // Throttle: ignore duplicate captures within 15 seconds
-        let now = Date()
-        guard now.timeIntervalSince(lastChromeSummonDate) > 15 else { return }
-        lastChromeSummonDate = now
+        guard !sentChromeURLs.contains(url) else { return }
+        sentChromeURLs.insert(url)
         guard sessionKey != nil else {
             showWhisper("Not connected to Gateway")
             return
