@@ -47,6 +47,8 @@ final class BridgeCore {
 
     var chromePageStore: ChromePageStore?
     var chromeExtensionAuthStore: ChromeExtensionAuthStore?
+    /// Dedup: url → last capture time. Rejects same URL within 60 seconds.
+    private var recentCaptureURLs: [String: Date] = [:]
 
     /// Validate the pairing token sent by the Chrome extension.
     /// Returns nil (allowed) when token is empty (pairing not yet configured).
@@ -86,6 +88,15 @@ final class BridgeCore {
             let err = ErrorPayload(code: "invalid_payload", message: "Missing url field", retriable: false, failedStep: "decode", details: nil)
             return jsonResponse(status: .badRequest, body: encode(APIResponse<String>(ok: false, result: nil, error: err)))
         }
+
+        // Dedup: reject same URL within 60 seconds
+        let now = Date()
+        if let last = recentCaptureURLs[payload.url], now.timeIntervalSince(last) < 60 {
+            return jsonResponse(status: .ok, body: encode(["ok": true, "deduped": true] as [String: Bool]))
+        }
+        recentCaptureURLs[payload.url] = now
+        // Purge entries older than 60s to prevent unbounded growth
+        recentCaptureURLs = recentCaptureURLs.filter { now.timeIntervalSince($0.value) < 60 }
 
         chromePageStore?.add(url: payload.url, title: payload.title, content: payload.content)
         NSLog("[Chrome] page captured: %@", String(payload.url.prefix(80)))
