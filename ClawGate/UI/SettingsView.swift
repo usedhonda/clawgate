@@ -56,7 +56,6 @@ struct InlineSettingsView: View {
 
     private var contentView: some View {
         VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
-            headerCard
             if lineSectionShouldShow {
                 lineSection
             }
@@ -106,7 +105,6 @@ struct InlineSettingsView: View {
             stopProbeTimer()
         }
         .onChange(of: model.config.debugLogging) { _ in model.save() }
-        .onChange(of: model.config.includeMessageBodyInLogs) { _ in model.save() }
         .onChange(of: model.config.lineEnabled) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.lineDefaultConversation) { _ in model.save() }
         .onChange(of: model.config.linePollIntervalSeconds) { _ in model.save() }
@@ -118,16 +116,6 @@ struct InlineSettingsView: View {
         .onChange(of: model.config.tmuxSessionModes) { _ in model.save() }
         .onChange(of: model.config.openclawHost) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.openclawPort) { _ in model.save(); refreshConnectivity() }
-    }
-
-    // MARK: - Header
-
-    private var headerCard: some View {
-        PanelCard {
-            Text("ClawGate")
-                .font(PanelTheme.titleFont)
-                .foregroundStyle(PanelTheme.textPrimary)
-        }
     }
 
     private var lineSection: some View {
@@ -231,12 +219,6 @@ struct InlineSettingsView: View {
                 Toggle("Launch at Login", isOn: launchAtLoginBinding)
             }
             Toggle("Debug Logging", isOn: $model.config.debugLogging)
-            if model.config.debugLogging {
-                Toggle("Include message body", isOn: $model.config.includeMessageBodyInLogs)
-                    .padding(.leading, 16)
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textSecondary)
-            }
         }
     }
 

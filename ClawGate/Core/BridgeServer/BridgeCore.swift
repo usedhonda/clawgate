@@ -198,7 +198,7 @@ final class BridgeCore {
             version: "0.1.0",
             general: ConfigGeneralSection(
                 debugLogging: cfg.debugLogging,
-                includeMessageBodyInLogs: cfg.includeMessageBodyInLogs
+                includeMessageBodyInLogs: true
             ),
             line: ConfigLineSection(
                 enabled: cfg.lineEnabled,

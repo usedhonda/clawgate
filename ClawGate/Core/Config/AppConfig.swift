@@ -11,7 +11,6 @@ struct AppConfig: Codable {
 
     // General
     var debugLogging: Bool
-    var includeMessageBodyInLogs: Bool
 
     // LINE
     var lineEnabled: Bool
@@ -53,7 +52,6 @@ struct AppConfig: Codable {
     static let `default` = AppConfig(
         nodeRole: .client,
         debugLogging: false,
-        includeMessageBodyInLogs: false,
         lineEnabled: true,
         lineDefaultConversation: "",
         linePollIntervalSeconds: 1,
@@ -82,7 +80,8 @@ final class ConfigStore {
     private enum Keys {
         static let debugLogging = "clawgate.debugLogging"
         static let nodeRole = "clawgate.nodeRole"
-        static let includeMessageBodyInLogs = "clawgate.includeMessageBodyInLogs"
+        // Removed: includeMessageBodyInLogs (always-on, purged from UserDefaults on save)
+        static let legacyIncludeMessageBodyInLogs = "clawgate.includeMessageBodyInLogs"
         static let lineEnabled = "clawgate.lineEnabled"
         static let lineDefaultConversation = "clawgate.lineDefaultConversation"
         static let linePollIntervalSeconds = "clawgate.linePollIntervalSeconds"
@@ -131,10 +130,6 @@ final class ConfigStore {
         if let roleRaw = defaults.string(forKey: Keys.nodeRole),
            let role = NodeRole(rawValue: roleRaw) {
             cfg.nodeRole = role
-        }
-
-        if defaults.object(forKey: Keys.includeMessageBodyInLogs) != nil {
-            cfg.includeMessageBodyInLogs = defaults.bool(forKey: Keys.includeMessageBodyInLogs)
         }
 
         if defaults.object(forKey: Keys.lineEnabled) != nil {
@@ -223,7 +218,7 @@ final class ConfigStore {
     func save(_ cfg: AppConfig) {
         defaults.set(cfg.debugLogging, forKey: Keys.debugLogging)
         defaults.removeObject(forKey: Keys.nodeRole)
-        defaults.set(cfg.includeMessageBodyInLogs, forKey: Keys.includeMessageBodyInLogs)
+        defaults.removeObject(forKey: Keys.legacyIncludeMessageBodyInLogs)
         defaults.set(cfg.lineEnabled, forKey: Keys.lineEnabled)
         defaults.set(cfg.lineDefaultConversation, forKey: Keys.lineDefaultConversation)
         defaults.set(cfg.linePollIntervalSeconds, forKey: Keys.linePollIntervalSeconds)
