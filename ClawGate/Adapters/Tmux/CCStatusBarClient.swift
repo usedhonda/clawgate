@@ -390,8 +390,12 @@ final class CCStatusBarClient: NSObject, URLSessionWebSocketDelegate, TmuxSessio
 
 private extension CCStatusBarClient.CCSession {
     func toSnapshot() -> SessionSnapshot {
-        SessionSnapshot(
-            id: id,
+        let srcID = id
+        let logical = SessionSnapshot.makeLogicalKey(sessionType: sessionType, project: project)
+        return SessionSnapshot(
+            id: srcID,
+            sourceID: srcID,
+            logicalKey: logical,
             project: project,
             sessionType: sessionType,
             tmuxSession: tmuxSession,

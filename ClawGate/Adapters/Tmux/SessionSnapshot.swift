@@ -8,7 +8,9 @@ import Foundation
 struct SessionSnapshot {
     // MARK: - Identity
 
-    let id: String               // Stable session identifier
+    let id: String               // Stable session identifier (== sourceID for backward compat)
+    let sourceID: String         // Physical source ID: "session:window.pane" (pane-specific)
+    let logicalKey: String       // Logical continuity key: "<sessionType>|<normalizedProject>|<rootHint>"
     let project: String          // Project / repo name
     let sessionType: String      // "claude_code" | "codex"
 
@@ -72,6 +74,18 @@ struct SessionSnapshot {
     /// Whether this session is ready to receive keyboard input.
     var readyForSend: Bool {
         tmuxTarget != nil && status == "waiting_input"
+    }
+
+    /// Build a logical key from session type, project name, and optional root hint.
+    /// Same pane reincarnations (tmux restart, window index change) should map to
+    /// the same logicalKey so downstream dedup / continuity holds.
+    static func makeLogicalKey(sessionType: String, project: String, rootHint: String = "") -> String {
+        let normalizedType = sessionType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalizedProject = project
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let normalizedRoot = rootHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return "\(normalizedType)|\(normalizedProject)|\(normalizedRoot)"
     }
 }
 

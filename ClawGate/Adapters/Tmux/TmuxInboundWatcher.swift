@@ -145,18 +145,32 @@ final class TmuxInboundWatcher {
             return
         }
 
-        // AskUserQuestion — cc-status-bar sends structured question data with waitingReason="askUserQuestion"
-        if newStatus == "waiting_input" && session.waitingReason == "askUserQuestion" {
-            debugLog("askUserQuestion detected for \(session.project) mode=\(mode)")
-            guard mode == "autonomous" || mode == "auto" || mode == "observe" else { return }
-            // Build DetectedQuestion from structured WS data (no pane capture needed)
-            if let text = session.questionText, let options = session.questionOptions, options.count >= 2 {
-                let question = DetectedQuestion(
-                    questionText: text,
-                    options: options,
-                    selectedIndex: session.questionSelected ?? 0,
-                    questionID: "\(Int(Date().timeIntervalSince1970 * 1000))"
-                )
+        // Question detection — source-agnostic.
+        // Try structured WS data first (cc-status-bar), fall back to pane parse (any source).
+        if newStatus == "waiting_input" {
+            let structuredQuestion: DetectedQuestion? = {
+                if session.waitingReason == "askUserQuestion",
+                   let text = session.questionText,
+                   let options = session.questionOptions, options.count >= 2 {
+                    return DetectedQuestion(
+                        questionText: text,
+                        options: options,
+                        selectedIndex: session.questionSelected ?? 0,
+                        questionID: "\(Int(Date().timeIntervalSince1970 * 1000))"
+                    )
+                }
+                return nil
+            }()
+
+            let parsedQuestion: DetectedQuestion? = {
+                if structuredQuestion != nil { return nil }
+                guard let capture = session.paneCapture, !capture.isEmpty else { return nil }
+                return detectQuestion(from: capture)
+            }()
+
+            if let question = structuredQuestion ?? parsedQuestion {
+                debugLog("question detected for \(session.project) mode=\(mode) source=\(structuredQuestion != nil ? "ws" : "parse")")
+                guard mode == "autonomous" || mode == "auto" || mode == "observe" else { return }
                 if mode == "auto" {
                     BlockingWork.queue.async { [weak self] in
                         self?.autoAnswerQuestion(session: session, question: question,
@@ -167,27 +181,20 @@ final class TmuxInboundWatcher {
                     var aboveContext: String? = nil
                     var belowContext: String? = nil
                     if let capture = session.paneCapture, !capture.isEmpty {
-                        let ctx = extractQuestionContext(from: capture, questionText: text)
+                        let ctx = extractQuestionContext(from: capture, questionText: question.questionText)
                         aboveContext = ctx.above
                         belowContext = ctx.below
                     } else if let target = session.tmuxTarget {
                         if let raw = try? TmuxShell.capturePane(target: target, lines: 50) {
-                            let ctx = extractQuestionContext(from: raw, questionText: text)
+                            let ctx = extractQuestionContext(from: raw, questionText: question.questionText)
                             aboveContext = ctx.above
                             belowContext = ctx.below
                         }
                     }
                     emitQuestionEvent(session: session, question: question, mode: mode, context: aboveContext, optionsContext: belowContext)
                 }
-            } else {
-                // Structured data missing — fall through to captureAndEmit as fallback
-                debugLog("askUserQuestion but no structured data, falling back to captureAndEmit")
-                BlockingWork.queue.async { [weak self] in
-                    Thread.sleep(forTimeInterval: 0.2)
-                    self?.captureAndEmit(session: session, mode: mode)
-                }
+                return
             }
-            return
         }
 
         // Permission prompt handling — older cc-status-bar may still report AskUserQuestion

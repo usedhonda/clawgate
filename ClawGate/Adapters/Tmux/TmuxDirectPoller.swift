@@ -72,10 +72,19 @@ final class TmuxDirectPoller: TmuxSessionSource {
             return
         }
 
-        var next: [String: SessionSnapshot] = [:]
+        // Build snapshots per pane, then select representative per logicalKey
+        var perPane: [SessionSnapshot] = []
         for pane in descriptors {
             guard let session = buildSession(from: pane) else { continue }
-            next[session.id] = session
+            perPane.append(session)
+        }
+
+        // Group by logicalKey and pick representative (attached > stable sort by target)
+        let grouped = Dictionary(grouping: perPane) { $0.logicalKey }
+        var next: [String: SessionSnapshot] = [:]
+        for (_, candidates) in grouped {
+            let representative = pickRepresentative(from: candidates)
+            next[representative.sourceID] = representative
         }
 
         let previous: [String: SessionSnapshot]
@@ -108,6 +117,10 @@ final class TmuxDirectPoller: TmuxSessionSource {
         let capture = (try? TmuxShell.capturePane(target: pane.target, lines: 120))?.trimmingCharacters(in: .newlines)
         let promptState = detectPromptState(capture: capture ?? "")
         let project = inferProject(from: pane)
+        let rootHint = inferRootHint(from: pane)
+
+        // Raw facts only. Question parse & structured data are handled by TmuxInboundWatcher.
+        // Here we only set tentative waitingReason based on pane content heuristics.
         let waitingReason: String?
         switch promptState {
         case .waitingInput:
@@ -116,8 +129,17 @@ final class TmuxDirectPoller: TmuxSessionSource {
             waitingReason = nil
         }
 
+        let sourceID = "\(pane.session):\(pane.window).\(pane.pane)"
+        let logicalKey = SessionSnapshot.makeLogicalKey(
+            sessionType: sessionType,
+            project: project,
+            rootHint: rootHint
+        )
+
         return SessionSnapshot(
-            id: "\(pane.session):\(pane.window).\(pane.pane)",
+            id: sourceID,
+            sourceID: sourceID,
+            logicalKey: logicalKey,
             project: project,
             sessionType: sessionType,
             tmuxSession: pane.session,
@@ -133,6 +155,25 @@ final class TmuxDirectPoller: TmuxSessionSource {
             captureSource: .tmuxDirect,
             isAttached: pane.isAttached
         )
+    }
+
+    /// Pick representative snapshot from same-logicalKey candidates.
+    /// Priority: attached > stable sort by tmuxTarget > first.
+    private func pickRepresentative(from candidates: [SessionSnapshot]) -> SessionSnapshot {
+        if candidates.count == 1 { return candidates[0] }
+        if let attached = candidates.first(where: { $0.isAttached }) {
+            return attached
+        }
+        return candidates.sorted {
+            ($0.tmuxTarget ?? "") < ($1.tmuxTarget ?? "")
+        }.first!
+    }
+
+    private func inferRootHint(from pane: TmuxShell.PaneDescriptor) -> String {
+        let path = NSString(string: pane.currentPath).expandingTildeInPath
+        if path.isEmpty { return "" }
+        let basename = URL(fileURLWithPath: path).lastPathComponent
+        return basename.lowercased()
     }
 
     private func inferSessionType(from pane: TmuxShell.PaneDescriptor) -> String? {
@@ -173,9 +214,51 @@ final class TmuxDirectPoller: TmuxSessionSource {
         return .running
     }
 
+    /// Detect permission prompt in the tail of pane output.
+    ///
+    /// Strategy (per Cdx):
+    /// 1. Look only at the last 30 lines (not whole capture)
+    /// 2. Require an anchored permission phrase
+    /// 3. Require option markers nearby (yes/no, selector glyph, numbered list)
     private func detectPermissionPrompt(in capture: String?) -> Bool {
-        guard let capture else { return false }
-        let lowered = capture.lowercased()
-        return lowered.contains("allow") && lowered.contains("yes") && lowered.contains("no")
+        guard let capture, !capture.isEmpty else { return false }
+
+        // Tail window: last 30 lines
+        let allLines = capture.components(separatedBy: "\n")
+        let tail = allLines.suffix(30).joined(separator: "\n").lowercased()
+
+        // Anchored permission phrases
+        let permissionPatterns = [
+            #"allow\s.*\?"#,
+            #"do you want to allow"#,
+            #"do you want to proceed"#,
+            #"approve.*(command|tool|action)"#,
+            #"permission.*(required|needed)"#,
+            #"tool call.*\?"#,
+        ]
+        var matchedPhrase = false
+        for pattern in permissionPatterns {
+            if tail.range(of: pattern, options: .regularExpression) != nil {
+                matchedPhrase = true
+                break
+            }
+        }
+        guard matchedPhrase else { return false }
+
+        // Option markers: yes/no, selector glyphs, numbered list, "always allow"
+        let optionPatterns = [
+            #"\byes\b"#,
+            #"\bno\b"#,
+            #"always allow"#,
+            #"don'?t ask again"#,
+            #"[❯●○]"#,
+            #"^\s*[1-9]\."#,
+        ]
+        for pattern in optionPatterns {
+            if tail.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 }
