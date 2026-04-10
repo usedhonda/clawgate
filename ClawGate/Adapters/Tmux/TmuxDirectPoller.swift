@@ -177,11 +177,29 @@ final class TmuxDirectPoller: TmuxSessionSource {
     }
 
     private func inferSessionType(from pane: TmuxShell.PaneDescriptor) -> String? {
-        let haystack = [pane.currentCommand, pane.title, pane.currentPath]
-            .joined(separator: " ")
-            .lowercased()
+        let title = pane.title.lowercased()
+        let cmd = pane.currentCommand.lowercased()
+
+        // 1. Explicit tproj-style role suffixes in pane title (highest confidence)
+        //    e.g. "clawgate.cdx", "tproj.cc", "myapp.codex"
+        if title.hasSuffix(".cdx") || title.hasSuffix(".codex")
+            || title.contains(".cdx ") || title.contains(".codex ") {
+            return "codex"
+        }
+        if title.hasSuffix(".cc") || title.hasSuffix(".claude")
+            || title.contains(".cc ") || title.contains(".claude ") {
+            return "claude_code"
+        }
+
+        // 2. Direct command match (running `claude` or `codex` binary)
+        if cmd == "claude" || cmd.hasPrefix("claude-") { return "claude_code" }
+        if cmd == "codex" || cmd.hasPrefix("codex-") { return "codex" }
+
+        // 3. Fuzzy contains (legacy behavior, still useful as fallback)
+        let haystack = [cmd, title].joined(separator: " ")
         if haystack.contains("codex") { return "codex" }
         if haystack.contains("claude") { return "claude_code" }
+
         return nil
     }
 
