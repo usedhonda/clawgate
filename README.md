@@ -62,8 +62,11 @@ ClawGate includes a desktop pet character ("Chi") that sits beside your active w
 
 ### What requires OpenClaw Gateway
 
-- Chat (send/receive messages)
-- Right-click summon menu (Omakase, Ask, Draft PR)
+- **Chat** — send/receive messages with the AI via the chat panel
+- **Right-click summon menu:**
+  - **Omakase** — reads your current screen (AX tree or OCR) and asks the AI for the most useful response: error explanations, message summaries with draft replies, code suggestions, or article summaries
+  - **Ask...** — same screen context, but you provide a specific question or instruction
+  - **Draft PR** — generates a pull request description from your terminal's git diff (only appears when a terminal app is focused)
 - Screenshot analysis
 
 ## Session Modes

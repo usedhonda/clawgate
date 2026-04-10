@@ -538,8 +538,15 @@ final class PetModel: NSObject, ObservableObject {
         // Track last non-ClawGate frontmost app (ClawGate becomes frontmost on pet click)
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             if lastTrackedApp?.processIdentifier != app.processIdentifier {
-                waveOnArrival = true  // New window — wave on arrival
-                noteActivity(unhideIfNeeded: true)  // app changed — come out and follow
+                if isHiding {
+                    // Stay hidden — just teleport to the new window's edge
+                    lastTrackedApp = app
+                    noteActivity(unhideIfNeeded: false)
+                    // Fall through to the hiding branch below for immediate repositioning
+                } else {
+                    waveOnArrival = true
+                    noteActivity(unhideIfNeeded: true)
+                }
             }
             lastTrackedApp = app
         }
@@ -943,6 +950,11 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         let ctx = captureScreenContext()
+        NSLog("[Pet] Omakase context: app=%@, title=%@, textLen=%d", ctx.appName, ctx.windowTitle, ctx.visibleText.count)
+        guard !ctx.visibleText.isEmpty || !ctx.windowTitle.isEmpty else {
+            showWhisper("Nothing to read on screen")
+            return
+        }
         let cwdLine = ctx.paneCwd.isEmpty ? "" : "\nWorking directory: \(ctx.paneCwd)"
         let prompt = """
         [Summon:Omakase]
@@ -992,6 +1004,11 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         let ctx = captureScreenContext()
+        NSLog("[Pet] Ask context: app=%@, title=%@, textLen=%d", ctx.appName, ctx.windowTitle, ctx.visibleText.count)
+        guard !ctx.visibleText.isEmpty || !ctx.windowTitle.isEmpty else {
+            showWhisper("Nothing to read on screen")
+            return
+        }
         let cwdLine = ctx.paneCwd.isEmpty ? "" : "\nWorking directory: \(ctx.paneCwd)"
         let prompt = """
         [Summon:Ask]
