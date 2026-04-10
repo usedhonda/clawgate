@@ -48,6 +48,15 @@ cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
 if [[ -f "$PROJECT_PATH/resources/AppIcon.icns" ]]; then
   cp "$PROJECT_PATH/resources/AppIcon.icns" ClawGate.app/Contents/Resources/AppIcon.icns
 fi
+# Copy SwiftPM resource bundle (Characters, menubar-claw.png, etc.)
+# memory/MEMORY.md L155: "deploy 時は .build/debug/ClawGate_ClawGate.bundle を
+# ClawGate.app/Contents/Resources/ にコピー必須"
+BUILD_BUNDLE="$PROJECT_PATH/.build/debug/ClawGate_ClawGate.bundle"
+if [[ -d "$BUILD_BUNDLE" ]]; then
+  DEST_BUNDLE="ClawGate.app/Contents/Resources/ClawGate_ClawGate.bundle"
+  rm -rf "$DEST_BUNDLE"
+  cp -R "$BUILD_BUNDLE" "$DEST_BUNDLE"
+fi
 
 echo "[5/6] Sign with $CERT_NAME"
 codesign --force --deep --options runtime \
