@@ -9,7 +9,7 @@ applications via Accessibility (AX) UI automation. It exposes a localhost-only H
 - **Server**: SwiftNIO HTTP/1.1 on `127.0.0.1:8765`
 - **Platform**: macOS 12+ (SwiftPM, swift-tools-version 5.9)
 - **Dependency**: swift-nio 2.67+ (NIOCore, NIOHTTP1, NIOPosix)
-- **Signing**: Self-signed cert ("ClawGate Dev") for stable CDHash
+- **Signing**: Developer ID Application (Team ID `F588423ZWS`) via `$SIGNING_ID` in `.local/secrets/release.env` — preserves TCC bindings across rebuilds
 
 ---
 
@@ -85,7 +85,7 @@ scripts/
   smoke-test.sh                       # Quick validation (5 tests)
   integration-test.sh                 # Full API test suite (18 tests)
   release.sh                          # Universal binary build, sign, DMG, notarize
-  setup-cert.sh                       # Self-signed certificate setup
+  legacy/                             # Retired self-signed cert helpers (do not use)
 extensions/
   openclaw-plugin/                    # OpenClaw channel plugin (JS/ESM)
   vibeterm-telemetry/                 # Location telemetry plugin (JS/ESM)
@@ -764,12 +764,23 @@ UI elements are located using a multi-layer scoring system:
 
 ### Manual debug build
 ```bash
+# Load the canonical signing identity (set once by the maintainer)
+set -a; source .local/secrets/release.env; set +a
+
 swift build
 cp .build/debug/ClawGate ClawGate.app/Contents/MacOS/ClawGate
-codesign --force --deep --options runtime --entitlements ClawGate.entitlements --sign "ClawGate Dev" ClawGate.app
+codesign --force --deep --options runtime \
+  --entitlements ClawGate.entitlements \
+  --sign "$SIGNING_ID" ClawGate.app
 ```
 
-**Important**: Always sign with `--sign "ClawGate Dev"` (self-signed cert), not `--sign -` (ad-hoc). Ad-hoc signing produces a different CDHash each time, which invalidates the TCC Accessibility permission entry. The "ClawGate Dev" cert produces a stable CDHash so permission persists across rebuilds. Run `./scripts/setup-cert.sh` for first-time certificate setup.
+**Important**: Always sign with the `$SIGNING_ID` exported from
+`.local/secrets/release.env` (typically `Developer ID Application: Yuzuru Honda (F588423ZWS)`).
+Never use `--sign -` (ad-hoc) — ad-hoc signing produces a different CDHash each time
+and invalidates the TCC Accessibility and Screen Recording entries. The Developer ID
+Application identity binds TCC to the Apple-issued Team ID, so rebuilds preserve
+permissions without re-granting. Legacy self-signed "ClawGate Dev" helpers live in
+`scripts/legacy/` and must not be used.
 
 ### Release build (native arch)
 ```bash

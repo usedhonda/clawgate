@@ -1,5 +1,5 @@
 #!/bin/bash
-# ClawGate Dev Deploy — one-shot build, deploy, and verify
+# ClawGate dev deploy — one-shot build, deploy, and verify
 # Usage: ./scripts/dev-deploy.sh [--skip-plugin] [--skip-test]
 #
 # Steps:
@@ -88,8 +88,9 @@ elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$
 elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
     RESOLVED_SIGNING_ID="ClawGate Dev"
 else
-    err "No usable signing identity found (Developer ID Application or ClawGate Dev)."
-    err "Run ./scripts/setup-cert.sh to create a self-signed cert, or check Keychain Access."
+    err "No usable signing identity found."
+    err "Expected '$DEFAULT_DEVID' in the login keychain."
+    err "Check .local/secrets/release.env and Keychain Access."
     exit 1
 fi
 codesign --force --deep --options runtime \

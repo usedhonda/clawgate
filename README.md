@@ -240,8 +240,9 @@ swift build
 # Optional: install pre-commit leak guard
 ./scripts/setup-git-hooks.sh
 
-# Set up signing certificate (one-time)
-./scripts/setup-cert.sh
+# Place the canonical signing identity in .local/secrets/release.env
+# (Developer ID Application cert; the maintainer sets this up once).
+# dev-deploy.sh reads $SIGNING_ID from that file automatically.
 
 # Deploy locally (build + sign + launch + smoke test)
 ./scripts/dev-deploy.sh
@@ -428,8 +429,8 @@ scripts/
   security-leak-check.sh                  # Secret/persona leak guard (staged or full scan)
   setup-git-hooks.sh                      # Install local pre-commit leak guard hook
   support-diagnostics.sh                  # Support bundle generator (health/doctor/log/process)
-  setup-cert.sh                           # Self-signed certificate setup
   post-task-restart.sh                    # Full deploy to Host A + Host B
+  legacy/                                 # Retired self-signed cert helpers (do not use)
 extensions/
   openclaw-plugin/                        # OpenClaw channel plugin (JS/ESM)
 ```
