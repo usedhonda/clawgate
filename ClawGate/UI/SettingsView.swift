@@ -50,19 +50,41 @@ struct InlineSettingsView: View {
 
     @ObservedObject var model: SettingsModel
     @State private var lineState: ConnectivityState = .unknown
-    @State private var tmuxState: ConnectivityState = .unknown
     @State private var gatewayState: ConnectivityState = .unknown
     @State private var probeTimer: Timer?
+    @State private var showRegenerateAlert = false
 
     private var contentView: some View {
         VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
             headerCard
-            lineSection
+            if lineSectionShouldShow {
+                lineSection
+            }
             tmuxSection
             gatewaySection
             systemSection
         }
         .padding(embedInScroll ? PanelTheme.padding : 0)
+    }
+
+    /// Whether the LINE section makes sense on this machine.
+    ///
+    /// LINE adapter only works when:
+    /// 1. LINE Desktop is installed on this machine, AND
+    /// 2. The OpenClaw Gateway we're connecting to is local (on this machine)
+    ///
+    /// If the Gateway is remote, this machine's LINE Desktop is unrelated to
+    /// what the remote Gateway actually operates on. Hide the section.
+    private var lineSectionShouldShow: Bool {
+        guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: "jp.naver.line.mac") != nil else {
+            return false
+        }
+        guard let config = readOpenClawGatewayConfig() else {
+            // No OpenClaw config on this machine — nothing uses LINE here.
+            return false
+        }
+        let host = config.host.lowercased()
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
     }
 
     var body: some View {
@@ -161,7 +183,6 @@ struct InlineSettingsView: View {
                 .foregroundStyle(PanelTheme.textPrimary)
             Toggle("Enable tmux monitoring", isOn: $model.config.tmuxEnabled)
             if model.config.tmuxEnabled {
-                statusRow(state: tmuxState)
                 Text("Session behavior is managed from Monitor.")
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(PanelTheme.textTertiary)
@@ -177,13 +198,62 @@ struct InlineSettingsView: View {
             Toggle("Allow Gateway to connect", isOn: $model.config.remoteAccessEnabled)
             if model.config.remoteAccessEnabled {
                 statusRow(state: gatewayState)
+                let tokenSet = !model.config.remoteAccessToken.isEmpty
                 fieldRow("Token") {
-                    SecureField("gateway token", text: $model.config.remoteAccessToken)
-                        .textFieldStyle(.plain)
-                        .modifier(PanelInputModifier())
+                    HStack(spacing: 6) {
+                        SecureField("not set", text: $model.config.remoteAccessToken)
+                            .textFieldStyle(.plain)
+                            .modifier(PanelInputModifier())
+                        if tokenSet {
+                            Button(action: copyToken) {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Copy token to clipboard")
+                            Button(action: { showRegenerateAlert = true }) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Regenerate token (invalidates the current one)")
+                        } else {
+                            Button(action: generateToken) {
+                                Text("Generate")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                 }
+                Text("Paste this token into OpenClaw Gateway's ~/.openclaw/openclaw.json under channels.clawgate.default.token, then restart Gateway.")
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .alert("Regenerate Token?",
+               isPresented: $showRegenerateAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Regenerate", role: .destructive) { generateToken() }
+        } message: {
+            Text("The current token will stop working. You'll need to update OpenClaw Gateway's config with the new one.")
+        }
+    }
+
+    private func generateToken() {
+        // URL-safe short UUID
+        let raw = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        model.config.remoteAccessToken = String(raw.prefix(32))
+        model.save()
+        copyToken()
+    }
+
+    private func copyToken() {
+        guard !model.config.remoteAccessToken.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(model.config.remoteAccessToken, forType: .string)
     }
 
     private var systemSection: some View {
@@ -267,7 +337,6 @@ struct InlineSettingsView: View {
         lineState = model.config.lineEnabled
             ? (lineAppRunning() ? .online : .offline)
             : .unknown
-        probeTmux()
         gatewayState = model.config.remoteAccessEnabled ? .online : .unknown
     }
 
@@ -275,19 +344,5 @@ struct InlineSettingsView: View {
         NSRunningApplication
             .runningApplications(withBundleIdentifier: "jp.naver.line.mac")
             .first != nil
-    }
-
-    private func probeTmux() {
-        guard model.config.tmuxEnabled else {
-            tmuxState = .unknown
-            return
-        }
-        tmuxState = .checking
-        DispatchQueue.global(qos: .utility).async {
-            let ok = ((try? TmuxShell.listSessions())?.isEmpty == false)
-            DispatchQueue.main.async {
-                tmuxState = ok ? .online : .offline
-            }
-        }
     }
 }

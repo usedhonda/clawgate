@@ -851,16 +851,24 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         image.lockFocus()
         defer { image.unlockFocus() }
 
-        // Draw a claw glyph (the character "Chi" wears) instead of the full crab.
-        // Lobster emoji shows just the claw prominently in menu-bar size.
+        // Draw the claw that Chi wears — the same red lobster claw as in
+        // the desktop pet's hide-claw sprite. Loaded from bundle.
         let clawRect = NSRect(x: 1, y: 0, width: 16, height: 16)
-        let clawStyle = NSMutableParagraphStyle()
-        clawStyle.alignment = .center
-        let clawAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 14),
-            .paragraphStyle: clawStyle,
-        ]
-        ("🦞" as NSString).draw(in: clawRect, withAttributes: clawAttributes)
+        if let clawURL = Bundle.module.url(forResource: "menubar-claw@2x", withExtension: "png"),
+           let clawImage = NSImage(contentsOf: clawURL) {
+            clawImage.draw(in: clawRect,
+                           from: .zero,
+                           operation: .sourceOver,
+                           fraction: 1.0)
+        } else {
+            // Fallback: lobster emoji if the bundled image is missing
+            let fallbackStyle = NSMutableParagraphStyle()
+            fallbackStyle.alignment = .center
+            ("🦞" as NSString).draw(in: clawRect, withAttributes: [
+                .font: NSFont.systemFont(ofSize: 14),
+                .paragraphStyle: fallbackStyle,
+            ])
+        }
 
         let badgeRect = NSRect(x: 13, y: 1, width: 8, height: 8)
         let badgePath = NSBezierPath(ovalIn: badgeRect)

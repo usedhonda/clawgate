@@ -26,7 +26,9 @@ let package = Package(
             ],
             path: "ClawGate",
             resources: [
-                .copy("Resources/Characters")
+                .copy("Resources/Characters"),
+                .copy("Resources/menubar-claw.png"),
+                .copy("Resources/menubar-claw@2x.png"),
             ]
         ),
         .executableTarget(
