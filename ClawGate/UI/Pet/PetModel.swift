@@ -29,12 +29,17 @@ final class PetModel: NSObject, ObservableObject {
         }
 
         func hiddenPoseOffsetX(for expression: PetExpression, side: PlacementSide) -> CGFloat {
+            // Asset-pixel horizontal shift applied on top of the flush-edge
+            // position when Chi is in a hide-peek pose. Values tuned so the
+            // peeking body sits flush against the window edge without biting
+            // into the window content. Tweaked 2026-04-10 from 77/95 → 74/92
+            // → 72/90 (pulled 5 asset px outward on all three peek variants).
             let deltaPx: CGFloat
             switch expression {
             case .hidePeek, .hidePeek3:
-                deltaPx = 77
+                deltaPx = 72
             case .hidePeek2:
-                deltaPx = 95
+                deltaPx = 90
             default:
                 deltaPx = 0
             }
@@ -654,8 +659,9 @@ final class PetModel: NSObject, ObservableObject {
         if isHiding {
             if let fixed = candidates.first(where: { $0.side == hidingSide }) {
                 var t = fixed.point
-                // Claw-only: compensate for overlap + height-fit inset
-                // Peek was already perfect, don't touch it
+                // Claw-only: compensate for overlap + height-fit inset.
+                // Peek variants use hiddenPoseOffsetX() below for their own
+                // asset-pixel tuning (see PetRenderMetrics).
                 if stateMachine.expression == .hideClaw {
                     if hidingSide == .right {
                         t.x += metrics.clawFix
