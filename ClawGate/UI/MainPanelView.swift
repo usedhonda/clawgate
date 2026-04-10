@@ -77,7 +77,7 @@ struct MainPanelView: View {
             tabContent
         }
         .padding(PanelTheme.padding)
-        .frame(minWidth: 200, maxWidth: 700, minHeight: 400, maxHeight: 1400)
+        .frame(minWidth: 320, maxWidth: 700, minHeight: 400, maxHeight: 1400)
         .background(PanelTheme.background.opacity(PanelTheme.appBackgroundOpacity))
         .preferredColorScheme(.dark)
     }

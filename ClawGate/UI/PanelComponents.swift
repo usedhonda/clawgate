@@ -191,6 +191,9 @@ struct PanelTabButton: View {
             Text(title)
                 .font(PanelTheme.font(size: 11, weight: isSelected ? .bold : .medium))
                 .foregroundStyle(isSelected ? PanelTheme.accentCyan : PanelTheme.textPrimary.opacity(0.88))
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(1)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
                 .background(
