@@ -620,27 +620,44 @@ private final class PetContentView: NSView {
 
     // MARK: - Whisper Window (Layer 1)
 
-    private func whisperAnchorPoint(for text: String, parentFrame: NSRect) -> NSPoint {
+    private func whisperOrigin(for text: String, parentWindow: NSWindow, bubbleSize: NSSize) -> NSPoint {
+        let parentFrame = parentWindow.frame
+        let screenFrame = parentWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? parentFrame
         let isClawWhisper = text == "zzz…" && model.isHiding && model.stateMachine.expression == .hideClaw
 
         if isClawWhisper {
-            let anchorX: CGFloat
+            let clawY = parentFrame.minY + parentFrame.height * 0.56
+            let edgeMargin: CGFloat = 2
+            var originX: CGFloat
             switch model.hidingSide {
             case .right:
-                // Host is on Chi's left, so the visible claw sits near the left edge.
-                anchorX = parentFrame.minX + parentFrame.width * 0.26
+                // Keep the zzz bubble fully outside the host window on the right side.
+                originX = parentFrame.maxX + edgeMargin
             case .left:
-                // Host is on Chi's right, so the visible claw sits near the right edge.
-                anchorX = parentFrame.minX + parentFrame.width * 0.74
+                // Keep the zzz bubble fully outside the host window on the left side.
+                originX = parentFrame.minX - bubbleSize.width - edgeMargin
             }
-            let anchorY = parentFrame.minY + parentFrame.height * 0.56
-            return NSPoint(x: anchorX, y: anchorY)
+
+            var originY = clawY
+            let clampedX = min(max(originX, screenFrame.minX), screenFrame.maxX - bubbleSize.width)
+            if abs(clampedX - originX) > 0.5 {
+                // When the screen edge prevents a pure side placement, raise the
+                // bubble so it still avoids covering the active window body.
+                originY = max(originY, parentFrame.maxY + 6)
+            }
+            originX = clampedX
+            originY = min(max(originY, screenFrame.minY), screenFrame.maxY - bubbleSize.height)
+            return NSPoint(x: originX, y: originY)
         }
 
         // All non-claw whispers target Chi's head area, including visible peek poses.
         let headX = parentFrame.midX
         let headY = parentFrame.minY + parentFrame.height * 0.88
-        return NSPoint(x: headX, y: headY)
+        var originX = headX - bubbleSize.width / 2
+        var originY = headY
+        originX = min(max(originX, screenFrame.minX), screenFrame.maxX - bubbleSize.width)
+        originY = min(max(originY, screenFrame.minY), screenFrame.maxY - bubbleSize.height)
+        return NSPoint(x: originX, y: originY)
     }
 
     private func showWhisper(_ text: String) {
@@ -668,9 +685,11 @@ private final class PetContentView: NSView {
         ww.isReleasedWhenClosed = false
         ww.ignoresMouseEvents = true
 
-        let parentFrame = parentWindow.frame
-        let anchor = whisperAnchorPoint(for: text, parentFrame: parentFrame)
-        let origin = NSPoint(x: anchor.x - w / 2, y: anchor.y)
+        let origin = whisperOrigin(
+            for: text,
+            parentWindow: parentWindow,
+            bubbleSize: NSSize(width: w, height: h)
+        )
         ww.setFrameOrigin(origin)
 
         parentWindow.addChildWindow(ww, ordered: .above)

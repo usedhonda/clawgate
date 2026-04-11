@@ -266,9 +266,11 @@ This preserves both attachment and facing correctness.
 ## Whisper Positioning
 
 - `zzz…` is a **claw whisper**, not a head whisper.
-- While Chi is hidden in `.hideClaw`, the whisper bubble should anchor just above the visible claw edge:
-  - hidden on the right side of the host -> whisper anchors above the left-edge claw
-  - hidden on the left side of the host -> whisper anchors above the right-edge claw
+- While Chi is hidden in `.hideClaw`, the whisper bubble must stay **outside the active host window body**.
+- Side rule for `zzz…`:
+  - hidden on the right side of the host -> align the bubble's **left edge** to the claw's outer-right edge and let the bubble rise on the screen-right side
+  - hidden on the left side of the host -> align the bubble's **right edge** to the claw's outer-left edge and let the bubble rise on the screen-left side
+- If the screen edge prevents a pure side placement, the bubble should be lifted upward before it is allowed to intrude over the host window body.
 - All other whispers (`Connected`, `link lost`, normal reactions, and any whisper shown during visible peek/emerge states) anchor above Chi's head area.
 - The whisper bubble's bottom edge should align to the semantic anchor area:
   - claw whisper -> claw area
