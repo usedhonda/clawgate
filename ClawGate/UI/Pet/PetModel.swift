@@ -136,6 +136,8 @@ final class PetModel: NSObject, ObservableObject {
     private var lastTrackedWindowFrame: CGRect?
     enum PlacementSide { case left, right }
     private var lastPlacementSide: PlacementSide = .right
+    private var lockedPlacementSide: PlacementSide?
+    private var lockedPlacementWindowFrame: CGRect?
 
     // MARK: - Hide behind window
     @Published var isHiding = false
@@ -554,6 +556,86 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    private func roughlySameFrame(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 20) -> Bool {
+        abs(lhs.origin.x - rhs.origin.x) < tolerance
+            && abs(lhs.origin.y - rhs.origin.y) < tolerance
+            && abs(lhs.width - rhs.width) < tolerance
+            && abs(lhs.height - rhs.height) < tolerance
+    }
+
+    private func clearPlacementLock() {
+        lockedPlacementSide = nil
+        lockedPlacementWindowFrame = nil
+    }
+
+    private func setPlacementLock(side: PlacementSide, frame: CGRect) {
+        lockedPlacementSide = side
+        lockedPlacementWindowFrame = frame
+    }
+
+    private func setHiddenSide(_ side: PlacementSide, resetPeekPose: Bool = false) {
+        hidingSide = side
+        lastPlacementSide = side
+        stateMachine.hideAnimationSuffix = side == .left ? "-left" : ""
+
+        guard resetPeekPose else { return }
+        switch stateMachine.expression {
+        case .hidePeek, .hidePeek2, .hidePeek3:
+            stateMachine.expression = .hideClaw
+        default:
+            break
+        }
+    }
+
+    private func screenForTrackedFrame(_ frame: CGRect) -> NSScreen? {
+        func area(_ rect: CGRect) -> CGFloat {
+            guard !rect.isNull, !rect.isEmpty else { return 0 }
+            return rect.width * rect.height
+        }
+
+        func appKitRect(on screen: NSScreen) -> CGRect {
+            CGRect(
+                x: frame.origin.x,
+                y: screen.frame.maxY - frame.origin.y - frame.height,
+                width: frame.width,
+                height: frame.height
+            )
+        }
+
+        return NSScreen.screens.max { lhs, rhs in
+            let lhsArea = area(lhs.visibleFrame.intersection(appKitRect(on: lhs)))
+            let rhsArea = area(rhs.visibleFrame.intersection(appKitRect(on: rhs)))
+            return lhsArea < rhsArea
+        } ?? NSScreen.main
+    }
+
+    private func resolveTrackedWindow(for app: NSRunningApplication) -> (element: AXUIElement?, frame: CGRect, screen: NSScreen)? {
+        guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier) else { return nil }
+
+        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        let windows = AXQuery.windows(appElement: appElement)
+        let focused = AXQuery.focusedWindow(appElement: appElement)
+
+        var candidates: [AXUIElement] = []
+        for window in [focused].compactMap({ $0 }) + windows {
+            if candidates.contains(where: { CFEqual($0, window) }) { continue }
+            candidates.append(window)
+        }
+        for candidate in candidates {
+            if let axFrame = AXQuery.copyFrameAttribute(candidate), roughlySameFrame(axFrame, cgBounds) {
+                if let screen = screenForTrackedFrame(axFrame) {
+                    return (candidate, axFrame, screen)
+                }
+                return (candidate, axFrame, NSScreen.main ?? NSScreen.screens.first!)
+            }
+        }
+
+        if let screen = screenForTrackedFrame(cgBounds) {
+            return (nil, cgBounds, screen)
+        }
+        return (nil, cgBounds, NSScreen.main ?? NSScreen.screens.first!)
+    }
+
     /// Teleport to normal position without walk animation
     private func updateTargetPositionImmediate() {
         let saved = isHiding
@@ -561,14 +643,15 @@ final class PetModel: NSObject, ObservableObject {
         // Calculate where we should be, then teleport
         guard isTrackingEnabled else { isHiding = saved; return }
         guard let app = lastTrackedApp else { isHiding = saved; return }
-        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
-        guard let focusedWin = AXQuery.focusedWindow(appElement: appElement),
-              let frame = AXQuery.copyFrameAttribute(focusedWin) else { isHiding = saved; return }
-        let screen = NSScreen.main?.visibleFrame ?? .zero
+        guard let resolved = resolveTrackedWindow(for: app) else { isHiding = saved; return }
+        lastTrackedWindow = resolved.element
+        lastTrackedWindowFrame = resolved.frame
+        let frame = resolved.frame
+        let screen = resolved.screen.visibleFrame
         let petSize: CGFloat = characterSize + 20
-        let screenHeight = NSScreen.main?.frame.height ?? 900
-        let appKitY = screenHeight - frame.origin.y - frame.height
-        let overlap = characterSize * 0.15
+        let appKitY = resolved.screen.frame.maxY - frame.origin.y - frame.height
+        let metrics = PetRenderMetrics(windowSize: petSize)
+        let overlap = metrics.overlap
         let rightX = frame.origin.x + frame.width - overlap
         let leftX = frame.origin.x - petSize + overlap
         let bottomY = appKitY
@@ -597,6 +680,7 @@ final class PetModel: NSObject, ObservableObject {
         // Track last non-ClawGate frontmost app (ClawGate becomes frontmost on pet click)
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             if lastTrackedApp?.processIdentifier != app.processIdentifier {
+                clearPlacementLock()
                 lastTrackedWindow = nil
                 lastTrackedWindowFrame = nil
                 if isHiding {
@@ -614,10 +698,7 @@ final class PetModel: NSObject, ObservableObject {
 
         guard let app = lastTrackedApp else { return }
 
-        // Primary source of truth: CGWindowList Z-order. This correctly handles
-        // same-app window switches where kAXFocusedWindowAttribute lies about
-        // which window is visually on top.
-        guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier) else {
+        guard let resolved = resolveTrackedWindow(for: app) else {
             if isHiding {
                 NSLog("[PetHide] No on-screen window for tracked app — unhiding")
                 unhide()
@@ -626,56 +707,45 @@ final class PetModel: NSObject, ObservableObject {
             }
             lastTrackedWindow = nil
             lastTrackedWindowFrame = nil
+            clearPlacementLock()
             return
         }
-
-        // AX focused window is best-effort (used for context capture). Prefer AX
-        // frame for sub-pixel precision when it agrees with CG bounds; otherwise
-        // trust CG bounds since they reflect the actual topmost window.
-        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
-        let focusedWin = AXQuery.focusedWindow(appElement: appElement)
-        let axFrame = focusedWin.flatMap { AXQuery.copyFrameAttribute($0) }
-
-        let frame: CGRect
-        if let ax = axFrame,
-           abs(ax.origin.x - cgBounds.origin.x) < 20,
-           abs(ax.origin.y - cgBounds.origin.y) < 20,
-           abs(ax.width - cgBounds.width) < 20,
-           abs(ax.height - cgBounds.height) < 20 {
-            frame = ax
-        } else {
-            frame = cgBounds
-        }
+        let focusedWin = resolved.element
+        let frame = resolved.frame
+        let hostScreen = resolved.screen
 
         // Track the specific window Chi is following (for context capture)
         lastTrackedWindow = focusedWin
         lastTrackedWindowFrame = frame
 
-        let screen = NSScreen.main?.visibleFrame ?? .zero
+        if let lockFrame = lockedPlacementWindowFrame, !roughlySameFrame(lockFrame, frame) {
+            clearPlacementLock()
+        }
+
+        let screen = hostScreen.visibleFrame
         let petSize: CGFloat = characterSize + 20  // match actual window size
 
         // Skip small windows (popups, dialogs) — but clear walk first
         if frame.width < 300 || frame.height < 200 {
+            clearPlacementLock()
             moveController.stop()
             return
         }
 
         // Skip fullscreen apps — but clear walk first
-        if let screenFull = NSScreen.main?.frame,
-           abs(frame.width - screenFull.width) < 10 && abs(frame.height - screenFull.height) < 40 {
+        if abs(frame.width - hostScreen.frame.width) < 10 && abs(frame.height - hostScreen.frame.height) < 40 {
+            clearPlacementLock()
             moveController.stop()
             return
         }
 
         // AX coordinates (top-left origin) → AppKit coordinates (bottom-left origin)
-        let screenHeight = NSScreen.main?.frame.height ?? 900
-        let appKitY = screenHeight - frame.origin.y - frame.height
+        let appKitY = hostScreen.frame.maxY - frame.origin.y - frame.height
 
         let metrics = PetRenderMetrics(windowSize: petSize)
         let overlap = metrics.overlap
         let rightX = frame.origin.x + frame.width - overlap
         let leftX = frame.origin.x - petSize + overlap
-        let topY = appKitY + frame.height - petSize
         let bottomY = appKitY
 
         // Candidate positions: always bottom, left or right
@@ -695,19 +765,32 @@ final class PetModel: NSObject, ObservableObject {
 
         // Hidden: stick to the side we entered hiding on, immediate move + pose offset
         if isHiding {
-            if let fixed = candidates.first(where: { $0.side == hidingSide }) {
+            var activeSide = hidingSide
+            if candidates.first(where: { $0.side == activeSide }) == nil {
+                if let opposite = candidates.first(where: { $0.side != activeSide }) {
+                    setHiddenSide(opposite.side, resetPeekPose: true)
+                    activeSide = opposite.side
+                } else {
+                    unhide()
+                    clearPlacementLock()
+                    moveController.stop()
+                    return
+                }
+            }
+
+            if let fixed = candidates.first(where: { $0.side == activeSide }) {
                 var t = fixed.point
                 // Claw-only: compensate for overlap + height-fit inset.
                 // Peek variants use hiddenPoseOffsetX() below for their own
                 // asset-pixel tuning (see PetRenderMetrics).
                 if stateMachine.expression == .hideClaw {
-                    if hidingSide == .right {
+                    if activeSide == .right {
                         t.x += metrics.clawFix
                     } else {
                         t.x -= metrics.clawFix
                     }
                 }
-                t.x += metrics.hiddenPoseOffsetX(for: stateMachine.expression, side: hidingSide)
+                t.x += metrics.hiddenPoseOffsetX(for: stateMachine.expression, side: activeSide)
                 t.x = max(screen.minX, min(t.x, screen.maxX - petSize))
                 t.y = max(screen.minY, min(t.y, screen.maxY - petSize))
                 moveController.moveTo(t, waveOnArrival: false, style: .immediate)
@@ -719,7 +802,17 @@ final class PetModel: NSObject, ObservableObject {
         var target: NSPoint
         var bestSide: PlacementSide
 
-        if let forced = forceSide, let match = candidates.first(where: { $0.side == forced }) {
+        let effectiveForcedSide: PlacementSide?
+        if let forced = forceSide {
+            effectiveForcedSide = forced
+        } else if moveController.isMoving, let locked = lockedPlacementSide {
+            effectiveForcedSide = locked
+        } else {
+            clearPlacementLock()
+            effectiveForcedSide = nil
+        }
+
+        if let forced = effectiveForcedSide, let match = candidates.first(where: { $0.side == forced }) {
             target = match.point
             bestSide = match.side
         } else {
@@ -749,6 +842,9 @@ final class PetModel: NSObject, ObservableObject {
         guard isTrackingEnabled, !isHiding else { return }
         let opposite: PlacementSide = lastPlacementSide == .right ? .left : .right
         lastPlacementSide = opposite
+        if let frame = lastTrackedWindowFrame {
+            setPlacementLock(side: opposite, frame: frame)
+        }
         noteActivity()
         updateTargetPosition(forceSide: opposite)
     }
@@ -836,7 +932,7 @@ final class PetModel: NSObject, ObservableObject {
     private func enterHiding() {
         guard !isHiding, characterManager.selectedName == "chi-claw" else { return }
         isHiding = true
-        hidingSide = lastPlacementSide
+        setHiddenSide(lastPlacementSide)
 
         // Instant: lock expression, stop cycle, switch sprite
         cycleWorkItem?.cancel()

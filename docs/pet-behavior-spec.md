@@ -279,10 +279,10 @@ Reason:
 - user-observed instability means it is not yet trustworthy as behavior truth
 - spec-first reconstruction is safer than patching on top of an already unstable working tree
 
-## Open Questions
+## Resolved Decisions
 
-1. What exact event should be treated as authoritative "arrival" for clearing `lockedPlacementSide` — move controller completion, geometric closeness, or next stable tracking tick?
-2. When AX cannot be matched to CG topmost, should context capture re-resolve from CG via a fresh AX search, or explicitly operate without AX window identity?
-3. On hidden side flip during an active peek pose, should the pose remain the same variant across the flip, or should the system normalize back to `.hideClaw` before showing the new side?
-4. In multi-display setups, should placement clamp against the host display’s visible frame instead of `NSScreen.main`?
-5. Should fullscreen transition clear placement lock immediately, or preserve it until a non-fullscreen host returns?
+1. `lockedPlacementSide` is cleared on the next stable tracking tick after locomotion has stopped, or immediately when the tracked host materially changes.
+2. When AX cannot be matched to the current CG topmost frame, context capture operates without AX window identity rather than inventing a stale match.
+3. Hidden side flips normalize any active peek pose back to `.hideClaw` before the new side is shown.
+4. Placement clamps against the host display's visible frame, not `NSScreen.main`.
+5. Fullscreen transitions clear placement lock immediately because edge attachment is no longer valid.
