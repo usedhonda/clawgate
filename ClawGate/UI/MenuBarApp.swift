@@ -36,7 +36,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let snapYAlignThreshold: CGFloat = 100
 
     private var isCollapsed = false
-    private var normalPanelWidth: CGFloat = 220
+    private var normalPanelWidth: CGFloat = 242
     private var normalPanelOrigin: NSPoint = .zero
     private static let collapsedWidth: CGFloat = 14
     private var activationObserver: NSObjectProtocol?
@@ -141,7 +141,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         mainPanelHost = host
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 220, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: 242, height: 424),
             styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .utilityWindow],
             backing: .buffered,
             defer: true
@@ -263,9 +263,20 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
 
-        // Ghostty visible → always snap to Ghostty (Tproj parity).
-        // Saved frame is only used when Ghostty is absent.
-        if let ghosttyFrame = findGhosttyFrame() {
+        // tproj running → snap directly below tproj (shared 242pt Ghostty column).
+        // Initial placement only; Chi doesn't follow tproj as it moves.
+        if let tprojFrame = findTprojFrame() {
+            let height = Self.loadSavedFrame().map(\.height) ?? panel.frame.height
+            let clampedHeight = min(max(height, panel.minSize.height), panel.maxSize.height)
+            let targetWidth: CGFloat = 242
+            let origin = CGPoint(x: tprojFrame.minX, y: tprojFrame.minY - clampedHeight)
+            let clamped = clampPanelOrigin(origin, panelSize: CGSize(width: targetWidth, height: clampedHeight))
+            panel.setFrame(NSRect(origin: clamped, size: CGSize(width: targetWidth, height: clampedHeight)), display: true)
+            normalPanelWidth = targetWidth
+            isGhosttySnapped = false
+            ghosttyDetachCooldownUntil = nil
+            logGhosttyFollow("opened below tproj origin=\(clamped) size=\(targetWidth)x\(clampedHeight)")
+        } else if let ghosttyFrame = findGhosttyFrame() {
             // Restore saved width if available
             if let saved = Self.loadSavedFrame(), saved.width >= panel.minSize.width {
                 normalPanelWidth = saved.width
@@ -355,6 +366,42 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let globalTop = NSScreen.screens.map(\.frame.maxY).max() ?? cgFrame.maxY
         let appKitY = globalTop - cgFrame.minY - cgFrame.height
         return CGRect(x: cgFrame.minX, y: appKitY, width: cgFrame.width, height: cgFrame.height)
+    }
+
+    /// Returns the AppKit-coordinate frame of tproj's main panel (the ~242x585
+    /// window, not the large Ghostty underlay). Used at panel-open time to snap
+    /// ClawGate directly below tproj in the shared Ghostty column.
+    ///
+    /// Detection is by `kCGWindowOwnerName == "tproj"` rather than bundle ID
+    /// because dev builds run the raw `.build/.../tproj` binary, which has no
+    /// CFBundleIdentifier. The size filter discards tproj's PaneBackgroundUnderlay
+    /// window (same PID, but much larger, covering Ghostty).
+    private func findTprojFrame() -> CGRect? {
+        guard let windowInfo = CGWindowListCopyWindowInfo(
+            [.excludeDesktopElements, .optionOnScreenOnly],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return nil
+        }
+
+        for info in windowInfo {
+            let ownerName = (info[kCGWindowOwnerName as String] as? String) ?? ""
+            guard ownerName == "tproj" else { continue }
+            // No layer filter: tproj's main panel sits at floating level (3)
+            // when Ghostty is frontmost, while its Ghostty-underlay window
+            // sits at layer 0. Size filter alone is enough to pick the panel
+            // and exclude the ~1444pt-wide underlay.
+            guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let cgFrame = CGRect(dictionaryRepresentation: boundsDict) else {
+                continue
+            }
+            guard cgFrame.width >= 100, cgFrame.width <= 700,
+                  cgFrame.height >= 200 else {
+                continue
+            }
+            return appKitFrameFromCGWindowBounds(cgFrame)
+        }
+        return nil
     }
 
     private func findGhosttyFrame() -> CGRect? {
