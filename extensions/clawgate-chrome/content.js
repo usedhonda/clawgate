@@ -1,4 +1,6 @@
 const MAX_CONTENT_LENGTH = 5000;
+const MAX_OCR_TEXT_LENGTH = 800;
+const MAX_CAPTION_LENGTH = 280;
 const ROOT_SELECTORS = ['article', 'main', '[role="main"]'];
 const REMOVE_SELECTORS = [
   'script',
@@ -135,25 +137,242 @@ function detectInjectionAttempt(rawText) {
   return invisibleCount > 20;
 }
 
-function extractPagePayload() {
+function isXPage() {
+  return /(^|\.)x\.com$|(^|\.)twitter\.com$/i.test(window.location.hostname);
+}
+
+function isLikelyDecorativeImage(image) {
+  const src = image.currentSrc || image.src || '';
+  const alt = (image.alt || '').toLowerCase();
+  return src.includes('/profile_images/')
+    || src.includes('/emoji/')
+    || src.includes('/abs-0.twimg.com/emoji/')
+    || alt.includes('avatar')
+    || alt === 'emoji';
+}
+
+function isVisibleRect(rect) {
+  return rect.width >= 80
+    && rect.height >= 80
+    && rect.bottom > 0
+    && rect.right > 0
+    && rect.top < window.innerHeight
+    && rect.left < window.innerWidth;
+}
+
+function getNodeTextSnippet(node, maxLength) {
+  return normalizeText(node?.innerText || '').slice(0, maxLength);
+}
+
+function collectImageCandidates(root) {
+  const scope = root || document.body || document.documentElement;
+  const images = Array.from(scope.querySelectorAll('img'));
+  const candidates = [];
+
+  for (const image of images) {
+    const src = image.currentSrc || image.src || '';
+    if (!src || !/^https?:/i.test(src) || isLikelyDecorativeImage(image)) {
+      continue;
+    }
+
+    const rect = image.getBoundingClientRect();
+    if (!isVisibleRect(rect)) {
+      continue;
+    }
+
+    const naturalWidth = image.naturalWidth || Math.round(rect.width);
+    const naturalHeight = image.naturalHeight || Math.round(rect.height);
+    if (naturalWidth < 180 || naturalHeight < 180) {
+      continue;
+    }
+
+    let score = rect.width * rect.height;
+    const article = image.closest('article');
+    const figure = image.closest('figure');
+    const captionSource = figure || article || image.parentElement || scope;
+    const captionText = getNodeTextSnippet(captionSource, MAX_CAPTION_LENGTH);
+
+    if (isXPage()) {
+      if (src.includes('pbs.twimg.com/media')) {
+        score += 200000;
+      }
+      if (article) {
+        score += 80000;
+      }
+    } else {
+      if (scope.contains(image)) {
+        score += 25000;
+      }
+      if (figure) {
+        score += 10000;
+      }
+    }
+
+    candidates.push({
+      image,
+      src,
+      altText: normalizeText(image.alt || '').slice(0, 200),
+      captionText,
+      rect,
+      naturalWidth,
+      naturalHeight,
+      score,
+    });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
+}
+
+function pickPrimaryImageCandidate(root) {
+  return collectImageCandidates(root)[0] || null;
+}
+
+function requestImageDataURL(url) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message));
+        return;
+      }
+      if (!response?.ok || !response?.dataUrl) {
+        reject(new Error(response?.error || 'Image fetch failed'));
+        return;
+      }
+      resolve(response.dataUrl);
+    });
+  });
+}
+
+function loadImage(source) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Image decode failed'));
+    image.src = source;
+  });
+}
+
+function createOCRCanvas(image) {
+  const maxDimension = 1600;
+  const scale = Math.min(1, maxDimension / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.drawImage(image, 0, 0, width, height);
+
+  const frame = context.getImageData(0, 0, width, height);
+  const data = frame.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const gray = Math.round((data[i] * 0.299) + (data[i + 1] * 0.587) + (data[i + 2] * 0.114));
+    const boosted = gray > 168 ? 255 : gray < 88 ? 0 : gray;
+    data[i] = boosted;
+    data[i + 1] = boosted;
+    data[i + 2] = boosted;
+  }
+  context.putImageData(frame, 0, 0);
+  return canvas;
+}
+
+async function extractOCRText(imageURL) {
+  if (typeof OCRAD !== 'function') {
+    return '';
+  }
+
+  const dataUrl = await requestImageDataURL(imageURL);
+  const image = await loadImage(dataUrl);
+  const canvas = createOCRCanvas(image);
+  const raw = OCRAD(canvas);
+  return normalizeText(raw).slice(0, MAX_OCR_TEXT_LENGTH);
+}
+
+function formatImageContext(imageContext) {
+  if (!imageContext) {
+    return '';
+  }
+
+  const sections = [];
+  if (imageContext.altText) {
+    sections.push(`Alt: ${imageContext.altText}`);
+  }
+  if (imageContext.ocrText) {
+    sections.push(`Image text: ${imageContext.ocrText}`);
+  }
+  if (imageContext.captionText) {
+    sections.push(`Nearby context: ${imageContext.captionText}`);
+  }
+
+  if (sections.length === 0) {
+    return '';
+  }
+
+  return `## Image Context\n${sections.join('\n')}`;
+}
+
+async function extractImageContext(root) {
+  const candidate = pickPrimaryImageCandidate(root);
+  if (!candidate) {
+    return null;
+  }
+
+  let ocrText = '';
+  let error = '';
+  try {
+    ocrText = await extractOCRText(candidate.src);
+  } catch (ocrError) {
+    error = ocrError instanceof Error ? ocrError.message : String(ocrError);
+  }
+
+  const result = {
+    source: 'client_ocr',
+    imageURL: candidate.src,
+    altText: candidate.altText,
+    captionText: candidate.captionText,
+    ocrText,
+    width: candidate.naturalWidth,
+    height: candidate.naturalHeight,
+  };
+
+  if (error) {
+    result.error = error;
+  }
+
+  return result;
+}
+
+async function extractPagePayload() {
   const root = pickRootNode();
   const clone = root.cloneNode(true);
   clone.querySelectorAll(REMOVE_SELECTORS).forEach((node) => node.remove());
 
   const rawText = clone.innerText || root.innerText || document.body?.innerText || '';
   const injectionDetected = detectInjectionAttempt(rawText);
-  const content = normalizeText(rawText).slice(0, MAX_CONTENT_LENGTH);
+  const baseContent = normalizeText(rawText).slice(0, MAX_CONTENT_LENGTH);
+  const imageContext = await extractImageContext(root);
+  const mergedContent = [baseContent, formatImageContext(imageContext)].filter(Boolean).join('\n\n');
   const metrics = computeContentMetrics(clone);
   if (injectionDetected) {
     metrics.injectionDetected = true;
+  }
+  if (imageContext) {
+    metrics.hasPrimaryImage = true;
+    metrics.primaryImageWidth = imageContext.width;
+    metrics.primaryImageHeight = imageContext.height;
+    metrics.hasImageOCR = Boolean(imageContext.ocrText);
   }
 
   return {
     ok: true,
     url: window.location.href,
     title: normalizeText(document.title),
-    content,
+    content: mergedContent,
     contentMetrics: metrics,
+    imageContext,
     meta: {
       description: extractMeta('description'),
       ogTitle: extractMeta('og:title', 'property'),
@@ -167,18 +386,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return undefined;
   }
 
-  try {
-    sendResponse(extractPagePayload());
-  } catch (error) {
-    sendResponse({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-      url: window.location.href,
-      title: normalizeText(document.title),
-      content: '',
-      contentMetrics: {},
-      meta: {},
+  extractPagePayload()
+    .then((payload) => sendResponse(payload))
+    .catch((error) => {
+      sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        url: window.location.href,
+        title: normalizeText(document.title),
+        content: '',
+        contentMetrics: {},
+        imageContext: null,
+        meta: {},
+      });
     });
-  }
+
   return true;
 });

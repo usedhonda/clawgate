@@ -28,6 +28,17 @@ chrome.runtime.onStartup.addListener(async () => {
   startPolling();
 });
 
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === 'fetch_image_data_url') {
+    fetchImageDataURL(message.url)
+      .then((dataUrl) => sendResponse({ ok: true, dataUrl }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+
+  return undefined;
+});
+
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_ID || !tab?.id) {
     return;
@@ -179,6 +190,8 @@ async function captureAndSend(tab) {
   const result = await chrome.tabs.sendMessage(tab.id, { type: 'extract_content' });
   const content = typeof result?.content === 'string' ? result.content : '';
   const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+  const imageContext = result?.imageContext && typeof result.imageContext === 'object' ? result.imageContext : null;
+  const contentMetrics = result?.contentMetrics && typeof result.contentMetrics === 'object' ? result.contentMetrics : {};
   const url = tab.url || result?.url || '';
   const title = tab.title || result?.title || '';
   const domain = safeHostname(url);
@@ -195,6 +208,8 @@ async function captureAndSend(tab) {
         description: meta.description || '',
         ogTitle: meta.ogTitle || '',
         ogImage: meta.ogImage || '',
+        imageContext,
+        contentMetrics,
       },
       engagement: {
         activeSeconds: 0,
@@ -224,6 +239,37 @@ async function captureAndSend(tab) {
     chrome.action.setBadgeText({ text: '' }).catch(() => undefined);
   }, 1000);
   await notifySettingsUpdated({ gatewayConnected: true, lastCaptureURL: url });
+}
+
+async function fetchImageDataURL(url) {
+  if (!url || !/^https?:/i.test(url)) {
+    throw new Error('Unsupported image URL');
+  }
+
+  const response = await fetch(url, {
+    method: 'GET',
+    cache: 'force-cache',
+    credentials: 'omit',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Image fetch failed (${response.status})`);
+  }
+
+  const contentType = response.headers.get('content-type') || 'image/png';
+  const buffer = await response.arrayBuffer();
+  return `data:${contentType};base64,${arrayBufferToBase64(buffer)}`;
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
 }
 
 function safeHostname(value) {
