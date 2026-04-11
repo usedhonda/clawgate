@@ -587,29 +587,31 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    private func appKitRectForTrackedFrame(_ frame: CGRect) -> CGRect {
+        let desktopMaxY = NSScreen.screens.map(\.frame.maxY).max() ?? (NSScreen.main?.frame.maxY ?? frame.maxY)
+        return CGRect(
+            x: frame.origin.x,
+            y: desktopMaxY - frame.origin.y - frame.height,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
     private func screenForTrackedFrame(_ frame: CGRect) -> NSScreen? {
         func area(_ rect: CGRect) -> CGFloat {
             guard !rect.isNull, !rect.isEmpty else { return 0 }
             return rect.width * rect.height
         }
 
-        func appKitRect(on screen: NSScreen) -> CGRect {
-            CGRect(
-                x: frame.origin.x,
-                y: screen.frame.maxY - frame.origin.y - frame.height,
-                width: frame.width,
-                height: frame.height
-            )
-        }
-
+        let appKitRect = appKitRectForTrackedFrame(frame)
         return NSScreen.screens.max { lhs, rhs in
-            let lhsArea = area(lhs.visibleFrame.intersection(appKitRect(on: lhs)))
-            let rhsArea = area(rhs.visibleFrame.intersection(appKitRect(on: rhs)))
+            let lhsArea = area(lhs.frame.intersection(appKitRect))
+            let rhsArea = area(rhs.frame.intersection(appKitRect))
             return lhsArea < rhsArea
         } ?? NSScreen.main
     }
 
-    private func resolveTrackedWindow(for app: NSRunningApplication) -> (element: AXUIElement?, frame: CGRect, screen: NSScreen)? {
+    private func resolveTrackedWindow(for app: NSRunningApplication) -> (element: AXUIElement?, frame: CGRect, appKitFrame: CGRect, screen: NSScreen)? {
         guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier) else { return nil }
 
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
@@ -624,16 +626,16 @@ final class PetModel: NSObject, ObservableObject {
         for candidate in candidates {
             if let axFrame = AXQuery.copyFrameAttribute(candidate), roughlySameFrame(axFrame, cgBounds) {
                 if let screen = screenForTrackedFrame(axFrame) {
-                    return (candidate, axFrame, screen)
+                    return (candidate, axFrame, appKitRectForTrackedFrame(axFrame), screen)
                 }
-                return (candidate, axFrame, NSScreen.main ?? NSScreen.screens.first!)
+                return (candidate, axFrame, appKitRectForTrackedFrame(axFrame), NSScreen.main ?? NSScreen.screens.first!)
             }
         }
 
         if let screen = screenForTrackedFrame(cgBounds) {
-            return (nil, cgBounds, screen)
+            return (nil, cgBounds, appKitRectForTrackedFrame(cgBounds), screen)
         }
-        return (nil, cgBounds, NSScreen.main ?? NSScreen.screens.first!)
+        return (nil, cgBounds, appKitRectForTrackedFrame(cgBounds), NSScreen.main ?? NSScreen.screens.first!)
     }
 
     /// Teleport to normal position without walk animation
@@ -649,7 +651,8 @@ final class PetModel: NSObject, ObservableObject {
         let frame = resolved.frame
         let screen = resolved.screen.visibleFrame
         let petSize: CGFloat = characterSize + 20
-        let appKitY = resolved.screen.frame.maxY - frame.origin.y - frame.height
+        let appKitFrame = resolved.appKitFrame
+        let appKitY = appKitFrame.origin.y
         let metrics = PetRenderMetrics(windowSize: petSize)
         let overlap = metrics.overlap
         let rightX = frame.origin.x + frame.width - overlap
@@ -712,6 +715,7 @@ final class PetModel: NSObject, ObservableObject {
         }
         let focusedWin = resolved.element
         let frame = resolved.frame
+        let appKitFrame = resolved.appKitFrame
         let hostScreen = resolved.screen
 
         // Track the specific window Chi is following (for context capture)
@@ -739,8 +743,8 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
 
-        // AX coordinates (top-left origin) → AppKit coordinates (bottom-left origin)
-        let appKitY = hostScreen.frame.maxY - frame.origin.y - frame.height
+        // Use desktop-global AppKit coordinates derived from the tracked frame.
+        let appKitY = appKitFrame.origin.y
 
         let metrics = PetRenderMetrics(windowSize: petSize)
         let overlap = metrics.overlap

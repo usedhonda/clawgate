@@ -164,6 +164,7 @@ Intent:
 The tracked window resolver should return:
 
 - CG topmost frame as the placement truth
+- a desktop-global AppKit rect derived from that CG frame (using the desktop union maxY, not a per-screen maxY)
 - AX element only when AX frame and CG frame roughly match
 
 Implications:
@@ -299,4 +300,5 @@ Reason:
 2. When AX cannot be matched to the current CG topmost frame, context capture operates without AX window identity rather than inventing a stale match.
 3. Hidden side flips normalize any active peek pose back to `.hideClaw` before the new side is shown.
 4. Placement clamps against the host display's visible frame, not `NSScreen.main`.
-5. Fullscreen transitions clear placement lock immediately because edge attachment is no longer valid.
+5. Multi-display tracking converts CG window bounds into AppKit coordinates using the desktop-wide coordinate space before selecting the host display; per-screen `maxY` conversion is invalid.
+6. Fullscreen transitions clear placement lock immediately because edge attachment is no longer valid.
