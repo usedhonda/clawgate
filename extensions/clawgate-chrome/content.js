@@ -224,8 +224,15 @@ function collectImageCandidates(root) {
   return candidates;
 }
 
-function pickPrimaryImageCandidate(root) {
-  return collectImageCandidates(root)[0] || null;
+function pickPrimaryImageCandidate(root, preferredImageURL = '') {
+  const candidates = collectImageCandidates(root);
+  if (preferredImageURL) {
+    const matched = candidates.find((candidate) => candidate.src === preferredImageURL);
+    if (matched) {
+      return matched;
+    }
+  }
+  return candidates[0] || null;
 }
 
 function requestImageDataURL(url) {
@@ -314,8 +321,8 @@ function formatImageContext(imageContext) {
   return `## Image Context\n${sections.join('\n')}`;
 }
 
-async function extractImageContext(root) {
-  const candidate = pickPrimaryImageCandidate(root);
+async function extractImageContext(root, preferredImageURL = '') {
+  const candidate = pickPrimaryImageCandidate(root, preferredImageURL);
   if (!candidate) {
     return null;
   }
@@ -345,7 +352,7 @@ async function extractImageContext(root) {
   return result;
 }
 
-async function extractPagePayload() {
+async function extractPagePayload(options = {}) {
   const root = pickRootNode();
   const clone = root.cloneNode(true);
   clone.querySelectorAll(REMOVE_SELECTORS).forEach((node) => node.remove());
@@ -353,7 +360,7 @@ async function extractPagePayload() {
   const rawText = clone.innerText || root.innerText || document.body?.innerText || '';
   const injectionDetected = detectInjectionAttempt(rawText);
   const baseContent = normalizeText(rawText).slice(0, MAX_CONTENT_LENGTH);
-  const imageContext = await extractImageContext(root);
+  const imageContext = await extractImageContext(root, options.preferredImageURL || '');
   const mergedContent = [baseContent, formatImageContext(imageContext)].filter(Boolean).join('\n\n');
   const metrics = computeContentMetrics(clone);
   if (injectionDetected) {
@@ -386,7 +393,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return undefined;
   }
 
-  extractPagePayload()
+  extractPagePayload({ preferredImageURL: typeof message.preferredImageURL === 'string' ? message.preferredImageURL : '' })
     .then((payload) => sendResponse(payload))
     .catch((error) => {
       sendResponse({

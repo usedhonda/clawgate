@@ -43,7 +43,7 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId !== CONTEXT_MENU_ID || !tab?.id) {
     return;
   }
-  await captureAndSend(tab);
+  await captureAndSend(tab, { preferredImageURL: typeof info.srcUrl === 'string' ? info.srcUrl : '' });
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -73,7 +73,7 @@ async function createContextMenu() {
   chrome.contextMenus.create({
     id: CONTEXT_MENU_ID,
     title: 'Send to Chi',
-    contexts: ['page'],
+    contexts: ['page', 'image'],
   });
 }
 
@@ -176,7 +176,7 @@ async function getActiveTab() {
   return tabs[0] || null;
 }
 
-async function captureAndSend(tab) {
+async function captureAndSend(tab, options = {}) {
   const { gatewayURL, gatewayToken } = await getSettings();
   if (!tab?.id) {
     return;
@@ -187,7 +187,10 @@ async function captureAndSend(tab) {
     return;
   }
 
-  const result = await chrome.tabs.sendMessage(tab.id, { type: 'extract_content' });
+  const result = await chrome.tabs.sendMessage(tab.id, {
+    type: 'extract_content',
+    preferredImageURL: typeof options.preferredImageURL === 'string' ? options.preferredImageURL : '',
+  });
   const content = typeof result?.content === 'string' ? result.content : '';
   const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
   const imageContext = result?.imageContext && typeof result.imageContext === 'object' ? result.imageContext : null;
