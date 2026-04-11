@@ -211,8 +211,8 @@ struct InlineSettingsView: View {
         return "\(peer.hostname) (\(status))"
     }
 
-    @State private var chromeToken: String = ChromeExtensionAuthStore().currentToken
-    @State private var chromeCopied = false
+    @State private var chromeExtensionProvisioned: Bool =
+        UserDefaults.standard.bool(forKey: "chromeExtensionProvisioned")
 
     private var systemSection: some View {
         PanelCard {
@@ -233,34 +233,22 @@ struct InlineSettingsView: View {
                 .foregroundStyle(PanelTheme.textPrimary)
             fieldRow("Extension") {
                 Spacer()
-                Button("Install") {
+                Button(chromeExtensionProvisioned ? "Re-install / Update" : "Install Chrome Extension") {
                     installChromeExtension()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
-            if !chromeToken.isEmpty {
-                fieldRow("Token") {
-                    Spacer()
-                    Button(chromeCopied ? "Copied ✓" : "Copy Token") {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(chromeToken, forType: .string)
-                        chromeCopied = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { chromeCopied = false }
-                    }
-                    .buttonStyle(.borderless)
+            fieldRow("Status") {
+                Text(chromeExtensionProvisioned ? "✓ Installed" : "Not installed")
                     .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.accentCyan)
-                }
+                    .foregroundStyle(chromeExtensionProvisioned ? PanelTheme.accentGreen : PanelTheme.textSecondary)
+                Spacer()
             }
         }
     }
 
     private func installChromeExtension() {
-        let store = ChromeExtensionAuthStore()
-        let token = store.generateNewToken()
-        chromeToken = token
-
         // Prefer the extension bundled in app Resources (production build).
         // Fall back to the source directory for dev builds (swift build).
         let bundledPath = Bundle.main.resourceURL?.appendingPathComponent("clawgate-chrome")
@@ -282,10 +270,24 @@ struct InlineSettingsView: View {
         task.launchPath = "/usr/bin/open"
         task.arguments = [
             "-a", "Google Chrome", "--args",
-            "--load-extension=\(extDir.path)",
-            "--clawgate-token=\(token)",
+            "--load-extension=\(extDir.path)"
         ]
-        try? task.run()
+        do {
+            try task.run()
+            UserDefaults.standard.set(true, forKey: "chromeExtensionProvisioned")
+            chromeExtensionProvisioned = true
+            NotificationCenter.default.post(
+                name: .petBubbleNotify,
+                object: nil,
+                userInfo: [
+                    "text": "Chrome extension loaded. Open the ClawGate popup and press Connect.",
+                    "source": "settings"
+                ]
+            )
+        } catch {
+            UserDefaults.standard.set(false, forKey: "chromeExtensionProvisioned")
+            chromeExtensionProvisioned = false
+        }
     }
 
     @available(macOS 13.0, *)
