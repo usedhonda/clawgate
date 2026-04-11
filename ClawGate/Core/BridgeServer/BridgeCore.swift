@@ -164,7 +164,16 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: body)
     }
 
-    func openclawInfo() -> HTTPResult {
+    func openclawInfo(headers: HTTPHeaders? = nil) -> HTTPResult {
+        // If the caller is the Chrome extension, record the bootstrap so the
+        // Settings panel can auto-detect that the extension is installed.
+        if let origin = headers?.first(name: "Origin"),
+           origin.hasPrefix("chrome-extension://") {
+            DispatchQueue.main.async {
+                UserDefaults.standard.set(true, forKey: "chromeExtensionProvisioned")
+            }
+        }
+
         let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
         guard let data = FileManager.default.contents(atPath: configPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

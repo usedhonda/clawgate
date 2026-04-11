@@ -116,7 +116,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
 
         // Non-blocking: openclaw-info reads local files only
         if head.method == .GET && path == "/v1/openclaw-info" {
-            writeResponse(context: context, result: core.openclawInfo())
+            writeResponse(context: context, result: core.openclawInfo(headers: head.headers))
             return
         }
 

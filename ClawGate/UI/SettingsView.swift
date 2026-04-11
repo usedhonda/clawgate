@@ -211,8 +211,7 @@ struct InlineSettingsView: View {
         return "\(peer.hostname) (\(status))"
     }
 
-    @State private var chromeExtensionProvisioned: Bool =
-        UserDefaults.standard.bool(forKey: "chromeExtensionProvisioned")
+    @AppStorage("chromeExtensionProvisioned") private var chromeExtensionProvisioned: Bool = false
 
     private var systemSection: some View {
         PanelCard {
@@ -233,14 +232,14 @@ struct InlineSettingsView: View {
                 .foregroundStyle(PanelTheme.textPrimary)
             fieldRow("Extension") {
                 Spacer()
-                Button(chromeExtensionProvisioned ? "Re-install / Update" : "Install Chrome Extension") {
-                    installChromeExtension()
+                Button("Open Installer") {
+                    openChromeExtensionInstaller()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
             }
             fieldRow("Status") {
-                Text(chromeExtensionProvisioned ? "✓ Installed" : "Not installed")
+                Text(chromeExtensionProvisioned ? "✓ Connected" : "Not connected")
                     .font(PanelTheme.bodyFont)
                     .foregroundStyle(chromeExtensionProvisioned ? PanelTheme.accentGreen : PanelTheme.textSecondary)
                 Spacer()
@@ -248,7 +247,7 @@ struct InlineSettingsView: View {
         }
     }
 
-    private func installChromeExtension() {
+    private func openChromeExtensionInstaller() {
         // Prefer the extension bundled in app Resources (production build).
         // Fall back to the source directory for dev builds (swift build).
         let bundledPath = Bundle.main.resourceURL?.appendingPathComponent("clawgate-chrome")
@@ -266,28 +265,23 @@ struct InlineSettingsView: View {
             .first(where: { fm.fileExists(atPath: $0.path) })
         else { return }
 
-        let task = Process()
-        task.launchPath = "/usr/bin/open"
-        task.arguments = [
-            "-a", "Google Chrome", "--args",
-            "--load-extension=\(extDir.path)"
-        ]
-        do {
-            try task.run()
-            UserDefaults.standard.set(true, forKey: "chromeExtensionProvisioned")
-            chromeExtensionProvisioned = true
-            NotificationCenter.default.post(
-                name: .petBubbleNotify,
-                object: nil,
-                userInfo: [
-                    "text": "Chrome extension loaded. Open the ClawGate popup and press Connect.",
-                    "source": "settings"
-                ]
-            )
-        } catch {
-            UserDefaults.standard.set(false, forKey: "chromeExtensionProvisioned")
-            chromeExtensionProvisioned = false
-        }
+        // Reveal the extension folder in Finder so the user can drag it into Chrome.
+        NSWorkspace.shared.selectFile(extDir.path, inFileViewerRootedAtPath: extDir.deletingLastPathComponent().path)
+
+        // Open chrome://extensions/ in Chrome (works even if Chrome is already running).
+        let openExtensionsPage = Process()
+        openExtensionsPage.launchPath = "/usr/bin/open"
+        openExtensionsPage.arguments = ["-a", "Google Chrome", "chrome://extensions/"]
+        try? openExtensionsPage.run()
+
+        NotificationCenter.default.post(
+            name: .petBubbleNotify,
+            object: nil,
+            userInfo: [
+                "text": "Turn on Developer Mode in Chrome, then drag the folder from Finder into the extensions page. Press 'Mark Installed' when done.",
+                "source": "settings"
+            ]
+        )
     }
 
     @available(macOS 13.0, *)
