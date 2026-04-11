@@ -77,6 +77,22 @@ if [[ "$SKIP_SYNC" != "true" ]]; then
     rm -rf "$DEST_BUNDLE"
     cp -R "$BUILD_BUNDLE" "$DEST_BUNDLE"
   fi
+  # Sync Chrome extension into app Resources so the bundled-path loader
+  # stays in step with extensions/clawgate-chrome/ (dev path always wins
+  # if Chrome is pointed there, but keeping the bundled copy current
+  # avoids a stale version when someone reinstalls via Settings).
+  EXT_SRC="$PROJECT_PATH/extensions/clawgate-chrome"
+  EXT_DST="$APP_PATH/Contents/Resources/clawgate-chrome"
+  if [[ -d "$EXT_SRC" ]]; then
+    mkdir -p "$(dirname "$EXT_DST")"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --delete "$EXT_SRC/" "$EXT_DST/"
+    else
+      rm -rf "$EXT_DST"
+      mkdir -p "$EXT_DST"
+      cp -R "$EXT_SRC/." "$EXT_DST/"
+    fi
+  fi
 else
   echo "[2/5] Skip app-binary sync (by option)"
 fi
