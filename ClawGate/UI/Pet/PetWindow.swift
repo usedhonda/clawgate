@@ -620,25 +620,39 @@ private final class PetContentView: NSView {
 
     // MARK: - Whisper Window (Layer 1)
 
+    private struct HiddenClawAssetMetrics {
+        static let assetWidth: CGFloat = 688
+        static let assetHeight: CGFloat = 768
+        // Measured from actual hide-claw sprites:
+        // hide-claw-1 alpha bbox = (0,385)-(122,557)
+        // hide-claw-2 alpha bbox = (0,386)-(143,557)
+        static let outerEdgeX: CGFloat = 143
+        static let topY: CGFloat = 385
+    }
+
     private func whisperOrigin(for text: String, parentWindow: NSWindow, bubbleSize: NSSize) -> NSPoint {
         let parentFrame = parentWindow.frame
         let screenFrame = parentWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? parentFrame
         let isClawWhisper = text == "zzz…" && model.isHiding && model.stateMachine.expression == .hideClaw
 
         if isClawWhisper {
-            let clawY = parentFrame.minY + parentFrame.height * 0.56
+            let scale = parentFrame.height / HiddenClawAssetMetrics.assetHeight
+            let renderedWidth = HiddenClawAssetMetrics.assetWidth * scale
+            let horizontalInset = (parentFrame.width - renderedWidth) / 2
+            let clawOuterOffset = horizontalInset + HiddenClawAssetMetrics.outerEdgeX * scale
+            let clawTopY = parentFrame.minY + (HiddenClawAssetMetrics.assetHeight - HiddenClawAssetMetrics.topY) * scale
             let edgeMargin: CGFloat = 2
             var originX: CGFloat
             switch model.hidingSide {
             case .right:
-                // Keep the zzz bubble fully outside the host window on the right side.
-                originX = parentFrame.maxX + edgeMargin
+                // Align bubble's left edge to the visible claw's right edge.
+                originX = parentFrame.minX + clawOuterOffset + edgeMargin
             case .left:
-                // Keep the zzz bubble fully outside the host window on the left side.
-                originX = parentFrame.minX - bubbleSize.width - edgeMargin
+                // Align bubble's right edge to the visible claw's left edge.
+                originX = parentFrame.maxX - clawOuterOffset - bubbleSize.width - edgeMargin
             }
 
-            var originY = clawY
+            var originY = clawTopY + 2
             let clampedX = min(max(originX, screenFrame.minX), screenFrame.maxX - bubbleSize.width)
             if abs(clampedX - originX) > 0.5 {
                 // When the screen edge prevents a pure side placement, raise the
