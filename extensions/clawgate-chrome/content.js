@@ -1,7 +1,7 @@
 const MAX_CONTENT_LENGTH = 5000;
 const MAX_OCR_TEXT_LENGTH = 800;
 const MAX_CAPTION_LENGTH = 280;
-const OCR_UNAVAILABLE_REASON = 'client_ocr_unavailable_under_mv3_csp';
+const OCR_UNAVAILABLE_REASON = 'client_ocr_unavailable';
 const ROOT_SELECTORS = ['article', 'main', '[role="main"]'];
 const REMOVE_SELECTORS = [
   'script',
@@ -236,9 +236,106 @@ function pickPrimaryImageCandidate(root, preferredImageURL = '') {
   return candidates[0] || null;
 }
 
+function requestImageDataURL(url) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message));
+        return;
+      }
+      if (!response?.ok || !response?.dataUrl) {
+        reject(new Error(response?.error || 'Image fetch failed'));
+        return;
+      }
+      resolve(response.dataUrl);
+    });
+  });
+}
+
+let ocrSandboxFramePromise = null;
+let ocrRequestSequence = 0;
+const pendingOCRRequests = new Map();
+
+function getSandboxOrigin() {
+  return new URL(chrome.runtime.getURL('sandbox/ocr.html')).origin;
+}
+
+function ensureOCRSandbox() {
+  if (ocrSandboxFramePromise) {
+    return ocrSandboxFramePromise;
+  }
+
+  ocrSandboxFramePromise = new Promise((resolve, reject) => {
+    const existing = document.getElementById('clawgate-ocr-sandbox');
+    if (existing instanceof HTMLIFrameElement && existing.contentWindow) {
+      resolve(existing);
+      return;
+    }
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'clawgate-ocr-sandbox';
+    iframe.src = chrome.runtime.getURL('sandbox/ocr.html');
+    iframe.style.display = 'none';
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.addEventListener('load', () => resolve(iframe), { once: true });
+    iframe.addEventListener('error', () => reject(new Error(OCR_UNAVAILABLE_REASON)), { once: true });
+    (document.documentElement || document.body).appendChild(iframe);
+  });
+
+  return ocrSandboxFramePromise;
+}
+
+window.addEventListener('message', (event) => {
+  if (event.origin !== getSandboxOrigin()) {
+    return;
+  }
+  const data = event.data;
+  if (!data || data.type !== 'clawgate_ocr_result' || typeof data.id !== 'string') {
+    return;
+  }
+
+  const pending = pendingOCRRequests.get(data.id);
+  if (!pending) {
+    return;
+  }
+  pendingOCRRequests.delete(data.id);
+
+  if (data.ok) {
+    pending.resolve(typeof data.text === 'string' ? normalizeText(data.text).slice(0, MAX_OCR_TEXT_LENGTH) : '');
+  } else {
+    pending.reject(new Error(typeof data.error === 'string' ? data.error : OCR_UNAVAILABLE_REASON));
+  }
+});
+
 async function extractOCRText(imageURL) {
-  void imageURL;
-  return '';
+  const dataUrl = await requestImageDataURL(imageURL);
+  const iframe = await ensureOCRSandbox();
+  const requestId = `ocr-${Date.now()}-${ocrRequestSequence += 1}`;
+
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      pendingOCRRequests.delete(requestId);
+      reject(new Error('OCR timeout'));
+    }, 10000);
+
+    pendingOCRRequests.set(requestId, {
+      resolve: (text) => {
+        window.clearTimeout(timeout);
+        resolve(text);
+      },
+      reject: (error) => {
+        window.clearTimeout(timeout);
+        reject(error);
+      },
+    });
+
+    iframe.contentWindow?.postMessage({
+      type: 'clawgate_ocr_request',
+      id: requestId,
+      imageDataUrl: dataUrl,
+    }, getSandboxOrigin());
+  });
 }
 
 function formatImageContext(imageContext) {
@@ -287,7 +384,7 @@ async function extractImageContext(root, preferredImageURL = '') {
     altText: candidate.altText,
     captionText: candidate.captionText,
     ocrText,
-    ocrAvailable: false,
+    ocrAvailable: true,
     width: candidate.naturalWidth,
     height: candidate.naturalHeight,
   };
