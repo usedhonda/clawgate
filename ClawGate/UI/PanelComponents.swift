@@ -181,6 +181,7 @@ struct ActionButton: View {
 
 struct PanelTabButton: View {
     let title: String
+    var systemImage: String? = nil
     let isSelected: Bool
     let action: () -> Void
 
@@ -188,29 +189,39 @@ struct PanelTabButton: View {
 
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(PanelTheme.font(size: 11, weight: isSelected ? .bold : .medium))
-                .foregroundStyle(isSelected ? PanelTheme.accentCyan : PanelTheme.textPrimary.opacity(0.88))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .layoutPriority(1)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
-                        .fill(isSelected
-                              ? PanelTheme.accentCyan.opacity(0.12)
-                              : PanelTheme.textPrimary.opacity(isHovered ? 0.10 : 0.06))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
-                        .stroke(isSelected
-                                ? PanelTheme.accentCyan.opacity(0.25)
-                                : (isHovered ? PanelTheme.controlBorderStrong : PanelTheme.controlBorder),
-                                lineWidth: 1)
-                )
+            HStack(spacing: 4) {
+                if let symbol = systemImage {
+                    Image(systemName: symbol)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                        .foregroundStyle(isSelected ? PanelTheme.accentCyan : PanelTheme.textPrimary.opacity(0.88))
+                }
+                if isSelected || systemImage == nil {
+                    Text(title)
+                        .font(PanelTheme.font(size: 11, weight: isSelected ? .bold : .medium))
+                        .foregroundStyle(isSelected ? PanelTheme.accentCyan : PanelTheme.textPrimary.opacity(0.88))
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+            }
+            .layoutPriority(1)
+            .padding(.horizontal, systemImage != nil && !isSelected ? 6 : 10)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
+                    .fill(isSelected
+                          ? PanelTheme.accentCyan.opacity(0.12)
+                          : PanelTheme.textPrimary.opacity(isHovered ? 0.10 : 0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: PanelTheme.cornerRadius, style: .continuous)
+                    .stroke(isSelected
+                            ? PanelTheme.accentCyan.opacity(0.25)
+                            : (isHovered ? PanelTheme.controlBorderStrong : PanelTheme.controlBorder),
+                            lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
+        .help(title)
         .onHover { hovering in
             withAnimation(.easeOut(duration: 0.14)) { isHovered = hovering }
         }

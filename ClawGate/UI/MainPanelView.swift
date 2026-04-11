@@ -19,9 +19,18 @@ final class MainPanelModel: ObservableObject {
 struct MainPanelView: View {
     private enum Tab: String, CaseIterable {
         case monitor  = "Monitor"
-        case config   = "Config"
         case avatar   = "Avatar"
         case vibeterm = "VibeTerm"
+        case config   = "Config"
+
+        var systemImage: String {
+            switch self {
+            case .monitor:  return "waveform.path.ecg"
+            case .avatar:   return "person.crop.circle"
+            case .vibeterm: return "terminal"
+            case .config:   return "gearshape"
+            }
+        }
     }
 
     @ObservedObject var settingsModel: SettingsModel
@@ -109,6 +118,7 @@ struct MainPanelView: View {
         ForEach(tabs, id: \.rawValue) { tab in
             PanelTabButton(
                 title: tab.rawValue,
+                systemImage: tab.systemImage,
                 isSelected: selectedTab == tab,
                 action: { selectedTab = tab }
             )
