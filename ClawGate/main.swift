@@ -20,9 +20,6 @@ final class AppRuntime {
         logger: logger
     )
 
-    lazy var chromePageStore = ChromePageStore()
-    lazy var chromeExtensionAuthStore = ChromeExtensionAuthStore()
-
     private lazy var registry = AdapterRegistry(adapters: enabledAdapters())
     private lazy var eventBus = EventBus()
     private lazy var core = BridgeCore(
@@ -150,10 +147,6 @@ final class AppRuntime {
         // Connect lineInboundWatcher to core for /v1/debug/line-dedup endpoint
         core.lineInboundWatcher = inboundWatcher
         core.lineHealthCaretaker = lineHealthCaretaker
-
-        // Chrome extension stores
-        core.chromePageStore = chromePageStore
-        core.chromeExtensionAuthStore = chromeExtensionAuthStore
 
         // Forward petChromeCaptureFired → EventBus (PetModel → Chrome extension poll)
         NotificationCenter.default.addObserver(

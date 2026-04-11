@@ -3,8 +3,6 @@ import CryptoKit
 
 extension Notification.Name {
     static let petBubbleNotify = Notification.Name("petBubbleNotify")
-    /// Posted by BridgeCore when a Chrome page capture arrives → PetModel calls summonChromePage.
-    static let petChromePage = Notification.Name("petChromePage")
     /// Posted by PetModel when user requests Chrome page capture → AppRuntime publishes to EventBus.
     static let petChromeCaptureFired = Notification.Name("petChromeCaptureFired")
 }
