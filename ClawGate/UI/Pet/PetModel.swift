@@ -75,6 +75,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var notificationMessage: OpenClawChatMessage?  // Independent notification
     @Published var pendingScreenshotOffer: ScreenshotOffer?
     @Published var petMode: PetMode = .secretary
+    private var hasEverConnected = false
     @Published var isVisible: Bool = PetModel.loadBool(PersistKey.isVisible, default: true) {
         didSet { UserDefaults.standard.set(isVisible, forKey: PersistKey.isVisible) }
     }
@@ -239,11 +240,15 @@ final class PetModel: NSObject, ObservableObject {
             guard let self else { return }
             switch event {
             case .connected(_, let key):
+                let wasConnected = (self.connectionState == .connected)
                 self.sessionKey = key
                 self.connectionState = .connected
                 self.stateMachine.handle(.reconnected)
                 NSLog("[Pet] Connected to Gateway, sessionKey=%@", key)
-                self.showWhisper("Connected")
+                if self.hasEverConnected && !wasConnected {
+                    self.showWhisper("Connected")
+                }
+                self.hasEverConnected = true
                 Task { [weak self] in
                     guard let self, let key = self.sessionKey else { return }
                     try? await self.wsClient.subscribeToSession(sessionKey: key)
@@ -345,9 +350,12 @@ final class PetModel: NSObject, ObservableObject {
                 }
 
             case .disconnected:
+                let wasConnected = (self.connectionState == .connected)
                 self.connectionState = .disconnected
                 self.stateMachine.handle(.disconnected)
-                self.showWhisper("すぅ…")
+                if self.hasEverConnected && wasConnected {
+                    self.showWhisper("zzz…")
+                }
             }
         }
     }
