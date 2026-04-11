@@ -1,6 +1,7 @@
 const MAX_CONTENT_LENGTH = 5000;
 const MAX_OCR_TEXT_LENGTH = 800;
 const MAX_CAPTION_LENGTH = 280;
+const OCR_UNAVAILABLE_REASON = 'client_ocr_unavailable_under_mv3_csp';
 const ROOT_SELECTORS = ['article', 'main', '[role="main"]'];
 const REMOVE_SELECTORS = [
   'script',
@@ -235,67 +236,9 @@ function pickPrimaryImageCandidate(root, preferredImageURL = '') {
   return candidates[0] || null;
 }
 
-function requestImageDataURL(url) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        reject(new Error(runtimeError.message));
-        return;
-      }
-      if (!response?.ok || !response?.dataUrl) {
-        reject(new Error(response?.error || 'Image fetch failed'));
-        return;
-      }
-      resolve(response.dataUrl);
-    });
-  });
-}
-
-function loadImage(source) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('Image decode failed'));
-    image.src = source;
-  });
-}
-
-function createOCRCanvas(image) {
-  const maxDimension = 1600;
-  const scale = Math.min(1, maxDimension / Math.max(image.width, image.height));
-  const width = Math.max(1, Math.round(image.width * scale));
-  const height = Math.max(1, Math.round(image.height * scale));
-
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext('2d', { willReadFrequently: true });
-  context.drawImage(image, 0, 0, width, height);
-
-  const frame = context.getImageData(0, 0, width, height);
-  const data = frame.data;
-  for (let i = 0; i < data.length; i += 4) {
-    const gray = Math.round((data[i] * 0.299) + (data[i + 1] * 0.587) + (data[i + 2] * 0.114));
-    const boosted = gray > 168 ? 255 : gray < 88 ? 0 : gray;
-    data[i] = boosted;
-    data[i + 1] = boosted;
-    data[i + 2] = boosted;
-  }
-  context.putImageData(frame, 0, 0);
-  return canvas;
-}
-
 async function extractOCRText(imageURL) {
-  if (typeof OCRAD !== 'function') {
-    return '';
-  }
-
-  const dataUrl = await requestImageDataURL(imageURL);
-  const image = await loadImage(dataUrl);
-  const canvas = createOCRCanvas(image);
-  const raw = OCRAD(canvas);
-  return normalizeText(raw).slice(0, MAX_OCR_TEXT_LENGTH);
+  void imageURL;
+  return '';
 }
 
 function formatImageContext(imageContext) {
@@ -334,6 +277,9 @@ async function extractImageContext(root, preferredImageURL = '') {
   } catch (ocrError) {
     error = ocrError instanceof Error ? ocrError.message : String(ocrError);
   }
+  if (!ocrText && !error) {
+    error = OCR_UNAVAILABLE_REASON;
+  }
 
   const result = {
     source: 'client_ocr',
@@ -341,6 +287,7 @@ async function extractImageContext(root, preferredImageURL = '') {
     altText: candidate.altText,
     captionText: candidate.captionText,
     ocrText,
+    ocrAvailable: false,
     width: candidate.naturalWidth,
     height: candidate.naturalHeight,
   };
