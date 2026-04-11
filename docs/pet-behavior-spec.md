@@ -263,6 +263,17 @@ This preserves both attachment and facing correctness.
 - Only legal while hiding, in `.hideClaw`, with no face showing
 - Never reused as a generic disconnect cue
 
+## Whisper Positioning
+
+- `zzz…` is a **claw whisper**, not a head whisper.
+- While Chi is hidden in `.hideClaw`, the whisper bubble should anchor just above the visible claw edge:
+  - hidden on the right side of the host -> whisper anchors above the left-edge claw
+  - hidden on the left side of the host -> whisper anchors above the right-edge claw
+- All other whispers (`Connected`, `link lost`, normal reactions, and any whisper shown during visible peek/emerge states) anchor above Chi's head area.
+- The whisper bubble's bottom edge should align to the semantic anchor area:
+  - claw whisper -> claw area
+  - all other whispers -> head area
+
 ## Working Tree Recommendation
 
 Current uncommitted `PetModel.swift` changes should **not** be treated as authoritative yet.

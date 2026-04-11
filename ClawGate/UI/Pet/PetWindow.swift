@@ -620,6 +620,29 @@ private final class PetContentView: NSView {
 
     // MARK: - Whisper Window (Layer 1)
 
+    private func whisperAnchorPoint(for text: String, parentFrame: NSRect) -> NSPoint {
+        let isClawWhisper = text == "zzz…" && model.isHiding && model.stateMachine.expression == .hideClaw
+
+        if isClawWhisper {
+            let anchorX: CGFloat
+            switch model.hidingSide {
+            case .right:
+                // Host is on Chi's left, so the visible claw sits near the left edge.
+                anchorX = parentFrame.minX + parentFrame.width * 0.26
+            case .left:
+                // Host is on Chi's right, so the visible claw sits near the right edge.
+                anchorX = parentFrame.minX + parentFrame.width * 0.74
+            }
+            let anchorY = parentFrame.minY + parentFrame.height * 0.56
+            return NSPoint(x: anchorX, y: anchorY)
+        }
+
+        // All non-claw whispers target Chi's head area, including visible peek poses.
+        let headX = parentFrame.midX
+        let headY = parentFrame.minY + parentFrame.height * 0.88
+        return NSPoint(x: headX, y: headY)
+    }
+
     private func showWhisper(_ text: String) {
         hideWhisper()
         guard let parentWindow = window else { return }
@@ -646,10 +669,8 @@ private final class PetContentView: NSView {
         ww.ignoresMouseEvents = true
 
         let parentFrame = parentWindow.frame
-        let origin = NSPoint(
-            x: parentFrame.midX - w / 2,
-            y: parentFrame.maxY + 2
-        )
+        let anchor = whisperAnchorPoint(for: text, parentFrame: parentFrame)
+        let origin = NSPoint(x: anchor.x - w / 2, y: anchor.y)
         ww.setFrameOrigin(origin)
 
         parentWindow.addChildWindow(ww, ordered: .above)
