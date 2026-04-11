@@ -146,6 +146,8 @@ final class PetModel: NSObject, ObservableObject {
     private var lastActivityTime = Date()
     private var hideCheckTimer: Timer?
     private var clawWaveTimer: Timer?
+    private var zzzTimer: Timer?
+    private var lastZzzAt: Date?
     private var unhideWaveOnArrival = false
 
     /// Pet interaction mode (right-click menu)
@@ -354,7 +356,7 @@ final class PetModel: NSObject, ObservableObject {
                 self.connectionState = .disconnected
                 self.stateMachine.handle(.disconnected)
                 if self.hasEverConnected && wasConnected {
-                    self.showWhisper("zzz…")
+                    self.showWhisper("link lost")
                 }
             }
         }
@@ -595,6 +597,8 @@ final class PetModel: NSObject, ObservableObject {
         // Track last non-ClawGate frontmost app (ClawGate becomes frontmost on pet click)
         if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             if lastTrackedApp?.processIdentifier != app.processIdentifier {
+                lastTrackedWindow = nil
+                lastTrackedWindowFrame = nil
                 if isHiding {
                     // Stay hidden — just teleport to the new window's edge
                     lastTrackedApp = app
@@ -610,22 +614,37 @@ final class PetModel: NSObject, ObservableObject {
 
         guard let app = lastTrackedApp else { return }
 
-        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
-        guard let focusedWin = AXQuery.focusedWindow(appElement: appElement),
-              let frame = AXQuery.copyFrameAttribute(focusedWin) else {
-            // The tracked app currently has no focusable window. If Chi was
-            // hiding, there is nothing left to hide behind — emerge so she
-            // doesn't peek at empty space. NOTE: this triggers ONLY when
-            // focusedWindow disappears entirely. A simple focus change to
-            // another window of the same (or any) app is *not* an unhide
-            // trigger; Chi just teleports to the new edge below.
+        // Primary source of truth: CGWindowList Z-order. This correctly handles
+        // same-app window switches where kAXFocusedWindowAttribute lies about
+        // which window is visually on top.
+        guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier) else {
             if isHiding {
-                NSLog("[PetHide] No focusable window left — unhiding")
+                NSLog("[PetHide] No on-screen window for tracked app — unhiding")
                 unhide()
             } else {
                 moveController.stop()
             }
+            lastTrackedWindow = nil
+            lastTrackedWindowFrame = nil
             return
+        }
+
+        // AX focused window is best-effort (used for context capture). Prefer AX
+        // frame for sub-pixel precision when it agrees with CG bounds; otherwise
+        // trust CG bounds since they reflect the actual topmost window.
+        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        let focusedWin = AXQuery.focusedWindow(appElement: appElement)
+        let axFrame = focusedWin.flatMap { AXQuery.copyFrameAttribute($0) }
+
+        let frame: CGRect
+        if let ax = axFrame,
+           abs(ax.origin.x - cgBounds.origin.x) < 20,
+           abs(ax.origin.y - cgBounds.origin.y) < 20,
+           abs(ax.width - cgBounds.width) < 20,
+           abs(ax.height - cgBounds.height) < 20 {
+            frame = ax
+        } else {
+            frame = cgBounds
         }
 
         // Track the specific window Chi is following (for context capture)
@@ -828,7 +847,33 @@ final class PetModel: NSObject, ObservableObject {
 
         // Micro-loop: occasional peek while hiding
         startHideMicroLoop()
+        scheduleNextZzz(initial: true)
         NSLog("[PetHide] Entered hiding (side=%@)", hidingSide == .left ? "left" : "right")
+    }
+
+    /// Schedule the next "zzz…" whisper attempt while Chi is hiding.
+    /// Fires only if still in `.hideClaw` (not peeking), with 25% roll and 60s cooldown.
+    private func scheduleNextZzz(initial: Bool) {
+        zzzTimer?.invalidate()
+        let delay: Double = initial ? Double.random(in: 5...10) : Double.random(in: 15...30)
+        zzzTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self, self.isHiding else { return }
+            // Face visible (peek variants) — never whisper zzz with face showing
+            guard self.stateMachine.expression == .hideClaw else {
+                self.scheduleNextZzz(initial: false)
+                return
+            }
+            // Cooldown: at least 60s since last zzz
+            if let last = self.lastZzzAt, Date().timeIntervalSince(last) < 60 {
+                self.scheduleNextZzz(initial: false)
+                return
+            }
+            if Double.random(in: 0..<1) < 0.25 {
+                self.showWhisper("zzz…")
+                self.lastZzzAt = Date()
+            }
+            self.scheduleNextZzz(initial: false)
+        }
     }
 
     private func startHideMicroLoop() {
@@ -854,6 +899,8 @@ final class PetModel: NSObject, ObservableObject {
         isHiding = false
         clawWaveTimer?.invalidate()
         clawWaveTimer = nil
+        zzzTimer?.invalidate()
+        zzzTimer = nil
         lastActivityTime = Date()
         stateMachine.isExpressionLocked = false
         // Keep hideAnimationSuffix for emerge animation (cleared after emerge finishes)

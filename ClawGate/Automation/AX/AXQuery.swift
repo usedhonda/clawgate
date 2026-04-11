@@ -1,4 +1,5 @@
 import ApplicationServices
+import CoreGraphics
 import Foundation
 
 struct AXNode {
@@ -27,6 +28,29 @@ enum AXQuery {
             return nil
         }
         return (element as! AXUIElement)
+    }
+
+    /// Returns the topmost on-screen window bounds for a given pid, in front-to-back order.
+    /// Uses CGWindowListCopyWindowInfo which reflects actual Z-order, unlike
+    /// kAXFocusedWindowAttribute (which returns the last-focused window of the app
+    /// even if a different window is visually on top).
+    static func topmostWindowBounds(pid: pid_t, minWidth: CGFloat = 200, minHeight: CGFloat = 150) -> CGRect? {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        for info in list {
+            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid else { continue }
+            let layer = (info[kCGWindowLayer as String] as? Int) ?? -1
+            if layer != 0 { continue }  // normal app windows only
+            guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
+                continue
+            }
+            if rect.width < minWidth || rect.height < minHeight { continue }
+            return rect
+        }
+        return nil
     }
 
     /// Get all windows of an application (including minimized ones).
