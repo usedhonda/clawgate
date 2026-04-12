@@ -36,3 +36,4 @@ docs/log/
 # Personal prompt overlay (not distributed)
 extensions/openclaw-plugin/src/prompts-local.js
 extensions/openclaw-plugin/src/prompts-private.js
+extensions/clawgate-chrome/icons/_orig/
