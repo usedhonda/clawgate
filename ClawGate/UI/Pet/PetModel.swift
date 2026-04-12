@@ -981,6 +981,9 @@ final class PetModel: NSObject, ObservableObject {
         clawWaveTimer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 6...12), repeats: true) { [weak self] _ in
             guard let self, self.isHiding else { return }
             if self.stateMachine.expression == .hideClaw {
+                if self.whisperText == "zzz…" {
+                    self.dismissWhisper()
+                }
                 let peeks: [PetExpression] = [.hidePeek, .hidePeek2, .hidePeek3]
                 let peek = peeks.randomElement() ?? .hidePeek
                 self.stateMachine.expression = peek

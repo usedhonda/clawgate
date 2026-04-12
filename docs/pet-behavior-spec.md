@@ -218,6 +218,7 @@ A sticky opposite-side choice may be cleared when:
 - Repositioning is immediate, not walking animation
 - Host changes do **not** automatically unhide if a valid new host exists
 - Peek poses are temporary overlays on the same hidden-side attachment
+- Entering a visible peek pose immediately dismisses any active `zzz…` whisper; `zzz…` is valid only while the claw-only pose remains visible
 
 ### Hidden app/window switch
 
