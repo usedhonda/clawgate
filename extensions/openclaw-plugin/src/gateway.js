@@ -370,10 +370,65 @@ let _filterDisplayName = "";
 // ── Session state tracking (for roster) ──────────────────────────
 /** @type {Map<string, string>} project -> mode */
 const sessionModes = new Map();
+/** @type {Map<string, string>} "<sessionType>:<project>" -> mode */
+const sessionModesByKey = new Map();
 /** @type {Map<string, string>} project -> status */
 const sessionStatuses = new Map();
 /** @type {Map<string, { getContextBlock: Function }>} accountId -> read-only project-view reader */
 const projectViewReaders = new Map();
+
+function normalizeSessionTypeKey(sessionType) {
+  const raw = `${sessionType || ""}`.trim().toLowerCase();
+  return raw === "codex" ? "codex" : "cc";
+}
+
+function sessionIdentityKey(project, sessionType) {
+  return `${normalizeSessionTypeKey(sessionType)}:${`${project || ""}`.trim()}`;
+}
+
+function modeRank(mode) {
+  switch (`${mode || ""}`.trim().toLowerCase()) {
+  case "autonomous":
+    return 3;
+  case "auto":
+    return 2;
+  case "observe":
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+function recomputeProjectMode(project) {
+  const normalizedProject = `${project || ""}`.trim();
+  if (!normalizedProject) return "ignore";
+
+  let bestMode = "ignore";
+  for (const [key, mode] of sessionModesByKey.entries()) {
+    const colonIdx = key.indexOf(":");
+    const keyedProject = colonIdx >= 0 ? key.slice(colonIdx + 1) : key;
+    if (keyedProject !== normalizedProject) continue;
+    if (modeRank(mode) > modeRank(bestMode)) {
+      bestMode = mode;
+    }
+  }
+  sessionModes.set(normalizedProject, bestMode);
+  return bestMode;
+}
+
+function setTrackedSessionMode(project, sessionType, mode) {
+  const normalizedProject = `${project || ""}`.trim();
+  if (!normalizedProject) return "ignore";
+
+  const normalizedMode = `${mode || "ignore"}`.trim().toLowerCase() || "ignore";
+  const key = sessionIdentityKey(normalizedProject, sessionType);
+  if (normalizedMode === "ignore") {
+    sessionModesByKey.delete(key);
+  } else {
+    sessionModesByKey.set(key, normalizedMode);
+  }
+  return recomputeProjectMode(normalizedProject);
+}
 
 // ── Pairing guidance dedup (full guidance sent once per project) ──
 /** @type {Set<string>} */
@@ -3070,7 +3125,7 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
   }
 
   // Track session state
-  sessionModes.set(project, mode);
+  setTrackedSessionMode(project, sessionType, mode);
   sessionStatuses.set(project, "waiting_input");
   if (mode !== "autonomous") setAutonomousLoopActive(project, false);
   // Question event means CC is actively working — clear review-done suppression
@@ -3357,7 +3412,7 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   if (reviewDoneState) {
     log?.debug?.(`clawgate: [${accountId}] skipping completion for "${project}" — review-done(reason=${reviewDoneState.reason}, awaiting next task)`);
     // Still update session state so roster stays accurate
-    sessionModes.set(project, mode);
+    setTrackedSessionMode(project, sessionType, mode);
     sessionStatuses.set(project, "waiting_input");
     return;
   }
@@ -3373,20 +3428,20 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
   const capture = payload.capture || "";
   if (capture === "idle_bootstrap") {
     log?.info?.(`clawgate: [${accountId}] skipping bootstrap completion for "${project}" (capture=idle_bootstrap)`);
-    sessionModes.set(project, mode);
+    setTrackedSessionMode(project, sessionType, mode);
     sessionStatuses.set(project, "waiting_input");
     return;
   }
 
   if (shouldSkipCompletionDispatch({ project, mode, sessionType, text })) {
-    sessionModes.set(project, mode);
+    setTrackedSessionMode(project, sessionType, mode);
     sessionStatuses.set(project, "waiting_input");
     log?.info?.(`clawgate: [${accountId}] completion_dedup_skipped project=${project} mode=${mode}`);
     return;
   }
 
   // Track session state for roster
-  sessionModes.set(project, mode);
+  setTrackedSessionMode(project, sessionType, mode);
   sessionStatuses.set(project, "waiting_input");
   if (mode !== "autonomous") setAutonomousLoopActive(project, false);
 
@@ -4212,9 +4267,10 @@ export async function startAccount(ctx) {
     if (remoteConfig?.tmux?.sessionModes) {
       for (const [key, mode] of Object.entries(remoteConfig.tmux.sessionModes)) {
         const colonIdx = key.indexOf(":");
+        const sessionType = colonIdx >= 0 ? key.slice(0, colonIdx) : "cc";
         const proj = colonIdx >= 0 ? key.slice(colonIdx + 1) : key;
         if (proj && mode && mode !== "ignore") {
-          sessionModes.set(proj, mode);
+          setTrackedSessionMode(proj, sessionType, mode);
         }
       }
       log?.info?.(`clawgate: [${accountId}] pre-loaded sessionModes from config: ${[...sessionModes.entries()].map(([k, v]) => `${k}=${v}`).join(", ") || "(none)"}`);
@@ -4476,7 +4532,9 @@ export async function startAccount(ctx) {
           if (event.adapter === "tmux" && event.payload?.project) {
             const proj = event.payload.project;
             const tmuxTgt = event.payload.tmux_target || "";
-            if (event.payload.mode) sessionModes.set(proj, event.payload.mode);
+            if (event.payload.mode) {
+              setTrackedSessionMode(proj, event.payload.session_type || event.payload.sender || "cc", event.payload.mode);
+            }
             if (event.payload.status) sessionStatuses.set(proj, event.payload.status);
             if (tmuxTgt) resolveProjectPath(proj, tmuxTgt);
           }

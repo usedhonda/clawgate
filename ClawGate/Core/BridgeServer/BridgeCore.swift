@@ -997,13 +997,27 @@ final class BridgeCore {
     func autonomousStatusSnapshot() -> AutonomousStatusResult {
         let config = configStore.load()
         let localLineSendExpected = config.lineEnabled
-        let candidates = config.tmuxSessionModes
-            .filter { (key, mode) in
-                key.hasPrefix("codex:") && (mode == "autonomous" || mode == "auto")
-            }
-            .sorted { $0.key < $1.key }
+        let entries = opsLogStore.recent(limit: 400)
 
-        guard let target = candidates.first else {
+        func modeRank(_ mode: String) -> Int {
+            switch mode {
+            case "autonomous": return 2
+            case "auto": return 1
+            default: return 0
+            }
+        }
+
+        var projectModes: [String: String] = [:]
+        for (key, mode) in config.tmuxSessionModes {
+            guard mode == "autonomous" || mode == "auto" else { continue }
+            let project = key.contains(":") ? String(key.split(separator: ":", maxSplits: 1)[1]) : key
+            if let existing = projectModes[project], modeRank(existing) >= modeRank(mode) {
+                continue
+            }
+            projectModes[project] = mode
+        }
+
+        guard !projectModes.isEmpty else {
             return AutonomousStatusResult(
                 targetProject: "",
                 mode: "ignore",
@@ -1015,9 +1029,28 @@ final class BridgeCore {
             )
         }
 
-        let project = String(target.key.dropFirst("codex:".count))
-        let mode = target.value
-        let entries = opsLogStore.recent(limit: 400)
+        var latestActivity: [String: Date] = [:]
+        for entry in entries {
+            guard entry.event == "tmux.completion" || entry.event == "tmux.forward" else { continue }
+            let kv = parseKeyValueMessage(entry.message)
+            guard let project = kv["project"], projectModes[project] != nil else { continue }
+            if latestActivity[project] == nil {
+                latestActivity[project] = entry.date
+            }
+        }
+
+        let target = projectModes.keys.sorted { lhs, rhs in
+            let leftDate = latestActivity[lhs] ?? .distantPast
+            let rightDate = latestActivity[rhs] ?? .distantPast
+            if leftDate != rightDate { return leftDate > rightDate }
+            if modeRank(projectModes[lhs] ?? "ignore") != modeRank(projectModes[rhs] ?? "ignore") {
+                return modeRank(projectModes[lhs] ?? "ignore") > modeRank(projectModes[rhs] ?? "ignore")
+            }
+            return lhs < rhs
+        }.first!
+
+        let project = target
+        let mode = projectModes[target] ?? "ignore"
 
         var lastCompletionAt: String?
         var lastCompletionDate: Date?
