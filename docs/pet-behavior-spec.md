@@ -68,15 +68,15 @@ It does **not** define Bridge, OpenClaw chat semantics, or Summon transport.
 | Idle for `hideAfterMinutes` and selected character is `chi-claw` | Enter hiding |
 | Enter hiding | Lock expression, stop locomotion, switch to `.hideClaw`, start micro-loop |
 | While hiding, periodic peek timer fires | Briefly show one of the peek poses, then return to `.hideClaw` |
-| While hiding, zzz check fires | Whisper `zzz…` only when still in `.hideClaw`, on cooldown, and random roll succeeds |
+| While hiding, sleep-whisper check fires | Whisper `zzz…` (25%) or `mm…` (15%) only when still in `.hideClaw`, on shared cooldown, and random roll succeeds |
 | Unhide | Teleport to normal idle position, play emerge briefly, then clear suffix, return to idle, resume cycle |
 
 ### Connection / non-placement events that still affect visible behavior
 
 | Trigger | Intended behavior |
 |---|---|
-| Disconnect while visible | Expression may change to sleep / whisper `link lost`, but hiding logic must not emit `zzz…` for disconnect |
-| Disconnect while hiding | Remain hidden; `zzz…` only follows hide rules, not connection loss |
+| Disconnect while visible | Expression may change to sleep / whisper `link lost`, but hiding logic must not emit hide sleep whispers for disconnect |
+| Disconnect while hiding | Remain hidden; `zzz…` / `mm…` only follow hide rules, not connection loss |
 
 ## State Variables and Invariants
 
@@ -218,7 +218,7 @@ A sticky opposite-side choice may be cleared when:
 - Repositioning is immediate, not walking animation
 - Host changes do **not** automatically unhide if a valid new host exists
 - Peek poses are temporary overlays on the same hidden-side attachment
-- Entering a visible peek pose immediately dismisses any active `zzz…` whisper; `zzz…` is valid only while the claw-only pose remains visible
+- Entering a visible peek pose immediately dismisses any active `zzz…` or `mm…` whisper; hide sleep whispers are valid only while the claw-only pose remains visible
 
 ### Hidden app/window switch
 
@@ -260,14 +260,15 @@ This preserves both attachment and facing correctness.
 - CG topmost wins for placement
 - AX focused is advisory for context only
 
-### Zzz whisper
+### Hide sleep whispers
 
-- Only legal while hiding, in `.hideClaw`, with no face showing
-- Never reused as a generic disconnect cue
+- `zzz…` and `mm…` are only legal while hiding, in `.hideClaw`, with no face showing
+- They share the same cooldown and peek-dismiss behavior
+- They are never reused as generic disconnect cues
 
 ## Whisper Positioning
 
-- `zzz…` is a **claw whisper**, not a head whisper.
+- `zzz…` and `mm…` are **claw whispers**, not head whispers.
 - While Chi is hidden in `.hideClaw`, the whisper bubble must stay **outside the active host window body**.
 - The claw-side anchor is based on the **measured hide-claw sprite bounds**, not the pet window edge or window center.
 - Side rule for `zzz…`:

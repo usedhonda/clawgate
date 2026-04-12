@@ -956,25 +956,29 @@ final class PetModel: NSObject, ObservableObject {
         NSLog("[PetHide] Entered hiding (side=%@)", hidingSide == .left ? "left" : "right")
     }
 
-    /// Schedule the next "zzz…" whisper attempt while Chi is hiding.
-    /// Fires only if still in `.hideClaw` (not peeking), with 25% roll and 60s cooldown.
+    /// Schedule the next sleep whisper attempt while Chi is hiding.
+    /// Fires only if still in `.hideClaw` (not peeking), with 25% `zzz…`, 15% `mm…`, and 60s shared cooldown.
     private func scheduleNextZzz(initial: Bool) {
         zzzTimer?.invalidate()
         let delay: Double = initial ? Double.random(in: 5...10) : Double.random(in: 15...30)
         zzzTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self, self.isHiding else { return }
-            // Face visible (peek variants) — never whisper zzz with face showing
+            // Face visible (peek variants) — never whisper sleep whispers with face showing
             guard self.stateMachine.expression == .hideClaw else {
                 self.scheduleNextZzz(initial: false)
                 return
             }
-            // Cooldown: at least 60s since last zzz
+            // Cooldown: at least 60s since the last sleep whisper
             if let last = self.lastZzzAt, Date().timeIntervalSince(last) < 60 {
                 self.scheduleNextZzz(initial: false)
                 return
             }
-            if Double.random(in: 0..<1) < 0.25 {
+            let roll = Double.random(in: 0..<1)
+            if roll < 0.25 {
                 self.showWhisper("zzz…")
+                self.lastZzzAt = Date()
+            } else if roll < 0.40 {
+                self.showWhisper("mm…")
                 self.lastZzzAt = Date()
             }
             self.scheduleNextZzz(initial: false)
@@ -986,7 +990,7 @@ final class PetModel: NSObject, ObservableObject {
         clawWaveTimer = Timer.scheduledTimer(withTimeInterval: Double.random(in: 6...12), repeats: true) { [weak self] _ in
             guard let self, self.isHiding else { return }
             if self.stateMachine.expression == .hideClaw {
-                if self.whisperText == "zzz…" {
+                if self.whisperText == "zzz…" || self.whisperText == "mm…" {
                     self.dismissWhisper()
                 }
                 let peeks: [PetExpression] = [.hidePeek, .hidePeek2, .hidePeek3]
