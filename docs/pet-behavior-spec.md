@@ -68,7 +68,7 @@ It does **not** define Bridge, OpenClaw chat semantics, or Summon transport.
 | Idle for `hideAfterMinutes` and selected character is `chi-claw` | Enter hiding |
 | Enter hiding | Lock expression, stop locomotion, switch to `.hideClaw`, start micro-loop |
 | While hiding, periodic peek timer fires | Briefly show one of the peek poses, then return to `.hideClaw` |
-| While hiding, sleep-whisper check fires | Whisper `zzz…` (25%) or `mm…` (15%) only when still in `.hideClaw`, on shared cooldown, and random roll succeeds |
+| While hiding, sleep-whisper check fires | Whisper `zzz…` (25%) or `mm…` (15%) only when still in `.hideClaw`, on 8-15s cadence, with a shared 30s cooldown, and random roll succeeds |
 | Unhide | Teleport to normal idle position, play emerge briefly, then clear suffix, return to idle, resume cycle |
 
 ### Connection / non-placement events that still affect visible behavior
@@ -263,7 +263,7 @@ This preserves both attachment and facing correctness.
 ### Hide sleep whispers
 
 - `zzz…` and `mm…` are only legal while hiding, in `.hideClaw`, with no face showing
-- They share the same cooldown and peek-dismiss behavior
+- They share the same 30s cooldown and peek-dismiss behavior
 - They are never reused as generic disconnect cues
 
 ## Whisper Positioning

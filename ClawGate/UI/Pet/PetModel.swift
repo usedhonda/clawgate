@@ -957,10 +957,10 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     /// Schedule the next sleep whisper attempt while Chi is hiding.
-    /// Fires only if still in `.hideClaw` (not peeking), with 25% `zzz…`, 15% `mm…`, and 60s shared cooldown.
+    /// Fires only if still in `.hideClaw` (not peeking), with 25% `zzz…`, 15% `mm…`, 8-15s cadence, and 30s shared cooldown.
     private func scheduleNextZzz(initial: Bool) {
         zzzTimer?.invalidate()
-        let delay: Double = initial ? Double.random(in: 5...10) : Double.random(in: 15...30)
+        let delay: Double = initial ? Double.random(in: 8...12) : Double.random(in: 8...15)
         zzzTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self, self.isHiding else { return }
             // Face visible (peek variants) — never whisper sleep whispers with face showing
@@ -968,8 +968,8 @@ final class PetModel: NSObject, ObservableObject {
                 self.scheduleNextZzz(initial: false)
                 return
             }
-            // Cooldown: at least 60s since the last sleep whisper
-            if let last = self.lastZzzAt, Date().timeIntervalSince(last) < 60 {
+            // Cooldown: at least 30s since the last sleep whisper
+            if let last = self.lastZzzAt, Date().timeIntervalSince(last) < 30 {
                 self.scheduleNextZzz(initial: false)
                 return
             }
