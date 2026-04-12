@@ -170,13 +170,18 @@ final class PetModel: NSObject, ObservableObject {
 
     func connect() {
         guard connectionState != .connecting && connectionState != .connected else { return }
-        guard let config = readOpenClawGatewayConfig() else {
+        guard let gatewayConfig = readOpenClawGatewayConfig() else {
             NSLog("[Pet] Gateway config not found in ~/.openclaw/openclaw.json")
             connectionState = .disconnected
             return
         }
-        // Use localhost (SSH tunnel) for secure context compatibility
-        guard let url = URL(string: "ws://127.0.0.1:\(config.port)/") else {
+
+        let appConfig = ConfigStore().load()
+        let host = appConfig.openclawHost.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        let port = appConfig.openclawPort
+        guard !host.isEmpty,
+              (1...65535).contains(port),
+              let url = URL(string: "ws://\(host):\(port)/") else {
             connectionState = .error("Invalid URL")
             return
         }
@@ -187,7 +192,7 @@ final class PetModel: NSObject, ObservableObject {
         eventTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let stream = try await wsClient.connect(url: url, token: config.token)
+                let stream = try await wsClient.connect(url: url, token: gatewayConfig.token)
                 for await event in stream {
                     self.handleEvent(event)
                 }
