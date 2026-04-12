@@ -633,9 +633,9 @@ private final class PetContentView: NSView {
     private func whisperOrigin(for text: String, parentWindow: NSWindow, bubbleSize: NSSize) -> NSPoint {
         let parentFrame = parentWindow.frame
         let screenFrame = parentWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? parentFrame
-        let isClawWhisper = text == "zzz…" && model.isHiding && model.stateMachine.expression == .hideClaw
+        let isHideSleepWhisper = (text == "zzz…" || text == "mm…") && model.isHiding && model.stateMachine.expression == .hideClaw
 
-        if isClawWhisper {
+        if isHideSleepWhisper {
             let scale = parentFrame.height / HiddenClawAssetMetrics.assetHeight
             let renderedWidth = HiddenClawAssetMetrics.assetWidth * scale
             let horizontalInset = (parentFrame.width - renderedWidth) / 2

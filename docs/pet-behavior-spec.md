@@ -271,7 +271,7 @@ This preserves both attachment and facing correctness.
 - `zzz…` and `mm…` are **claw whispers**, not head whispers.
 - While Chi is hidden in `.hideClaw`, the whisper bubble must stay **outside the active host window body**.
 - The claw-side anchor is based on the **measured hide-claw sprite bounds**, not the pet window edge or window center.
-- Side rule for `zzz…`:
+- Side rule for hide sleep whispers (`zzz…` and `mm…`):
   - hidden on the right side of the host -> align the bubble's **left edge** to the claw's outer-right edge and let the bubble rise on the screen-right side
   - hidden on the left side of the host -> align the bubble's **right edge** to the claw's outer-left edge and let the bubble rise on the screen-left side
 - If the screen edge prevents a pure side placement, the bubble should be lifted upward before it is allowed to intrude over the host window body.
