@@ -129,7 +129,7 @@ final class PetModel: NSObject, ObservableObject {
     private var idleTimer: Timer?
     private var windowTrackingTimer: Timer?
     private var trackingTickCount = 0
-    private var dragPauseUntil: Date?
+    @Published var isPinned: Bool = false
     private(set) var lastTrackedApp: NSRunningApplication?
     /// The AX window element Chi is currently following (for context capture)
     private var lastTrackedWindow: AXUIElement?
@@ -425,6 +425,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func toggleChat() {
+        releasePinIfNeeded()
         noteActivity()
         if stateMachine.isChatOpen {
             stateMachine.isChatOpen = false
@@ -541,7 +542,8 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Window Tracking (follow active window)
 
     func onPetDragged() {
-        dragPauseUntil = Date().addingTimeInterval(30)
+        isPinned = true
+        clearPlacementLock()
         noteActivity()
     }
 
@@ -571,6 +573,19 @@ final class PetModel: NSObject, ObservableObject {
     private func clearPlacementLock() {
         lockedPlacementSide = nil
         lockedPlacementWindowFrame = nil
+    }
+
+    private func releasePinIfNeeded() {
+        guard isPinned else { return }
+        isPinned = false
+        noteActivity()
+    }
+
+    private func pinnedFrameIsOnAnyScreen() -> Bool {
+        guard let origin = moveController.currentOrigin else { return true }
+        let petSize: CGFloat = characterSize + 20
+        let frame = CGRect(x: origin.x, y: origin.y, width: petSize, height: petSize)
+        return NSScreen.screens.contains { $0.frame.intersects(frame) }
     }
 
     private func setPlacementLock(side: PlacementSide, frame: CGRect) {
@@ -679,7 +694,13 @@ final class PetModel: NSObject, ObservableObject {
 
     private func updateTargetPosition(forceSide: PlacementSide? = nil) {
         guard isTrackingEnabled else { return }
-        if let pause = dragPauseUntil, Date() < pause { return }
+        if isPinned {
+            if !pinnedFrameIsOnAnyScreen() {
+                isPinned = false
+            } else {
+                return
+            }
+        }
 
         let frontmost = NSWorkspace.shared.frontmostApplication
         var waveOnArrival = unhideWaveOnArrival
@@ -849,6 +870,7 @@ final class PetModel: NSObject, ObservableObject {
     /// Move to opposite side of tracked window
     func moveToOppositeSide() {
         guard isTrackingEnabled, !isHiding else { return }
+        releasePinIfNeeded()
         let opposite: PlacementSide = lastPlacementSide == .right ? .left : .right
         lastPlacementSide = opposite
         if let frame = lastTrackedWindowFrame {
@@ -939,7 +961,7 @@ final class PetModel: NSObject, ObservableObject {
     private(set) var hidingSide: PlacementSide = .right
 
     private func enterHiding() {
-        guard !isHiding, characterManager.selectedName == "chi-claw" else { return }
+        guard !isPinned, !isHiding, characterManager.selectedName == "chi-claw" else { return }
         isHiding = true
         setHiddenSide(lastPlacementSide)
 
@@ -962,7 +984,7 @@ final class PetModel: NSObject, ObservableObject {
         zzzTimer?.invalidate()
         let delay: Double = initial ? Double.random(in: 8...12) : Double.random(in: 8...15)
         zzzTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            guard let self, self.isHiding else { return }
+            guard let self, self.isHiding, !self.isPinned else { return }
             // Face visible (peek variants) — never whisper sleep whispers with face showing
             guard self.stateMachine.expression == .hideClaw else {
                 self.scheduleNextZzz(initial: false)
