@@ -238,6 +238,10 @@ function pickPrimaryImageCandidate(root, preferredImageURL = '') {
 
 function requestImageDataURL(url) {
   return new Promise((resolve, reject) => {
+    if (!chrome.runtime?.sendMessage) {
+      reject(new Error('Extension context invalidated'));
+      return;
+    }
     chrome.runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
       const runtimeError = chrome.runtime.lastError;
       if (runtimeError) {
@@ -257,8 +261,12 @@ let ocrSandboxFramePromise = null;
 let ocrRequestSequence = 0;
 const pendingOCRRequests = new Map();
 
+let _cachedSandboxOrigin = null;
 function getSandboxOrigin() {
-  return new URL(chrome.runtime.getURL('sandbox/ocr.html')).origin;
+  if (_cachedSandboxOrigin) return _cachedSandboxOrigin;
+  if (!chrome.runtime?.getURL) return null;
+  _cachedSandboxOrigin = new URL(chrome.runtime.getURL('sandbox/ocr.html')).origin;
+  return _cachedSandboxOrigin;
 }
 
 function ensureOCRSandbox() {
@@ -267,6 +275,11 @@ function ensureOCRSandbox() {
   }
 
   ocrSandboxFramePromise = new Promise((resolve, reject) => {
+    if (!chrome.runtime?.getURL) {
+      reject(new Error(OCR_UNAVAILABLE_REASON));
+      return;
+    }
+
     const existing = document.getElementById('clawgate-ocr-sandbox');
     if (existing instanceof HTMLIFrameElement && existing.contentWindow) {
       resolve(existing);
@@ -287,7 +300,8 @@ function ensureOCRSandbox() {
 }
 
 window.addEventListener('message', (event) => {
-  if (event.origin !== getSandboxOrigin()) {
+  const origin = getSandboxOrigin();
+  if (!origin || event.origin !== origin) {
     return;
   }
   const data = event.data;
@@ -330,11 +344,14 @@ async function extractOCRText(imageURL) {
       },
     });
 
-    iframe.contentWindow?.postMessage({
-      type: 'clawgate_ocr_request',
-      id: requestId,
-      imageDataUrl: dataUrl,
-    }, getSandboxOrigin());
+    const targetOrigin = getSandboxOrigin();
+    if (targetOrigin) {
+      iframe.contentWindow?.postMessage({
+        type: 'clawgate_ocr_request',
+        id: requestId,
+        imageDataUrl: dataUrl,
+      }, targetOrigin);
+    }
   });
 }
 
@@ -432,7 +449,7 @@ async function extractPagePayload(options = {}) {
   };
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+if (chrome.runtime?.onMessage) chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'extract_content') {
     return undefined;
   }
