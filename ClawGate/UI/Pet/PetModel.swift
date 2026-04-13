@@ -425,7 +425,6 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func toggleChat() {
-        releasePinIfNeeded()
         noteActivity()
         if stateMachine.isChatOpen {
             stateMachine.isChatOpen = false
@@ -579,6 +578,12 @@ final class PetModel: NSObject, ObservableObject {
         guard isPinned else { return }
         isPinned = false
         noteActivity()
+    }
+
+    func unpinFromClickIfNeeded() -> Bool {
+        guard isPinned else { return false }
+        releasePinIfNeeded()
+        return true
     }
 
     private func pinnedFrameIsOnAnyScreen() -> Bool {

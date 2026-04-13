@@ -271,7 +271,10 @@ private final class PetContentView: NSView {
             return
         }
         if !isDragging {
-            if event.clickCount == 2 {
+            if event.clickCount == 1, model.unpinFromClickIfNeeded() {
+                singleClickTask?.cancel()
+                singleClickTask = nil
+            } else if event.clickCount == 2 {
                 singleClickTask?.cancel()
                 singleClickTask = nil
                 model.moveToOppositeSide()
