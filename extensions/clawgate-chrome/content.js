@@ -249,7 +249,7 @@ function requestImageDataURL(url) {
     try {
       runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
         try {
-          const runtimeError = globalThis.chrome?.runtime?.lastError;
+          const runtimeError = getLastRuntimeErrorOrInvalidate();
           if (runtimeError) {
             const error = new Error(runtimeError.message);
             if (isContextInvalidationError(error)) {
@@ -310,7 +310,7 @@ function teardownExtensionBindings() {
 
   if (chromeMessageListenerAttached) {
     try {
-      const onMessage = globalThis.chrome?.runtime?.onMessage;
+      const onMessage = getRuntimeOnMessageOrInvalidate();
       if (onMessage && typeof onMessage.removeListener === 'function') {
         onMessage.removeListener(handleRuntimeMessage);
       }
@@ -354,6 +354,36 @@ function getRuntimeOrInvalidate(requiredMethod) {
   } catch (error) {
     markExtensionContextInvalidated(error);
     return null;
+  }
+}
+
+function getRuntimeOnMessageOrInvalidate() {
+  if (extensionContextInvalidated) {
+    return null;
+  }
+
+  try {
+    const onMessage = globalThis.chrome?.runtime?.onMessage;
+    if (!onMessage || typeof onMessage.addListener !== 'function') {
+      markExtensionContextInvalidated(makeInvalidationError());
+      return null;
+    }
+    return onMessage;
+  } catch (error) {
+    markExtensionContextInvalidated(error);
+    return null;
+  }
+}
+
+function getLastRuntimeErrorOrInvalidate() {
+  if (extensionContextInvalidated) {
+    return makeInvalidationError();
+  }
+
+  try {
+    return globalThis.chrome?.runtime?.lastError || null;
+  } catch (error) {
+    return markExtensionContextInvalidated(error);
   }
 }
 
@@ -626,8 +656,8 @@ function handleRuntimeMessage(message, _sender, sendResponse) {
   return true;
 }
 
-const runtime = globalThis.chrome?.runtime;
-if (!extensionContextInvalidated && runtime?.onMessage && typeof runtime.onMessage.addListener === 'function') {
-  runtime.onMessage.addListener(handleRuntimeMessage);
+const runtimeOnMessage = getRuntimeOnMessageOrInvalidate();
+if (runtimeOnMessage && typeof runtimeOnMessage.addListener === 'function') {
+  runtimeOnMessage.addListener(handleRuntimeMessage);
   chromeMessageListenerAttached = true;
 }
