@@ -2,7 +2,7 @@ const MAX_CONTENT_LENGTH = 5000;
 const MAX_OCR_TEXT_LENGTH = 800;
 const MAX_CAPTION_LENGTH = 280;
 const OCR_UNAVAILABLE_REASON = 'client_ocr_unavailable';
-const CONTENT_DIAGNOSTIC_VERSION = '0.3.6+diag-1';
+const CONTENT_DIAGNOSTIC_VERSION = '0.4.0+diag-1';
 const CONTENT_DIAGNOSTIC_ATTR = 'data-clawgate-content-version';
 const CONTENT_DIAGNOSTIC_TIME_ATTR = 'data-clawgate-content-loaded-at';
 const CONTENT_DIAGNOSTIC_INSTANCE_ATTR = 'data-clawgate-content-instance';
@@ -342,7 +342,7 @@ let ocrRequestSequence = 0;
 const pendingOCRRequests = new Map();
 let extensionContextInvalidated = false;
 let windowMessageListenerAttached = false;
-let chromeMessageListenerAttached = false;
+let windowErrorListenerAttached = false;
 let ocrSandboxFrame = null;
 let _cachedSandboxURL = null;
 let _cachedSandboxOrigin = null;
@@ -373,14 +373,10 @@ function teardownExtensionBindings() {
     windowMessageListenerAttached = false;
   }
 
-  if (chromeMessageListenerAttached) {
-    try {
-      const onMessage = getRuntimeOnMessageOrInvalidate();
-      if (onMessage && typeof onMessage.removeListener === 'function') {
-        onMessage.removeListener(handleRuntimeMessage);
-      }
-    } catch {}
-    chromeMessageListenerAttached = false;
+  if (windowErrorListenerAttached) {
+    window.removeEventListener('error', swallowContextInvalidation, true);
+    window.removeEventListener('unhandledrejection', swallowContextInvalidation);
+    windowErrorListenerAttached = false;
   }
 
   if (ocrSandboxFrame instanceof HTMLIFrameElement) {
@@ -437,8 +433,18 @@ function getRuntimeOrInvalidate(requiredMethod) {
   }
 }
 
-window.addEventListener('error', swallowContextInvalidation, true);
-window.addEventListener('unhandledrejection', swallowContextInvalidation);
+function ensureOCRSessionBindings() {
+  if (!windowErrorListenerAttached) {
+    window.addEventListener('error', swallowContextInvalidation, true);
+    window.addEventListener('unhandledrejection', swallowContextInvalidation);
+    windowErrorListenerAttached = true;
+  }
+
+  if (!windowMessageListenerAttached) {
+    window.addEventListener('message', handleSandboxMessage);
+    windowMessageListenerAttached = true;
+  }
+}
 
 function getRuntimeOnMessageOrInvalidate() {
   if (extensionContextInvalidated) {
@@ -548,8 +554,14 @@ function handleSandboxMessage(event) {
   }
 }
 
-window.addEventListener('message', handleSandboxMessage);
-windowMessageListenerAttached = true;
+async function runOCRSession(work) {
+  ensureOCRSessionBindings();
+  try {
+    return await work();
+  } finally {
+    teardownExtensionBindings();
+  }
+}
 
 async function extractOCRText(imageURL) {
   if (extensionContextInvalidated) {
@@ -625,7 +637,7 @@ async function extractImageContext(root, preferredImageURL = '') {
   let ocrText = '';
   let error = '';
   try {
-    ocrText = await extractOCRText(candidate.src);
+    ocrText = await runOCRSession(() => extractOCRText(candidate.src));
   } catch (ocrError) {
     error = ocrError instanceof Error ? ocrError.message : String(ocrError);
     if (isContextInvalidationError(ocrError)) {
@@ -730,5 +742,4 @@ function handleRuntimeMessage(message, _sender, sendResponse) {
 const runtimeOnMessage = getRuntimeOnMessageOrInvalidate();
 if (runtimeOnMessage && typeof runtimeOnMessage.addListener === 'function') {
   runtimeOnMessage.addListener(handleRuntimeMessage);
-  chromeMessageListenerAttached = true;
 }
