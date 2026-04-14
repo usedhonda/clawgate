@@ -307,6 +307,7 @@ let extensionContextInvalidated = false;
 let windowMessageListenerAttached = false;
 let chromeMessageListenerAttached = false;
 let ocrSandboxFrame = null;
+let _cachedSandboxURL = null;
 let _cachedSandboxOrigin = null;
 
 function makeInvalidationError() {
@@ -318,6 +319,7 @@ function isContextInvalidationError(error) {
   return /Extension context invalidated/i.test(message)
     || /Cannot read properties of undefined \(reading 'getURL'\)/i.test(message)
     || /Cannot read properties of undefined \(reading 'sendMessage'\)/i.test(message)
+    || /Cannot read properties of undefined \(reading 'connect'\)/i.test(message)
     || /message port closed/i.test(message);
 }
 
@@ -365,6 +367,21 @@ function markExtensionContextInvalidated(error) {
   return invalidationError;
 }
 
+function swallowContextInvalidation(event) {
+  const payload = event?.error ?? event?.reason ?? event?.message ?? null;
+  if (!isContextInvalidationError(payload)) {
+    return;
+  }
+
+  markExtensionContextInvalidated(payload instanceof Error ? payload : new Error(String(payload)));
+  if (typeof event.preventDefault === 'function') {
+    event.preventDefault();
+  }
+  if (typeof event.stopImmediatePropagation === 'function') {
+    event.stopImmediatePropagation();
+  }
+}
+
 function getRuntimeOrInvalidate(requiredMethod) {
   if (extensionContextInvalidated) {
     return null;
@@ -380,6 +397,27 @@ function getRuntimeOrInvalidate(requiredMethod) {
   } catch (error) {
     markExtensionContextInvalidated(error);
     return null;
+  }
+}
+
+window.addEventListener('error', swallowContextInvalidation, true);
+window.addEventListener('unhandledrejection', swallowContextInvalidation);
+
+function primeSandboxLocation() {
+  if (extensionContextInvalidated || (_cachedSandboxURL && _cachedSandboxOrigin)) {
+    return;
+  }
+
+  const runtime = getRuntimeOrInvalidate('getURL');
+  if (!runtime) {
+    return;
+  }
+
+  try {
+    _cachedSandboxURL = runtime.getURL('sandbox/ocr.html');
+    _cachedSandboxOrigin = new URL(_cachedSandboxURL).origin;
+  } catch (error) {
+    markExtensionContextInvalidated(error);
   }
 }
 
@@ -415,16 +453,8 @@ function getLastRuntimeErrorOrInvalidate() {
 
 function getSandboxOrigin() {
   if (extensionContextInvalidated) return null;
-  if (_cachedSandboxOrigin) return _cachedSandboxOrigin;
-
-  const runtime = getRuntimeOrInvalidate('getURL');
-  if (!runtime) return null;
-
-  try {
-    _cachedSandboxOrigin = new URL(runtime.getURL('sandbox/ocr.html')).origin;
-  } catch (error) {
-    markExtensionContextInvalidated(error);
-    return null;
+  if (!_cachedSandboxOrigin) {
+    primeSandboxLocation();
   }
   return _cachedSandboxOrigin;
 }
@@ -438,9 +468,11 @@ function ensureOCRSandbox() {
   }
 
   ocrSandboxFramePromise = new Promise((resolve, reject) => {
-    const runtime = getRuntimeOrInvalidate('getURL');
-    if (!runtime) {
-      reject(makeInvalidationError());
+    if (!_cachedSandboxURL) {
+      primeSandboxLocation();
+    }
+    if (!_cachedSandboxURL) {
+      reject(extensionContextInvalidated ? makeInvalidationError() : new Error(OCR_UNAVAILABLE_REASON));
       return;
     }
 
@@ -455,7 +487,7 @@ function ensureOCRSandbox() {
     iframe.id = 'clawgate-ocr-sandbox';
     ocrSandboxFrame = iframe;
     try {
-      iframe.src = runtime.getURL('sandbox/ocr.html');
+      iframe.src = _cachedSandboxURL;
     } catch (error) {
       reject(markExtensionContextInvalidated(error));
       return;
@@ -505,6 +537,7 @@ function handleSandboxMessage(event) {
 
 window.addEventListener('message', handleSandboxMessage);
 windowMessageListenerAttached = true;
+primeSandboxLocation();
 
 async function extractOCRText(imageURL) {
   if (extensionContextInvalidated) {
