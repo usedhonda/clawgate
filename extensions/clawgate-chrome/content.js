@@ -271,6 +271,12 @@ function requestImageDataURL(url) {
 
     const handleMessage = (response) => {
       try {
+        if (typeof response?.sandboxUrl === 'string' && response.sandboxUrl) {
+          _cachedSandboxURL = response.sandboxUrl;
+        }
+        if (typeof response?.sandboxOrigin === 'string' && response.sandboxOrigin) {
+          _cachedSandboxOrigin = response.sandboxOrigin;
+        }
         if (!response?.ok || !response?.dataUrl) {
           finishReject(new Error(response?.error || 'Image fetch failed'));
           return;
@@ -403,24 +409,6 @@ function getRuntimeOrInvalidate(requiredMethod) {
 window.addEventListener('error', swallowContextInvalidation, true);
 window.addEventListener('unhandledrejection', swallowContextInvalidation);
 
-function primeSandboxLocation() {
-  if (extensionContextInvalidated || (_cachedSandboxURL && _cachedSandboxOrigin)) {
-    return;
-  }
-
-  const runtime = getRuntimeOrInvalidate('getURL');
-  if (!runtime) {
-    return;
-  }
-
-  try {
-    _cachedSandboxURL = runtime.getURL('sandbox/ocr.html');
-    _cachedSandboxOrigin = new URL(_cachedSandboxURL).origin;
-  } catch (error) {
-    markExtensionContextInvalidated(error);
-  }
-}
-
 function getRuntimeOnMessageOrInvalidate() {
   if (extensionContextInvalidated) {
     return null;
@@ -453,9 +441,6 @@ function getLastRuntimeErrorOrInvalidate() {
 
 function getSandboxOrigin() {
   if (extensionContextInvalidated) return null;
-  if (!_cachedSandboxOrigin) {
-    primeSandboxLocation();
-  }
   return _cachedSandboxOrigin;
 }
 
@@ -469,10 +454,7 @@ function ensureOCRSandbox() {
 
   ocrSandboxFramePromise = new Promise((resolve, reject) => {
     if (!_cachedSandboxURL) {
-      primeSandboxLocation();
-    }
-    if (!_cachedSandboxURL) {
-      reject(extensionContextInvalidated ? makeInvalidationError() : new Error(OCR_UNAVAILABLE_REASON));
+      reject(new Error(OCR_UNAVAILABLE_REASON));
       return;
     }
 
@@ -537,7 +519,6 @@ function handleSandboxMessage(event) {
 
 window.addEventListener('message', handleSandboxMessage);
 windowMessageListenerAttached = true;
-primeSandboxLocation();
 
 async function extractOCRText(imageURL) {
   if (extensionContextInvalidated) {

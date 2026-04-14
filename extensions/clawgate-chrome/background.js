@@ -8,6 +8,7 @@ const CONTEXT_MENU_ID = 'clawgate-send-to-chi';
 const POLL_INTERVAL_MS = 2500;
 const POLL_ERROR_BACKOFF_MS = 5000;
 const IMAGE_FETCH_PORT_NAME = 'clawgate_image_fetch';
+const OCR_SANDBOX_PATH = 'sandbox/ocr.html';
 
 let cursor = '';
 let pollTimer = null;
@@ -42,12 +43,24 @@ chrome.runtime.onConnect.addListener((port) => {
     fetchImageDataURL(message.url)
       .then((dataUrl) => {
         try {
-          port.postMessage({ ok: true, dataUrl });
+          const sandboxUrl = chrome.runtime.getURL(OCR_SANDBOX_PATH);
+          port.postMessage({
+            ok: true,
+            dataUrl,
+            sandboxUrl,
+            sandboxOrigin: new URL(sandboxUrl).origin,
+          });
         } catch {}
       })
       .catch((error) => {
         try {
-          port.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });
+          const sandboxUrl = chrome.runtime.getURL(OCR_SANDBOX_PATH);
+          port.postMessage({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+            sandboxUrl,
+            sandboxOrigin: new URL(sandboxUrl).origin,
+          });
         } catch {}
       });
   };
