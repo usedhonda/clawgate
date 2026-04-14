@@ -7,6 +7,7 @@ const DEFAULT_SETTINGS = {
 const CONTEXT_MENU_ID = 'clawgate-send-to-chi';
 const POLL_INTERVAL_MS = 2500;
 const POLL_ERROR_BACKOFF_MS = 5000;
+const IMAGE_FETCH_PORT_NAME = 'clawgate_image_fetch';
 
 let cursor = '';
 let pollTimer = null;
@@ -28,15 +29,30 @@ chrome.runtime.onStartup.addListener(async () => {
   startPolling();
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === 'fetch_image_data_url') {
-    fetchImageDataURL(message.url)
-      .then((dataUrl) => sendResponse({ ok: true, dataUrl }))
-      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-    return true;
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== IMAGE_FETCH_PORT_NAME) {
+    return;
   }
 
-  return undefined;
+  const handlePortMessage = (message) => {
+    if (message?.type !== 'fetch_image_data_url') {
+      return;
+    }
+
+    fetchImageDataURL(message.url)
+      .then((dataUrl) => {
+        try {
+          port.postMessage({ ok: true, dataUrl });
+        } catch {}
+      })
+      .catch((error) => {
+        try {
+          port.postMessage({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        } catch {}
+      });
+  };
+
+  port.onMessage.addListener(handlePortMessage);
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {

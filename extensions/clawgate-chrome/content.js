@@ -237,39 +237,65 @@ function pickPrimaryImageCandidate(root, preferredImageURL = '') {
 }
 
 const EXTENSION_CONTEXT_INVALIDATED_REASON = 'extension_context_invalidated';
+const IMAGE_FETCH_PORT_NAME = 'clawgate_image_fetch';
 
 function requestImageDataURL(url) {
   return new Promise((resolve, reject) => {
-    const runtime = getRuntimeOrInvalidate('sendMessage');
+    const runtime = getRuntimeOrInvalidate('connect');
     if (!runtime) {
       reject(makeInvalidationError());
       return;
     }
 
+    let port = null;
+    let settled = false;
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      try { port?.disconnect(); } catch {}
+      resolve(value);
+    };
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      try { port?.disconnect(); } catch {}
+      reject(error);
+    };
+
     try {
-      runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
-        try {
-          const runtimeError = getLastRuntimeErrorOrInvalidate();
-          if (runtimeError) {
-            const error = new Error(runtimeError.message);
-            if (isContextInvalidationError(error)) {
-              reject(markExtensionContextInvalidated(error));
-            } else {
-              reject(error);
-            }
-            return;
-          }
-          if (!response?.ok || !response?.dataUrl) {
-            reject(new Error(response?.error || 'Image fetch failed'));
-            return;
-          }
-          resolve(response.dataUrl);
-        } catch (error) {
-          reject(markExtensionContextInvalidated(error));
-        }
-      });
+      port = runtime.connect({ name: IMAGE_FETCH_PORT_NAME });
     } catch (error) {
-      reject(markExtensionContextInvalidated(error));
+      finishReject(markExtensionContextInvalidated(error));
+      return;
+    }
+
+    const handleMessage = (response) => {
+      try {
+        if (!response?.ok || !response?.dataUrl) {
+          finishReject(new Error(response?.error || 'Image fetch failed'));
+          return;
+        }
+        finishResolve(response.dataUrl);
+      } catch (error) {
+        finishReject(markExtensionContextInvalidated(error));
+      }
+    };
+
+    const handleDisconnect = () => {
+      const runtimeError = getLastRuntimeErrorOrInvalidate();
+      if (runtimeError && isContextInvalidationError(runtimeError)) {
+        finishReject(markExtensionContextInvalidated(runtimeError));
+        return;
+      }
+      finishReject(runtimeError ? new Error(runtimeError.message) : makeInvalidationError());
+    };
+
+    try {
+      port.onMessage.addListener(handleMessage);
+      port.onDisconnect.addListener(handleDisconnect);
+      port.postMessage({ type: 'fetch_image_data_url', url });
+    } catch (error) {
+      finishReject(markExtensionContextInvalidated(error));
     }
   });
 }
