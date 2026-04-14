@@ -2,6 +2,10 @@ const MAX_CONTENT_LENGTH = 5000;
 const MAX_OCR_TEXT_LENGTH = 800;
 const MAX_CAPTION_LENGTH = 280;
 const OCR_UNAVAILABLE_REASON = 'client_ocr_unavailable';
+const CONTENT_DIAGNOSTIC_VERSION = '0.3.6+diag-1';
+const CONTENT_DIAGNOSTIC_ATTR = 'data-clawgate-content-version';
+const CONTENT_DIAGNOSTIC_TIME_ATTR = 'data-clawgate-content-loaded-at';
+const CONTENT_DIAGNOSTIC_INSTANCE_ATTR = 'data-clawgate-content-instance';
 const ROOT_SELECTORS = ['article', 'main', '[role="main"]'];
 const REMOVE_SELECTORS = [
   'script',
@@ -66,6 +70,33 @@ const INJECTION_PATTERNS = [
   /[\u0530-\u058F]{3,}.*(?:assistant|function|exec|command)/gi,
   /[\u10A0-\u10FF]{3,}.*(?:assistant|function|exec|command)/gi,
 ];
+
+function installContentDiagnosticMarker() {
+  const root = document.documentElement;
+  if (!root) {
+    return;
+  }
+
+  const loadedAt = new Date().toISOString();
+  const instanceId = `cg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  root.setAttribute(CONTENT_DIAGNOSTIC_ATTR, CONTENT_DIAGNOSTIC_VERSION);
+  root.setAttribute(CONTENT_DIAGNOSTIC_TIME_ATTR, loadedAt);
+  root.setAttribute(CONTENT_DIAGNOSTIC_INSTANCE_ATTR, instanceId);
+
+  let meta = document.head?.querySelector('meta[name=\"clawgate-content-version\"]');
+  if (!(meta instanceof HTMLMetaElement)) {
+    meta = document.createElement('meta');
+    meta.name = 'clawgate-content-version';
+    if (document.head) {
+      document.head.appendChild(meta);
+    }
+  }
+  if (meta instanceof HTMLMetaElement) {
+    meta.content = `${CONTENT_DIAGNOSTIC_VERSION}|${loadedAt}|${instanceId}`;
+  }
+}
+
+installContentDiagnosticMarker();
 
 function stripInjectionPatterns(text) {
   let result = text;
