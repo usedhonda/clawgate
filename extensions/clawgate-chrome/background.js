@@ -19,6 +19,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   await createContextMenu();
   await restoreCursor();
   await refreshBadge();
+  await installInvalidationGuardOnExistingTabs();
   startPolling();
 });
 
@@ -27,6 +28,7 @@ chrome.runtime.onStartup.addListener(async () => {
   await createContextMenu();
   await restoreCursor();
   await refreshBadge();
+  await installInvalidationGuardOnExistingTabs();
   startPolling();
 });
 
@@ -95,6 +97,46 @@ async function ensureDefaults() {
     gatewayToken: typeof current.gatewayToken === 'string' ? current.gatewayToken : DEFAULT_SETTINGS.gatewayToken,
   };
   await chrome.storage.local.set(next);
+}
+
+async function installInvalidationGuardOnExistingTabs() {
+  const tabs = await chrome.tabs.query({});
+  const injectableTabs = tabs.filter((tab) => typeof tab.id === 'number' && /^https?:/i.test(tab.url || ''));
+
+  await Promise.allSettled(injectableTabs.map((tab) => chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: 'ISOLATED',
+    func: () => {
+      const marker = '__clawgateInvalidationGuardInstalled';
+      if (window[marker]) {
+        return;
+      }
+      window[marker] = true;
+
+      const isInvalidationMessage = (value) => {
+        const text = value instanceof Error ? value.message : String(value || '');
+        return /Extension context invalidated/i.test(text)
+          || /Cannot read properties of undefined \(reading 'getURL'\)/i.test(text)
+          || /Cannot read properties of undefined \(reading 'connect'\)/i.test(text);
+      };
+
+      const swallow = (event) => {
+        const payload = event?.error ?? event?.reason ?? event?.message ?? null;
+        if (!isInvalidationMessage(payload)) {
+          return;
+        }
+        if (typeof event.preventDefault === 'function') {
+          event.preventDefault();
+        }
+        if (typeof event.stopImmediatePropagation === 'function') {
+          event.stopImmediatePropagation();
+        }
+      };
+
+      window.addEventListener('error', swallow, true);
+      window.addEventListener('unhandledrejection', swallow);
+    },
+  })));
 }
 
 async function createContextMenu() {
