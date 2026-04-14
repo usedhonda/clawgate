@@ -2,7 +2,7 @@ const MAX_CONTENT_LENGTH = 5000;
 const MAX_OCR_TEXT_LENGTH = 800;
 const MAX_CAPTION_LENGTH = 280;
 const OCR_UNAVAILABLE_REASON = 'client_ocr_unavailable';
-const CONTENT_DIAGNOSTIC_VERSION = '0.4.0+diag-1';
+const CONTENT_DIAGNOSTIC_VERSION = '0.4.1+ondemand-1';
 const CONTENT_DIAGNOSTIC_ATTR = 'data-clawgate-content-version';
 const CONTENT_DIAGNOSTIC_TIME_ATTR = 'data-clawgate-content-loaded-at';
 const CONTENT_DIAGNOSTIC_INSTANCE_ATTR = 'data-clawgate-content-instance';
@@ -346,6 +346,7 @@ let windowErrorListenerAttached = false;
 let ocrSandboxFrame = null;
 let _cachedSandboxURL = null;
 let _cachedSandboxOrigin = null;
+const CONTENT_RUNTIME_HANDLER_KEY = '__clawgateContentRuntimeHandler';
 
 function makeInvalidationError() {
   return new Error(EXTENSION_CONTEXT_INVALIDATED_REASON);
@@ -702,44 +703,67 @@ async function extractPagePayload(options = {}) {
   };
 }
 
-function handleRuntimeMessage(message, _sender, sendResponse) {
-  if (extensionContextInvalidated) {
-    sendResponse({
-      ok: false,
-      error: EXTENSION_CONTEXT_INVALIDATED_REASON,
-      url: window.location.href,
-      title: normalizeText(document.title),
-      content: '',
-      contentMetrics: {},
-      imageContext: null,
-      meta: {},
-    });
-    return false;
+function removeRuntimeMessageListener() {
+  const currentHandler = globalThis[CONTENT_RUNTIME_HANDLER_KEY];
+  if (!currentHandler) {
+    return;
   }
 
+  const runtimeOnMessage = getRuntimeOnMessageOrInvalidate();
+  if (runtimeOnMessage && typeof runtimeOnMessage.removeListener === 'function') {
+    try {
+      runtimeOnMessage.removeListener(currentHandler);
+    } catch (error) {
+      markExtensionContextInvalidated(error);
+    }
+  }
+  delete globalThis[CONTENT_RUNTIME_HANDLER_KEY];
+}
+
+function finalizeInjectedSession() {
+  removeRuntimeMessageListener();
+  teardownExtensionBindings();
+}
+
+function respondWithExtractionError(sendResponse, error) {
+  sendResponse({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    url: window.location.href,
+    title: normalizeText(document.title),
+    content: '',
+    contentMetrics: {},
+    imageContext: null,
+    meta: {},
+  });
+}
+
+function handleRuntimeMessage(message, _sender, sendResponse) {
   if (message?.type !== 'extract_content') {
     return undefined;
+  }
+
+  if (extensionContextInvalidated) {
+    respondWithExtractionError(sendResponse, makeInvalidationError());
+    finalizeInjectedSession();
+    return false;
   }
 
   extractPagePayload({ preferredImageURL: typeof message.preferredImageURL === 'string' ? message.preferredImageURL : '' })
     .then((payload) => sendResponse(payload))
     .catch((error) => {
-      sendResponse({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        url: window.location.href,
-        title: normalizeText(document.title),
-        content: '',
-        contentMetrics: {},
-        imageContext: null,
-        meta: {},
-      });
+      respondWithExtractionError(sendResponse, error);
+    })
+    .finally(() => {
+      finalizeInjectedSession();
     });
 
   return true;
 }
 
+removeRuntimeMessageListener();
 const runtimeOnMessage = getRuntimeOnMessageOrInvalidate();
 if (runtimeOnMessage && typeof runtimeOnMessage.addListener === 'function') {
+  globalThis[CONTENT_RUNTIME_HANDLER_KEY] = handleRuntimeMessage;
   runtimeOnMessage.addListener(handleRuntimeMessage);
 }

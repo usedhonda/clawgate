@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ClawGate",
   "description": "Send pages to Chi, your AI companion",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA",
   "permissions": [
     "tabs",
@@ -24,17 +24,6 @@
     "default_title": "ClawGate",
     "default_popup": "popup/popup.html"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle"
-    }
-  ],
   "sandbox": {
     "pages": [
       "sandbox/ocr.html"
