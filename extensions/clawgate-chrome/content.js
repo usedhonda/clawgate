@@ -236,59 +236,174 @@ function pickPrimaryImageCandidate(root, preferredImageURL = '') {
   return candidates[0] || null;
 }
 
+const EXTENSION_CONTEXT_INVALIDATED_REASON = 'extension_context_invalidated';
+
 function requestImageDataURL(url) {
   return new Promise((resolve, reject) => {
-    if (!chrome.runtime?.sendMessage) {
-      reject(new Error('Extension context invalidated'));
+    const runtime = getRuntimeOrInvalidate('sendMessage');
+    if (!runtime) {
+      reject(makeInvalidationError());
       return;
     }
-    chrome.runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
-      const runtimeError = chrome.runtime.lastError;
-      if (runtimeError) {
-        reject(new Error(runtimeError.message));
-        return;
-      }
-      if (!response?.ok || !response?.dataUrl) {
-        reject(new Error(response?.error || 'Image fetch failed'));
-        return;
-      }
-      resolve(response.dataUrl);
-    });
+
+    try {
+      runtime.sendMessage({ type: 'fetch_image_data_url', url }, (response) => {
+        try {
+          const runtimeError = globalThis.chrome?.runtime?.lastError;
+          if (runtimeError) {
+            const error = new Error(runtimeError.message);
+            if (isContextInvalidationError(error)) {
+              reject(markExtensionContextInvalidated(error));
+            } else {
+              reject(error);
+            }
+            return;
+          }
+          if (!response?.ok || !response?.dataUrl) {
+            reject(new Error(response?.error || 'Image fetch failed'));
+            return;
+          }
+          resolve(response.dataUrl);
+        } catch (error) {
+          reject(markExtensionContextInvalidated(error));
+        }
+      });
+    } catch (error) {
+      reject(markExtensionContextInvalidated(error));
+    }
   });
 }
 
 let ocrSandboxFramePromise = null;
 let ocrRequestSequence = 0;
 const pendingOCRRequests = new Map();
-
+let extensionContextInvalidated = false;
+let windowMessageListenerAttached = false;
+let chromeMessageListenerAttached = false;
+let ocrSandboxFrame = null;
 let _cachedSandboxOrigin = null;
+
+function makeInvalidationError() {
+  return new Error(EXTENSION_CONTEXT_INVALIDATED_REASON);
+}
+
+function isContextInvalidationError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /Extension context invalidated/i.test(message)
+    || /Cannot read properties of undefined \(reading 'getURL'\)/i.test(message)
+    || /Cannot read properties of undefined \(reading 'sendMessage'\)/i.test(message)
+    || /message port closed/i.test(message);
+}
+
+function rejectPendingOCRRequests(error) {
+  for (const [requestId, pending] of pendingOCRRequests.entries()) {
+    pendingOCRRequests.delete(requestId);
+    pending.reject(error);
+  }
+}
+
+function teardownExtensionBindings() {
+  if (windowMessageListenerAttached) {
+    window.removeEventListener('message', handleSandboxMessage);
+    windowMessageListenerAttached = false;
+  }
+
+  if (chromeMessageListenerAttached) {
+    try {
+      const onMessage = globalThis.chrome?.runtime?.onMessage;
+      if (onMessage && typeof onMessage.removeListener === 'function') {
+        onMessage.removeListener(handleRuntimeMessage);
+      }
+    } catch {}
+    chromeMessageListenerAttached = false;
+  }
+
+  if (ocrSandboxFrame instanceof HTMLIFrameElement) {
+    ocrSandboxFrame.remove();
+  }
+  ocrSandboxFrame = null;
+  ocrSandboxFramePromise = null;
+}
+
+function markExtensionContextInvalidated(error) {
+  if (extensionContextInvalidated) {
+    return makeInvalidationError();
+  }
+
+  extensionContextInvalidated = true;
+  const invalidationError = isContextInvalidationError(error)
+    ? (error instanceof Error ? error : makeInvalidationError())
+    : makeInvalidationError();
+  rejectPendingOCRRequests(invalidationError);
+  teardownExtensionBindings();
+  return invalidationError;
+}
+
+function getRuntimeOrInvalidate(requiredMethod) {
+  if (extensionContextInvalidated) {
+    return null;
+  }
+
+  try {
+    const runtime = globalThis.chrome?.runtime;
+    if (!runtime || typeof runtime[requiredMethod] !== 'function') {
+      markExtensionContextInvalidated(makeInvalidationError());
+      return null;
+    }
+    return runtime;
+  } catch (error) {
+    markExtensionContextInvalidated(error);
+    return null;
+  }
+}
+
 function getSandboxOrigin() {
+  if (extensionContextInvalidated) return null;
   if (_cachedSandboxOrigin) return _cachedSandboxOrigin;
-  if (!chrome.runtime?.getURL) return null;
-  _cachedSandboxOrigin = new URL(chrome.runtime.getURL('sandbox/ocr.html')).origin;
+
+  const runtime = getRuntimeOrInvalidate('getURL');
+  if (!runtime) return null;
+
+  try {
+    _cachedSandboxOrigin = new URL(runtime.getURL('sandbox/ocr.html')).origin;
+  } catch (error) {
+    markExtensionContextInvalidated(error);
+    return null;
+  }
   return _cachedSandboxOrigin;
 }
 
 function ensureOCRSandbox() {
+  if (extensionContextInvalidated) {
+    return Promise.reject(makeInvalidationError());
+  }
   if (ocrSandboxFramePromise) {
     return ocrSandboxFramePromise;
   }
 
   ocrSandboxFramePromise = new Promise((resolve, reject) => {
-    if (!chrome.runtime?.getURL) {
-      reject(new Error(OCR_UNAVAILABLE_REASON));
+    const runtime = getRuntimeOrInvalidate('getURL');
+    if (!runtime) {
+      reject(makeInvalidationError());
       return;
     }
 
     const existing = document.getElementById('clawgate-ocr-sandbox');
     if (existing instanceof HTMLIFrameElement && existing.contentWindow) {
+      ocrSandboxFrame = existing;
       resolve(existing);
       return;
     }
 
     const iframe = document.createElement('iframe');
     iframe.id = 'clawgate-ocr-sandbox';
-    iframe.src = chrome.runtime.getURL('sandbox/ocr.html');
+    ocrSandboxFrame = iframe;
+    try {
+      iframe.src = runtime.getURL('sandbox/ocr.html');
+    } catch (error) {
+      reject(markExtensionContextInvalidated(error));
+      return;
+    }
     iframe.style.display = 'none';
     iframe.setAttribute('aria-hidden', 'true');
     iframe.addEventListener('load', () => resolve(iframe), { once: true });
@@ -296,10 +411,20 @@ function ensureOCRSandbox() {
     (document.documentElement || document.body).appendChild(iframe);
   });
 
+  ocrSandboxFramePromise.catch((error) => {
+    if (isContextInvalidationError(error)) {
+      markExtensionContextInvalidated(error);
+    }
+  });
+
   return ocrSandboxFramePromise;
 }
 
-window.addEventListener('message', (event) => {
+function handleSandboxMessage(event) {
+  if (extensionContextInvalidated) {
+    return;
+  }
+
   const origin = getSandboxOrigin();
   if (!origin || event.origin !== origin) {
     return;
@@ -320,9 +445,16 @@ window.addEventListener('message', (event) => {
   } else {
     pending.reject(new Error(typeof data.error === 'string' ? data.error : OCR_UNAVAILABLE_REASON));
   }
-});
+}
+
+window.addEventListener('message', handleSandboxMessage);
+windowMessageListenerAttached = true;
 
 async function extractOCRText(imageURL) {
+  if (extensionContextInvalidated) {
+    throw makeInvalidationError();
+  }
+
   const dataUrl = await requestImageDataURL(imageURL);
   const iframe = await ensureOCRSandbox();
   const requestId = `ocr-${Date.now()}-${ocrRequestSequence += 1}`;
@@ -345,13 +477,18 @@ async function extractOCRText(imageURL) {
     });
 
     const targetOrigin = getSandboxOrigin();
-    if (targetOrigin) {
-      iframe.contentWindow?.postMessage({
-        type: 'clawgate_ocr_request',
-        id: requestId,
-        imageDataUrl: dataUrl,
-      }, targetOrigin);
+    if (!targetOrigin || !iframe.contentWindow) {
+      pendingOCRRequests.delete(requestId);
+      window.clearTimeout(timeout);
+      reject(extensionContextInvalidated ? makeInvalidationError() : new Error(OCR_UNAVAILABLE_REASON));
+      return;
     }
+
+    iframe.contentWindow.postMessage({
+      type: 'clawgate_ocr_request',
+      id: requestId,
+      imageDataUrl: dataUrl,
+    }, targetOrigin);
   });
 }
 
@@ -390,6 +527,9 @@ async function extractImageContext(root, preferredImageURL = '') {
     ocrText = await extractOCRText(candidate.src);
   } catch (ocrError) {
     error = ocrError instanceof Error ? ocrError.message : String(ocrError);
+    if (isContextInvalidationError(ocrError)) {
+      markExtensionContextInvalidated(ocrError);
+    }
   }
   if (!ocrText && !error) {
     error = OCR_UNAVAILABLE_REASON;
@@ -449,7 +589,21 @@ async function extractPagePayload(options = {}) {
   };
 }
 
-if (chrome.runtime?.onMessage) chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+function handleRuntimeMessage(message, _sender, sendResponse) {
+  if (extensionContextInvalidated) {
+    sendResponse({
+      ok: false,
+      error: EXTENSION_CONTEXT_INVALIDATED_REASON,
+      url: window.location.href,
+      title: normalizeText(document.title),
+      content: '',
+      contentMetrics: {},
+      imageContext: null,
+      meta: {},
+    });
+    return false;
+  }
+
   if (message?.type !== 'extract_content') {
     return undefined;
   }
@@ -470,4 +624,10 @@ if (chrome.runtime?.onMessage) chrome.runtime.onMessage.addListener((message, _s
     });
 
   return true;
-});
+}
+
+const runtime = globalThis.chrome?.runtime;
+if (!extensionContextInvalidated && runtime?.onMessage && typeof runtime.onMessage.addListener === 'function') {
+  runtime.onMessage.addListener(handleRuntimeMessage);
+  chromeMessageListenerAttached = true;
+}
