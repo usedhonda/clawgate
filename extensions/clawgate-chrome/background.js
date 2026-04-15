@@ -99,11 +99,16 @@ async function ensureDefaults() {
 
 async function createContextMenu() {
   await chrome.contextMenus.removeAll();
-  chrome.contextMenus.create({
-    id: CONTEXT_MENU_ID,
-    title: 'Send to Chi',
-    contexts: ['page', 'image'],
-  });
+  chrome.contextMenus.create(
+    {
+      id: CONTEXT_MENU_ID,
+      title: 'Send to Chi',
+      contexts: ['page', 'image'],
+    },
+    () => {
+      void chrome.runtime.lastError;
+    },
+  );
 }
 
 async function restoreCursor() {
