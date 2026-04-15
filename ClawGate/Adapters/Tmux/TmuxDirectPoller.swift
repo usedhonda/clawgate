@@ -103,6 +103,9 @@ final class TmuxDirectPoller: TmuxSessionSource {
                 }
             } else {
                 onSessionsChanged?()
+                if session.status == "waiting_input" {
+                    onStateChange?(session, "bootstrap", "waiting_input")
+                }
             }
         }
 
