@@ -115,8 +115,13 @@ final class TmuxDirectPoller: TmuxSessionSource {
     private func buildSession(from pane: TmuxShell.PaneDescriptor) -> SessionSnapshot? {
         guard let sessionType = inferSessionType(from: pane) else { return nil }
         let capture = (try? TmuxShell.capturePane(target: pane.target, lines: 120))?.trimmingCharacters(in: .newlines)
-        let promptState = detectPromptState(capture: capture ?? "")
         let project = inferProject(from: pane)
+        let promptClassification = classifyPromptState(capture: capture ?? "")
+        let promptState = promptClassification.state
+        logger.log(
+            .debug,
+            "TmuxDirectPoller: classify target=\(pane.target) project=\(project) classified=\(promptState.rawValue) lastPromptLine=\(promptClassification.lastPromptLine ?? "nil")"
+        )
         let rootHint = inferRootHint(from: pane)
 
         // Raw facts only. Question parse & structured data are handled by TmuxInboundWatcher.
@@ -254,17 +259,52 @@ final class TmuxDirectPoller: TmuxSessionSource {
         case waitingInput = "waiting_input"
     }
 
-    private func detectPromptState(capture: String) -> PromptState {
-        let lines = capture.components(separatedBy: "\n")
-        for line in lines.reversed() {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    private struct PromptClassification {
+        let state: PromptState
+        let lastPromptLine: String?
+    }
+
+    private func classifyPromptState(capture: String) -> PromptClassification {
+        let tailLines = capture.components(separatedBy: "\n").suffix(30)
+
+        for rawLine in tailLines.reversed() {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { continue }
+            if isIgnorableTailLine(trimmed) { continue }
             if trimmed.range(of: #"^[›❯>]\s*"#, options: .regularExpression) != nil {
-                return .waitingInput
+                return PromptClassification(state: .waitingInput, lastPromptLine: trimmed)
             }
-            break
+            return PromptClassification(state: .running, lastPromptLine: nil)
         }
-        return .running
+
+        return PromptClassification(state: .running, lastPromptLine: nil)
+    }
+
+    private func isIgnorableTailLine(_ line: String) -> Bool {
+        let patterns = [
+            #"^Ran \d+ bash commands?$"#,
+            #"^⏺ .*"#,
+            #"^⎿ .*"#,
+            #"^✻ .*"#,
+            #"^✶ .*"#,
+            #"^Tip: .*"#,
+            #"^Crystallizing….*$"#,
+            #"^thinking.*$"#,
+            #"^⏵⏵ .*"#,
+            #"^[-─]{3,}.*$"#,
+            #"^╭.*╮$"#,
+            #"^╰.*╯$"#,
+            #"^│.*│$"#,
+            #"^\[[^\]]+\].*$"#,
+            #"^[CSW]: .*"#,
+        ]
+
+        for pattern in patterns {
+            if line.range(of: pattern, options: .regularExpression) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     /// Detect permission prompt in the tail of pane output.
