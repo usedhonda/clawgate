@@ -272,6 +272,13 @@ final class TmuxDirectPoller: TmuxSessionSource {
 
         for rawLine in tailLines.reversed() {
             let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.range(of: #"^• Working \("#, options: .regularExpression) != nil {
+                return PromptClassification(state: .running, lastPromptLine: nil)
+            }
+        }
+
+        for rawLine in tailLines.reversed() {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.isEmpty { continue }
             if isIgnorableTailLine(trimmed) { continue }
             if trimmed.range(of: #"^[›❯>]\s*"#, options: .regularExpression) != nil {
