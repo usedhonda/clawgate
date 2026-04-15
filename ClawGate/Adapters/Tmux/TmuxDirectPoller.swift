@@ -300,6 +300,8 @@ final class TmuxDirectPoller: TmuxSessionSource {
             #"^│.*│$"#,
             #"^\[[^\]]+\].*$"#,
             #"^[CSW]: .*"#,
+            #"^[^\s]+ (low|medium|high) · .*$"#,
+            #"^gpt-[^\s]+ · .*$"#,
         ]
 
         for pattern in patterns {
