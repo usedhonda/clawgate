@@ -67,17 +67,15 @@ APP_PATH=\"\$PROJECT_PATH/ClawGate.app\"
 APP_BIN=\"\$APP_PATH/Contents/MacOS/ClawGate\"
 TMP_BACKUP=\"/tmp/ClawGate.app.backup.\$\$\"
 
-# Canonical signing identity. Sources .local/secrets/release.env and
-# falls back to the default Developer ID Application when SIGNING_ID is
-# not already set.
-if [[ -f \"\$PROJECT_PATH/.local/secrets/release.env\" ]]; then
-  set -a
-  source \"\$PROJECT_PATH/.local/secrets/release.env\"
-  set +a
-fi
-: \"\${SIGNING_ID:=Developer ID Application: Yuzuru Honda (F588423ZWS)}\"
-
 if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
+  # Canonical signing identity. Load release secrets only for build/sign flows.
+  if [[ -f \"\$PROJECT_PATH/.local/secrets/release.env\" ]]; then
+    set -a
+    source \"\$PROJECT_PATH/.local/secrets/release.env\"
+    set +a
+  fi
+  : \"\${SIGNING_ID:=Developer ID Application: Yuzuru Honda (F588423ZWS)}\"
+
   echo \"[remote] swift build (Intel)\"
   swift build
 fi
@@ -92,7 +90,7 @@ if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
   # Use the canonical Developer ID Application identity (stable TCC binding
   # across rebuilds via Team ID).
   if ! security find-identity -v -p codesigning 2>/dev/null | grep -qF \"\$SIGNING_ID\"; then
-    echo \"[remote] missing '\$SIGNING_ID' codesign identity. Import the Developer ID\" >&2
+    echo \"[remote] missing \\\"\$SIGNING_ID\\\" codesign identity. Import the Developer ID\" >&2
     echo \"[remote] cert into login.keychain-db or rerun with a different SIGNING_ID.\" >&2
     exit 1
   fi
@@ -116,12 +114,12 @@ if [[ \"\$BUILD_FLAG\" == \"1\" ]]; then
   rm -rf \"\$TMP_BACKUP\"
 else
   echo \"[remote] restart-only mode (skip build/deploy/sign)\"
-  CURRENT_AUTH=\$(codesign -dv --verbose=4 ClawGate.app 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true)
+  CURRENT_AUTH=\$(codesign -dv --verbose=4 ClawGate.app 2>&1 | sed -n \"s/^Authority=//p\" | head -n 1 || true)
   case \"\$CURRENT_AUTH\" in
     Developer\\ ID\\ Application*|ClawGate\\ Dev) : ;;
     *)
-      echo \"[remote] WARN: current app signature authority is '\$CURRENT_AUTH'.\"
-      echo \"[remote]       expected '\$SIGNING_ID' or legacy 'ClawGate Dev' fallback.\"
+      echo \"[remote] WARN: current app signature authority is \\\"\$CURRENT_AUTH\\\".\"
+      echo \"[remote]       expected \\\"\$SIGNING_ID\\\" or legacy \\\"ClawGate Dev\\\" fallback.\"
       ;;
   esac
 fi
@@ -146,7 +144,7 @@ ps aux | grep \"\$APP_BIN\" | grep -v grep || true
 echo \"[remote] app binary arch:\"
 file \"\$APP_BIN\" || true
 echo \"[remote] app signature authority:\"
-codesign -dv --verbose=4 \"\$APP_PATH\" 2>&1 | sed -n 's/^Authority=//p' | head -n 1 || true
+codesign -dv --verbose=4 \"\$APP_PATH\" 2>&1 | sed -n \"s/^Authority=//p\" | head -n 1 || true
 echo \"[remote] gateway launchctl:\"
 launchctl list | grep ai.openclaw.gateway || true
 echo \"[remote] health:\"
