@@ -53,7 +53,7 @@ struct PetNotificationBubble: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
             }
-            .frame(maxWidth: lastMsg.text.count > 100 ? 400 : 300)
+            .frame(maxWidth: lastMsg.text.count > 100 ? 300 : 260)
             .background(
                 RoundedRectangle(cornerRadius: 12)
                     .fill(PetColors.notificationBubble)
@@ -117,7 +117,7 @@ struct PetNotificationBubble: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(maxWidth: 320)
+        .frame(maxWidth: 260)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(PetColors.notificationBubble)
@@ -180,7 +180,7 @@ struct PetNotificationBubble: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .frame(maxWidth: 320)
+        .frame(maxWidth: 260)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(PetColors.notificationBubble)

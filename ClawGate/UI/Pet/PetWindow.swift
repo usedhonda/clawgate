@@ -545,7 +545,7 @@ private final class PetContentView: NSView {
 
         // Dynamic size based on content
         let fitSize = hosting.intrinsicContentSize
-        let w = min(max(fitSize.width, 120), 320)
+        let w = min(max(fitSize.width, 120), 260)
         let h = min(max(fitSize.height, 30), 200)
         hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
 
@@ -562,11 +562,22 @@ private final class PetContentView: NSView {
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
 
-        // Position: centered above character's head
+        // Position: extend away from tracked window based on pet's placement side
         let parentFrame = parentWindow.frame
+        var bubbleX: CGFloat
+        if model.lastPlacementSide == .right {
+            bubbleX = parentFrame.minX
+        } else {
+            bubbleX = parentFrame.maxX - w
+        }
+        // Screen-edge clamp
+        if let screen = parentWindow.screen ?? NSScreen.main {
+            let sf = screen.visibleFrame
+            bubbleX = max(sf.minX, min(bubbleX, sf.maxX - w))
+        }
         bw.setFrameOrigin(NSPoint(
-            x: parentFrame.midX - w / 2,
-            y: parentFrame.maxY + 4  // bottom of bubble just above character's head
+            x: bubbleX,
+            y: parentFrame.maxY + 4
         ))
 
         parentWindow.addChildWindow(bw, ordered: .above)

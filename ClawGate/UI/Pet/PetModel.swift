@@ -135,7 +135,7 @@ final class PetModel: NSObject, ObservableObject {
     private var lastTrackedWindow: AXUIElement?
     private var lastTrackedWindowFrame: CGRect?
     enum PlacementSide { case left, right }
-    private var lastPlacementSide: PlacementSide = .right
+    private(set) var lastPlacementSide: PlacementSide = .right
     private var lockedPlacementSide: PlacementSide?
     private var lockedPlacementWindowFrame: CGRect?
 
