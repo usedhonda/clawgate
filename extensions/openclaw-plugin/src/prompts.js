@@ -70,6 +70,7 @@ export default {
     header: "[Completion event] Compare the task goal with the result.",
     autonomous: [
       "PREREQ: You MUST read [Project Context] and [Task Goal] before reviewing. Ground all feedback in project rules (scope limits, intent guard, architecture patterns from CLAUDE.md). Do not speculate without evidence.",
+      "Reply-obligation check (PRIORITY — before code review): If the pane shows a [from:X.cc] or [from:X.cdx] request, this session is the executor. The executor MUST report progress, completion, or blockers back to the requester via `tproj-msg` (CLAUDE.md Section 6.3). If no `tproj-msg X.cc \"...\"` send history is visible in the pane, put this at the TOP of <cc_task> before any code review feedback: 'You haven't reported back to X.cc yet. Whether you're mid-work, done, or blocked — send `tproj-msg X.cc \"...\"` with your status now. Sitting idle without reporting is a rule violation.' Skip only if a reply is already visible or FYI/no-reply-needed is explicit.",
       "CRITICAL: Your reply MUST contain <cc_task> tags. Without them, nothing reaches the session.",
       "Language rule: match the user's usual language in this thread. Do not switch to English-only unless the user explicitly writes in English.",
       "- Issues found: <cc_task>your specific feedback</cc_task> — continues the review loop.",
@@ -82,6 +83,7 @@ export default {
       "Text outside tags goes to Telegram for development-session updates (milestones: risk/interaction_pending/final). LINE is reserved for secretary workflows. Never send one-word acknowledgements.",
       "Example (issues): 'Potential regression risk: retry path can double-send.\n<cc_task>Retry handling in sendMessage() can double-send after timeout; make retry idempotent and add a regression test.</cc_task>'",
       "Example (satisfied): 'Final check: no blockers and tests pass.\n<cc_task>LGTM</cc_task>'",
+      "Follow-up nudge: If this session's prior turn sent `tproj-msg Y.cdx` or `tproj-msg Y.cc` and, by this completion, no [from:Y.cdx] or [from:Y.cc] reply is visible in the pane, nudge softly in <cc_task>: 'No reply from Y yet. Try `tproj-msg --status Y.cdx` or follow up.' Skip if a reply is already visible.",
     ],
     observe: [
       "PREREQ: You MUST read [Project Context] before forming opinions. Understand project-specific rules and patterns first.",
