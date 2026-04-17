@@ -266,16 +266,14 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
 
-        // tproj running → snap directly below tproj (shared 242pt Ghostty column).
-        // Initial placement only; Chi doesn't follow tproj as it moves.
+        // tproj running → snap directly below tproj and match its live width.
         if let tprojFrame = findTprojFrame() {
             let height = Self.loadSavedFrame().map(\.height) ?? panel.frame.height
             let clampedHeight = min(max(height, panel.minSize.height), panel.maxSize.height)
-            let targetWidth: CGFloat = 242
+            let targetWidth = min(max(tprojFrame.width, panel.minSize.width), panel.maxSize.width)
             let origin = CGPoint(x: tprojFrame.minX, y: tprojFrame.minY - clampedHeight)
             let clamped = clampPanelOrigin(origin, panelSize: CGSize(width: targetWidth, height: clampedHeight))
             panel.setFrame(NSRect(origin: clamped, size: CGSize(width: targetWidth, height: clampedHeight)), display: true)
-            normalPanelWidth = targetWidth
             isTprojSnapped = true
             lastTprojFrame = tprojFrame
             tprojDetachCooldownUntil = nil
@@ -629,11 +627,20 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func tprojTargetFrame(panel: NSPanel, tprojFrame: CGRect) -> CGRect {
-        let targetWidth: CGFloat = 242
+        let targetWidth = min(max(tprojFrame.width, panel.minSize.width), panel.maxSize.width)
         let targetHeight = panel.frame.height
         let origin = CGPoint(x: tprojFrame.minX, y: tprojFrame.minY - targetHeight)
         let clamped = clampPanelOrigin(origin, panelSize: CGSize(width: targetWidth, height: targetHeight))
         return CGRect(origin: CGPoint(x: round(clamped.x), y: round(clamped.y)), size: CGSize(width: targetWidth, height: targetHeight))
+    }
+
+    private func restoreNormalPanelWidthIfNeeded(_ panel: NSPanel) {
+        let restoredWidth = min(max(normalPanelWidth, panel.minSize.width), panel.maxSize.width)
+        guard abs(panel.frame.width - restoredWidth) >= 0.5 else { return }
+        var restored = panel.frame
+        restored.size.width = restoredWidth
+        restored.origin = clampPanelOrigin(restored.origin, panelSize: restored.size)
+        panel.setFrame(restored, display: true)
     }
 
     private func tickPanelFollow() {
@@ -665,15 +672,17 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     isTprojSnapped = false
                     tprojDetachCooldownUntil = Date().addingTimeInterval(snapDetachCooldown)
                     lastTprojFrame = tprojFrame
+                    restoreNormalPanelWidthIfNeeded(panel)
                     logGhosttyFollow("detached from tproj manually (distance=\(Int(xDrift)))")
                     if isTprojSnapped != prevTprojSnapped { updateGhosttyFollowInterval() }
                     return
                 }
 
-                if abs(currentFrame.origin.x - targetFrame.origin.x) >= 0.5 ||
-                    abs(currentFrame.origin.y - targetFrame.origin.y) >= 0.5 ||
-                    abs(currentFrame.width - targetFrame.width) >= 0.5 {
+                if abs(currentFrame.width - targetFrame.width) >= 1 {
                     panel.setFrame(targetFrame, display: true)
+                } else if abs(currentFrame.origin.x - targetFrame.origin.x) >= 0.5 ||
+                    abs(currentFrame.origin.y - targetFrame.origin.y) >= 0.5 {
+                    panel.setFrameOrigin(targetFrame.origin)
                 }
             } else {
                 if let cooldownEnd = tprojDetachCooldownUntil, Date() < cooldownEnd {
@@ -690,7 +699,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 }
 
                 panel.setFrame(targetFrame, display: true)
-                normalPanelWidth = targetFrame.width
                 isTprojSnapped = true
                 logGhosttyFollow("snapped below tproj origin=\(targetFrame.origin)")
             }
@@ -704,6 +712,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if isTprojSnapped { isTprojSnapped = false }
         lastTprojFrame = nil
         tprojDetachCooldownUntil = nil
+        if tprojChanged {
+            restoreNormalPanelWidthIfNeeded(panel)
+        }
         if tprojChanged { updateGhosttyFollowInterval() }
 
         guard let currentGhosttyFrame = findGhosttyFrame() else {
