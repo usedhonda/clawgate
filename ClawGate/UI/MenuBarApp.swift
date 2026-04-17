@@ -22,6 +22,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var ghosttyFollowTimer: DispatchSourceTimer?
     private var lastGhosttyFrame: CGRect?
     private var isGhosttySnapped = false
+    private var isTprojSnapped: Bool = false
+    private var lastTprojFrame: CGRect?
+    private var tprojDetachCooldownUntil: Date?
     private var ghosttyDetachCooldownUntil: Date?
     private var ghosttyAnchorSide: GhosttyAnchorSide = .right
     private var ghosttyLastDebugLogAt: Date = .distantPast
@@ -273,7 +276,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let clamped = clampPanelOrigin(origin, panelSize: CGSize(width: targetWidth, height: clampedHeight))
             panel.setFrame(NSRect(origin: clamped, size: CGSize(width: targetWidth, height: clampedHeight)), display: true)
             normalPanelWidth = targetWidth
+            isTprojSnapped = true
+            lastTprojFrame = tprojFrame
+            tprojDetachCooldownUntil = nil
             isGhosttySnapped = false
+            lastGhosttyFrame = nil
             ghosttyDetachCooldownUntil = nil
             logGhosttyFollow("opened below tproj origin=\(clamped) size=\(targetWidth)x\(clampedHeight)")
         } else if let ghosttyFrame = findGhosttyFrame() {
@@ -537,7 +544,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now(), repeating: .milliseconds(16))
         timer.setEventHandler { [weak self] in
-            self?.tickGhosttyFollow()
+            self?.tickPanelFollow()
         }
         timer.resume()
         ghosttyFollowTimer = timer
@@ -548,6 +555,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         ghosttyFollowTimer = nil
         lastGhosttyFrame = nil
         isGhosttySnapped = false
+        lastTprojFrame = nil
+        isTprojSnapped = false
+        tprojDetachCooldownUntil = nil
         ghosttyDetachCooldownUntil = nil
         ghosttyAnchorSide = .right
     }
@@ -555,7 +565,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func updateGhosttyFollowInterval() {
         guard let timer = ghosttyFollowTimer else { return }
         let ms: Int
-        if isGhosttySnapped {
+        if isTprojSnapped {
+            ms = 16
+        } else if lastTprojFrame != nil {
+            ms = 100
+        } else if isGhosttySnapped {
             ms = 16      // 60 fps - smooth follow
         } else if lastGhosttyFrame != nil {
             ms = 100     // Ghostty visible - snap detection
@@ -600,11 +614,98 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         ghosttyAnchorSide = target.side
     }
 
-    private func tickGhosttyFollow() {
+    private func area(of rect: CGRect) -> CGFloat {
+        guard !rect.isNull, !rect.isEmpty else { return 0 }
+        return rect.width * rect.height
+    }
+
+    private func screenContaining(frame: CGRect) -> NSScreen? {
+        NSScreen.screens.max { lhs, rhs in
+            area(of: lhs.frame.intersection(frame)) < area(of: rhs.frame.intersection(frame))
+        }.flatMap { screen in
+            let intersection = screen.frame.intersection(frame)
+            return (intersection.isNull || intersection.isEmpty) ? nil : screen
+        }
+    }
+
+    private func tprojTargetFrame(panel: NSPanel, tprojFrame: CGRect) -> CGRect {
+        let targetWidth: CGFloat = 242
+        let targetHeight = panel.frame.height
+        let origin = CGPoint(x: tprojFrame.minX, y: tprojFrame.minY - targetHeight)
+        let clamped = clampPanelOrigin(origin, panelSize: CGSize(width: targetWidth, height: targetHeight))
+        return CGRect(origin: CGPoint(x: round(clamped.x), y: round(clamped.y)), size: CGSize(width: targetWidth, height: targetHeight))
+    }
+
+    private func tickPanelFollow() {
         guard let panel = mainPanel, panel.isVisible else {
             stopGhosttyFollow()
             return
         }
+        let panelScreen = screenContaining(frame: panel.frame) ?? panel.screen
+        if let tprojFrame = findTprojFrame(),
+           let tprojScreen = screenContaining(frame: tprojFrame),
+           panelScreen == tprojScreen {
+            let prevTprojSnapped = isTprojSnapped
+            let previousTprojFrame = lastTprojFrame
+            let targetFrame = tprojTargetFrame(panel: panel, tprojFrame: tprojFrame)
+            let currentFrame = panel.frame
+
+            if isTprojSnapped {
+                let xDrift = abs(currentFrame.origin.x - targetFrame.origin.x)
+                let tprojMotion: CGFloat
+                if let previousTprojFrame {
+                    tprojMotion = hypot(
+                        tprojFrame.origin.x - previousTprojFrame.origin.x,
+                        tprojFrame.origin.y - previousTprojFrame.origin.y
+                    )
+                } else {
+                    tprojMotion = 0
+                }
+                if xDrift >= snapDetachThreshold && tprojMotion < 2 {
+                    isTprojSnapped = false
+                    tprojDetachCooldownUntil = Date().addingTimeInterval(snapDetachCooldown)
+                    lastTprojFrame = tprojFrame
+                    logGhosttyFollow("detached from tproj manually (distance=\(Int(xDrift)))")
+                    if isTprojSnapped != prevTprojSnapped { updateGhosttyFollowInterval() }
+                    return
+                }
+
+                if abs(currentFrame.origin.x - targetFrame.origin.x) >= 0.5 ||
+                    abs(currentFrame.origin.y - targetFrame.origin.y) >= 0.5 ||
+                    abs(currentFrame.width - targetFrame.width) >= 0.5 {
+                    panel.setFrame(targetFrame, display: true)
+                }
+            } else {
+                if let cooldownEnd = tprojDetachCooldownUntil, Date() < cooldownEnd {
+                    lastTprojFrame = tprojFrame
+                    return
+                }
+                tprojDetachCooldownUntil = nil
+
+                if isGhosttySnapped {
+                    isGhosttySnapped = false
+                    lastGhosttyFrame = nil
+                    ghosttyDetachCooldownUntil = nil
+                    logGhosttyFollow("handoff from Ghostty snap to tproj snap")
+                }
+
+                panel.setFrame(targetFrame, display: true)
+                normalPanelWidth = targetFrame.width
+                isTprojSnapped = true
+                logGhosttyFollow("snapped below tproj origin=\(targetFrame.origin)")
+            }
+
+            lastTprojFrame = tprojFrame
+            if isTprojSnapped != prevTprojSnapped { updateGhosttyFollowInterval() }
+            return
+        }
+
+        let tprojChanged = isTprojSnapped || lastTprojFrame != nil
+        if isTprojSnapped { isTprojSnapped = false }
+        lastTprojFrame = nil
+        tprojDetachCooldownUntil = nil
+        if tprojChanged { updateGhosttyFollowInterval() }
+
         guard let currentGhosttyFrame = findGhosttyFrame() else {
             let changed = isGhosttySnapped || lastGhosttyFrame != nil
             if isGhosttySnapped { isGhosttySnapped = false }
