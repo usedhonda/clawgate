@@ -407,9 +407,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func showScreenshotOffer(_ offer: ScreenshotOffer) {
-        let entry = NotificationEntry(id: UUID().uuidString, text: offer.mentionText, source: offer.sourceKind.rawValue, timestamp: Date())
-        summonResults.append(entry)
-        PetLogStore.save(summonResults, file: "summon.json")
+        addLocalEntry(text: offer.mentionText, source: offer.sourceKind.rawValue)
         showWhisper("Screenshot ready.", duration: 2.5)
 
         guard isBubbleEnabled, !stateMachine.isChatOpen else {
@@ -1430,6 +1428,10 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func appendSummonEntry(text: String, source: String) {
+        if Self.isLocalSource(source) {
+            addLocalEntry(text: text, source: source)
+            return
+        }
         let entry = NotificationEntry(
             id: UUID().uuidString, text: text,
             source: source, timestamp: Date()
@@ -1440,6 +1442,15 @@ final class PetModel: NSObject, ObservableObject {
         }
         PetLogStore.save(summonResults, file: "summon.json")
         showSummonTab = true
+    }
+
+    private static func isLocalSource(_ source: String) -> Bool {
+        switch source {
+        case "clipboard", "clipboard_offer", "clipboard_image", "saved_file":
+            return true
+        default:
+            return false
+        }
     }
 
     private func detectTmuxPaneCwd() -> String? {
