@@ -391,12 +391,10 @@ final class PetModel: NSObject, ObservableObject {
             NSLog("[Pet] showNotification suppressed")
             return
         }
-        // Duration scales with text length: 15s base + 1s per 20 chars, max 60s
-        let duration = min(max(15.0, Double(msg.text.count) / 20.0 + 15.0), 60.0)
         notificationMessage = msg
         notificationDismissTask?.cancel()
         notificationDismissTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
             guard !Task.isCancelled else { return }
             self?.notificationMessage = nil
         }
