@@ -584,7 +584,7 @@ private final class PetContentView: NSView {
 
         parentWindow.addChildWindow(bw, ordered: .above)
         notificationWindow = bw
-        installBubbleDismissMonitor()
+        refreshPetPanelDismissMonitor()
     }
 
     private func showFullChat() {
@@ -618,27 +618,37 @@ private final class PetContentView: NSView {
 
         bw.makeKeyAndOrderFront(nil)
         chatWindow = bw
+        refreshPetPanelDismissMonitor()
     }
 
-    private func installBubbleDismissMonitor() {
+    private func refreshPetPanelDismissMonitor() {
+        let wantsMonitor = notificationWindow != nil || chatWindow != nil
+        if wantsMonitor {
+            installPetPanelDismissMonitor()
+        } else {
+            removePetPanelDismissMonitor()
+        }
+    }
+
+    private func installPetPanelDismissMonitor() {
         guard bubbleLocalMonitor == nil else { return }
         bubbleLocalMonitor = NSEvent.addLocalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] event in
             guard let self else { return event }
             if !self.isPetFamilyWindow(event.window) {
-                self.dismissBubbleFromClickOut()
+                self.dismissPetPanelsFromClickOut()
             }
             return event
         }
         bubbleGlobalMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
         ) { [weak self] _ in
-            self?.dismissBubbleFromClickOut()
+            self?.dismissPetPanelsFromClickOut()
         }
     }
 
-    private func removeBubbleDismissMonitor() {
+    private func removePetPanelDismissMonitor() {
         if let monitor = bubbleLocalMonitor {
             NSEvent.removeMonitor(monitor)
             bubbleLocalMonitor = nil
@@ -659,19 +669,22 @@ private final class PetContentView: NSView {
             || w === summonMenuWindow
     }
 
-    private func dismissBubbleFromClickOut() {
+    private func dismissPetPanelsFromClickOut() {
         model.dismissNotification()
         model.pendingClipboardOffer = nil
         model.dismissScreenshotOffer()
+        if model.stateMachine.isChatOpen {
+            model.toggleChat()
+        }
     }
 
     private func hideNotificationBubble() {
-        removeBubbleDismissMonitor()
         if let nw = notificationWindow {
             window?.removeChildWindow(nw)
             nw.orderOut(nil)
             notificationWindow = nil
         }
+        refreshPetPanelDismissMonitor()
     }
 
     private func hideChatWindow() {
@@ -679,6 +692,7 @@ private final class PetContentView: NSView {
             cw.orderOut(nil)
             chatWindow = nil
         }
+        refreshPetPanelDismissMonitor()
     }
 
     // MARK: - Whisper Window (Layer 1)
