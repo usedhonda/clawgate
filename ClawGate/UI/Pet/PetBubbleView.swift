@@ -414,6 +414,7 @@ private final class PetTabHeaderNSView: NSView {
         ("Chat", "chat"),
         ("Summon", "summon"),
         ("Notifs", "notifications"),
+        ("Local", "local"),
     ]
 
     override init(frame frameRect: NSRect) {
@@ -553,6 +554,8 @@ struct PetChatContainerView: View {
                 PetBubbleView(model: model)
             case "summon":
                 SummonResultsView(model: model)
+            case "local":
+                LocalResultsView(model: model)
             default:
                 NotificationListView(model: model)
             }
@@ -675,6 +678,108 @@ struct SummonEntryView: View {
         case "ask": return .cyan
         case "draft_pr": return .green
         default: return .white.opacity(0.5)
+        }
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
+    }
+}
+
+// MARK: - Local Results View
+
+struct LocalResultsView: View {
+    @ObservedObject var model: PetModel
+
+    var body: some View {
+        if model.localResults.isEmpty {
+            VStack {
+                Spacer()
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 24))
+                    .foregroundColor(.white.opacity(0.2))
+                Text("Clipboard activity shows up here")
+                    .font(.system(size: 13))
+                    .foregroundColor(.white.opacity(0.4))
+                    .padding(.top, 4)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.localResults.reversed()) { entry in
+                            LocalEntryView(entry: entry)
+                                .id(entry.id)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .onChange(of: model.localResults.count) { _ in
+                    if let last = model.localResults.last {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct LocalEntryView: View {
+    let entry: NotificationEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Image(systemName: iconForSource(entry.source))
+                    .font(.system(size: 11))
+                    .foregroundColor(colorForSource(entry.source))
+                Text(labelForSource(entry.source))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(colorForSource(entry.source))
+                Spacer()
+                Text(timeString(entry.timestamp))
+                    .font(.system(size: 10))
+                    .foregroundColor(.white.opacity(0.3))
+            }
+            Text(entry.text)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.85))
+                .lineLimit(6)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.07))
+        )
+    }
+
+    private func iconForSource(_ source: String) -> String {
+        switch source {
+        case "clipboard_offer": return "doc.on.clipboard"
+        default: return "circle"
+        }
+    }
+
+    private func colorForSource(_ source: String) -> Color {
+        switch source {
+        case "clipboard_offer": return .blue
+        default: return .white.opacity(0.5)
+        }
+    }
+
+    private func labelForSource(_ source: String) -> String {
+        switch source {
+        case "clipboard_offer": return "CLIPBOARD"
+        default: return source.uppercased()
         }
     }
 
