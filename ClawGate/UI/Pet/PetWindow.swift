@@ -148,6 +148,8 @@ private final class PetContentView: NSView {
     private var summonObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
     private var summonMenuGlobalMonitor: Any?
+    private var bubbleLocalMonitor: Any?
+    private var bubbleGlobalMonitor: Any?
 
     // Drag state
     private var dragStartScreenPos: NSPoint?
@@ -582,6 +584,7 @@ private final class PetContentView: NSView {
 
         parentWindow.addChildWindow(bw, ordered: .above)
         notificationWindow = bw
+        installBubbleDismissMonitor()
     }
 
     private func showFullChat() {
@@ -617,7 +620,53 @@ private final class PetContentView: NSView {
         chatWindow = bw
     }
 
+    private func installBubbleDismissMonitor() {
+        guard bubbleLocalMonitor == nil else { return }
+        bubbleLocalMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            guard let self else { return event }
+            if !self.isPetFamilyWindow(event.window) {
+                self.dismissBubbleFromClickOut()
+            }
+            return event
+        }
+        bubbleGlobalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            self?.dismissBubbleFromClickOut()
+        }
+    }
+
+    private func removeBubbleDismissMonitor() {
+        if let monitor = bubbleLocalMonitor {
+            NSEvent.removeMonitor(monitor)
+            bubbleLocalMonitor = nil
+        }
+        if let monitor = bubbleGlobalMonitor {
+            NSEvent.removeMonitor(monitor)
+            bubbleGlobalMonitor = nil
+        }
+    }
+
+    private func isPetFamilyWindow(_ w: NSWindow?) -> Bool {
+        guard let w else { return false }
+        return w === self.window
+            || w === notificationWindow
+            || w === chatWindow
+            || w === askWindow
+            || w === whisperWindow
+            || w === summonMenuWindow
+    }
+
+    private func dismissBubbleFromClickOut() {
+        model.dismissNotification()
+        model.pendingClipboardOffer = nil
+        model.dismissScreenshotOffer()
+    }
+
     private func hideNotificationBubble() {
+        removeBubbleDismissMonitor()
         if let nw = notificationWindow {
             window?.removeChildWindow(nw)
             nw.orderOut(nil)
