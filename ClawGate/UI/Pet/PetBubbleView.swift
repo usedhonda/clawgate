@@ -733,47 +733,80 @@ struct LocalResultsView: View {
 
 struct LocalEntryView: View {
     let entry: NotificationEntry
+    @State private var isHovered = false
     @State private var justCopied = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Image(systemName: iconForSource(entry.source))
-                    .font(.system(size: 11))
-                    .foregroundColor(colorForSource(entry.source))
-                Text(labelForSource(entry.source))
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(colorForSource(entry.source))
-                Spacer()
-                Text(timeString(entry.timestamp))
-                    .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.3))
-                Button(action: copyToPasteboard) {
-                    Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+        Button(action: copyToPasteboard) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: iconForSource(entry.source))
+                        .font(.system(size: 11))
+                        .foregroundColor(colorForSource(entry.source))
+                    Text(labelForSource(entry.source))
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(justCopied ? .green : .white.opacity(0.5))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(Color.white.opacity(0.08))
-                        )
+                        .foregroundColor(colorForSource(entry.source))
+                    Spacer()
+                    if justCopied {
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark")
+                            Text("Copied")
+                        }
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.green)
+                    } else {
+                        HStack(spacing: 4) {
+                            if isHovered {
+                                Image(systemName: "doc.on.doc")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.85))
+                            }
+                            Text(timeString(entry.timestamp))
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.3))
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Copy to clipboard")
+                Text(entry.text)
+                    .font(.system(size: 12))
+                    .foregroundColor(.white.opacity(0.85))
+                    .lineLimit(6)
+                    .multilineTextAlignment(.leading)
             }
-            Text(entry.text)
-                .font(.system(size: 12))
-                .foregroundColor(.white.opacity(0.85))
-                .lineLimit(6)
-                .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(
+                        justCopied ? Color.green.opacity(0.18) :
+                        isHovered ? Color.white.opacity(0.14) :
+                        Color.white.opacity(0.07)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(
+                        justCopied ? Color.green.opacity(0.55) :
+                        isHovered ? Color.white.opacity(0.22) :
+                        Color.clear,
+                        lineWidth: 1
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10))
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.white.opacity(0.07))
-        )
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .animation(.easeOut(duration: 0.2), value: justCopied)
+        .onHover { hovering in
+            isHovered = hovering
+            if hovering {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .help("Click to copy")
     }
 
     private func copyToPasteboard() {
@@ -781,7 +814,7 @@ struct LocalEntryView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(entry.text, forType: .string)
         justCopied = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
             justCopied = false
         }
     }
