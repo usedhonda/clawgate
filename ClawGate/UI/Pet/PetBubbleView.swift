@@ -733,6 +733,7 @@ struct LocalResultsView: View {
 
 struct LocalEntryView: View {
     let entry: NotificationEntry
+    @State private var justCopied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -747,6 +748,19 @@ struct LocalEntryView: View {
                 Text(timeString(entry.timestamp))
                     .font(.system(size: 10))
                     .foregroundColor(.white.opacity(0.3))
+                Button(action: copyToPasteboard) {
+                    Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(justCopied ? .green : .white.opacity(0.5))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(Color.white.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Copy to clipboard")
             }
             Text(entry.text)
                 .font(.system(size: 12))
@@ -762,9 +776,21 @@ struct LocalEntryView: View {
         )
     }
 
+    private func copyToPasteboard() {
+        ClipboardWatcher.shared.suppress()
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(entry.text, forType: .string)
+        justCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            justCopied = false
+        }
+    }
+
     private func iconForSource(_ source: String) -> String {
         switch source {
         case "clipboard_offer": return "doc.on.clipboard"
+        case "clipboard": return "arrow.turn.down.right"
+        case "clipboard_image", "saved_file": return "photo"
         default: return "circle"
         }
     }
@@ -772,13 +798,17 @@ struct LocalEntryView: View {
     private func colorForSource(_ source: String) -> Color {
         switch source {
         case "clipboard_offer": return .blue
+        case "clipboard": return .cyan
+        case "clipboard_image", "saved_file": return .purple
         default: return .white.opacity(0.5)
         }
     }
 
     private func labelForSource(_ source: String) -> String {
         switch source {
-        case "clipboard_offer": return "CLIPBOARD"
+        case "clipboard_offer": return "COPIED"
+        case "clipboard": return "CLIPBOARD ACTION"
+        case "clipboard_image", "saved_file": return "SCREENSHOT"
         default: return source.uppercased()
         }
     }
