@@ -112,6 +112,7 @@ final class PetModel: NSObject, ObservableObject {
     }
     @Published var notificationHistory: [NotificationEntry] = []
     @Published var summonResults: [NotificationEntry] = []
+    @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
 
     let stateMachine = PetStateMachine()
@@ -889,6 +890,7 @@ final class PetModel: NSObject, ObservableObject {
         // Restore persisted logs
         notificationHistory = PetLogStore.load(file: "notifications.json")
         summonResults = PetLogStore.load(file: "summon.json")
+        localResults = PetLogStore.load(file: "local.json")
 
         characterManager.scan()
         _ = try? OpenClawDeviceIdentity.loadOrCreate()
@@ -1586,6 +1588,18 @@ final class PetModel: NSObject, ObservableObject {
             notificationHistory.removeFirst(notificationHistory.count - 200)
         }
         PetLogStore.save(notificationHistory, file: "notifications.json")
+    }
+
+    func addLocalEntry(text: String, source: String) {
+        let entry = NotificationEntry(
+            id: UUID().uuidString, text: text,
+            source: source, timestamp: Date()
+        )
+        localResults.append(entry)
+        if localResults.count > 100 {
+            localResults.removeFirst(localResults.count - 100)
+        }
+        PetLogStore.save(localResults, file: "local.json")
     }
 }
 
