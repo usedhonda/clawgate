@@ -1481,6 +1481,7 @@ final class PetModel: NSObject, ObservableObject {
                     actions: offer.actions,
                     sourceApp: self.lastTrackedApp?.localizedName
                 )
+                self.addLocalEntry(text: enriched.text, source: "clipboard_offer")
                 // Show offer as notification bubble with action buttons
                 self.pendingClipboardOffer = enriched
             }
