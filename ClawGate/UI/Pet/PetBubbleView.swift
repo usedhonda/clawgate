@@ -16,35 +16,20 @@ private enum PetColors {
 /// Brief notification bubble showing the latest assistant message
 struct PetNotificationBubble: View {
     @ObservedObject var model: PetModel
-    @State private var isVisible = true
-    @State private var isHovered = false
-    @State private var fadeTask: Task<Void, Never>?
 
     var body: some View {
         // Screenshot offer bubble
-        if isVisible, let offer = model.pendingScreenshotOffer {
+        if let offer = model.pendingScreenshotOffer {
             screenshotOfferView(offer)
-                .onHover { hovering in
-                    isHovered = hovering
-                    if hovering { fadeTask?.cancel() }
-                    else { startFadeTimer(duration: 15_000_000_000) }
-                }
-                .onAppear { startFadeTimer(duration: 15_000_000_000) }
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
         // Clipboard offer bubble (action buttons)
-        else if isVisible, let offer = model.pendingClipboardOffer {
+        else if let offer = model.pendingClipboardOffer {
             clipboardOfferView(offer)
-                .onHover { hovering in
-                    isHovered = hovering
-                    if hovering { fadeTask?.cancel() }
-                    else { startFadeTimer(duration: 8_000_000_000) }
-                }
-                .onAppear { startFadeTimer(duration: 8_000_000_000) }
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
         // Regular notification bubble
-        else if isVisible, let lastMsg = model.notificationMessage {
+        else if let lastMsg = model.notificationMessage {
             VStack(alignment: .leading, spacing: 2) {
                 Text(lastMsg.text)
                     .font(.system(size: 13))
@@ -59,16 +44,8 @@ struct PetNotificationBubble: View {
                     .fill(PetColors.notificationBubble)
                     .shadow(color: .black.opacity(0.3), radius: 6, y: 3)
             )
-            .onHover { hovering in
-                isHovered = hovering
-                if hovering { fadeTask?.cancel() }
-                else { startFadeTimer(for: lastMsg.text) }
-            }
             .onTapGesture {
                 model.toggleChat()
-            }
-            .onAppear {
-                startFadeTimer(for: lastMsg.text)
             }
             .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
@@ -206,22 +183,10 @@ struct PetNotificationBubble: View {
 
     private func dismissOffer() {
         model.pendingClipboardOffer = nil
-        withAnimation(.easeOut(duration: 0.3)) {
-            isVisible = false
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            isVisible = true  // reset for next notification
-        }
     }
 
     private func dismissScreenshotOffer() {
         model.dismissScreenshotOffer()
-        withAnimation(.easeOut(duration: 0.3)) {
-            isVisible = false
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            isVisible = true
-        }
     }
 
     private func iconForContentType(_ type: ClipboardContentType) -> String {
@@ -235,30 +200,6 @@ struct PetNotificationBubble: View {
         case .base64: return "lock.open"
         case .jwt: return "key"
         case .terminalOutput: return "terminal"
-        }
-    }
-
-    private func startFadeTimer(for text: String) {
-        let duration: UInt64 = text.count > 100 ? 12_000_000_000 : 6_000_000_000
-        startFadeTimer(duration: duration)
-    }
-
-    private func startFadeTimer(duration: UInt64) {
-        fadeTask?.cancel()
-        fadeTask = Task {
-            try? await Task.sleep(nanoseconds: duration)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                withAnimation(.easeOut(duration: 0.5)) {
-                    isVisible = false
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                    model.dismissNotification()
-                    model.pendingClipboardOffer = nil
-                    model.dismissScreenshotOffer()
-                    isVisible = true
-                }
-            }
         }
     }
 }
