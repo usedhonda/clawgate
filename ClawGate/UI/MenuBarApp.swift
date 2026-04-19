@@ -540,7 +540,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func startGhosttyFollow() {
         ghosttyFollowTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(16))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(33))
         timer.setEventHandler { [weak self] in
             self?.tickPanelFollow()
         }
@@ -564,11 +564,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let timer = ghosttyFollowTimer else { return }
         let ms: Int
         if isTprojSnapped {
-            ms = 16
+            ms = 33
         } else if lastTprojFrame != nil {
             ms = 100
         } else if isGhosttySnapped {
-            ms = 16      // 60 fps - smooth follow
+            ms = 33      // 30 fps - smooth follow
         } else if lastGhosttyFrame != nil {
             ms = 100     // Ghostty visible - snap detection
         } else {
