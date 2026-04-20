@@ -2601,24 +2601,32 @@ function buildActiveTasksPrefix() {
     const pending = Array.isArray(state?.pendingUserStarted) ? state.pendingUserStarted : [];
     if (pending.length === 0) return "";
 
-    // Optional defer/blocker hints
+    // Optional defer/blocker hints — supports both { tasks: { id: {...} } } and flat { id: {...} }.
     let continuation = {};
     try {
       const contPath = join(homedir(), ".openclaw", "workspace", "memory", "task-continuation-state.json");
       const contRaw = readFileSync(contPath, "utf8");
       const parsed = JSON.parse(contRaw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) continuation = parsed;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        if (parsed.tasks && typeof parsed.tasks === "object" && !Array.isArray(parsed.tasks)) {
+          continuation = parsed.tasks;
+        } else {
+          continuation = parsed;
+        }
+      }
     } catch { /* optional — ignore */ }
 
     const rows = pending.map((task) => {
       const id = task?.id || task?.task_id || "";
       const title = task?.title || "";
       const description = `${task?.description || ""}`.trim();
-      const since = task?.since || task?.started_at || task?.startedAt || "";
+      const project = task?.project || "";
+      const since = task?.since || task?.started_at || task?.startedAt || task?.updatedAt || task?.updated_at || "";
       const parts = [];
       if (id) parts.push(`id: ${id}`);
       if (title) parts.push(`title: ${JSON.stringify(title)}`);
       if (description) parts.push(`description: ${JSON.stringify(description.slice(0, 160))}`);
+      if (project) parts.push(`project: ${JSON.stringify(project)}`);
       if (since) parts.push(`since: ${since}`);
       const cont = id && continuation[id];
       if (cont && typeof cont === "object") {
