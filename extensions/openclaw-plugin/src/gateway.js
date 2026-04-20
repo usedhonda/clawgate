@@ -2586,6 +2586,58 @@ function buildRosterPrefix() {
 }
 
 /**
+ * Build a snapshot of in_progress tasks (Chi's active work) to prefix inbound messages.
+ * Source: ~/.openclaw/workspace/memory/task-watcher-state.json -> pendingUserStarted
+ * Optional: ~/.openclaw/workspace/memory/task-continuation-state.json for defer/blocker hints
+ * Silent fail ("" return) on missing file / parse error — Chi should see active tasks when
+ * available but the feature must never block inbound dispatch.
+ * @returns {string}
+ */
+function buildActiveTasksPrefix() {
+  try {
+    const statePath = join(homedir(), ".openclaw", "workspace", "memory", "task-watcher-state.json");
+    const raw = readFileSync(statePath, "utf8");
+    const state = JSON.parse(raw);
+    const pending = Array.isArray(state?.pendingUserStarted) ? state.pendingUserStarted : [];
+    if (pending.length === 0) return "";
+
+    // Optional defer/blocker hints
+    let continuation = {};
+    try {
+      const contPath = join(homedir(), ".openclaw", "workspace", "memory", "task-continuation-state.json");
+      const contRaw = readFileSync(contPath, "utf8");
+      const parsed = JSON.parse(contRaw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) continuation = parsed;
+    } catch { /* optional — ignore */ }
+
+    const rows = pending.map((task) => {
+      const id = task?.id || task?.task_id || "";
+      const title = task?.title || "";
+      const description = `${task?.description || ""}`.trim();
+      const since = task?.since || task?.started_at || task?.startedAt || "";
+      const parts = [];
+      if (id) parts.push(`id: ${id}`);
+      if (title) parts.push(`title: ${JSON.stringify(title)}`);
+      if (description) parts.push(`description: ${JSON.stringify(description.slice(0, 160))}`);
+      if (since) parts.push(`since: ${since}`);
+      const cont = id && continuation[id];
+      if (cont && typeof cont === "object") {
+        if (Number.isFinite(cont.consecutive_defers) && cont.consecutive_defers > 0) {
+          parts.push(`consecutive_defers=${cont.consecutive_defers}`);
+        }
+        if (cont.blocker_escalated_at) parts.push(`blocker_escalated_at=${cont.blocker_escalated_at}`);
+        if (cont.last_asked_at) parts.push(`last_asked_at=${cont.last_asked_at}`);
+      }
+      return `  - ${parts.join(", ")}`;
+    });
+
+    return `<active_tasks count="${pending.length}">\n${rows.join("\n")}\n</active_tasks>`;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Build MsgContext from a ClawGate poll event.
  * @param {object} event — from /v1/poll
  * @param {string} accountId
@@ -2665,10 +2717,11 @@ function buildMsgContext(event, accountId, defaultConversation) {
     _ingressAdapter: event.adapter || "line",
   };
 
-  // Build BodyForAgent with location + project roster prefixes
+  // Build BodyForAgent with location + project roster + active tasks prefixes
   const locationPrefix = buildLocationPrefix();
   const rosterPrefix = buildRosterPrefix();
-  const prefixes = [locationPrefix, rosterPrefix].filter(Boolean);
+  const activeTasksPrefix = buildActiveTasksPrefix();
+  const prefixes = [locationPrefix, rosterPrefix, activeTasksPrefix].filter(Boolean);
   if (prefixes.length > 0) {
     ctx.BodyForAgent = `${prefixes.join("\n\n")}\n\n${text}`;
   }
