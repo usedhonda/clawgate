@@ -1120,7 +1120,7 @@ const STALE_REPEAT_WINDOW_MS_V2 = Math.max(
 const ENABLE_COMMON_INGRESS_DEDUP = envFlag("CLAWGATE_COMMON_INGRESS_DEDUP", true);
 const COMMON_INGRESS_DEDUP_WINDOW_MS = Math.max(
   5_000,
-  (Number.parseInt(process.env.CLAWGATE_COMMON_INGRESS_DEDUP_WINDOW_MS || "20000", 10) || 20000)
+  (Number.parseInt(process.env.CLAWGATE_COMMON_INGRESS_DEDUP_WINDOW_MS || "3600000", 10) || 3600000)
 );
 const COMMON_INGRESS_DEDUP_MAX_ENTRIES = Math.max(
   200,
@@ -1223,9 +1223,26 @@ function stableKey(eventText, conversation) {
   return `${normalizedConv}::${normalizedText}`;
 }
 
+// Dedup-only: fold small kana to normal kana so IME variants
+// (ょ↔よ, ゃ↔や, ュ↔ユ, etc.) collapse to the same dedup key.
+// NFKC does NOT normalize these. Applied only to dedup material,
+// never to user-visible event.payload.text.
+const SMALL_KANA_FOLD_MAP = {
+  "ぁ": "あ", "ぃ": "い", "ぅ": "う", "ぇ": "え", "ぉ": "お",
+  "ゃ": "や", "ゅ": "ゆ", "ょ": "よ",
+  "っ": "つ", "ゎ": "わ", "ゕ": "か", "ゖ": "け",
+  "ァ": "ア", "ィ": "イ", "ゥ": "ウ", "ェ": "エ", "ォ": "オ",
+  "ャ": "ヤ", "ュ": "ユ", "ョ": "ヨ",
+  "ッ": "ツ", "ヮ": "ワ", "ヵ": "カ", "ヶ": "ケ",
+};
+const SMALL_KANA_FOLD_RE = /[ぁぃぅぇぉゃゅょっゎゕゖァィゥェォャュョッヮヵヶ]/g;
+
+function foldSmallKanaForDedup(text) {
+  return `${text || ""}`.replace(SMALL_KANA_FOLD_RE, (ch) => SMALL_KANA_FOLD_MAP[ch] || ch);
+}
+
 function normalizeCommonDedupText(rawText) {
-  const normalized = `${rawText || ""}`
-    .normalize("NFKC")
+  const normalized = foldSmallKanaForDedup(`${rawText || ""}`.normalize("NFKC"))
     .replace(/\[tproj-msg:[^\]]*\]\s*/giu, "")
     .replace(/\s+/g, " ")
     .trim()
@@ -1255,6 +1272,8 @@ function buildCommonIngressDedupKey({ adapter, conversation, eventText }) {
     enabled: true,
     keyHash: hashFingerprint(material),
     compact,
+    adapter: normalizedAdapter,
+    conversation: normalizedConversation,
   };
 }
 
@@ -1304,6 +1323,8 @@ function matchCommonIngressDuplicate(commonKey) {
   }
 
   const near = recentCommonInbounds.find((entry) => {
+    if (entry.adapter !== commonKey.adapter) return false;
+    if (entry.conversation !== commonKey.conversation) return false;
     const score = compactSimilarityScore(commonKey.compact, entry.compact);
     return score >= 0.93;
   });
@@ -1320,13 +1341,14 @@ function recordCommonIngress(commonKey) {
   recentCommonInbounds.push({
     keyHash: commonKey.keyHash,
     compact: commonKey.compact,
+    adapter: commonKey.adapter,
+    conversation: commonKey.conversation,
     time: now,
   });
 }
 
 function normalizeShortLineDedupText(rawText) {
-  return `${rawText || ""}`
-    .normalize("NFKC")
+  return foldSmallKanaForDedup(`${rawText || ""}`.normalize("NFKC"))
     .toLowerCase()
     .replace(/\s+/g, "")
     .replace(/[\p{P}\p{S}_]+/gu, "")
