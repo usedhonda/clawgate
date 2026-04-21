@@ -12,6 +12,8 @@ actor OpenClawWSClient {
     private var continuation: AsyncStream<OpenClawEvent>.Continuation?
     private var isConnected = false
     private var pingTask: Task<Void, Never>?
+    private var pingDeadline: Task<Void, Error>?
+    private var pingInFlight = false
     private var inFlightAcks: [String: CheckedContinuation<Void, Error>] = [:]
 
     private var authToken: String?
@@ -76,6 +78,9 @@ actor OpenClawWSClient {
         handshakeComplete = false
         pingTask?.cancel()
         pingTask = nil
+        pingDeadline?.cancel()
+        pingDeadline = nil
+        pingInFlight = false
         authToken = nil
         pendingRequestId = nil
         failAllAcks(error: OpenClawError.connectionFailed("Disconnected"))
@@ -426,12 +431,37 @@ actor OpenClawWSClient {
     }
 
     private func sendPing() {
-        guard let task = webSocketTask else { return }
-        let deadline = Task {
+        guard let task = webSocketTask, !pingInFlight else { return }
+        pingInFlight = true
+
+        pingDeadline?.cancel()
+        pingDeadline = Task { [weak self] in
             try await Task.sleep(nanoseconds: 10_000_000_000)
-            task.cancel(with: .abnormalClosure, reason: "pong timeout".data(using: .utf8))
+            await self?.handlePingTimeout()
         }
-        task.sendPing { _ in deadline.cancel() }
+
+        task.sendPing { [weak self] error in
+            Task { [weak self] in
+                await self?.handlePingComplete(error: error)
+            }
+        }
+    }
+
+    private func handlePingComplete(error: Error?) {
+        pingInFlight = false
+        pingDeadline?.cancel()
+        pingDeadline = nil
+        if let error {
+            logger.warning("Ping failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func handlePingTimeout() {
+        guard pingInFlight else { return }
+        logger.warning("Ping timeout — tearing down connection")
+        pingInFlight = false
+        pingDeadline = nil
+        teardown()
     }
 
     func isHandshakeStuck() -> Bool {
