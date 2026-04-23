@@ -34,6 +34,12 @@ actor OpenClawWSClient {
         config.timeoutIntervalForResource = 60
         session = URLSession(configuration: config)
 
+        // Wait for Gateway to be ready. Gateway init (bonjour/telegram/model-pricing)
+        // can take ~30s after a restart — longer than the 10s handshake timeout below.
+        // Without this poll we would tear down the WS before Gateway sends connect.challenge,
+        // then reconnect into the same trap (logged 5+ times over 2026-04-22/23).
+        try await waitForGatewayReady(url: url)
+
         var request = URLRequest(url: url)
         request.setValue("clawgate-macos/1.0", forHTTPHeaderField: "User-Agent")
         request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Connection-Nonce")
@@ -71,6 +77,50 @@ actor OpenClawWSClient {
 
     func disconnect() {
         teardown()
+    }
+
+    /// Poll Gateway's HTTP /ready endpoint with exponential backoff until 200 OK or total ~60s elapsed.
+    /// Derives the HTTP base URL from the ws URL (ws→http, wss→https).
+    private func waitForGatewayReady(url wsURL: URL) async throws {
+        guard var comps = URLComponents(url: wsURL, resolvingAgainstBaseURL: false) else {
+            throw OpenClawError.connectionFailed("Invalid WS URL for /ready probe")
+        }
+        comps.scheme = (wsURL.scheme == "wss") ? "https" : "http"
+        comps.path = "/ready"
+        comps.query = nil
+        guard let readyURL = comps.url else {
+            throw OpenClawError.connectionFailed("Failed to derive /ready URL")
+        }
+
+        // Probe schedule: 500ms, 2s, 5s, 10s, 10s, 10s, 10s, 10s — total ~57.5s
+        let delaysNs: [UInt64] = [500_000_000, 2_000_000_000, 5_000_000_000]
+        let steadyDelayNs: UInt64 = 10_000_000_000
+        let maxElapsed: TimeInterval = 60
+        let started = Date()
+        var attempt = 0
+        let probeSession = URLSessionConfiguration.ephemeral
+        probeSession.timeoutIntervalForRequest = 5
+        probeSession.timeoutIntervalForResource = 5
+        let client = URLSession(configuration: probeSession)
+        defer { client.finishTasksAndInvalidate() }
+
+        while Date().timeIntervalSince(started) < maxElapsed {
+            try Task.checkCancellation()
+            var req = URLRequest(url: readyURL)
+            req.timeoutInterval = 5
+            if let (_, resp) = try? await client.data(for: req),
+               let http = resp as? HTTPURLResponse,
+               http.statusCode == 200 {
+                if attempt > 0 {
+                    logger.info("Gateway /ready OK after \(attempt, privacy: .public) probe(s)")
+                }
+                return
+            }
+            let delay = attempt < delaysNs.count ? delaysNs[attempt] : steadyDelayNs
+            try await Task.sleep(nanoseconds: delay)
+            attempt += 1
+        }
+        throw OpenClawError.connectionFailed("Gateway not ready within \(Int(maxElapsed))s")
     }
 
     private func teardown() {
