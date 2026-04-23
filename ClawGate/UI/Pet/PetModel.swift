@@ -915,11 +915,15 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
-    /// Retry connection every 15s if disconnected (handles Gateway-after-ClawGate startup)
+    /// Retry connection every 15s if not connected (handles Gateway-after-ClawGate startup
+    /// and recovers from stuck .error states after transient failures like /ready timeout).
     private func startReconnectTimer() {
         Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self else { return }
-            if self.connectionState == .disconnected {
+            switch self.connectionState {
+            case .connected, .connecting:
+                return
+            case .disconnected, .error:
                 self.connect()
             }
         }

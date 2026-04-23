@@ -502,7 +502,12 @@ actor OpenClawWSClient {
         pingDeadline?.cancel()
         pingDeadline = nil
         if let error {
-            logger.warning("Ping failed: \(error.localizedDescription, privacy: .public)")
+            // Immediate ping error means the socket is no longer viable.
+            // Without teardown here, receiveLoop stays blocked on task.receive()
+            // and the connection sits in a false-.connected state forever
+            // (observed: 10h silent drop with CLOSED socket, no reconnect).
+            logger.warning("Ping failed: \(error.localizedDescription, privacy: .public) — tearing down")
+            teardown()
         }
     }
 
