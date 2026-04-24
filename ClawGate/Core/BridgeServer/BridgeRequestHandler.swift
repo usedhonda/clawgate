@@ -19,6 +19,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
     private static let routes: [(HTTPMethod, String)] = [
         (.GET, "/v1/health"),
         (.GET, "/v1/config"),
+        (.GET, "/v1/adapters"),
         (.GET, "/v1/tmux/session-mode"),
         (.PUT, "/v1/tmux/session-mode"),
         (.GET, "/v1/poll"),
@@ -126,6 +127,12 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
             return
         }
 
+        // Non-blocking: adapter status is config-derived only
+        if head.method == .GET && path == "/v1/adapters" {
+            writeResponse(context: context, result: core.adapters())
+            return
+        }
+
         // Stats: lightweight in-memory read, respond on event loop
         if head.method == .GET && path == "/v1/stats" {
             let daysStr = components?.queryItems?.first(where: { $0.name == "days" })?.value
@@ -180,26 +187,26 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.oauthSafariOpen(body: bodyData)
             } else if method == .POST && path == "/v1/send" {
                 let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
-                result = core.send(body: bodyData, traceID: traceID)
+                result = core.send(body: bodyData, traceID: traceID, pathAndQuery: head.uri, headers: head.headers)
             } else if method == .POST && path == "/v1/bubble-notify" {
                 result = core.bubbleNotify(body: bodyData)
             } else if method == .GET && path == "/v1/context" {
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-                result = core.context(adapter: adapter)
+                result = core.context(adapter: adapter, pathAndQuery: head.uri, headers: head.headers)
             } else if method == .GET && path == "/v1/messages" {
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
                 let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
                 let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
                 let conversation = components?.queryItems?.first(where: { $0.name == "conversation" })?.value
-                result = core.messages(adapter: adapter, limit: limit, conversation: conversation)
+                result = core.messages(adapter: adapter, limit: limit, conversation: conversation, pathAndQuery: head.uri, headers: head.headers)
             } else if method == .GET && path == "/v1/conversations" {
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
                 let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
                 let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
-                result = core.conversations(adapter: adapter, limit: limit)
+                result = core.conversations(adapter: adapter, limit: limit, pathAndQuery: head.uri, headers: head.headers)
             } else if method == .GET && path == "/v1/axdump" {
                 let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-                result = core.axdump(adapter: adapter)
+                result = core.axdump(adapter: adapter, pathAndQuery: head.uri, headers: head.headers)
             } else if method == .GET && path == "/v1/doctor" {
                 result = core.doctor()
             } else if method == .GET && path == "/v1/tmux/session-mode" {
@@ -220,7 +227,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
                 result = core.projectContextRead(cmd: cmd, arg: arg, federation: federation, project: project)
             } else if method == .POST && path == "/v1/line/ensure-conversation" {
-                result = core.ensureLineConversation(body: bodyData)
+                let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
+                result = core.ensureLineConversation(body: bodyData, pathAndQuery: head.uri, headers: head.headers, traceID: traceID)
             } else if method == .POST && path == "/v1/debug/reset-line-baseline" {
                 result = core.resetLineBaseline()
             } else {

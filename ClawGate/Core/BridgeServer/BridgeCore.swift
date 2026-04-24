@@ -246,6 +246,82 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: body)
     }
 
+    func adapters() -> HTTPResult {
+        let cfg = configStore.load()
+        let lineRegistered = registry.adapter(for: "line") != nil
+        let target = lineForwardTargetBaseURL(cfg: cfg)
+        let forwardReady = !cfg.lineEnabled && target != nil
+        let forwardReason: String
+        if cfg.lineEnabled {
+            forwardReason = "line enabled locally; no forward needed"
+        } else if target != nil {
+            forwardReason = "line disabled locally; forwarding to OpenClaw host on ClawGate port"
+        } else {
+            forwardReason = "line disabled locally; openclawHost is not forwardable"
+        }
+
+        struct ForwardStatus: Codable {
+            let enabled: Bool
+            let targetURL: String?
+            let ready: Bool
+            let liveChecked: Bool
+            let reason: String
+
+            enum CodingKeys: String, CodingKey {
+                case enabled
+                case targetURL = "target_url"
+                case ready
+                case liveChecked = "live_checked"
+                case reason
+            }
+        }
+        struct LineStatus: Codable {
+            let enabled: Bool
+            let registered: Bool
+            let localSend: Bool
+            let forward: ForwardStatus
+
+            enum CodingKeys: String, CodingKey {
+                case enabled
+                case registered
+                case localSend = "local_send"
+                case forward
+            }
+        }
+        struct AdaptersStatus: Codable {
+            let line: LineStatus
+            let nodeRole: String
+            let openclawHost: String
+            let openclawPort: Int
+
+            enum CodingKeys: String, CodingKey {
+                case line
+                case nodeRole = "node_role"
+                case openclawHost = "openclaw_host"
+                case openclawPort = "openclaw_port"
+            }
+        }
+
+        let result = AdaptersStatus(
+            line: LineStatus(
+                enabled: cfg.lineEnabled,
+                registered: lineRegistered,
+                localSend: cfg.lineEnabled && lineRegistered,
+                forward: ForwardStatus(
+                    enabled: forwardReady,
+                    targetURL: target?.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+                    ready: forwardReady,
+                    liveChecked: false,
+                    reason: forwardReason
+                )
+            ),
+            nodeRole: cfg.nodeRole.rawValue,
+            openclawHost: cfg.openclawHost,
+            openclawPort: cfg.openclawPort
+        )
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+    }
+
     func tmuxSessionMode(sessionType: String, project: String) -> HTTPResult {
         let normalizedType = sessionType.trimmingCharacters(in: .whitespacesAndNewlines)
         guard normalizedType == "claude_code" || normalizedType == "codex" else {
@@ -434,12 +510,51 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
     }
 
-    func send(body: Data, traceID: String?) -> HTTPResult {
+    private func decodeSendRequest(from body: Data) throws -> (SendRequest, Data) {
+        if let request = try? jsonDecoder.decode(SendRequest.self, from: body) {
+            return (request, body)
+        }
+
+        struct LegacySendRequest: Decodable {
+            let adapter: String
+            let action: String?
+            let conversationHint: String?
+            let text: String?
+            let message: String?
+            let enterToSend: Bool?
+            let traceID: String?
+
+            enum CodingKeys: String, CodingKey {
+                case adapter
+                case action
+                case conversationHint = "conversation_hint"
+                case text
+                case message
+                case enterToSend = "enter_to_send"
+                case traceID = "trace_id"
+            }
+        }
+
+        let legacy = try jsonDecoder.decode(LegacySendRequest.self, from: body)
+        let request = SendRequest(
+            adapter: legacy.adapter,
+            action: legacy.action ?? "send_message",
+            payload: SendPayload(
+                conversationHint: legacy.conversationHint ?? "",
+                text: legacy.text ?? legacy.message ?? "",
+                enterToSend: legacy.enterToSend ?? true,
+                traceID: legacy.traceID
+            )
+        )
+        return (request, encode(request))
+    }
+
+    func send(body: Data, traceID: String?, pathAndQuery: String = "/v1/send", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
         let requestTrace = normalizedTraceID(traceID)
         let start = Date()
         writeOps(level: "info", event: "ingress_received", traceID: requestTrace, stage: "bridge_server", action: "send_message", status: "start", errorCode: nil, errorMessage: nil, latencyMs: nil)
         do {
-            let request = try jsonDecoder.decode(SendRequest.self, from: body)
+            let (request, forwardBody) = try decodeSendRequest(from: body)
             let trace = normalizedTraceID(request.payload.traceID ?? requestTrace)
             writeOps(level: "info", event: "ingress_validated", traceID: trace, stage: "bridge_server", action: "send_message", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: nil)
             guard request.action == "send_message" else {
@@ -491,7 +606,7 @@ final class BridgeCore {
                     details: nil
                 )
             }
-            if let denied = rejectLineOnClient(adapterName: request.adapter) {
+            if let denied = rejectLineOnClient(adapterName: request.adapter, method: .POST, pathAndQuery: pathAndQuery, body: forwardBody, headers: headers, traceID: trace) {
                 return denied
             }
 
@@ -508,7 +623,7 @@ final class BridgeCore {
                 let hasLocalAuthoritative = ccMode == "autonomous" || ccMode == "auto" || codexMode == "autonomous" || codexMode == "auto"
                 if !hasLocalAuthoritative {
                     do {
-                        let fedResult = try forwardToFederationClient(body: body, traceID: trace, fedServer: fedServer)
+                        let fedResult = try forwardToFederationClient(body: forwardBody, traceID: trace, fedServer: fedServer)
                         let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
                         writeOps(level: "info", event: "federation_preflight_forward_ok", traceID: trace, stage: "federation", action: "forward_send", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
                         return fedResult
@@ -847,8 +962,8 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
     }
 
-    func context(adapter adapterName: String) -> HTTPResult {
-        if let denied = rejectLineOnClient(adapterName: adapterName) {
+    func context(adapter adapterName: String, pathAndQuery: String = "/v1/context", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName, method: .GET, pathAndQuery: pathAndQuery, body: nil, headers: headers, traceID: nil) {
             return denied
         }
         do {
@@ -881,8 +996,8 @@ final class BridgeCore {
         }
     }
 
-    func messages(adapter adapterName: String, limit: Int, conversation: String? = nil) -> HTTPResult {
-        if let denied = rejectLineOnClient(adapterName: adapterName) {
+    func messages(adapter adapterName: String, limit: Int, conversation: String? = nil, pathAndQuery: String = "/v1/messages", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName, method: .GET, pathAndQuery: pathAndQuery, body: nil, headers: headers, traceID: nil) {
             return denied
         }
         do {
@@ -927,8 +1042,8 @@ final class BridgeCore {
         }
     }
 
-    func conversations(adapter adapterName: String, limit: Int) -> HTTPResult {
-        if let denied = rejectLineOnClient(adapterName: adapterName) {
+    func conversations(adapter adapterName: String, limit: Int, pathAndQuery: String = "/v1/conversations", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName, method: .GET, pathAndQuery: pathAndQuery, body: nil, headers: headers, traceID: nil) {
             return denied
         }
         do {
@@ -1185,8 +1300,8 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(response))
     }
 
-    func axdump(adapter adapterName: String) -> HTTPResult {
-        if let denied = rejectLineOnClient(adapterName: adapterName) {
+    func axdump(adapter adapterName: String, pathAndQuery: String = "/v1/axdump", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: adapterName, method: .GET, pathAndQuery: pathAndQuery, body: nil, headers: headers, traceID: nil) {
             return denied
         }
         do {
@@ -1682,20 +1797,198 @@ final class BridgeCore {
         }
     }
 
-    private func rejectLineOnClient(adapterName: String) -> HTTPResult? {
+    private func rejectLineOnClient(
+        adapterName: String,
+        method: HTTPMethod,
+        pathAndQuery: String,
+        body: Data?,
+        headers: HTTPHeaders,
+        traceID: String?
+    ) -> HTTPResult? {
         let cfg = configStore.load()
         guard !cfg.lineEnabled, adapterName == "line" else { return nil }
-        let payload = ErrorPayload(
-            code: "line_disabled",
-            message: "line adapter is disabled",
-            retriable: false,
-            failedStep: "line_gate",
-            details: "lineEnabled=false"
+        return forwardLineRequest(method: method, pathAndQuery: pathAndQuery, body: body, headers: headers, traceID: traceID)
+    }
+
+    private func lineForwardTargetBaseURL(cfg: AppConfig) -> URL? {
+        let rawHost = cfg.openclawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawHost.isEmpty else { return nil }
+
+        let host: String
+        if let parsed = URL(string: rawHost), parsed.scheme != nil {
+            host = parsed.host ?? rawHost
+        } else {
+            host = rawHost
+        }
+
+        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
+        let loopbackHosts = ["localhost", "127.0.0.1", "::1", "0.0.0.0"]
+        guard !loopbackHosts.contains(normalized) else { return nil }
+
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = host
+        components.port = 8765
+        return components.url
+    }
+
+    private func forwardLineRequest(
+        method: HTTPMethod,
+        pathAndQuery: String,
+        body: Data?,
+        headers: HTTPHeaders,
+        traceID: String?
+    ) -> HTTPResult {
+        let trace = normalizedTraceID(traceID)
+        let start = Date()
+
+        if headers.first(name: "X-ClawGate-Forwarded") == "1" {
+            writeOps(level: "error", event: "line_forward_failed", traceID: trace, stage: "line_forward", action: "forward_line", status: "failed", errorCode: "line_forward_loop", errorMessage: "forward loop detected", latencyMs: 0)
+            let payload = ErrorPayload(
+                code: "line_forward_loop",
+                message: "LINE forward loop detected",
+                retriable: false,
+                failedStep: "line_forward_loop",
+                details: "X-ClawGate-Forwarded=1"
+            )
+            return jsonResponse(status: .badGateway, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)), traceID: trace)
+        }
+
+        let cfg = configStore.load()
+        guard let baseURL = lineForwardTargetBaseURL(cfg: cfg) else {
+            writeOps(level: "error", event: "line_forward_failed", traceID: trace, stage: "line_forward", action: "forward_line", status: "failed", errorCode: "line_forward_unavailable", errorMessage: "openclawHost is not forwardable", latencyMs: 0)
+            let payload = ErrorPayload(
+                code: "line_forward_unavailable",
+                message: "LINE forward target is unavailable",
+                retriable: true,
+                failedStep: "line_forward_config",
+                details: "openclawHost would loop"
+            )
+            return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)), traceID: trace)
+        }
+
+        let normalizedPath = pathAndQuery.hasPrefix("/") ? pathAndQuery : "/\(pathAndQuery)"
+        guard let url = URL(string: normalizedPath, relativeTo: baseURL)?.absoluteURL else {
+            writeOps(level: "error", event: "line_forward_failed", traceID: trace, stage: "line_forward", action: "forward_line", status: "failed", errorCode: "line_forward_failed", errorMessage: "invalid forward URL", latencyMs: 0)
+            let payload = ErrorPayload(
+                code: "line_forward_failed",
+                message: "Invalid LINE forward URL",
+                retriable: true,
+                failedStep: "line_forward_http",
+                details: "\(baseURL.absoluteString)\(normalizedPath)"
+            )
+            return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)), traceID: trace)
+        }
+
+        writeOps(level: "info", event: "line_forward_start", traceID: trace, stage: "line_forward", action: "forward_line", status: "start", errorCode: nil, errorMessage: nil, latencyMs: nil)
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 9
+        config.timeoutIntervalForResource = 9
+        let session = URLSession(configuration: config)
+        var request = URLRequest(url: url)
+        request.httpMethod = method.rawValue
+        if let body, !body.isEmpty {
+            request.httpBody = body
+        }
+
+        for name in ["Content-Type", "Accept", "Authorization", "X-Trace-ID"] {
+            if let value = headers.first(name: name) {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+        }
+        if request.value(forHTTPHeaderField: "X-Trace-ID") == nil {
+            request.setValue(trace, forHTTPHeaderField: "X-Trace-ID")
+        }
+        request.setValue("1", forHTTPHeaderField: "X-ClawGate-Forwarded")
+        request.setValue(Host.current().localizedName ?? "unknown", forHTTPHeaderField: "X-ClawGate-Forwarded-By")
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var responseData = Data()
+        var response: URLResponse?
+        var responseError: Error?
+        let task = session.dataTask(with: request) { data, urlResponse, error in
+            if let data {
+                responseData = data
+            }
+            response = urlResponse
+            responseError = error
+            semaphore.signal()
+        }
+        task.resume()
+
+        let waitResult = semaphore.wait(timeout: .now() + .milliseconds(9500))
+        session.finishTasksAndInvalidate()
+
+        if waitResult != .success {
+            task.cancel()
+            let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+            writeOps(level: "error", event: "line_forward_failed", traceID: trace, stage: "line_forward", action: "forward_line", status: "failed", errorCode: "line_forward_failed", errorMessage: "forward timed out", latencyMs: latencyMs)
+            let payload = ErrorPayload(
+                code: "line_forward_failed",
+                message: "LINE forward timed out",
+                retriable: true,
+                failedStep: "line_forward_http",
+                details: url.absoluteString
+            )
+            return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)), traceID: trace)
+        }
+
+        if let responseError {
+            let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+            writeOps(level: "error", event: "line_forward_failed", traceID: trace, stage: "line_forward", action: "forward_line", status: "failed", errorCode: "line_forward_failed", errorMessage: String(describing: responseError), latencyMs: latencyMs)
+            let payload = ErrorPayload(
+                code: "line_forward_failed",
+                message: "LINE forward failed",
+                retriable: true,
+                failedStep: "line_forward_http",
+                details: String(describing: responseError)
+            )
+            return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)), traceID: trace)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+            writeOps(level: "error", event: "line_forward_failed", traceID: trace, stage: "line_forward", action: "forward_line", status: "failed", errorCode: "line_forward_failed", errorMessage: "missing HTTP response", latencyMs: latencyMs)
+            let payload = ErrorPayload(
+                code: "line_forward_failed",
+                message: "LINE forward returned no HTTP response",
+                retriable: true,
+                failedStep: "line_forward_http",
+                details: url.absoluteString
+            )
+            return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)), traceID: trace)
+        }
+
+        var responseHeaders = HTTPHeaders()
+        let blockedResponseHeaders: Set<String> = ["connection", "keep-alive", "transfer-encoding", "content-length", "host"]
+        for (key, value) in httpResponse.allHeaderFields {
+            let name = String(describing: key)
+            guard !blockedResponseHeaders.contains(name.lowercased()) else { continue }
+            responseHeaders.add(name: name, value: String(describing: value))
+        }
+        if !responseHeaders.contains(name: "Content-Type") {
+            responseHeaders.add(name: "Content-Type", value: "application/json; charset=utf-8")
+        }
+        responseHeaders.add(name: "Content-Length", value: "\(responseData.count)")
+        if !trace.isEmpty {
+            responseHeaders.add(name: "X-Trace-ID", value: trace)
+        }
+
+        let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+        let status = HTTPResponseStatus(statusCode: httpResponse.statusCode)
+        writeOps(
+            level: status.code >= 500 ? "error" : "info",
+            event: status.code >= 500 ? "line_forward_failed" : "line_forward_ok",
+            traceID: trace,
+            stage: "line_forward",
+            action: "forward_line",
+            status: status.code >= 500 ? "failed" : "ok",
+            errorCode: status.code >= 500 ? "line_forward_upstream_error" : nil,
+            errorMessage: status.code >= 500 ? "upstream status \(status.code)" : nil,
+            latencyMs: latencyMs
         )
-        return jsonResponse(
-            status: .forbidden,
-            body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
-        )
+        return HTTPResult(status: status, headers: responseHeaders, body: responseData)
     }
 
     /// Forward a /v1/send request to a federation client when local tmux session is not found.
@@ -2085,7 +2378,16 @@ final class BridgeCore {
 
     // MARK: - LINE Ensure Conversation
 
-    func ensureLineConversation(body: Data) -> HTTPResult {
+    func ensureLineConversation(
+        body: Data,
+        pathAndQuery: String = "/v1/line/ensure-conversation",
+        headers: HTTPHeaders = HTTPHeaders(),
+        traceID: String? = nil
+    ) -> HTTPResult {
+        if let denied = rejectLineOnClient(adapterName: "line", method: .POST, pathAndQuery: pathAndQuery, body: body, headers: headers, traceID: traceID) {
+            return denied
+        }
+
         struct EnsureRequest: Decodable {
             let conversation: String?
         }
