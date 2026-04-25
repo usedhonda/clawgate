@@ -302,10 +302,8 @@ See [Direct Gateway Setup](docs/runbooks/direct-gateway-setup.md) for full instr
 ### Messenger Recovery (LINE Adapter)
 
 ```bash
-# Regular recovery (Host A)
-./scripts/line-fast-recover.sh --remote-host macmini
-
-# Re-sign binary (when TCC permission is lost)
+# Re-sign + restart on macmini (when TCC permission is lost or app is unsigned).
+# Run on the macmini local desktop session (NOT via SSH):
 KEYCHAIN_PASSWORD='your-password' ./scripts/macmini-local-sign-and-restart.sh
 ```
 

@@ -27,9 +27,9 @@ These scripts are tailored to the maintainer's Host A / Host B setup or release 
 | Group | Examples |
 |------|----------|
 | Host A / macmini deploy | `macmini-local-sign-and-restart.sh` |
-| Cross-host restart | `restart-hostab-stack.sh`, `restart-macmini-openclaw.sh` |
+| Cross-host restart | `post-task-restart.sh`, `restart-macmini-openclaw.sh` |
 | Host A / Host B validation | `host-a-host-b-e2e.sh`, `macmini-colocated-e2e.sh`, `federation-e2e.sh`, `verify-cc-observe-e2e.sh` |
-| Messaging recovery / tracing | `line-fast-recover.sh`, `line-e2e-trace.sh`, `watch-tmux-delivery.sh`, `watch-observe.sh` |
+| Messaging tracing | `line-e2e-trace.sh`, `watch-tmux-delivery.sh`, `watch-observe.sh` |
 | Release / packaging | `release.sh`, `release-usual.sh`, `setup-keychain-password.sh` |
 
 ## legacy/

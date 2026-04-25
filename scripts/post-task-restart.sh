@@ -3,13 +3,26 @@ set -euo pipefail
 
 # Canonical post-task restart/verification.
 # Run this at the end of implementation tasks without waiting for manual confirmation.
+#
+# Steps:
+#   1) (optional) Sync repo to Host A (macmini)
+#   2) Restart Host A ClawGate + OpenClaw Gateway via SSH (no build/codesign here)
+#   3) Restart Host B ClawGate locally
+#   4) Verify health, gateway, LINE conversation
+#
+# IMPORTANT: Host A build/codesign is NOT performed here. SSH-driven codesign
+# was unreliable (errSecInternalComponent on remote keychain unlock) and
+# silently rolled back the bundle, breaking TCC. Build/sign must be run on
+# the macmini local desktop session:
+#   KEYCHAIN_PASSWORD='...' ./scripts/macmini-local-sign-and-restart.sh
 
 REMOTE_HOST="macmini"
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_SYNC=false
-SKIP_REMOTE_BUILD=true
 REQUIRE_HOSTA_LOCAL_SIGN=false
+CLAWGATE_ROLE="host_b_client"
+OPS_SCRIPT_NAME="post-task-restart.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,9 +33,9 @@ while [[ $# -gt 0 ]]; do
     --skip-sync)
       SKIP_SYNC=true; shift ;;
     --skip-remote-build)
-      SKIP_REMOTE_BUILD=true; shift ;;
+      shift ;;  # deprecated: remote build path was removed (kept for backward compat)
     --skip-local-relay)
-      shift ;;  # deprecated: relay removed, kept for backward compat
+      shift ;;  # deprecated: relay removed (kept for backward compat)
     --require-hosta-local-sign)
       REQUIRE_HOSTA_LOCAL_SIGN=true; shift ;;
     *)
@@ -33,30 +46,42 @@ done
 
 cd "$PROJECT_PATH"
 
+source "$PROJECT_PATH/scripts/lib-ops-log.sh"
+ops_log info "post_task_begin" "post-task restart begin (remote_host=$REMOTE_HOST skip_sync=$SKIP_SYNC)"
+trap 'ops_log error "post_task_failed" "post-task restart failed (line=$LINENO exit=$?)"' ERR
+
 echo "== post-task-restart =="
 echo "Remote host : $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
 echo "Skip sync   : $SKIP_SYNC"
-echo "Skip build  : $SKIP_REMOTE_BUILD"
 echo "Require HostA local sign: $REQUIRE_HOSTA_LOCAL_SIGN"
 
-STACK_ARGS=(--remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" --skip-local-relay)
-if [[ "$SKIP_SYNC" == "true" ]]; then
-  STACK_ARGS+=(--skip-sync)
-fi
-if [[ "$SKIP_REMOTE_BUILD" == "true" ]]; then
-  STACK_ARGS+=(--skip-remote-build)
+# Keep federation token aligned if explicitly provided in environment.
+if [[ -n "${FEDERATION_TOKEN:-}" ]]; then
+  ssh "$REMOTE_HOST" "defaults write com.clawgate.app clawgate.federationToken -string '$FEDERATION_TOKEN' || true; defaults write ClawGate clawgate.federationToken -string '$FEDERATION_TOKEN' || true" >/dev/null 2>&1 || true
 fi
 
-if ! ./scripts/restart-hostab-stack.sh "${STACK_ARGS[@]}"; then
+if [[ "$SKIP_SYNC" != "true" ]]; then
+  ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
+fi
+
+# Host A restart (no build/codesign — see header).
+if ! ./scripts/restart-macmini-openclaw.sh \
+    --remote-host "$REMOTE_HOST" \
+    --project-path "$PROJECT_PATH" \
+    --skip-build; then
   echo
   echo "[fallback] Host A signing/restart may require local desktop session on macmini."
   echo "[fallback] Run on macmini:"
   echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"
   echo "[fallback] Then rerun:"
-  echo "  ./scripts/post-task-restart.sh --remote-host $REMOTE_HOST --project-path $PROJECT_PATH --skip-sync --skip-remote-build"
+  echo "  ./scripts/post-task-restart.sh --remote-host $REMOTE_HOST --project-path $PROJECT_PATH --skip-sync"
   exit 1
 fi
+
+# Host B restart (canonical local path).
+echo "[local] Restart Host B ClawGate.app"
+./scripts/restart-local-clawgate.sh
 
 echo
 echo "[verify] Host B health"
@@ -101,3 +126,4 @@ if [[ "$REQUIRE_HOSTA_LOCAL_SIGN" == "true" ]]; then
 fi
 
 echo "Done."
+ops_log info "post_task_ok" "post-task restart finished"
