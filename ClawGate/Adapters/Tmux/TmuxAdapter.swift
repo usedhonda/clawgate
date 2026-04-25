@@ -107,21 +107,31 @@ final class TmuxAdapter: AdapterProtocol {
         stepLogger.record(step: "resolve_target", start: start1, success: true,
                           details: "project=\(project) target=\(target) status=\(session.status)")
 
-        // Step 2: Check session is ready for input
+        // Step 2: Check session is ready for input.
+        // Cached SessionSnapshot.status can be stale (e.g. snapshot reports "running"
+        // but the live pane is actually idle/suggestion). Cross-check with a live
+        // detectPromptDraftState to prevent false-positive session_busy.
         let start2 = Date()
-        guard session.status == "waiting_input" else {
-            stepLogger.record(step: "check_status", start: start2, success: false,
-                              details: "status=\(session.status), expected waiting_input")
-            throw BridgeRuntimeError(
-                code: "session_busy",
-                message: "Claude Code session '\(project)' is currently \(session.status)",
-                retriable: true,
-                failedStep: "check_status",
-                details: "Wait for the current task to complete before sending a new one"
-            )
+        if session.status != "waiting_input" {
+            let liveState = detectPromptDraftState(target: target)
+            if liveState.state == .idle || liveState.state == .suggestion {
+                stepLogger.record(step: "check_status", start: start2, success: true,
+                                  details: "cached_status=\(session.status) live=\(liveState.state) reason=\(liveState.reason) — proceeding")
+            } else {
+                stepLogger.record(step: "check_status", start: start2, success: false,
+                                  details: "cached_status=\(session.status) live=\(liveState.state) reason=\(liveState.reason)")
+                throw BridgeRuntimeError(
+                    code: "session_busy",
+                    message: "Claude Code session '\(project)' is currently \(session.status)",
+                    retriable: true,
+                    failedStep: "check_status",
+                    details: "Wait for the current task to complete before sending a new one (live=\(liveState.state))"
+                )
+            }
+        } else {
+            stepLogger.record(step: "check_status", start: start2, success: true,
+                              details: "status=waiting_input")
         }
-        stepLogger.record(step: "check_status", start: start2, success: true,
-                          details: "status=waiting_input")
 
         // Step 3: Pre-flight draft guard (non menu-select only)
         let isMenuSelect = payload.text.range(of: #"^__cc_select:(\d+)$"#, options: .regularExpression) != nil
@@ -302,6 +312,22 @@ final class TmuxAdapter: AdapterProtocol {
         }
 
         let tail = Array(source.suffix(48))
+
+        // Safeguard: if a "Working" / progress marker is visible in the tail, the
+        // pane is mid-task even when the prompt line itself is empty. Return
+        // .unknown so Step-2 / draft guard treat the pane as busy and refuse to
+        // overwrite an in-flight task. Without this the cached-status fallback
+        // in sendMessage would falsely treat a Working pane as idle.
+        for line in tail {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            if trimmed.range(of: #"^[•✻✳]\s+(Working|Cogitated|Churned|Actualizing|Thinking)\b"#, options: .regularExpression) != nil {
+                return PromptDraftDetection(state: .unknown, draft: "", reason: "working_marker_detected")
+            }
+            if trimmed.range(of: #"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s"#, options: .regularExpression) != nil {
+                return PromptDraftDetection(state: .unknown, draft: "", reason: "spinner_glyph_detected")
+            }
+        }
         var end = tail.count - 1
         while end >= 0 && tail[end].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             end -= 1
@@ -543,9 +569,16 @@ final class TmuxAdapter: AdapterProtocol {
     // MARK: - Public prompt state API
 
     /// Public wrapper for detectPromptDraftState — used by /v1/tmux/prompt-state endpoint.
+    /// Mirrors sendMessage's mode-aware target selection so prompt-state and send
+    /// inspect the exact same pane. When `.cc` and `.cdx` panes coexist for the same
+    /// project, picking `candidates.first` blindly was a source of disagreement.
     func detectPromptState(forProject project: String) -> PromptDraftDetection {
         let candidates = sessionSource.sessions(forProject: project)
-        guard let session = candidates.first, let target = session.tmuxTarget else {
+        let resolved: SessionSnapshot? = candidates.first(where: { candidate in
+            let m = sessionMode(for: candidate)
+            return m == "autonomous" || m == "auto"
+        }) ?? candidates.first
+        guard let session = resolved, let target = session.tmuxTarget else {
             return PromptDraftDetection(state: .unknown, draft: "", reason: "session_not_found")
         }
         let result = detectPromptDraftState(target: target)
