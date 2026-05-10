@@ -4615,7 +4615,7 @@ export async function startAccount(ctx) {
           if (event.adapter === "tmux" && event.payload?.project) {
             const proj = event.payload.project;
             const tmuxTgt = event.payload.tmux_target || "";
-            if (event.payload.mode) {
+            if (event.payload.mode && event.payload.mode !== "ignore") {
               setTrackedSessionMode(proj, event.payload.session_type || event.payload.sender || "cc", event.payload.mode);
             }
             if (event.payload.status) sessionStatuses.set(proj, event.payload.status);

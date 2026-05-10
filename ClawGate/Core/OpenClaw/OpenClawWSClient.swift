@@ -240,7 +240,7 @@ actor OpenClawWSClient {
             let connectReq = ConnectRequest(
                 type: "req", id: requestId, method: "connect",
                 params: ConnectParams(
-                    minProtocol: 3, maxProtocol: 3,
+                    minProtocol: 3, maxProtocol: 4,
                     client: ClientInfo(id: "cli", version: "1.0.0", platform: "macos", mode: "cli"),
                     role: role, scopes: scopes,
                     auth: AuthParams(token: token),
