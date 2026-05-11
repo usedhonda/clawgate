@@ -279,6 +279,15 @@ enum LineSidebarDiscovery {
         return rowsByOrder[ocrMatch.yOrder]
     }
 
+    static func firstVisibleSearchResultRow(in sidebar: SidebarListCandidate) -> SidebarRowCandidate? {
+        sidebar.visibleRows.sorted { lhs, rhs in
+            if lhs.frame.minY != rhs.frame.minY {
+                return lhs.frame.minY < rhs.frame.minY
+            }
+            return lhs.frame.minX < rhs.frame.minX
+        }.first
+    }
+
     static func defaultConversationSearchResultRows(
         in sidebar: SidebarListCandidate,
         searchFieldFrame: CGRect

@@ -259,21 +259,16 @@ final class LINEAdapter: AdapterProtocol {
                         if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame) {
                             sidebarDetectedAfterSearch = true
                             logger.log(.debug, "LINE search sidebar detected rows=\(sidebar.visibleRows.count)")
-                            let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
-                            let windowID = AXQuery.pid(of: rootWindow).flatMap { AXActions.findWindowID(pid: $0) }
-                            if let row = LineSidebarDiscovery.findConversationRow(
-                                named: payload.conversationHint,
-                                in: sidebar,
+                            try clickSearchResultRowAndVerify(
+                                hint: payload.conversationHint,
+                                rootWindow: rootWindow,
+                                windowFrame: freshWindowFrame,
+                                sidebar: sidebar,
                                 nodes: freshNodes,
-                                windowTitle: windowTitle,
-                                windowID: windowID
-                            ) {
-                                clickedSidebarResultRow = true
-                                logger.log(.info, "LINE search result click row_y=\(Int(row.frame.minY)) rows=\(sidebar.visibleRows.count)")
-                                _ = AXActions.clickAtCenter(row.element)
-                            } else {
-                                logger.log(.warning, "LINE search sidebar found but no matching clickable row")
-                            }
+                                logPrefix: "LINE",
+                                failedStep: "open_conversation"
+                            )
+                            clickedSidebarResultRow = true
                         } else {
                             logger.log(.warning, "LINE search sidebar not found after Enter")
                         }
@@ -609,6 +604,123 @@ final class LINEAdapter: AdapterProtocol {
     private func legacyResolve(_ selector: LineSelector, in nodes: [AXNode]) -> SelectorCandidate? {
         guard let node = AXQuery.bestMatch(selector: selector, in: nodes) else { return nil }
         return SelectorCandidate(node: node, confidence: 0.3, matchedLayer: 1)
+    }
+
+    private func lineSearchAlwaysClickFirstRowEnabled() -> Bool {
+        UserDefaults.standard.object(forKey: "LineSearchAlwaysClickFirstRow") as? Bool ?? true
+    }
+
+    private func hasMessageInput(rootWindow: AXUIElement, fallbackWindowFrame: CGRect) -> Bool {
+        let nodes = AXQuery.descendants(of: rootWindow)
+        let windowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? fallbackWindowFrame
+        return (SelectorResolver.resolve(
+            selector: LineSelectors.messageInputU,
+            in: nodes,
+            windowFrame: windowFrame
+        ) ?? legacyResolve(LineSelectors.messageInput, in: nodes)) != nil
+    }
+
+    private func searchResultRow(
+        hint: String,
+        sidebar: LineSidebarDiscovery.SidebarListCandidate,
+        nodes: [AXNode],
+        rootWindow: AXUIElement,
+        logPrefix: String
+    ) -> LineSidebarDiscovery.SidebarRowCandidate? {
+        let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+        let windowID = AXQuery.pid(of: rootWindow).flatMap { AXActions.findWindowID(pid: $0) }
+        let matchedRow = LineSidebarDiscovery.findConversationRow(
+            named: hint,
+            in: sidebar,
+            nodes: nodes,
+            windowTitle: windowTitle,
+            windowID: windowID
+        )
+        let targetRow: LineSidebarDiscovery.SidebarRowCandidate?
+        if lineSearchAlwaysClickFirstRowEnabled() {
+            targetRow = LineSidebarDiscovery.firstVisibleSearchResultRow(in: sidebar)
+        } else {
+            targetRow = matchedRow
+        }
+        guard let row = targetRow else {
+            logger.log(.warning, "\(logPrefix) search sidebar found but no clickable row")
+            return nil
+        }
+        let matchedSameAsTarget = matchedRow.map { CFEqual($0.element, row.element) } ?? false
+        logger.log(
+            .info,
+            "\(logPrefix) search result click row_y=\(Int(row.frame.minY)) rows=\(sidebar.visibleRows.count) matched_name=\(matchedSameAsTarget)"
+        )
+        return row
+    }
+
+    private func clickSearchResultRowAndVerify(
+        hint: String,
+        rootWindow: AXUIElement,
+        windowFrame: CGRect,
+        sidebar: LineSidebarDiscovery.SidebarListCandidate,
+        nodes: [AXNode],
+        logPrefix: String,
+        failedStep: String
+    ) throws {
+        guard let row = searchResultRow(
+            hint: hint,
+            sidebar: sidebar,
+            nodes: nodes,
+            rootWindow: rootWindow,
+            logPrefix: logPrefix
+        ) else {
+            throw BridgeRuntimeError(
+                code: "first_row_click_failed",
+                message: "No clickable search result row found",
+                retriable: true,
+                failedStep: failedStep,
+                details: "sidebar_detected=true"
+            )
+        }
+
+        _ = AXActions.clickAtCenter(row.element)
+        if AXActions.poll(intervalMs: 50, timeoutMs: 200, condition: {
+            self.hasMessageInput(rootWindow: rootWindow, fallbackWindowFrame: windowFrame)
+        }) {
+            return
+        }
+
+        let refreshedNodes = AXQuery.descendants(of: rootWindow)
+        let refreshedFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+        guard let refreshedSidebar = LineSidebarDiscovery.findSidebarList(
+            in: refreshedNodes,
+            windowFrame: refreshedFrame
+        ),
+              let refreshedRow = searchResultRow(
+                hint: hint,
+                sidebar: refreshedSidebar,
+                nodes: refreshedNodes,
+                rootWindow: rootWindow,
+                logPrefix: "\(logPrefix) retry"
+              ) else {
+            throw BridgeRuntimeError(
+                code: "first_row_click_failed",
+                message: "Search result row click did not open a conversation",
+                retriable: true,
+                failedStep: failedStep,
+                details: "verify_timeout=200ms retry_row_missing"
+            )
+        }
+
+        _ = AXActions.clickAtCenter(refreshedRow.element)
+        let inputFound = AXActions.poll(intervalMs: 50, timeoutMs: 200) {
+            self.hasMessageInput(rootWindow: rootWindow, fallbackWindowFrame: refreshedFrame)
+        }
+        guard inputFound else {
+            throw BridgeRuntimeError(
+                code: "first_row_click_failed",
+                message: "Search result row click did not open a conversation",
+                retriable: true,
+                failedStep: failedStep,
+                details: "verify_timeout=200ms retry_failed"
+            )
+        }
     }
 
     private func isoString(_ date: Date) -> String {
@@ -1061,6 +1173,8 @@ final class LINEAdapter: AdapterProtocol {
 
         var freshNodes: [AXNode] = []
         var freshWindowFrame = workingWindowFrame
+        var freshSidebar: LineSidebarDiscovery.SidebarListCandidate?
+        var freshSearchFieldFrame: CGRect?
         var targetResultRow: LineSidebarDiscovery.SidebarRowCandidate?
         let resultFound = AXActions.poll(intervalMs: 100, timeoutMs: 2000) {
             freshNodes = AXQuery.descendants(of: rootWindow)
@@ -1072,13 +1186,21 @@ final class LINEAdapter: AdapterProtocol {
                   let sidebar = LineSidebarDiscovery.findSidebarList(
                     in: freshNodes,
                     windowFrame: freshWindowFrame
-                  ),
-                  let row = LineSidebarDiscovery.defaultConversationTargetResultRow(
-                    in: sidebar,
-                    searchFieldFrame: searchFieldFrame
                   ) else {
                 return false
             }
+            let row: LineSidebarDiscovery.SidebarRowCandidate?
+            if self.lineSearchAlwaysClickFirstRowEnabled() {
+                row = LineSidebarDiscovery.firstVisibleSearchResultRow(in: sidebar)
+            } else {
+                row = LineSidebarDiscovery.defaultConversationTargetResultRow(
+                    in: sidebar,
+                    searchFieldFrame: searchFieldFrame
+                )
+            }
+            guard let row else { return false }
+            freshSidebar = sidebar
+            freshSearchFieldFrame = searchFieldFrame
             targetResultRow = row
             return true
         }
@@ -1092,12 +1214,63 @@ final class LINEAdapter: AdapterProtocol {
             )
         }
 
+        let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
+        let windowID = AXQuery.pid(of: rootWindow).flatMap { AXActions.findWindowID(pid: $0) }
+        let matchedRow = freshSidebar.flatMap {
+            LineSidebarDiscovery.findConversationRow(
+                named: defaultConversation,
+                in: $0,
+                nodes: freshNodes,
+                windowTitle: windowTitle,
+                windowID: windowID
+            )
+        }
+        let matchedSameAsTarget = matchedRow.map { CFEqual($0.element, row.element) } ?? false
         logger.log(
             .info,
-            "LINE default recovery search click row_y=\(Int(row.frame.minY)) row_h=\(Int(row.frame.height))"
+            "LINE default recovery search click row_y=\(Int(row.frame.minY)) row_h=\(Int(row.frame.height)) matched_name=\(matchedSameAsTarget)"
         )
         _ = AXActions.clickAtCenter(row.element)
-        usleep(250_000)
+
+        var inputFound = AXActions.poll(intervalMs: 50, timeoutMs: 200) {
+            self.hasMessageInput(rootWindow: rootWindow, fallbackWindowFrame: freshWindowFrame)
+        }
+        if !inputFound {
+            freshNodes = AXQuery.descendants(of: rootWindow)
+            freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? workingWindowFrame
+            if let retrySidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame) {
+                let retryRow: LineSidebarDiscovery.SidebarRowCandidate?
+                if lineSearchAlwaysClickFirstRowEnabled() {
+                    retryRow = LineSidebarDiscovery.firstVisibleSearchResultRow(in: retrySidebar)
+                } else if let searchFieldFrame = freshSearchFieldFrame {
+                    retryRow = LineSidebarDiscovery.defaultConversationTargetResultRow(
+                        in: retrySidebar,
+                        searchFieldFrame: searchFieldFrame
+                    )
+                } else {
+                    retryRow = nil
+                }
+                if let retryRow {
+                    logger.log(
+                        .info,
+                        "LINE default recovery retry search result click row_y=\(Int(retryRow.frame.minY)) row_h=\(Int(retryRow.frame.height))"
+                    )
+                    _ = AXActions.clickAtCenter(retryRow.element)
+                    inputFound = AXActions.poll(intervalMs: 50, timeoutMs: 200) {
+                        self.hasMessageInput(rootWindow: rootWindow, fallbackWindowFrame: freshWindowFrame)
+                    }
+                }
+            }
+        }
+        guard inputFound else {
+            throw BridgeRuntimeError(
+                code: "first_row_click_failed",
+                message: "Default conversation search result row click did not open a conversation",
+                retriable: true,
+                failedStep: "recover_default_conversation",
+                details: defaultConversation
+            )
+        }
 
         var recoveredNodes = freshNodes
         var recoveredFrame = freshWindowFrame
@@ -1367,18 +1540,24 @@ final class LINEAdapter: AdapterProtocol {
 
         let freshNodes = AXQuery.descendants(of: rootWindow)
         let freshWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
-        let windowTitle = AXQuery.copyStringAttribute(rootWindow, attribute: kAXTitleAttribute as String)
-        let windowID = AXQuery.pid(of: rootWindow).flatMap { AXActions.findWindowID(pid: $0) }
-        if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame),
-           let row = LineSidebarDiscovery.findConversationRow(
-               named: hint,
-               in: sidebar,
-               nodes: freshNodes,
-               windowTitle: windowTitle,
-               windowID: windowID
-           ) {
-            logger.log(.info, "ensureConversation: clicking sidebar row")
-            _ = AXActions.clickAtCenter(row.element)
+        if let sidebar = LineSidebarDiscovery.findSidebarList(in: freshNodes, windowFrame: freshWindowFrame) {
+            try clickSearchResultRowAndVerify(
+                hint: hint,
+                rootWindow: rootWindow,
+                windowFrame: freshWindowFrame,
+                sidebar: sidebar,
+                nodes: freshNodes,
+                logPrefix: "ensureConversation",
+                failedStep: "ensure_conversation"
+            )
+        } else {
+            throw BridgeRuntimeError(
+                code: "first_row_click_failed",
+                message: "Search result sidebar not found",
+                retriable: true,
+                failedStep: "ensure_conversation",
+                details: nil
+            )
         }
 
         // Poll for messageInput to confirm navigation succeeded
