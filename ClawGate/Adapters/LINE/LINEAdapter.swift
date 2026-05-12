@@ -559,10 +559,47 @@ final class LINEAdapter: AdapterProtocol {
 
     // MARK: - Common helper for read-only operations
 
+    private func lineUseMainWindowPreferenceEnabled() -> Bool {
+        UserDefaults.standard.object(forKey: "LineUseMainWindowPreference") as? Bool ?? true
+    }
+
+    private func resolveLineMainWindow(appElement: AXUIElement) -> AXUIElement? {
+        let windows = AXQuery.windows(appElement: appElement)
+        for window in windows {
+            guard let frame = AXQuery.copyFrameAttribute(window) else { continue }
+            let nodes = AXQuery.descendants(of: window, maxDepth: 6, maxNodes: 500)
+            guard LineSidebarDiscovery.findSidebarList(in: nodes, windowFrame: frame) != nil else {
+                continue
+            }
+            let title = AXQuery.copyStringAttribute(window, attribute: kAXTitleAttribute as String) ?? "<untitled>"
+            logger.log(.info, "LINE main window resolution: scanned \(windows.count) windows, selected sidebar_window=\(title)")
+            return window
+        }
+        logger.log(.info, "LINE main window resolution: scanned \(windows.count) windows, selected sidebar_window=nil")
+        return nil
+    }
+
     private func withLINEWindow<T>(
         body: (_ rootWindow: AXUIElement, _ windowFrame: CGRect, _ nodes: [AXNode]) throws -> T
     ) throws -> T {
         do {
+            if lineUseMainWindowPreferenceEnabled() {
+                guard AXIsProcessTrusted() else {
+                    throw AXAppWindow.WindowError.axPermissionMissing
+                }
+                guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first else {
+                    throw AXAppWindow.WindowError.appNotRunning(bundleIdentifier: bundleIdentifier)
+                }
+                let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+                if let mainWindow = resolveLineMainWindow(appElement: appElement) {
+                    _ = AXActions.surface(app: appElement, window: mainWindow)
+                    guard let frame = AXQuery.copyFrameAttribute(mainWindow) else {
+                        throw AXAppWindow.WindowError.frameNotFound
+                    }
+                    let nodes = AXQuery.descendants(of: mainWindow, maxDepth: 6, maxNodes: 500)
+                    return try body(mainWindow, frame, nodes)
+                }
+            }
             return try AXAppWindow.withWindow(bundleIdentifier: bundleIdentifier) { ctx in
                 try body(ctx.window, ctx.frame, ctx.nodes)
             }
@@ -733,6 +770,10 @@ final class LINEAdapter: AdapterProtocol {
 
     private func currentRootWindow(app: NSRunningApplication, allowActivation: Bool) -> AXUIElement? {
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        if lineUseMainWindowPreferenceEnabled(), let mainWindow = resolveLineMainWindow(appElement: appElement) {
+            _ = AXActions.surface(app: appElement, window: mainWindow)
+            return mainWindow
+        }
         if allowActivation {
             return AXActions.ensureWindow(app: app, appElement: appElement, bundleID: bundleIdentifier)
         }
