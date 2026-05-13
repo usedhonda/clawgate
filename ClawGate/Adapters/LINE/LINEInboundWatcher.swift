@@ -296,6 +296,13 @@ final class LINEInboundWatcher {
     /// Dedup pipeline history ring buffer (最新 20 件、デバッグエンドポイント用)
     private var pipelineHistory: [LineInboundDedupSnapshot.PipelineEntry] = []
     private let maxPipelineHistory = 20
+    private struct SuppressedPrimaryWithoutPositionEvent {
+        let at: Date
+        let primaryReason: String
+    }
+    private var suppressedPrimaryWithoutPositionEvents: [SuppressedPrimaryWithoutPositionEvent] = []
+    private let maxSuppressedPrimaryWithoutPositionEvents = 100
+    private let suppressedPrimaryWithoutPositionRetention: TimeInterval = 60 * 60
 
     /// AXTextArea origin.x — dynamically updated each poll for crop left boundary
     private var contentLeftX: CGFloat?
@@ -774,6 +781,9 @@ final class LINEInboundWatcher {
             textHead: textHead,
             emitted: !evaluation.shouldSuppress
         ))
+        if evaluation.reason == "suppressed_primary_without_position" {
+            recordSuppressedPrimaryWithoutPosition(now: now, primaryReason: evaluation.primaryReason)
+        }
         if evaluation.shouldSuppress { return evaluation }
 
         lastInboundFingerprint = fingerprint
@@ -1682,15 +1692,64 @@ final class LINEInboundWatcher {
         }
     }
 
+    private func recordSuppressedPrimaryWithoutPosition(now: Date, primaryReason: String) {
+        stateLock.lock()
+        suppressedPrimaryWithoutPositionEvents.append(SuppressedPrimaryWithoutPositionEvent(
+            at: now,
+            primaryReason: primaryReason.isEmpty ? "unknown" : primaryReason
+        ))
+        pruneSuppressedPrimaryWithoutPositionEvents(now: now)
+        stateLock.unlock()
+    }
+
+    private func suppressionMetricsSnapshot(now: Date) -> LineInboundDedupSnapshot.SuppressionMetrics {
+        stateLock.lock()
+        pruneSuppressedPrimaryWithoutPositionEvents(now: now)
+        let events = suppressedPrimaryWithoutPositionEvents
+        stateLock.unlock()
+
+        let recent5minCutoff = now.addingTimeInterval(-5 * 60)
+        let recent5min = events.filter { $0.at >= recent5minCutoff }
+        let recent60min = events
+        let last = events.last
+
+        return LineInboundDedupSnapshot.SuppressionMetrics(
+            recent5minCount: recent5min.count,
+            recent60minCount: recent60min.count,
+            lastAt: last.map { isoString($0.at) } ?? "never",
+            lastPrimaryReason: last?.primaryReason ?? "none",
+            recent5minPrimaryReasons: countPrimaryReasons(recent5min),
+            recent60minPrimaryReasons: countPrimaryReasons(recent60min)
+        )
+    }
+
+    private func pruneSuppressedPrimaryWithoutPositionEvents(now: Date) {
+        let cutoff = now.addingTimeInterval(-suppressedPrimaryWithoutPositionRetention)
+        suppressedPrimaryWithoutPositionEvents.removeAll { $0.at < cutoff }
+        if suppressedPrimaryWithoutPositionEvents.count > maxSuppressedPrimaryWithoutPositionEvents {
+            suppressedPrimaryWithoutPositionEvents.removeFirst(
+                suppressedPrimaryWithoutPositionEvents.count - maxSuppressedPrimaryWithoutPositionEvents
+            )
+        }
+    }
+
+    private func countPrimaryReasons(_ events: [SuppressedPrimaryWithoutPositionEvent]) -> [String: Int] {
+        events.reduce(into: [:]) { counts, event in
+            counts[event.primaryReason, default: 0] += 1
+        }
+    }
+
     func dedupSnapshot() -> LineInboundDedupSnapshot {
-        LineInboundDedupSnapshot(
+        let now = Date()
+        return LineInboundDedupSnapshot(
             seenConversations: seenLinesByConversation.mapValues(\.count),
             seenLinesTotal: seenLinesByConversation.values.reduce(0) { $0 + $1.count },
             lastFingerprintHead: String(lastInboundFingerprint.prefix(60)),
             lastAcceptedAt: lastInboundAt == .distantPast ? "never" : isoString(lastInboundAt),
             fingerprintWindowSec: Int(ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds),
             pipelineHistory: pipelineHistory.reversed(),
-            timestamp: isoString(Date())
+            suppressionMetrics: suppressionMetricsSnapshot(now: now),
+            timestamp: isoString(now)
         )
     }
 

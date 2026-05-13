@@ -224,12 +224,40 @@ struct LineInboundDedupSnapshot: Codable {
         }
     }
 
+    struct SuppressionMetrics: Codable {
+        let recent5minCount: Int
+        let recent60minCount: Int
+        let lastAt: String
+        let lastPrimaryReason: String
+        let recent5minPrimaryReasons: [String: Int]
+        let recent60minPrimaryReasons: [String: Int]
+
+        static let empty = SuppressionMetrics(
+            recent5minCount: 0,
+            recent60minCount: 0,
+            lastAt: "never",
+            lastPrimaryReason: "none",
+            recent5minPrimaryReasons: [:],
+            recent60minPrimaryReasons: [:]
+        )
+
+        enum CodingKeys: String, CodingKey {
+            case recent5minCount = "recent5min_count"
+            case recent60minCount = "recent60min_count"
+            case lastAt = "last_at"
+            case lastPrimaryReason = "last_primary_reason"
+            case recent5minPrimaryReasons = "recent5min_primary_reasons"
+            case recent60minPrimaryReasons = "recent60min_primary_reasons"
+        }
+    }
+
     let seenConversations: [String: Int]  // conversation -> seen line count
     let seenLinesTotal: Int
     let lastFingerprintHead: String       // 先頭 60 文字
     let lastAcceptedAt: String            // ISO8601（未受信なら "never"）
     let fingerprintWindowSec: Int
     let pipelineHistory: [PipelineEntry]  // 最新 20 件（新しい順）
+    let suppressionMetrics: SuppressionMetrics
     let timestamp: String
 
     enum CodingKeys: String, CodingKey {
@@ -239,6 +267,7 @@ struct LineInboundDedupSnapshot: Codable {
         case lastAcceptedAt = "last_accepted_at"
         case fingerprintWindowSec = "fingerprint_window_sec"
         case pipelineHistory = "pipeline_history"
+        case suppressionMetrics = "suppression_metrics"
         case timestamp
     }
 }

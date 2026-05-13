@@ -710,6 +710,7 @@ final class BridgeCore {
             lastAcceptedAt: "never",
             fingerprintWindowSec: 0,
             pipelineHistory: [],
+            suppressionMetrics: .empty,
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
         return jsonResponse(status: .ok, body: encode(snapshot))
@@ -1362,10 +1363,13 @@ final class BridgeCore {
         // Check 4: LINE inbound watcher freshness
         checks.append(lineWatcherFreshnessCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
 
-        // Check 5: LINE caretaker state
+        // Check 5: LINE inbound dedup suppression health
+        checks.append(lineInboundDedupHealthCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
+
+        // Check 6: LINE caretaker state
         checks.append(lineCaretakerStateCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
 
-        // Check 6: LINE window accessible (only if LINE is running and AX is trusted)
+        // Check 7: LINE window accessible (only if LINE is running and AX is trusted)
         if lineEnabled && axTrusted && lineRunning {
             let windowCheck = checkLINEWindowAccessible()
             checks.append(windowCheck)
@@ -1378,7 +1382,7 @@ final class BridgeCore {
             ))
         }
 
-        // Check 7: Port 8765 (we're already listening, so this is informational)
+        // Check 8: Port 8765 (we're already listening, so this is informational)
         let portDetails = "0.0.0.0:8765 (remote access)"
         let federationSuffix = cfg.federationEnabled ? " + ws:/federation" : ""
         checks.append(DoctorCheck(
@@ -1388,7 +1392,7 @@ final class BridgeCore {
             details: portDetails + federationSuffix
         ))
 
-        // Check 8: Screen Recording permission (for Vision OCR)
+        // Check 9: Screen Recording permission (for Vision OCR)
         let screenOk = CGPreflightScreenCaptureAccess()
         checks.append(DoctorCheck(
             name: "screen_recording_permission",
@@ -1397,7 +1401,7 @@ final class BridgeCore {
             details: screenOk ? nil : "System Settings > Privacy > Screen Recording"
         ))
 
-        // Check 9: Federation status
+        // Check 10: Federation status
         if cfg.federationEnabled && cfg.federationURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let clientCount = federationServer?.clientCount() ?? 0
             checks.append(DoctorCheck(
@@ -1415,7 +1419,7 @@ final class BridgeCore {
             ))
         }
 
-        // Check 10: Gateway poll freshness — Gateway is expected to poll this host.
+        // Check 11: Gateway poll freshness — Gateway is expected to poll this host.
         let age = Date().timeIntervalSince(lastGatewayPollAt)
         let staleThreshold: TimeInterval = 120
         if lastGatewayPollAt == .distantPast {
@@ -1652,6 +1656,56 @@ final class BridgeCore {
             : "LINE watcher freshness is stale"
         let details = "age_seconds=\(ageSeconds) isPolling=\(snapshot.isPolling) timeouts=\(snapshot.consecutiveTimeouts) skipped=\(snapshot.skippedPollCount)"
         return DoctorCheck(name: "line_inbound_watcher_freshness", status: status, message: message, details: details)
+    }
+
+    private func lineInboundDedupHealthCheck(lineEnabled: Bool, lineRunning: Bool) -> DoctorCheck {
+        guard lineEnabled else {
+            return DoctorCheck(
+                name: "line_inbound_dedup_health",
+                status: "ok",
+                message: "LINE inbound dedup health check skipped",
+                details: "lineEnabled=false"
+            )
+        }
+        guard lineRunning else {
+            return DoctorCheck(
+                name: "line_inbound_dedup_health",
+                status: "ok",
+                message: "LINE inbound dedup health check skipped",
+                details: "LINE is not running"
+            )
+        }
+
+        let metrics = lineInboundWatcher?.dedupSnapshot().suppressionMetrics ?? .empty
+        let status = metrics.recent5minCount <= 1 ? "ok" : "warning"
+        let message: String
+        if metrics.recent5minCount <= 1 {
+            message = "LINE inbound dedup suppression is healthy"
+        } else if metrics.recent5minCount <= 5 {
+            message = "Dedup pipeline has suppressed \(metrics.recent5minCount) primary events in the last 5 minutes"
+        } else {
+            message = "Dedup pipeline is repeatedly suppressing primary evidence without positioned lines"
+        }
+        let details = [
+            "recent5min_count=\(metrics.recent5minCount)",
+            "recent60min_count=\(metrics.recent60minCount)",
+            "last_at=\(metrics.lastAt)",
+            "last_primary_reason=\(metrics.lastPrimaryReason)",
+            "recent5min_primary_reasons=\(formatReasonCounts(metrics.recent5minPrimaryReasons))",
+            "recent60min_primary_reasons=\(formatReasonCounts(metrics.recent60minPrimaryReasons))"
+        ].joined(separator: " ")
+        return DoctorCheck(name: "line_inbound_dedup_health", status: status, message: message, details: details)
+    }
+
+    private func formatReasonCounts(_ counts: [String: Int]) -> String {
+        guard !counts.isEmpty else { return "none" }
+        return counts
+            .sorted { lhs, rhs in
+                if lhs.value == rhs.value { return lhs.key < rhs.key }
+                return lhs.value > rhs.value
+            }
+            .map { "\($0.key):\($0.value)" }
+            .joined(separator: ",")
     }
 
     private func lineCaretakerStateCheck(lineEnabled: Bool, lineRunning: Bool) -> DoctorCheck {
