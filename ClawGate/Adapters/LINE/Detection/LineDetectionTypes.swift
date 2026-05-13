@@ -97,6 +97,7 @@ struct LineCaretakerDecisionInput {
     let watcherStale: Bool
     let surfaceAbnormal: Bool
     let forcedReanchorDue: Bool
+    let dedupPipelineDegraded: Bool
 }
 
 struct LineCaretakerDecisionResult {
@@ -146,6 +147,14 @@ enum LineCaretakerDecisionEngine {
                 mode: .forceRecover,
                 assessmentReason: "forced_reanchor_due",
                 repairReason: "forced_reanchor_due"
+            )
+        }
+        if input.dedupPipelineDegraded {
+            return LineCaretakerDecisionResult(
+                shouldRepair: true,
+                mode: .forceRecover,
+                assessmentReason: "dedup_pipeline_degraded",
+                repairReason: "dedup_pipeline_degraded"
             )
         }
         if input.surfaceAbnormal {

@@ -11,7 +11,8 @@ final class LineHealthCaretakerTests: XCTestCase {
                 lineRunning: true,
                 watcherStale: true,
                 surfaceAbnormal: true,
-                forcedReanchorDue: true
+                forcedReanchorDue: true,
+                dedupPipelineDegraded: true
             )
         )
 
@@ -29,7 +30,8 @@ final class LineHealthCaretakerTests: XCTestCase {
                 lineRunning: true,
                 watcherStale: true,
                 surfaceAbnormal: false,
-                forcedReanchorDue: false
+                forcedReanchorDue: false,
+                dedupPipelineDegraded: false
             )
         )
 
@@ -47,7 +49,8 @@ final class LineHealthCaretakerTests: XCTestCase {
                 lineRunning: true,
                 watcherStale: false,
                 surfaceAbnormal: false,
-                forcedReanchorDue: true
+                forcedReanchorDue: true,
+                dedupPipelineDegraded: false
             )
         )
 
@@ -65,11 +68,87 @@ final class LineHealthCaretakerTests: XCTestCase {
                 lineRunning: true,
                 watcherStale: true,
                 surfaceAbnormal: true,
-                forcedReanchorDue: false
+                forcedReanchorDue: false,
+                dedupPipelineDegraded: true
             )
         )
 
         XCTAssertFalse(result.shouldRepair)
         XCTAssertEqual(result.assessmentReason, "cooldown_active")
+    }
+
+    func testDecisionUsesForceRecoverForDedupPipelineDegraded() {
+        let result = LineCaretakerDecisionEngine.decide(
+            LineCaretakerDecisionInput(
+                isSending: false,
+                sentRecently: false,
+                inCooldown: false,
+                lineRunning: true,
+                watcherStale: false,
+                surfaceAbnormal: false,
+                forcedReanchorDue: false,
+                dedupPipelineDegraded: true
+            )
+        )
+
+        XCTAssertTrue(result.shouldRepair)
+        XCTAssertEqual(result.mode, .forceRecover)
+        XCTAssertEqual(result.assessmentReason, "dedup_pipeline_degraded")
+        XCTAssertEqual(result.repairReason, "dedup_pipeline_degraded")
+    }
+
+    func testDecisionSendGuardBeatsDedupPipelineDegraded() {
+        let result = LineCaretakerDecisionEngine.decide(
+            LineCaretakerDecisionInput(
+                isSending: true,
+                sentRecently: false,
+                inCooldown: false,
+                lineRunning: true,
+                watcherStale: false,
+                surfaceAbnormal: false,
+                forcedReanchorDue: false,
+                dedupPipelineDegraded: true
+            )
+        )
+
+        XCTAssertFalse(result.shouldRepair)
+        XCTAssertEqual(result.assessmentReason, "recent_send_guard")
+    }
+
+    func testDecisionCooldownBeatsDedupPipelineDegraded() {
+        let result = LineCaretakerDecisionEngine.decide(
+            LineCaretakerDecisionInput(
+                isSending: false,
+                sentRecently: false,
+                inCooldown: true,
+                lineRunning: true,
+                watcherStale: false,
+                surfaceAbnormal: false,
+                forcedReanchorDue: false,
+                dedupPipelineDegraded: true
+            )
+        )
+
+        XCTAssertFalse(result.shouldRepair)
+        XCTAssertEqual(result.assessmentReason, "cooldown_active")
+    }
+
+    func testDecisionForcedReanchorBeatsDedupPipelineDegraded() {
+        let result = LineCaretakerDecisionEngine.decide(
+            LineCaretakerDecisionInput(
+                isSending: false,
+                sentRecently: false,
+                inCooldown: false,
+                lineRunning: true,
+                watcherStale: false,
+                surfaceAbnormal: false,
+                forcedReanchorDue: true,
+                dedupPipelineDegraded: true
+            )
+        )
+
+        XCTAssertTrue(result.shouldRepair)
+        XCTAssertEqual(result.mode, .forceRecover)
+        XCTAssertEqual(result.assessmentReason, "forced_reanchor_due")
     }
 }

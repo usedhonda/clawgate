@@ -8,6 +8,7 @@ final class LineHealthCaretaker {
         static let forcedRepairInterval: TimeInterval = 600
         static let repairCooldown: TimeInterval = 180
         static let recentSendQuietPeriod: TimeInterval = 60
+        static let dedupDegradedThreshold5min: Int = 3
     }
 
     private let lineAdapter: LINEAdapter
@@ -146,6 +147,8 @@ final class LineHealthCaretaker {
         }
 
         let watcherSnapshot = inboundWatcher.snapshotState()
+        let dedupMetrics = inboundWatcher.dedupSnapshot().suppressionMetrics
+        let dedupPipelineDegraded = dedupMetrics.recent5minCount >= Constants.dedupDegradedThreshold5min
         let surfaceSnapshot: LineSurfaceHealthSnapshot?
         do {
             surfaceSnapshot = try lineAdapter.probeDefaultConversationSurface()
@@ -174,11 +177,18 @@ final class LineHealthCaretaker {
                 lineRunning: true,
                 watcherStale: isWatcherStale(watcherSnapshot, now: now),
                 surfaceAbnormal: surfaceSnapshot?.abnormal ?? true,
-                forcedReanchorDue: now >= currentForcedRepairDueAt()
+                forcedReanchorDue: now >= currentForcedRepairDueAt(),
+                dedupPipelineDegraded: dedupPipelineDegraded
             )
         )
 
         updateState(lastAssessmentReason: decision.assessmentReason)
+        if dedupPipelineDegraded {
+            logger.log(
+                .warning,
+                "LineHealthCaretaker: dedup pipeline degraded recent5min=\(dedupMetrics.recent5minCount) threshold=\(Constants.dedupDegradedThreshold5min) last_reason=\(dedupMetrics.lastPrimaryReason)"
+            )
+        }
         guard decision.shouldRepair, let mode = decision.mode, let repairReason = decision.repairReason else {
             return
         }
