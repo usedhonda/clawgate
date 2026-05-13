@@ -656,6 +656,14 @@ final class BridgeCore {
                 "conversation": request.payload.conversationHint,
                 "trace_id": trace,
             ])
+            ClawGateActualLogger.shared.append(
+                channel: request.adapter,
+                conversation: request.payload.conversationHint,
+                text: request.payload.text,
+                traceID: trace,
+                durationMs: latencyMs,
+                logger: logger
+            )
 
             let content = APIResponse(ok: true, result: result, error: nil)
             return jsonResponse(status: .ok, body: encode(content), traceID: trace)
