@@ -1567,9 +1567,9 @@ final class BridgeCore {
         } else {
             return DoctorCheck(
                 name: "line_window_accessible",
-                status: "ok",
-                message: "Messenger window (LINE) is accessible (sidebar view)",
-                details: "Node count: \(nodes.count), open a chat to see the input field"
+                status: "warning",
+                message: "Messenger window (LINE) is in sidebar view — thread not open (input field missing)",
+                details: "Node count: \(nodes.count). LINE inbound watcher cannot scrape messages until a conversation thread is open."
             )
         }
     }
