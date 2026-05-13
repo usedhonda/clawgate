@@ -10,6 +10,7 @@
 import { execSync } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const SEND_TIMEOUT_MS = 30_000;
 let clawgateAuthToken = "";
 
 export function setClawgateAuthToken(token) {
@@ -83,6 +84,7 @@ export async function clawgateSend(apiUrl, conversationHint, text, traceId = "")
   return request(apiUrl, "/v1/send", {
     method: "POST",
     traceId,
+    timeoutMs: SEND_TIMEOUT_MS,
     body: {
       adapter: "line",
       action: "send_message",
