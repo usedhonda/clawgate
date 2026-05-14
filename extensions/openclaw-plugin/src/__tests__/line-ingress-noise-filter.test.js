@@ -3,9 +3,20 @@ import assert from "node:assert/strict";
 
 let _filterDisplayName = "Alice Smith";
 
-function isUiChromeLine(line) {
+const SYSTEM_NOTICE_EXACT_LINES = new Set([
+  "LINEアプリを最新バージョンにアップデートしてください。",
+  "“ecosystem-watchdog”はバックグラウンドで実行できる項目です。",
+  "これは“ログイン項目と機能拡張”で管理できます。",
+]);
+
+function isHybridFusionSource(source) {
+  return source === "hybrid_fusion" || source === "line_hybrid_fusion";
+}
+
+function isUiChromeLine(line, options = {}) {
   const s = line.trim();
   if (!s) return true;
+  if (isHybridFusionSource(options.source) && SYSTEM_NOTICE_EXACT_LINES.has(s)) return true;
   if (/^既読$/.test(s)) return true;
   if (/^未読$/.test(s)) return true;
   if (/^ここから未読メッセージ$/.test(s)) return true;
@@ -24,11 +35,18 @@ function normalizeCompactLine(text) {
   return `${text || ""}`.replace(/\s+/g, " ").trim();
 }
 
-function looksLikeShortOcrGarbage(text) {
+function containsJapaneseText(text) {
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(`${text || ""}`);
+}
+
+function looksLikeShortOcrGarbage(text, options = {}) {
   const s = normalizeCompactLine(text);
   if (!s) return true;
   if (isUiChromeLine(s)) return true;
-  if (s.length <= 12 && !/[。！？!?]/u.test(s)) return true;
+  if (s.length <= 12 && !/[。！？!?]/u.test(s)) {
+    if (options.allowShortJapanese && s.length >= 2 && containsJapaneseText(s)) return false;
+    return true;
+  }
   return false;
 }
 
@@ -91,7 +109,7 @@ function normalizeInboundText(rawText, source) {
     .split("\n")
     .map((l) => stripDisplayNameNoisePrefix(l))
     .filter((l) => l.length > 0)
-    .filter((l) => !isUiChromeLine(l));
+    .filter((l) => !isUiChromeLine(l, { source }));
 
   lines = mergeWrappedLines(lines);
 
@@ -102,14 +120,14 @@ function normalizeInboundText(rawText, source) {
       .filter((l) => l.length > 0);
     if (rawLines.length > 0) {
       const fallbackLine = stripDisplayNameNoisePrefix(rawLines[rawLines.length - 1]);
-      if (fallbackLine && !isUiChromeLine(fallbackLine)) {
+      if (fallbackLine && !isUiChromeLine(fallbackLine, { source })) {
         lines = [fallbackLine];
       }
     }
   }
 
   const result = lines.join("\n").trim();
-  if (result && looksLikeShortOcrGarbage(result)) return "";
+  if (result && looksLikeShortOcrGarbage(result, { allowShortJapanese: source === "hybrid_fusion" || source === "line_hybrid_fusion" })) return "";
   return result;
 }
 
@@ -150,6 +168,65 @@ describe("LINE inbound noise filtering", () => {
     assert.equal(
       normalizeInboundText("こんにちは！お元気ですか？", "hybrid_fusion"),
       "こんにちは！お元気ですか？"
+    );
+  });
+
+  it("keeps Japanese messages with two or more characters without punctuation", () => {
+    assert.equal(normalizeInboundText("できてないから", "hybrid_fusion"), "できてないから");
+    assert.equal(normalizeInboundText("日報きてないね", "hybrid_fusion"), "日報きてないね");
+    assert.equal(normalizeInboundText("日報きてない", "hybrid_fusion"), "日報きてない");
+    assert.equal(normalizeInboundText("了解", "hybrid_fusion"), "了解");
+    assert.equal(normalizeInboundText("うん", "hybrid_fusion"), "うん");
+  });
+
+  it("drops single-character Japanese noise", () => {
+    assert.equal(normalizeInboundText("あ", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("ん", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("了", "hybrid_fusion"), "");
+  });
+
+  it("drops exact system notice lines only for hybrid OCR sources", () => {
+    assert.equal(normalizeInboundText("LINEアプリを最新バージョンにアップデートしてください。", "hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("“ecosystem-watchdog”はバックグラウンドで実行できる項目です。", "line_hybrid_fusion"), "");
+    assert.equal(normalizeInboundText("これは“ログイン項目と機能拡張”で管理できます。", "hybrid_fusion"), "");
+  });
+
+  it("keeps user text when mixed with exact system notice lines", () => {
+    assert.equal(
+      normalizeInboundText(
+        "LINEアプリを最新バージョンにアップデートしてください。\n日報がきてない",
+        "hybrid_fusion"
+      ),
+      "日報がきてない"
+    );
+    assert.equal(
+      normalizeInboundText(
+        "“ecosystem-watchdog”はバックグラウンドで実行できる項目です。\nこれは“ログイン項目と機能拡張”で管理できます。\nテスト送信です。",
+        "line_hybrid_fusion"
+      ),
+      "テスト送信です。"
+    );
+  });
+
+  it("does not drop partial system notice matches", () => {
+    assert.equal(
+      normalizeInboundText("LINEアプリを最新", "hybrid_fusion"),
+      "LINEアプリを最新"
+    );
+    assert.equal(
+      normalizeInboundText("ecosystem-watchdog", "hybrid_fusion"),
+      "ecosystem-watchdog"
+    );
+  });
+
+  it("keeps exact system notice text on non-OCR sources", () => {
+    assert.equal(
+      normalizeInboundText("LINEアプリを最新バージョンにアップデートしてください。", "notification_banner"),
+      "LINEアプリを最新バージョンにアップデートしてください。"
+    );
+    assert.equal(
+      normalizeInboundText("これは“ログイン項目と機能拡張”で管理できます。", "manual_text"),
+      "これは“ログイン項目と機能拡張”で管理できます。"
     );
   });
 });

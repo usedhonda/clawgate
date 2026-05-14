@@ -1533,9 +1533,20 @@ function recordStableInbound(eventText, conversation) {
   recentStableInbounds.push({ key: stableKey(eventText, conversation), time: Date.now() });
 }
 
-function isUiChromeLine(line) {
+const SYSTEM_NOTICE_EXACT_LINES = new Set([
+  "LINEアプリを最新バージョンにアップデートしてください。",
+  "“ecosystem-watchdog”はバックグラウンドで実行できる項目です。",
+  "これは“ログイン項目と機能拡張”で管理できます。",
+]);
+
+function isHybridFusionSource(source) {
+  return source === "hybrid_fusion" || source === "line_hybrid_fusion";
+}
+
+function isUiChromeLine(line, options = {}) {
   const s = line.trim();
   if (!s) return true;
+  if (isHybridFusionSource(options.source) && SYSTEM_NOTICE_EXACT_LINES.has(s)) return true;
   if (/^既読$/.test(s)) return true;
   if (/^未読$/.test(s)) return true;
   if (/^ここから未読メッセージ$/.test(s)) return true;
@@ -1558,11 +1569,18 @@ function normalizeCompactLine(text) {
   return `${text || ""}`.replace(/\s+/g, " ").trim();
 }
 
-function looksLikeShortOcrGarbage(text) {
+function containsJapaneseText(text) {
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(`${text || ""}`);
+}
+
+function looksLikeShortOcrGarbage(text, options = {}) {
   const s = normalizeCompactLine(text);
   if (!s) return true;
   if (isUiChromeLine(s)) return true;
-  if (s.length <= 12 && !/[。！？!?]/u.test(s)) return true;
+  if (s.length <= 12 && !/[。！？!?]/u.test(s)) {
+    if (options.allowShortJapanese && s.length >= 2 && containsJapaneseText(s)) return false;
+    return true;
+  }
   return false;
 }
 
@@ -1601,7 +1619,7 @@ function normalizeInboundText(rawText, source) {
     .split("\n")
     .map((l) => stripDisplayNameNoisePrefix(l))
     .filter((l) => l.length > 0)
-    .filter((l) => !isUiChromeLine(l));
+    .filter((l) => !isUiChromeLine(l, { source }));
 
   // Re-join OCR wrap fragments so one user message is not split into many pieces.
   lines = mergeWrappedLines(lines);
@@ -1615,7 +1633,7 @@ function normalizeInboundText(rawText, source) {
       .filter((l) => l.length > 0);
     if (rawLines.length > 0) {
       const fallbackLine = stripDisplayNameNoisePrefix(rawLines[rawLines.length - 1]);
-      if (fallbackLine && !isUiChromeLine(fallbackLine)) {
+      if (fallbackLine && !isUiChromeLine(fallbackLine, { source })) {
         lines = [fallbackLine];
       }
     }
@@ -1625,7 +1643,7 @@ function normalizeInboundText(rawText, source) {
 
   const result = lines.join("\n").trim();
   // Final guard: drop result that looks like short OCR garbage
-  if (result && looksLikeShortOcrGarbage(result)) return "";
+  if (result && looksLikeShortOcrGarbage(result, { allowShortJapanese: source === "hybrid_fusion" || source === "line_hybrid_fusion" })) return "";
   return result;
 }
 
