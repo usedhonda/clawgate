@@ -4593,6 +4593,17 @@ export async function startAccount(ctx) {
     try {
       const poll = await clawgatePoll(apiUrl, cursor);
 
+      // Self-heal: detect upstream ClawGate restart (eventBus rebuild).
+      // If the server's next_cursor regressed below our local cursor, the upstream
+      // eventBus was rebuilt from id=1 while our cursor remained stale. /v1/poll?since=N
+      // would filter out every new id<=N forever; reset to 0 to recover.
+      // Tracked in clawgate Task #18 / memory feedback_clawgate_cursor_stuck (2026-05-28).
+      if (poll.ok && typeof poll.next_cursor === "number" && poll.next_cursor < cursor) {
+        log?.warn?.(`clawgate: [${accountId}] cursor desync detected (server next_cursor=${poll.next_cursor} < local cursor=${cursor}); upstream restart suspected, resetting cursor=0 to recover`);
+        cursor = 0;
+        continue;
+      }
+
       if (poll.ok && poll.events?.length > 0) {
         for (const event of poll.events) {
           if (abortSignal?.aborted) break;
