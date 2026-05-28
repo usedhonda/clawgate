@@ -14,6 +14,9 @@ final class BridgeCore {
     var lineHealthCaretaker: LineHealthCaretaker?
     var gatewayHealthMonitor: GatewayHealthMonitor?
 
+    /// Set by main.swift; used for tmux_session_discovery doctor check.
+    weak var tmuxDirectPoller: TmuxDirectPoller?
+
     /// Tracks when the Gateway last polled /v1/poll (for staleness detection)
     private(set) var lastGatewayPollAt: Date = .distantPast
     private let pollTimestampLock = NSLock()
@@ -1424,6 +1427,70 @@ final class BridgeCore {
                 status: "ok",
                 message: "Federation client enabled",
                 details: "Connecting to \(cfg.federationURL)"
+            ))
+        }
+
+        // Check 11a: TmuxDirectPoller freshness — detects silent-stuck mode where the
+        // ClawGate process is alive (pgrep + /v1/health pass) but the tmux session
+        // poller stops running. Covers the 2026-05-23 failure mode that pgrep-based
+        // watchdogs miss. See .local/plans/2026-05-28-clawgate-recurrence-prevention.md.
+        if let poller = tmuxDirectPoller {
+            let stale: TimeInterval = max(90, poller.configuredPollInterval * 4.5)
+            let sessionCount = poller.observedSessionCount
+            if let last = poller.lastSuccessfulPollAt {
+                let pollAge = Date().timeIntervalSince(last)
+                if pollAge > stale {
+                    checks.append(DoctorCheck(
+                        name: "tmux_session_discovery",
+                        status: "error",
+                        message: "TmuxDirectPoller stuck",
+                        details: "lastSuccessfulPoll age=\(Int(pollAge))s sessions=\(sessionCount) threshold=\(Int(stale))s"
+                    ))
+                } else {
+                    checks.append(DoctorCheck(
+                        name: "tmux_session_discovery",
+                        status: "ok",
+                        message: "TmuxDirectPoller fresh",
+                        details: "lastSuccessfulPoll age=\(Int(pollAge))s sessions=\(sessionCount)"
+                    ))
+                }
+            } else {
+                checks.append(DoctorCheck(
+                    name: "tmux_session_discovery",
+                    status: "warning",
+                    message: "TmuxDirectPoller has not yet completed a poll",
+                    details: "sessions=\(sessionCount)"
+                ))
+            }
+        }
+
+        // Check 11b: EventBus activity — informational. Long idle period after
+        // earlier activity hints at upstream stuck. Pure idle (no events ever) is
+        // expected for some adapter mixes and is reported as ok.
+        if let lastAppend = eventBus.lastAppendAt {
+            let appendAge = Date().timeIntervalSince(lastAppend)
+            let activityStale: TimeInterval = 1800
+            if appendAge > activityStale {
+                checks.append(DoctorCheck(
+                    name: "eventbus_activity",
+                    status: "warning",
+                    message: "EventBus inactive since last seen",
+                    details: "lastAppend age=\(Int(appendAge))s threshold=\(Int(activityStale))s"
+                ))
+            } else {
+                checks.append(DoctorCheck(
+                    name: "eventbus_activity",
+                    status: "ok",
+                    message: "EventBus active",
+                    details: "lastAppend age=\(Int(appendAge))s"
+                ))
+            }
+        } else {
+            checks.append(DoctorCheck(
+                name: "eventbus_activity",
+                status: "ok",
+                message: "EventBus idle (no events appended yet)",
+                details: nil
             ))
         }
 

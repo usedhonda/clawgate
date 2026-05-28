@@ -19,6 +19,13 @@ final class EventBus {
     private var nextID: Int64 = 1
     private var subscribers: [UUID: Subscriber] = [:]
     private let maxEvents = 1000
+    private var _lastAppendAt: Date?
+
+    var lastAppendAt: Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lastAppendAt
+    }
 
     @discardableResult
     func append(type: String, adapter: String, payload: [String: String]) -> BridgeEvent {
@@ -37,6 +44,7 @@ final class EventBus {
         if events.count > maxEvents {
             events.removeFirst(events.count - maxEvents)
         }
+        _lastAppendAt = Date()
 
         let callbacks = subscribers.values.map(\.callback)
         lock.unlock()

@@ -251,6 +251,9 @@ final class AppRuntime {
         tmuxInboundWatcher.start()
         tmuxSourceProxy.setUnderlying(tmuxDirectPoller)
         tmuxSourceProxy.connect()
+
+        // Expose poller to BridgeCore so /v1/doctor can verify it is still ticking.
+        core.tmuxDirectPoller = tmuxDirectPoller
     }
 
     private func persistOpsLogForMenu(_ event: BridgeEvent) {

@@ -15,6 +15,21 @@ final class TmuxDirectPoller: TmuxSessionSource {
     private let lock = NSLock()
     private var timer: DispatchSourceTimer?
     private var sessions: [String: SessionSnapshot] = [:]
+    private var _lastSuccessfulPollAt: Date?
+
+    var lastSuccessfulPollAt: Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _lastSuccessfulPollAt
+    }
+
+    var observedSessionCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions.count
+    }
+
+    var configuredPollInterval: TimeInterval { pollInterval }
 
     init(logger: AppLogger, pollInterval: TimeInterval = 20) {
         self.logger = logger
@@ -91,6 +106,7 @@ final class TmuxDirectPoller: TmuxSessionSource {
         lock.lock()
         previous = sessions
         sessions = next
+        _lastSuccessfulPollAt = Date()
         lock.unlock()
 
         for (id, session) in next {
