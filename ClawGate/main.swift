@@ -21,7 +21,11 @@ final class AppRuntime {
     )
 
     private lazy var registry = AdapterRegistry(adapters: enabledAdapters())
-    private lazy var eventBus = EventBus()
+    private lazy var eventBus = EventBus(
+        persistenceDirectory: FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".clawgate", isDirectory: true)
+    )
     private lazy var core = BridgeCore(
         eventBus: eventBus,
         registry: registry,
