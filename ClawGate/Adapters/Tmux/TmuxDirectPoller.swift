@@ -5,6 +5,48 @@ import Foundation
 /// The poller mirrors the `TmuxSessionSource` surface so startup code can swap
 /// the source without changing downstream consumers.
 final class TmuxDirectPoller: TmuxSessionSource {
+    struct DiagnosticsSnapshot: Codable {
+        struct RejectedPaneSample: Codable {
+            let target: String
+            let title: String
+            let currentCommand: String
+            let currentPath: String
+            let panePID: Int32
+            let rejectReason: String
+
+            enum CodingKeys: String, CodingKey {
+                case target
+                case title
+                case currentCommand = "current_command"
+                case currentPath = "current_path"
+                case panePID = "pane_pid"
+                case rejectReason = "reject_reason"
+            }
+        }
+
+        let rawPaneCount: Int
+        let builtSessionCount: Int
+        let rejectedPaneSamples: [RejectedPaneSample]
+        let lastTmuxError: String?
+        let lastPollAt: Date?
+
+        enum CodingKeys: String, CodingKey {
+            case rawPaneCount = "raw_pane_count"
+            case builtSessionCount = "built_session_count"
+            case rejectedPaneSamples = "rejected_pane_samples"
+            case lastTmuxError = "last_tmux_error"
+            case lastPollAt = "last_poll_at"
+        }
+
+        static let empty = DiagnosticsSnapshot(
+            rawPaneCount: 0,
+            builtSessionCount: 0,
+            rejectedPaneSamples: [],
+            lastTmuxError: nil,
+            lastPollAt: nil
+        )
+    }
+
     var onStateChange: ((SessionSnapshot, String, String) -> Void)?
     var onProgress: ((SessionSnapshot) -> Void)?
     var onSessionsChanged: (() -> Void)?
@@ -16,6 +58,7 @@ final class TmuxDirectPoller: TmuxSessionSource {
     private var timer: DispatchSourceTimer?
     private var sessions: [String: SessionSnapshot] = [:]
     private var _lastSuccessfulPollAt: Date?
+    private var diagnostics = DiagnosticsSnapshot.empty
 
     var lastSuccessfulPollAt: Date? {
         lock.lock()
@@ -30,6 +73,12 @@ final class TmuxDirectPoller: TmuxSessionSource {
     }
 
     var configuredPollInterval: TimeInterval { pollInterval }
+
+    var diagnosticsSnapshot: DiagnosticsSnapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return diagnostics
+    }
 
     init(logger: AppLogger, pollInterval: TimeInterval = 20) {
         self.logger = logger
@@ -79,19 +128,33 @@ final class TmuxDirectPoller: TmuxSessionSource {
     }
 
     private func pollOnce() {
+        let pollAt = Date()
         let descriptors: [TmuxShell.PaneDescriptor]
         do {
             descriptors = try TmuxShell.listPanes()
         } catch {
+            lock.lock()
+            diagnostics = DiagnosticsSnapshot(
+                rawPaneCount: 0,
+                builtSessionCount: 0,
+                rejectedPaneSamples: diagnostics.rejectedPaneSamples,
+                lastTmuxError: String(describing: error),
+                lastPollAt: pollAt
+            )
+            lock.unlock()
             logger.log(.debug, "TmuxDirectPoller: list-panes failed: \(error)")
             return
         }
 
         // Build snapshots per pane, then select representative per logicalKey
         var perPane: [SessionSnapshot] = []
+        var rejectedPaneSamples: [DiagnosticsSnapshot.RejectedPaneSample] = []
         for pane in descriptors {
-            guard let session = buildSession(from: pane) else { continue }
-            perPane.append(session)
+            if let session = buildSession(from: pane) {
+                perPane.append(session)
+            } else if rejectedPaneSamples.count < 5 {
+                rejectedPaneSamples.append(makeRejectedPaneSample(from: pane))
+            }
         }
 
         // Group by logicalKey and pick representative (attached > stable sort by target)
@@ -107,6 +170,13 @@ final class TmuxDirectPoller: TmuxSessionSource {
         previous = sessions
         sessions = next
         _lastSuccessfulPollAt = Date()
+        diagnostics = DiagnosticsSnapshot(
+            rawPaneCount: descriptors.count,
+            builtSessionCount: perPane.count,
+            rejectedPaneSamples: rejectedPaneSamples,
+            lastTmuxError: nil,
+            lastPollAt: pollAt
+        )
         lock.unlock()
 
         for (id, session) in next {
@@ -179,6 +249,22 @@ final class TmuxDirectPoller: TmuxSessionSource {
             captureSource: .tmuxDirect,
             isAttached: pane.isAttached
         )
+    }
+
+    private func makeRejectedPaneSample(from pane: TmuxShell.PaneDescriptor) -> DiagnosticsSnapshot.RejectedPaneSample {
+        DiagnosticsSnapshot.RejectedPaneSample(
+            target: pane.target,
+            title: pane.title,
+            currentCommand: pane.currentCommand,
+            currentPath: pane.currentPath,
+            panePID: pane.panePID,
+            rejectReason: "unclassified(title=\(diagnosticValue(pane.title)),cmd=\(diagnosticValue(pane.currentCommand)))"
+        )
+    }
+
+    private func diagnosticValue(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "<empty>" : trimmed
     }
 
     /// Pick representative snapshot from same-logicalKey candidates.

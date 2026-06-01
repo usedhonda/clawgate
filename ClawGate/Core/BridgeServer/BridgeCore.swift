@@ -736,6 +736,17 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(snapshot))
     }
 
+    func handleTmuxDirectDebug() -> HTTPResult {
+        let snapshot = tmuxDirectPoller?.diagnosticsSnapshot ?? TmuxDirectPoller.DiagnosticsSnapshot(
+            rawPaneCount: 0,
+            builtSessionCount: 0,
+            rejectedPaneSamples: [],
+            lastTmuxError: "tmux_direct_poller_not_initialized",
+            lastPollAt: nil
+        )
+        return jsonResponse(status: .ok, body: encode(snapshot))
+    }
+
     func resetLineBaseline() -> HTTPResult {
         guard let watcher = lineInboundWatcher else {
             let payload = ErrorPayload(code: "no_watcher", message: "LINE inbound watcher not initialized", retriable: false, failedStep: "reset_baseline", details: "")
@@ -1437,6 +1448,8 @@ final class BridgeCore {
         if let poller = tmuxDirectPoller {
             let stale: TimeInterval = max(90, poller.configuredPollInterval * 4.5)
             let sessionCount = poller.observedSessionCount
+            let diagnostics = poller.diagnosticsSnapshot
+            let diagnosticsDetails = "rawPaneCount=\(diagnostics.rawPaneCount) builtSessionCount=\(diagnostics.builtSessionCount)"
             if let last = poller.lastSuccessfulPollAt {
                 let pollAge = Date().timeIntervalSince(last)
                 if pollAge > stale {
@@ -1444,14 +1457,14 @@ final class BridgeCore {
                         name: "tmux_session_discovery",
                         status: "error",
                         message: "TmuxDirectPoller stuck",
-                        details: "lastSuccessfulPoll age=\(Int(pollAge))s sessions=\(sessionCount) threshold=\(Int(stale))s"
+                        details: "lastSuccessfulPoll age=\(Int(pollAge))s sessions=\(sessionCount) threshold=\(Int(stale))s \(diagnosticsDetails)"
                     ))
                 } else {
                     checks.append(DoctorCheck(
                         name: "tmux_session_discovery",
                         status: "ok",
                         message: "TmuxDirectPoller fresh",
-                        details: "lastSuccessfulPoll age=\(Int(pollAge))s sessions=\(sessionCount)"
+                        details: "lastSuccessfulPoll age=\(Int(pollAge))s sessions=\(sessionCount) \(diagnosticsDetails)"
                     ))
                 }
             } else {
@@ -1459,7 +1472,7 @@ final class BridgeCore {
                     name: "tmux_session_discovery",
                     status: "warning",
                     message: "TmuxDirectPoller has not yet completed a poll",
-                    details: "sessions=\(sessionCount)"
+                    details: "sessions=\(sessionCount) \(diagnosticsDetails)"
                 ))
             }
         }
