@@ -739,7 +739,28 @@ final class LINEInboundWatcher {
                 primaryReason: "none"
             )
         }
-        if ingressDedupTuneV2Enabled, normalized.count < 6 {
+        // Short text (<6 chars) previously bypassed dedup entirely, so a still-visible short
+        // message (e.g. "今日") was re-dispatched on every poll. Now short text runs through the
+        // position-aware engine WHEN it has observed fragments to anchor on; the unconditional
+        // accept is preserved only when no positional evidence exists (handled below, after
+        // fragments are computed).
+        let isShortText = ingressDedupTuneV2Enabled && normalized.count < 6
+
+        let normalizedConversation = conversation.lowercased()
+        let fingerprint = "\(normalizedConversation)|\(normalized)"
+        let now = Date()
+        let windowSeconds = ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds
+        let textHead = String(text.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
+        pruneExpiredSeenLines(conversation: normalizedConversation, now: now)
+
+        let freshness = freshnessEvidence(from: details)
+        let fragments = observedFragmentsForDedup(from: details)
+
+        // Short text with no positional anchor keeps the legacy accept: never drop a real short
+        // message. Without fragments the engine would suppress even a legit first short line via
+        // suppressed_no_positioned_lines, so we only route short text through the engine when it
+        // has position evidence.
+        if isShortText, fragments.isEmpty {
             return LineInboundDedupEvaluation(
                 shouldSuppress: false,
                 reason: "accepted_short_text_bypass",
@@ -751,16 +772,7 @@ final class LINEInboundWatcher {
             )
         }
 
-        let normalizedConversation = conversation.lowercased()
-        let fingerprint = "\(normalizedConversation)|\(normalized)"
-        let now = Date()
-        let windowSeconds = ingressDedupTuneV2Enabled ? inboundDedupWindowSecondsV2 : inboundDedupWindowSeconds
-        let textHead = String(text.prefix(40)).replacingOccurrences(of: "\n", with: "↵")
-        pruneExpiredSeenLines(conversation: normalizedConversation, now: now)
-
-        let freshness = freshnessEvidence(from: details)
         let fingerprintHit = fingerprint == lastInboundFingerprint && now.timeIntervalSince(lastInboundAt) < windowSeconds
-        let fragments = observedFragmentsForDedup(from: details)
         let existingTracker = seenLinesByConversation[normalizedConversation] ?? [:]
 
         let (evaluation, updatedTracker) = LineInboundDedupDecisionEngine.decide(
