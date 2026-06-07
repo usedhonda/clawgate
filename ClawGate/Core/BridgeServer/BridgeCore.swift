@@ -1385,6 +1385,9 @@ final class BridgeCore {
         // Check 4: LINE inbound watcher freshness
         checks.append(lineWatcherFreshnessCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
 
+        // Check 4b: LINE inbound flow (poll loop stopped detection)
+        checks.append(lineInboundFlowCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
+
         // Check 5: LINE inbound dedup suppression health
         checks.append(lineInboundDedupHealthCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
 
@@ -1403,6 +1406,9 @@ final class BridgeCore {
                 details: lineEnabled ? (!axTrusted ? "Accessibility permission required" : "LINE app is not running") : "lineEnabled=false"
             ))
         }
+
+        // Check 7b: LINE outbound surface health (abnormal => sends fail; today's outage class)
+        checks.append(lineSurfaceHealthCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
 
         // Check 8: Port 8765 (we're already listening, so this is informational)
         let portDetails = "0.0.0.0:8765 (remote access)"
@@ -1765,7 +1771,17 @@ final class BridgeCore {
         }
 
         let metrics = lineInboundWatcher?.dedupSnapshot().suppressionMetrics ?? .empty
-        let status = metrics.recent5minCount <= 1 ? "ok" : "warning"
+        // recent5minCount >= 3 (LineHealthCaretaker.Constants.dedupDegradedThreshold5min)
+        // means the inbound pipeline is repeatedly suppressing/re-reading — surface the
+        // "繰り返し読んでしまう" degradation as an error, not just a warning.
+        let status: String
+        if metrics.recent5minCount <= 1 {
+            status = "ok"
+        } else if metrics.recent5minCount < 3 {
+            status = "warning"
+        } else {
+            status = "error"
+        }
         let message: String
         if metrics.recent5minCount <= 1 {
             message = "LINE inbound dedup suppression is healthy"
@@ -1830,6 +1846,48 @@ final class BridgeCore {
             message: "LINE caretaker is healthy",
             details: "assessment=\(snapshot.lastAssessmentReason) next_forced=\(snapshot.nextForcedRepairDueAt)"
         )
+    }
+
+    /// Surface the LINE outbound send surface health directly. Reads the caretaker's
+    /// cached lastSurface (refreshed every tick) rather than doing a live AX probe, to
+    /// avoid doctor() causing AX churn. abnormal=true means sends will fail — this is
+    /// the signal that was available but un-escalated during the 2026-06-07 outage
+    /// (reason=message_input_missing).
+    private func lineSurfaceHealthCheck(lineEnabled: Bool, lineRunning: Bool) -> DoctorCheck {
+        guard lineEnabled else {
+            return DoctorCheck(name: "line_surface_health", status: "ok", message: "LINE surface health check skipped", details: "lineEnabled=false")
+        }
+        guard lineRunning else {
+            return DoctorCheck(name: "line_surface_health", status: "ok", message: "LINE surface health check skipped", details: "LINE is not running")
+        }
+        let snapshot = lineHealthCaretaker?.snapshot() ?? defaultLineCaretakerSnapshot()
+        guard let surface = snapshot.lastSurface else {
+            return DoctorCheck(name: "line_surface_health", status: "warning", message: "LINE outbound surface not probed yet", details: "assessment=\(snapshot.lastAssessmentReason)")
+        }
+        let details = "abnormal=\(surface.abnormal) reason=\(surface.reason) has_message_input=\(surface.hasMessageInput) matches_expected=\(surface.matchesExpectedConversation) probed_at=\(surface.timestamp)"
+        if surface.abnormal {
+            return DoctorCheck(name: "line_surface_health", status: "error", message: "LINE outbound surface is abnormal (sends will fail)", details: details)
+        }
+        return DoctorCheck(name: "line_surface_health", status: "ok", message: "LINE outbound surface is healthy", details: details)
+    }
+
+    /// Detect a stopped inbound poll loop. Note: a stale lastAcceptedAt alone is NOT an
+    /// error — it just means no one has sent a message recently (normal). Only a poll
+    /// loop that is not running AND has not completed a poll recently is a real fault.
+    private func lineInboundFlowCheck(lineEnabled: Bool, lineRunning: Bool) -> DoctorCheck {
+        guard lineEnabled else {
+            return DoctorCheck(name: "line_inbound_flow", status: "ok", message: "LINE inbound flow check skipped", details: "lineEnabled=false")
+        }
+        guard lineRunning else {
+            return DoctorCheck(name: "line_inbound_flow", status: "ok", message: "LINE inbound flow check skipped", details: "LINE is not running")
+        }
+        let snapshot = lineInboundWatcher?.snapshotState() ?? defaultLineWatcherSnapshot()
+        let pollAge = parseISODate(snapshot.lastCompletedPollAt).map { Int(max(0, Date().timeIntervalSince($0))) }
+        let details = "poll_age=\(pollAge.map(String.init) ?? "never") last_accepted=\(snapshot.lastAcceptedAt) is_polling=\(snapshot.isPolling) timeouts=\(snapshot.consecutiveTimeouts)"
+        if !snapshot.isPolling, (pollAge ?? Int.max) > 90 {
+            return DoctorCheck(name: "line_inbound_flow", status: "error", message: "LINE inbound poll loop appears stopped", details: details)
+        }
+        return DoctorCheck(name: "line_inbound_flow", status: "ok", message: "LINE inbound flow is active", details: details)
     }
 
     private func defaultLineWatcherSnapshot() -> LineDetectionStateSnapshot {
