@@ -1156,6 +1156,27 @@ final class LINEAdapter: AdapterProtocol {
         )
     }
 
+    /// Force LINE window content to re-render when the message input element is
+    /// absent from the AX tree. Root cause of the 2026-06-07 outbound outage was
+    /// LINE window content becoming un-rendered (AXTextArea message input missing)
+    /// while the correct conversation stayed selected; the search-based recovery
+    /// could not restore it. Clearing stuck search state, surfacing the window,
+    /// then nudging its position forces AppKit/Qt to re-render the conversation
+    /// view. Returns fresh descendants after the nudge.
+    private func forceWindowReRender(app: NSRunningApplication, rootWindow: AXUIElement) -> [AXNode] {
+        AXActions.sendEscape()
+        usleep(120_000)
+        let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        AXActions.surface(app: appElement, window: rootWindow)
+        if let frame = AXQuery.copyFrameAttribute(rootWindow) {
+            AXActions.setWindowPosition(rootWindow, to: CGPoint(x: frame.origin.x + 12, y: frame.origin.y + 12))
+            usleep(120_000)
+            AXActions.setWindowPosition(rootWindow, to: frame.origin)
+            usleep(150_000)
+        }
+        return AXQuery.descendants(of: rootWindow)
+    }
+
     private func recoverDefaultConversationSurface(
         app: NSRunningApplication,
         rootWindow: AXUIElement,
@@ -1165,6 +1186,29 @@ final class LINEAdapter: AdapterProtocol {
         forcePaneReanchor: Bool
     ) throws -> [AXNode] {
         activate(app: app)
+
+        // When the message input is missing from the AX tree, the window content
+        // is un-rendered (2026-06-07 outbound outage). Force a re-render before the
+        // search-based recovery, which cannot restore a missing input field. This
+        // only runs inside recovery (surface already abnormal), so it is safe.
+        let preRenderNodes = AXQuery.descendants(of: rootWindow)
+        let preRenderFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
+        let inputPresent = (SelectorResolver.resolve(
+            selector: LineSelectors.messageInputU, in: preRenderNodes, windowFrame: preRenderFrame
+        ) ?? legacyResolve(LineSelectors.messageInput, in: preRenderNodes)) != nil
+        if !inputPresent {
+            let rerendered = forceWindowReRender(app: app, rootWindow: rootWindow)
+            let rerenderedFrame = AXQuery.copyFrameAttribute(rootWindow) ?? preRenderFrame
+            if let assessment = try? assessSendSurface(
+                rootWindow: rootWindow,
+                windowFrame: rerenderedFrame,
+                nodes: rerendered,
+                expectedConversation: defaultConversation
+            ), !assessment.isAbnormal {
+                logger.log(.info, "LINE default recovery: window re-render restored surface (input was missing)")
+                return rerendered
+            }
+        }
 
         let workingNodes = AXQuery.descendants(of: rootWindow)
         let workingWindowFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
