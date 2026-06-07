@@ -10,17 +10,20 @@ set -euo pipefail
 #   3) Restart Host B ClawGate locally
 #   4) Verify health, gateway, LINE conversation
 #
-# IMPORTANT: Host A build/codesign is NOT performed here. SSH-driven codesign
-# was unreliable (errSecInternalComponent on remote keychain unlock) and
-# silently rolled back the bundle, breaking TCC. Build/sign must be run on
-# the macmini local desktop session:
-#   KEYCHAIN_PASSWORD='...' ./scripts/macmini-local-sign-and-restart.sh
+# By default Host A build/codesign is NOT performed here (restart-only). Pass
+# --build-hosta to build + codesign + restart Host A via SSH using the canonical
+# macmini-local-sign-and-restart.sh with an explicit keychain unlock (verified
+# working over SSH — see memory/deployment.md §2). Without --build-hosta a fresh
+# Swift binary will NOT reach macmini; only source is synced and the existing
+# bundle is restarted.
+#   ./scripts/post-task-restart.sh --build-hosta
 
 REMOTE_HOST="macmini"
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_SYNC=false
 REQUIRE_HOSTA_LOCAL_SIGN=false
+BUILD_HOSTA=false
 CLAWGATE_ROLE="host_b_client"
 OPS_SCRIPT_NAME="post-task-restart.sh"
 
@@ -38,6 +41,8 @@ while [[ $# -gt 0 ]]; do
       shift ;;  # deprecated: relay removed (kept for backward compat)
     --require-hosta-local-sign)
       REQUIRE_HOSTA_LOCAL_SIGN=true; shift ;;
+    --build-hosta)
+      BUILD_HOSTA=true; shift ;;
     *)
       echo "Unknown arg: $1" >&2
       exit 2 ;;
@@ -55,6 +60,7 @@ echo "Remote host : $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
 echo "Skip sync   : $SKIP_SYNC"
 echo "Require HostA local sign: $REQUIRE_HOSTA_LOCAL_SIGN"
+echo "Build HostA (SSH sign)  : $BUILD_HOSTA"
 
 # Keep federation token aligned if explicitly provided in environment.
 if [[ -n "${FEDERATION_TOKEN:-}" ]]; then
@@ -65,18 +71,33 @@ if [[ "$SKIP_SYNC" != "true" ]]; then
   ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
 fi
 
-# Host A restart (no build/codesign — see header).
-if ! ./scripts/restart-macmini-openclaw.sh \
-    --remote-host "$REMOTE_HOST" \
-    --project-path "$PROJECT_PATH" \
-    --skip-build; then
-  echo
-  echo "[fallback] Host A signing/restart may require local desktop session on macmini."
-  echo "[fallback] Run on macmini:"
-  echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"
-  echo "[fallback] Then rerun:"
-  echo "  ./scripts/post-task-restart.sh --remote-host $REMOTE_HOST --project-path $PROJECT_PATH --skip-sync"
-  exit 1
+if [[ "$BUILD_HOSTA" == "true" ]]; then
+  # Host A build + codesign + restart via the canonical macmini-local-sign path,
+  # invoked over SSH with an explicit keychain unlock (the script unlocks the
+  # keychain itself, which is what makes SSH codesign reliable — deployment.md §2).
+  # This is the only path that lands a fresh Swift binary on macmini, and it
+  # writes .runtime/hosta-local-sign.stamp so the verify step below can confirm.
+  echo "[hostA] build + codesign + restart via macmini-local-sign-and-restart.sh (SSH)"
+  if ! ssh "$REMOTE_HOST" "KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\""; then
+    echo
+    echo "[fallback] Host A build/sign over SSH failed. Run on macmini local desktop session:"
+    echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"
+    exit 1
+  fi
+else
+  # Host A restart (no build/codesign — see header).
+  if ! ./scripts/restart-macmini-openclaw.sh \
+      --remote-host "$REMOTE_HOST" \
+      --project-path "$PROJECT_PATH" \
+      --skip-build; then
+    echo
+    echo "[fallback] Host A signing/restart may require local desktop session on macmini."
+    echo "[fallback] Run on macmini:"
+    echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"
+    echo "[fallback] Then rerun:"
+    echo "  ./scripts/post-task-restart.sh --remote-host $REMOTE_HOST --project-path $PROJECT_PATH --skip-sync"
+    exit 1
+  fi
 fi
 
 # Host B restart (canonical local path).
