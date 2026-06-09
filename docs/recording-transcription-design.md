@@ -45,20 +45,20 @@ The client must not operate LINE directly. The server must not receive raw audio
 
 The feature should only exist in client mode.
 
-Implementation should gate all user-visible controls and all HTTP APIs behind a single runtime role resolver. Do not use a loose LINE heuristic such as "lineEnabled=false means client mode" as the feature contract. The intended condition is:
+Implementation should gate all user-visible controls and all HTTP APIs behind a single runtime role resolver. The intended condition is:
 
 ```text
 ambient context stream is available iff runtime role == client
 ```
 
-Current source note (verified): `AppConfig` defines `nodeRole` and `load()` reads it (`AppConfig.swift:130-132`), but the persistence is asymmetric and broken — `save(_:)` actively calls `removeObject(forKey: Keys.nodeRole)` on every save (`:220`), and `nodeRole` defaults to `.client` (`:53`). So role cannot currently be pinned as `server`; it reverts to `client` on the next save. The same pattern strips `federationEnabled` (`:246`), and the Federation start gate depends on it — so fixing role resolution and clarifying Federation startup are entangled through the same stripping `save()`.
+Resolved role signal (investigation done): do **not** revive a persisted `nodeRole`, and do **not** key off `lineEnabled`. `nodeRole` still exists and is reported as `node_role` (`BridgeCore.swift`), but its persistence was deliberately removed in commit `9081835` ("refactor: remove role-gated standalone config"); `save(_:)` strips it (`AppConfig.swift:220`) and it defaults to `.client`, so it reads identically on both hosts and cannot discriminate. `lineEnabled` happens to differ (server on / client off) but is a LINE concern, not an identity one.
 
-Prerequisite (do not skip): before reviving role persistence, first investigate **why** `save()` strips `nodeRole`. It was removed deliberately; blindly restoring it risks re-introducing whatever motivated the removal (likely a prior incident where role mis-persisted on the server host). Restore persistence only after that cause is understood. Otherwise the UI could show recording controls on the wrong host.
+The honest, already-persisted client signal is the Gateway relationship. The **server hosts the OpenClaw Gateway locally** (its `openclawHost` resolves to itself / localhost). The **client points `openclawHost` at a remote Gateway** — it is a Gateway consumer, not the host. Resolve `runtimeRole` from this: a host whose `openclawHost` targets a remote Gateway is the client. Wrap it as a single resolver so the feature contract reads `role == client`, while the source of truth stays the existing client configuration — no new persisted state, no reviving `nodeRole`, no `lineEnabled`.
 
 Recommended behavior:
 
-- Client mode: show the Context Stream UI and allow local capture/transcription.
-- Server mode: hide the UI, omit the option from settings, and return `403 client_only_feature` for direct API calls.
+- Client mode: show the Context Stream controls in the menu bar and allow local capture/transcription.
+- Server mode: hide the menu-bar controls, omit the option from settings, and return `403 client_only_feature` for direct API calls.
 
 ## Recording vs Context Stream State
 
@@ -444,7 +444,6 @@ The design is ready for implementation when it answers these questions without a
 These are unresolved and must be settled before or during implementation:
 
 - **Microphone coexistence**: ClawGate runs its own always-on capture while another voice-recording app may also hold the mic on the same host. Decide the coexistence rule (mutually exclusive capture, or tolerated duplication with bounded power/disk cost).
-- **`nodeRole` strip cause**: `save(_:)` deliberately removes `nodeRole`. Investigate why before restoring persistence (blind revival risks re-triggering the original reason). See Client-Mode Availability.
 - **pyannote runtime weight**: a resident Python/torch diarization process vs the 30–60s delta cadence — confirm the per-window diarization latency is acceptable and the footprint is tolerable on a client Mac.
 - **Retention / privacy concrete values**: rolling retention (default 6h), chunk size, and third-party-audio handling need final numbers and a consent posture, not just defaults.
 - **Context-intake contract (cross-lane)**: the OpenClaw-side intake contract is owned by the oc-general lane and must be coordinated there before client delivery is testable.
