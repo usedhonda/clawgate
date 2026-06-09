@@ -415,6 +415,7 @@ private final class PetTabHeaderNSView: NSView {
         ("Summon", "summon"),
         ("Notifs", "notifications"),
         ("Local", "local"),
+        ("Log", "log"),
     ]
 
     override init(frame frameRect: NSRect) {
@@ -556,6 +557,8 @@ struct PetChatContainerView: View {
                 SummonResultsView(model: model)
             case "local":
                 LocalResultsView(model: model)
+            case "log":
+                AmbientLogPetView()
             default:
                 NotificationListView(model: model)
             }

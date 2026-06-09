@@ -19,7 +19,6 @@ final class MainPanelModel: ObservableObject {
 struct MainPanelView: View {
     private enum Tab: String, CaseIterable {
         case monitor  = "Monitor"
-        case log      = "Log"
         case avatar   = "Avatar"
         case vibeterm = "VibeTerm"
         case config   = "Config"
@@ -27,7 +26,6 @@ struct MainPanelView: View {
         var systemImage: String {
             switch self {
             case .monitor:  return "waveform.path.ecg"
-            case .log:      return "text.bubble"
             case .avatar:   return "person.crop.circle"
             case .vibeterm: return "terminal"
             case .config:   return "gearshape"
@@ -47,10 +45,7 @@ struct MainPanelView: View {
     @State private var selectedTab: Tab = .monitor
 
     private var visibleTabs: [Tab] {
-        // Conversation Log is a client-only feature (ambient capture runs on the
-        // client, the host that points at a remote Gateway).
-        if ConfigStore().load().isClientRole { return Tab.allCases }
-        return Tab.allCases.filter { $0 != .log }
+        Tab.allCases
     }
 
     var body: some View {
@@ -165,8 +160,6 @@ struct MainPanelView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-        case .log:
-            AmbientLogView()
         case .avatar:
             ScrollView(showsIndicators: false) {
                 AvatarSettingsView(petModel: petModel)
@@ -357,84 +350,5 @@ struct CollapsedBarView: View {
                 isHovered = hovering
                 if hovering { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
             }
-    }
-}
-
-// MARK: - Ambient Conversation Log
-
-private struct AmbientLogEntry: Identifiable {
-    let id = UUID()
-    let text: String
-}
-
-private final class AmbientLogModel: ObservableObject {
-    @Published var entries: [AmbientLogEntry] = []
-    @Published var sessionLabel: String = ""
-    private var timer: Timer?
-
-    func start() {
-        load()
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-            self?.load()
-        }
-    }
-
-    func stop() {
-        timer?.invalidate()
-        timer = nil
-    }
-
-    private func load() {
-        let (label, segs) = AmbientStorage.latestSessionSegments(limit: 300)
-        sessionLabel = label
-        entries = segs.map { AmbientLogEntry(text: $0.text) }
-    }
-}
-
-/// Conversation Log tab: shows the ambient transcript of the surrounding
-/// conversation (most recent session), scrollable and auto-refreshing. The
-/// machine transcript is not quote-safe — treat it as context, not record.
-struct AmbientLogView: View {
-    @StateObject private var model = AmbientLogModel()
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
-            PanelSectionHeader(title: "Conversation Log")
-
-            if !model.sessionLabel.isEmpty {
-                Text(model.sessionLabel)
-                    .font(PanelTheme.smallFont)
-                    .foregroundStyle(PanelTheme.textTertiary)
-            }
-
-            if model.entries.isEmpty {
-                Text("No ambient conversation yet. Start Context Stream from the menu bar (right-click the menu-bar icon) to begin capturing nearby speech.")
-                    .font(PanelTheme.bodyFont)
-                    .foregroundStyle(PanelTheme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView(showsIndicators: true) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(model.entries) { entry in
-                                Text(entry.text)
-                                    .font(PanelTheme.bodyFont)
-                                    .foregroundStyle(PanelTheme.textPrimary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            Color.clear.frame(height: 1).id("ambient-log-bottom")
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .onChange(of: model.entries.count) { _ in
-                        proxy.scrollTo("ambient-log-bottom", anchor: .bottom)
-                    }
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
     }
 }
