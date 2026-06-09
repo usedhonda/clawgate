@@ -64,4 +64,28 @@ enum AmbientStorage {
     static func sessionDir(_ sessionID: String) -> URL {
         sessionsRoot.appendingPathComponent(sessionID, isDirectory: true)
     }
+
+    /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune
+    /// emptied day directories. Sessions under sessions/ are intentionally NOT
+    /// touched — they are kept until explicit deletion (design retention policy).
+    static func pruneRolling(olderThan seconds: TimeInterval, now: Date = Date()) {
+        let fm = FileManager.default
+        let cutoff = now.addingTimeInterval(-seconds)
+        guard let dayDirs = try? fm.contentsOfDirectory(
+            at: rollingRoot, includingPropertiesForKeys: nil) else { return }
+        for dayDir in dayDirs {
+            guard let chunks = try? fm.contentsOfDirectory(
+                at: dayDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { continue }
+            for chunk in chunks {
+                let mod = (try? chunk.resourceValues(forKeys: [.contentModificationDateKey]))?
+                    .contentModificationDate
+                if let mod, mod < cutoff {
+                    try? fm.removeItem(at: chunk)
+                }
+            }
+            if let remaining = try? fm.contentsOfDirectory(atPath: dayDir.path), remaining.isEmpty {
+                try? fm.removeItem(at: dayDir)
+            }
+        }
+    }
 }

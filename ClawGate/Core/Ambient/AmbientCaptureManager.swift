@@ -24,6 +24,8 @@ final class AmbientCaptureManager {
     /// Carry the last N samples into the next chunk so a sentence split across
     /// the boundary keeps context (matches the 3s overlap in the STT preset).
     private let overlapFrames: Int
+    /// Rolling-buffer retention; chunks older than this are pruned on rotation.
+    private let retentionSeconds: TimeInterval
 
     private var currentFile: AVAudioFile?
     private var currentChunkURL: URL?
@@ -39,9 +41,13 @@ final class AmbientCaptureManager {
     var onChunkReady: ((URL) -> Void)?
     private let log: (String) -> Void
 
-    init(chunkSeconds: Int = 30, overlapSeconds: Int = 3, log: @escaping (String) -> Void = { _ in }) {
+    init(chunkSeconds: Int = 30,
+         overlapSeconds: Int = 3,
+         retentionSeconds: TimeInterval = 6 * 3600,
+         log: @escaping (String) -> Void = { _ in }) {
         self.chunkSeconds = max(5, chunkSeconds)
         self.overlapFrames = max(0, overlapSeconds) * 16_000
+        self.retentionSeconds = retentionSeconds
         self.log = log
         self.recordFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -170,7 +176,11 @@ final class AmbientCaptureManager {
             return
         }
         let cb = onChunkReady
-        DispatchQueue.global(qos: .utility).async { cb?(url) }
+        let retain = retentionSeconds
+        DispatchQueue.global(qos: .utility).async {
+            cb?(url)
+            AmbientStorage.pruneRolling(olderThan: retain)
+        }
     }
 
     // MARK: - Audio thread
