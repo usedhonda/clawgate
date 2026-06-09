@@ -126,23 +126,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             // about: Off / Recording / Paused. The raw capture+stream axes
             // ("capture=idle stream=off") were jargon and showed a nonsensical
             // "Resume" when nothing was paused.
-            // The only thing the user asked to see at a glance: recording or
-            // not. One status line + one toggle — no jargon, no extra items.
-            let header = NSMenuItem(
-                title: snap.streaming ? "🔴 Recording" : "⚪️ Not recording",
-                action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            if snap.streaming, let last = snap.lastText, !last.isEmpty {
-                let t = NSMenuItem(title: "  ↳ \(String(last.prefix(48)))", action: nil, keyEquivalent: "")
-                t.isEnabled = false
-                menu.addItem(t)
-            }
-            menu.addItem(NSMenuItem.separator())
+            // One line: the icon is the status (🔴 recording / ⚪️ not), the
+            // verb is the action, the click toggles. No separate status row.
             if snap.streaming {
-                menu.addItem(withTitle: "Stop Recording", action: #selector(ambientStopStream), keyEquivalent: "")
+                menu.addItem(withTitle: "🔴 Stop Recording", action: #selector(ambientStopStream), keyEquivalent: "")
             } else {
-                menu.addItem(withTitle: "Start Recording", action: #selector(ambientStartStream), keyEquivalent: "")
+                menu.addItem(withTitle: "⚪️ Start Recording", action: #selector(ambientStartStream), keyEquivalent: "")
             }
             menu.addItem(NSMenuItem.separator())
         }
