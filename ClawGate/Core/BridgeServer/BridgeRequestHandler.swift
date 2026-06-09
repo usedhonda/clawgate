@@ -45,6 +45,13 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.GET, "/v1/project-context-read"),
         (.POST, "/v1/line/ensure-conversation"),
         (.POST, "/v1/debug/reset-line-baseline"),
+        (.GET, "/v1/ambient/status"),
+        (.POST, "/v1/ambient/stream/start"),
+        (.POST, "/v1/ambient/stream/stop"),
+        (.POST, "/v1/ambient/capture/pause"),
+        (.POST, "/v1/ambient/capture/resume"),
+        (.GET, "/v1/ambient/sessions"),
+        (.GET, "/v1/ambient/transcript"),
     ]
 
     private var requestHead: HTTPRequestHead?
@@ -234,6 +241,21 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.ensureLineConversation(body: bodyData, pathAndQuery: head.uri, headers: head.headers, traceID: traceID)
             } else if method == .POST && path == "/v1/debug/reset-line-baseline" {
                 result = core.resetLineBaseline()
+            } else if method == .GET && path == "/v1/ambient/status" {
+                result = core.ambientStatus()
+            } else if method == .POST && path == "/v1/ambient/stream/start" {
+                result = core.ambientStreamStart()
+            } else if method == .POST && path == "/v1/ambient/stream/stop" {
+                result = core.ambientStreamStop()
+            } else if method == .POST && path == "/v1/ambient/capture/pause" {
+                result = core.ambientCapturePause()
+            } else if method == .POST && path == "/v1/ambient/capture/resume" {
+                result = core.ambientCaptureResume()
+            } else if method == .GET && path == "/v1/ambient/sessions" {
+                result = core.ambientSessions()
+            } else if method == .GET && path == "/v1/ambient/transcript" {
+                let sessionID = components?.queryItems?.first(where: { $0.name == "session_id" })?.value ?? ""
+                result = core.ambientTranscript(sessionID: sessionID)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()

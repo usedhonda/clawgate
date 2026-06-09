@@ -14,6 +14,9 @@ final class BridgeCore {
     var lineHealthCaretaker: LineHealthCaretaker?
     var gatewayHealthMonitor: GatewayHealthMonitor?
 
+    /// Set by main.swift in client mode; backs the /v1/ambient/* endpoints.
+    var ambientController: AmbientController?
+
     /// Set by main.swift; used for tmux_session_discovery doctor check.
     weak var tmuxDirectPoller: TmuxDirectPoller?
 
@@ -754,6 +757,76 @@ final class BridgeCore {
         }
         watcher.resetBaseline()
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: "baseline_reset", error: nil)))
+    }
+
+    // MARK: - Ambient Context Stream (client-only)
+
+    private func ambientUnavailable() -> HTTPResult {
+        let payload = ErrorPayload(code: "client_only_feature", message: "Ambient Context Stream is only available in client mode.", retriable: false, failedStep: "ambient", details: nil)
+        return jsonResponse(status: .forbidden, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+    }
+
+    private func ambientRunControl(_ c: AmbientController, _ op: (@escaping (Result<Void, AmbientController.ControlError>) -> Void) -> Void) -> HTTPResult {
+        let sem = DispatchSemaphore(value: 0)
+        var outcome: Result<Void, AmbientController.ControlError> = .failure(.captureFailed("timeout"))
+        op { r in outcome = r; sem.signal() }
+        _ = sem.wait(timeout: .now() + 30)
+        switch outcome {
+        case .success:
+            return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
+        case .failure(let e):
+            let status: HTTPResponseStatus
+            let code: String
+            switch e {
+            case .clientOnly: status = .forbidden; code = "client_only_feature"
+            case .micDenied: status = .forbidden; code = "mic_denied"
+            case .captureFailed: status = .internalServerError; code = "capture_failed"
+            }
+            let payload = ErrorPayload(code: code, message: "\(e)", retriable: false, failedStep: "ambient", details: nil)
+            return jsonResponse(status: status, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+        }
+    }
+
+    func ambientStatus() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
+    }
+
+    func ambientStreamStart() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        return ambientRunControl(c) { c.startStream(completion: $0) }
+    }
+
+    func ambientStreamStop() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        c.stopStream()
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
+    }
+
+    func ambientCapturePause() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        c.pauseCapture()
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
+    }
+
+    func ambientCaptureResume() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        return ambientRunControl(c) { c.resumeCapture(completion: $0) }
+    }
+
+    func ambientSessions() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.sessionIDs(), error: nil)))
+    }
+
+    func ambientTranscript(sessionID: String) -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        guard let text = c.transcriptText(sessionID: sessionID) else {
+            let payload = ErrorPayload(code: "not_found", message: "transcript not found", retriable: false, failedStep: "ambient", details: nil)
+            return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+        }
+        struct TranscriptResult: Codable { let sessionID: String; let text: String }
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: TranscriptResult(sessionID: sessionID, text: text), error: nil)))
     }
 
     func tprojMsgDeliver(body: Data) -> HTTPResult {

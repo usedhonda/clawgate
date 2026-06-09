@@ -96,6 +96,17 @@ final class AppRuntime {
         configStore: configStore
     )
 
+    /// Ambient Context Stream (client-only). Backs /v1/ambient/* and the menu-bar controls.
+    private lazy var ambientController = AmbientController(
+        configStore: configStore,
+        log: { [weak self] msg in self?.logger.log(.info, msg) }
+    )
+
+    /// The ambient controller when this host is the client, else nil (server hides the feature).
+    func ambient() -> AmbientController? {
+        configStore.load().isClientRole ? ambientController : nil
+    }
+
     // Keep a weak reference to the delegate for session menu updates
     weak var menuBarDelegate: MenuBarAppDelegate?
 
@@ -151,6 +162,14 @@ final class AppRuntime {
         // Connect lineInboundWatcher to core for /v1/debug/line-dedup endpoint
         core.lineInboundWatcher = inboundWatcher
         core.lineHealthCaretaker = lineHealthCaretaker
+
+        // Ambient Context Stream is client-only (host that points at a remote Gateway).
+        if configStore.load().isClientRole {
+            core.ambientController = ambientController
+            logger.log(.info, "Ambient Context Stream available (client role)")
+        } else {
+            logger.log(.info, "Ambient Context Stream disabled (server role)")
+        }
 
         // Forward petChromeCaptureFired → EventBus (PetModel → Chrome extension poll)
         NotificationCenter.default.addObserver(

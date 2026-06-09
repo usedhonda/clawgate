@@ -117,6 +117,34 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func showStatusItemMenu() {
         let menu = NSMenu()
+
+        // Ambient Context Stream controls (client-only). The menu bar must let
+        // the user stop/resume capture at any moment — a hard privacy requirement.
+        if let ambient = runtime.ambient() {
+            let snap = ambient.snapshot()
+            let header = NSMenuItem(
+                title: "Ambient: capture=\(snap.captureState) stream=\(snap.streaming ? "on" : "off")",
+                action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            if let last = snap.lastText, !last.isEmpty {
+                let t = NSMenuItem(title: "  ↳ \(String(last.prefix(48)))", action: nil, keyEquivalent: "")
+                t.isEnabled = false
+                menu.addItem(t)
+            }
+            if snap.streaming {
+                menu.addItem(withTitle: "Stop Context Stream", action: #selector(ambientStopStream), keyEquivalent: "")
+            } else {
+                menu.addItem(withTitle: "Start Context Stream", action: #selector(ambientStartStream), keyEquivalent: "")
+            }
+            if snap.captureState == "capturing" {
+                menu.addItem(withTitle: "Pause Capture", action: #selector(ambientPauseCapture), keyEquivalent: "")
+            } else {
+                menu.addItem(withTitle: "Resume Capture", action: #selector(ambientResumeCapture), keyEquivalent: "")
+            }
+            menu.addItem(NSMenuItem.separator())
+        }
+
         menu.addItem(withTitle: "Quit ClawGate", action: #selector(quit), keyEquivalent: "q")
         statusItem?.menu = menu
         statusItem?.button?.performClick(nil)
@@ -124,6 +152,34 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         DispatchQueue.main.async { [weak self] in
             self?.statusItem?.menu = nil
         }
+    }
+
+    @objc private func ambientStartStream() {
+        runtime.ambient()?.startStream { [weak self] result in
+            if case .failure(let err) = result {
+                DispatchQueue.main.async { self?.presentAmbientError("\(err)") }
+            }
+        }
+    }
+
+    @objc private func ambientStopStream() { runtime.ambient()?.stopStream() }
+
+    @objc private func ambientPauseCapture() { runtime.ambient()?.pauseCapture() }
+
+    @objc private func ambientResumeCapture() {
+        runtime.ambient()?.resumeCapture { [weak self] result in
+            if case .failure(let err) = result {
+                DispatchQueue.main.async { self?.presentAmbientError("\(err)") }
+            }
+        }
+    }
+
+    private func presentAmbientError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Ambient Context Stream"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 
     private func configureMainPanel() {
