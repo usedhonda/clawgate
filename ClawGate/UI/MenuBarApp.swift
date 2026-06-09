@@ -122,25 +122,27 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // the user stop/resume capture at any moment — a hard privacy requirement.
         if let ambient = runtime.ambient() {
             let snap = ambient.snapshot()
+            // One plain status line for the three real states the user cares
+            // about: Off / Recording / Paused. The raw capture+stream axes
+            // ("capture=idle stream=off") were jargon and showed a nonsensical
+            // "Resume" when nothing was paused.
+            // The only thing the user asked to see at a glance: recording or
+            // not. One status line + one toggle — no jargon, no extra items.
             let header = NSMenuItem(
-                title: "Ambient: capture=\(snap.captureState) stream=\(snap.streaming ? "on" : "off")",
+                title: snap.streaming ? "🔴 Recording" : "⚪️ Not recording",
                 action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            if let last = snap.lastText, !last.isEmpty {
+            if snap.streaming, let last = snap.lastText, !last.isEmpty {
                 let t = NSMenuItem(title: "  ↳ \(String(last.prefix(48)))", action: nil, keyEquivalent: "")
                 t.isEnabled = false
                 menu.addItem(t)
             }
+            menu.addItem(NSMenuItem.separator())
             if snap.streaming {
-                menu.addItem(withTitle: "Stop Context Stream", action: #selector(ambientStopStream), keyEquivalent: "")
+                menu.addItem(withTitle: "Stop Recording", action: #selector(ambientStopStream), keyEquivalent: "")
             } else {
-                menu.addItem(withTitle: "Start Context Stream", action: #selector(ambientStartStream), keyEquivalent: "")
-            }
-            if snap.captureState == "capturing" {
-                menu.addItem(withTitle: "Pause Capture", action: #selector(ambientPauseCapture), keyEquivalent: "")
-            } else {
-                menu.addItem(withTitle: "Resume Capture", action: #selector(ambientResumeCapture), keyEquivalent: "")
+                menu.addItem(withTitle: "Start Recording", action: #selector(ambientStartStream), keyEquivalent: "")
             }
             menu.addItem(NSMenuItem.separator())
         }
