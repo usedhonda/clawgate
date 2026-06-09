@@ -65,6 +65,34 @@ enum AmbientStorage {
         sessionsRoot.appendingPathComponent(sessionID, isDirectory: true)
     }
 
+    /// The most recent session's kept transcript segments (chronological), for
+    /// the Conversation Log UI. Returns (sessionID, segments capped at limit).
+    static func latestSessionSegments(limit: Int) -> (String, [TranscriptSegment]) {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(at: sessionsRoot, includingPropertiesForKeys: nil) else {
+            return ("", [])
+        }
+        let sessionDirs = dirs
+            .filter { $0.lastPathComponent.hasPrefix("ctx-") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard let latest = sessionDirs.last else { return ("", []) }
+        let raw = latest.appendingPathComponent("transcripts/raw.jsonl")
+        guard let data = try? Data(contentsOf: raw),
+              let text = String(data: data, encoding: .utf8) else {
+            return (latest.lastPathComponent, [])
+        }
+        let decoder = JSONDecoder()
+        var segs: [TranscriptSegment] = []
+        for line in text.split(separator: "\n") {
+            if let d = line.data(using: .utf8),
+               let seg = try? decoder.decode(TranscriptSegment.self, from: d) {
+                segs.append(seg)
+            }
+        }
+        if segs.count > limit { segs = Array(segs.suffix(limit)) }
+        return (latest.lastPathComponent, segs)
+    }
+
     /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune
     /// emptied day directories. Sessions under sessions/ are intentionally NOT
     /// touched — they are kept until explicit deletion (design retention policy).
