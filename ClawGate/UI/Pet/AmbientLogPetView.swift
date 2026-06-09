@@ -35,6 +35,11 @@ private final class AmbientLogModel: ObservableObject {
 struct AmbientLogPetView: View {
     @StateObject private var model = AmbientLogModel()
 
+    /// Opaque panel fill so a sparse log (one short segment) doesn't leave the
+    /// translucent window showing the desktop/tmux behind it — that bleed-through
+    /// reads as if the Log tab contained unrelated content.
+    private static let panelBg = Color(red: 0.11, green: 0.12, blue: 0.16)
+
     var body: some View {
         Group {
             if model.entries.isEmpty {
@@ -44,6 +49,7 @@ struct AmbientLogPetView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Self.panelBg)
         .onAppear { model.start() }
         .onDisappear { model.stop() }
     }
