@@ -183,8 +183,8 @@ final class AmbientController {
             do {
                 // Energy gate: whisper hallucinates ("Thank you." etc.) on silence,
                 // which would pollute always-on ambient context. Skip near-silent
-                // chunks before transcription. (Floor is conservative; tune with real
-                // silence-vs-speech RMS data.)
+                // chunks before transcription. (Floor calibrated against real
+                // silence-vs-speech RMS — see silenceFloorRMS.)
                 let rms = Self.chunkRMS(url)
                 if let rms, rms < Self.silenceFloorRMS {
                     self.log(String(format: "ambient chunk gated rms=%.4f < %.4f (silent)", rms, Self.silenceFloorRMS))
@@ -296,8 +296,11 @@ final class AmbientController {
     // MARK: - Helpers
 
     /// RMS below which a chunk is treated as silence and not transcribed.
-    /// Conservative default; calibrate against real silence-vs-speech samples.
-    private static let silenceFloorRMS: Float = 0.005
+    /// Calibrated 2026-06-09 against 61 real chunks: whisper hallucinations
+    /// ("Thank you." / "ご視聴ありがとうございました") clustered in the 0.005–0.015
+    /// near-silence band (noise floor, peak < 0.5), while genuine speech sat at
+    /// rms ≥ 0.017 with peak ≈ 1.0. 0.005 let the whole hallucination band through.
+    private static let silenceFloorRMS: Float = 0.015
 
     /// Root-mean-square level of a WAV chunk (0…1 for Float32 PCM).
     private static func chunkRMS(_ url: URL) -> Float? {
