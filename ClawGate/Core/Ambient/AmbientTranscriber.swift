@@ -7,6 +7,23 @@ struct TranscriptSegment: Codable, Equatable {
     let text: String
 }
 
+/// Named STT quality preset — noisy-room tuned defaults from
+/// docs/ambient-stt-quality.md. `maxContext: 0` is the main loop-repetition
+/// killer; thresholds + duplicate filtering trim hallucinated filler.
+struct AmbientPreset: Codable {
+    var name = "large-metal-noisy-room-v1"
+    var engine = "whisper.cpp"
+    var backend = "Metal"
+    var model = "large-v3-turbo"
+    var maxContext = 0
+    var beamSize = 5
+    var noSpeechThreshold = 0.30
+    var entropyThreshold = 2.80
+    var duplicateFilter = true
+
+    static let defaultPrompt = "This is a live room conversation. Expect startup, product, revenue, fundraising, operations, engineering, and personal-assistant context. Preserve names and technical terms when heard. Do not invent content for unclear audio."
+}
+
 /// Shells out to a whisper.cpp `whisper-cli` binary to transcribe a WAV chunk.
 ///
 /// The binary and model are provisioned out-of-repo under Application Support
@@ -37,11 +54,17 @@ final class AmbientTranscriber {
 
     let binary: URL
     let model: URL
+    let preset: AmbientPreset
+    let prompt: String
 
     init(binary: URL = AmbientStorage.defaultWhisperBinary,
-         model: URL = AmbientStorage.defaultWhisperModel) {
+         model: URL = AmbientStorage.defaultWhisperModel,
+         preset: AmbientPreset = AmbientPreset(),
+         prompt: String = AmbientPreset.defaultPrompt) {
         self.binary = binary
         self.model = model
+        self.preset = preset
+        self.prompt = prompt
     }
 
     var isAvailable: Bool {
@@ -71,6 +94,11 @@ final class AmbientTranscriber {
             "-of", prefix.path,
             "-l", language ?? "auto",
             "-t", "\(max(2, ProcessInfo.processInfo.activeProcessorCount - 2))",
+            "-mc", "\(preset.maxContext)",
+            "-bs", "\(preset.beamSize)",
+            "-nth", "\(preset.noSpeechThreshold)",
+            "-et", "\(preset.entropyThreshold)",
+            "--prompt", prompt,
             "-np",
         ]
         let errPipe = Pipe()

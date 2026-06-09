@@ -83,6 +83,7 @@ final class AmbientController {
                         self.sessionID = Self.newSessionID()
                         self.segmentsTotal = 0
                         AmbientStorage.ensureDir(self.transcriptDir())
+                        self.writeSessionMetadata()
                     }
                     self.streaming = true
                     self.lastError = nil
@@ -189,6 +190,26 @@ final class AmbientController {
     private func transcriptDir() -> URL {
         AmbientStorage.sessionDir(sessionID ?? "unknown")
             .appendingPathComponent("transcripts", isDirectory: true)
+    }
+
+    /// Record the active STT preset/model/thresholds for the session so later
+    /// transcript-quality problems can be debugged (docs/ambient-stt-quality.md).
+    private func writeSessionMetadata() {
+        guard let sid = sessionID else { return }
+        struct Meta: Codable {
+            let preset: AmbientPreset
+            let chunkSeconds: Int
+            let promptUsed: Bool
+        }
+        let meta = Meta(
+            preset: transcriber.preset,
+            chunkSeconds: capture.chunkSeconds,
+            promptUsed: !transcriber.prompt.isEmpty
+        )
+        let url = AmbientStorage.sessionDir(sid).appendingPathComponent("preset.json")
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? enc.encode(meta) { try? data.write(to: url) }
     }
 
     private func appendTranscripts(_ segments: [TranscriptSegment]) {
