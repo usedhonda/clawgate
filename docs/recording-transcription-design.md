@@ -1,8 +1,14 @@
 # ClawGate Ambient Context Stream Design
 
-> Status: design note only
+> Status: design note + partial implementation
 > Scope: client-side recording, transcription, speaker diarization, and OpenClaw context delivery
-> Non-goal: implementation, build changes, release changes, or LINE behavior changes
+> Non-goal (of the original note): implementation, build changes, release changes, or LINE behavior changes
+
+## Implementation Status (2026-06-09)
+
+The **client-side recording → text-transcription slice is implemented and verified end-to-end** on the client host (`ClawGate/Core/Ambient/`): runtime-role gate, `AVAudioEngine` capture into rolling 16 kHz mono WAV chunks, whisper.cpp transcription into per-session transcripts, `/v1/ambient/*` HTTP API, and menu-bar Start/Stop/Pause/Resume controls. whisper.cpp (`whisper-cli` + `ggml-large-v3-turbo`) is provisioned under Application Support. Live verified: mic → capture → transcript text via the API.
+
+Still **not** implemented (out of the "recording → text" scope): speaker diarization (pyannote), self/other speaker identity, the local delivery queue, and OpenClaw delivery (`ambient.transcript.delta` over Gateway WS) — the last is blocked on the cross-lane context-intake contract (oc-general). See Open Items. Implementation gotchas captured in memory `ambient-capture-gotchas`.
 
 ## Purpose
 
