@@ -181,6 +181,20 @@ final class AmbientController {
             self.state.sync { self.pendingChunks += 1 }
             defer { self.state.sync { self.pendingChunks = max(0, self.pendingChunks - 1) } }
             do {
+                // Energy gate: whisper hallucinates ("Thank you." etc.) on silence,
+                // which would pollute always-on ambient context. Skip near-silent
+                // chunks before transcription. (Floor is conservative; tune with real
+                // silence-vs-speech RMS data.)
+                let rms = Self.chunkRMS(url)
+                if let rms, rms < Self.silenceFloorRMS {
+                    self.log(String(format: "ambient chunk gated rms=%.4f < %.4f (silent)", rms, Self.silenceFloorRMS))
+                    self.appendSkipped([SkippedSegment(
+                        reason: "low_confidence_no_speech",
+                        segment: TranscriptSegment(startSeconds: 0, endSeconds: 0,
+                                                   text: String(format: "(gated silent chunk rms=%.4f)", rms)))])
+                    self.state.sync { self.skippedTotal += 1 }
+                    return
+                }
                 let result = try self.transcriber.transcribe(chunk: url)
                 var kept: [TranscriptSegment] = []
                 var rollingSkipped: [SkippedSegment] = []
@@ -280,6 +294,25 @@ final class AmbientController {
     }
 
     // MARK: - Helpers
+
+    /// RMS below which a chunk is treated as silence and not transcribed.
+    /// Conservative default; calibrate against real silence-vs-speech samples.
+    private static let silenceFloorRMS: Float = 0.005
+
+    /// Root-mean-square level of a WAV chunk (0…1 for Float32 PCM).
+    private static func chunkRMS(_ url: URL) -> Float? {
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+        let frames = AVAudioFrameCount(file.length)
+        guard frames > 0,
+              let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames),
+              (try? file.read(into: buf)) != nil,
+              let ch = buf.floatChannelData else { return nil }
+        let n = Int(buf.frameLength)
+        guard n > 0 else { return nil }
+        var sum: Double = 0
+        for i in 0..<n { let v = Double(ch[0][i]); sum += v * v }
+        return Float((sum / Double(n)).squareRoot())
+    }
 
     private static func newSessionID() -> String {
         let fmt = ISO8601DateFormatter()
