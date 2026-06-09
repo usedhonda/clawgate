@@ -5,12 +5,21 @@ import AVFoundation
 /// whisper.cpp. Capture is independently controllable (start/pause/resume/stop)
 /// so the user can stop recording at any moment from the menu bar — a hard
 /// privacy requirement of the Ambient Context Stream design.
+///
+/// On-disk chunks are 16-bit PCM mono 16 kHz (what whisper.cpp wants). Note that
+/// `AVAudioFile.write(from:)` requires buffers in the file's *processingFormat*
+/// (Float32), not the on-disk Int16 format — so capture converts the mic input
+/// to a Float32 16 kHz mono record format and lets AVAudioFile encode Int16 to
+/// disk.
 final class AmbientCaptureManager {
     enum CaptureState: String { case idle, capturing, paused }
 
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
-    private let targetFormat: AVAudioFormat
+    /// Buffer format handed to AVAudioFile.write — must match AVAudioFile.processingFormat.
+    private let recordFormat: AVAudioFormat
+    /// On-disk encoding (16-bit PCM mono 16 kHz) for whisper.cpp.
+    private let fileSettings: [String: Any]
     private let chunkFrameLimit: AVAudioFrameCount
 
     private var currentFile: AVAudioFile?
@@ -26,15 +35,24 @@ final class AmbientCaptureManager {
     var onChunkReady: ((URL) -> Void)?
     private let log: (String) -> Void
 
-    init(chunkSeconds: Int = 60, log: @escaping (String) -> Void = { _ in }) {
-        self.chunkSeconds = max(10, chunkSeconds)
+    init(chunkSeconds: Int = 20, log: @escaping (String) -> Void = { _ in }) {
+        self.chunkSeconds = max(5, chunkSeconds)
         self.log = log
-        self.targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
+        self.recordFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
             sampleRate: 16_000,
             channels: 1,
-            interleaved: true
+            interleaved: false
         )!
+        self.fileSettings = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16_000,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+        ]
         self.chunkFrameLimit = AVAudioFrameCount(self.chunkSeconds * 16_000)
     }
 
@@ -95,12 +113,16 @@ final class AmbientCaptureManager {
 
     private func beginEngineLocked() throws {
         let input = engine.inputNode
-        let inputFormat = input.outputFormat(forBus: 0)
+        let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0 else {
             throw NSError(domain: "AmbientCapture", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "no input format (mic unavailable)"])
         }
-        converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        guard let conv = AVAudioConverter(from: inputFormat, to: recordFormat) else {
+            throw NSError(domain: "AmbientCapture", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "cannot build audio converter"])
+        }
+        converter = conv
         try openNewChunkLocked()
 
         input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
@@ -125,7 +147,7 @@ final class AmbientCaptureManager {
         chunkSeq += 1
         let name = String(format: "chunk-%06d.wav", chunkSeq)
         let url = dir.appendingPathComponent(name)
-        currentFile = try AVAudioFile(forWriting: url, settings: targetFormat.settings)
+        currentFile = try AVAudioFile(forWriting: url, settings: fileSettings)
         currentChunkURL = url
         framesInCurrentChunk = 0
     }
@@ -137,7 +159,7 @@ final class AmbientCaptureManager {
         currentChunkURL = nil
         framesInCurrentChunk = 0
         // Only surface chunks with real audio (skip empty stubs).
-        guard frames > 0 else {
+        guard frames > 16_000 else {  // < ~1s of audio
             try? FileManager.default.removeItem(at: url)
             return
         }
@@ -149,9 +171,9 @@ final class AmbientCaptureManager {
 
     private func handleTap(_ buffer: AVAudioPCMBuffer) {
         guard let converter else { return }
-        let ratio = targetFormat.sampleRate / buffer.format.sampleRate
+        let ratio = recordFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
-        guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity) else { return }
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: recordFormat, frameCapacity: capacity) else { return }
 
         var consumed = false
         var convErr: NSError?
@@ -161,7 +183,10 @@ final class AmbientCaptureManager {
             inStatus.pointee = .haveData
             return buffer
         }
-        guard status != .error, outBuf.frameLength > 0 else { return }
+        guard status != .error, outBuf.frameLength > 0 else {
+            if let convErr { log("ambient convert error: \(convErr.localizedDescription)") }
+            return
+        }
 
         lock.lock(); defer { lock.unlock() }
         guard let file = currentFile else { return }
