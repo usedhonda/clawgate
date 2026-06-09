@@ -38,14 +38,26 @@ final class AmbientTests: XCTestCase {
         XCTAssertEqual(segs[1].text, "The brass fox is awake.")
     }
 
-    func testFilterRepetitionsDropsConsecutiveDuplicates() {
+    func testClassifyDropsConsecutiveDuplicates() {
         let segs = [
             TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "hello"),
             TranscriptSegment(startSeconds: 1, endSeconds: 2, text: "hello"),
             TranscriptSegment(startSeconds: 2, endSeconds: 3, text: "world"),
         ]
-        let out = AmbientTranscriber.filterRepetitions(segs)
-        XCTAssertEqual(out.map(\.text), ["hello", "world"])
+        let r = AmbientTranscriber.classify(segs)
+        XCTAssertEqual(r.kept.map(\.text), ["hello", "world"])
+        XCTAssertEqual(r.skipped.map(\.reason), ["immediate_duplicate"])
+    }
+
+    func testClassifyFlagsInternalRepetition() {
+        XCTAssertTrue(AmbientTranscriber.isInternalRepetition("yeah yeah yeah yeah"))
+        XCTAssertFalse(AmbientTranscriber.isInternalRepetition("the brass fox is awake"))
+        XCTAssertFalse(AmbientTranscriber.isInternalRepetition("yeah yeah"))
+
+        let segs = [TranscriptSegment(startSeconds: 0, endSeconds: 2, text: "yeah yeah yeah yeah")]
+        let r = AmbientTranscriber.classify(segs)
+        XCTAssertTrue(r.kept.isEmpty)
+        XCTAssertEqual(r.skipped.map(\.reason), ["internal_repetition"])
     }
 
     func testStorageDefaultWhisperPathsUnderApplicationSupport() {

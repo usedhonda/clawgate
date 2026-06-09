@@ -7,6 +7,18 @@ struct TranscriptSegment: Codable, Equatable {
     let text: String
 }
 
+/// A segment dropped during filtering, with the reason (for skipped.jsonl audit).
+struct SkippedSegment: Codable, Equatable {
+    let reason: String
+    let segment: TranscriptSegment
+}
+
+/// Result of transcribing one chunk: kept segments plus what was filtered out.
+struct TranscriptionResult {
+    let kept: [TranscriptSegment]
+    let skipped: [SkippedSegment]
+}
+
 /// Named STT quality preset — noisy-room tuned defaults from
 /// docs/ambient-stt-quality.md. `maxContext: 0` is the main loop-repetition
 /// killer; thresholds + duplicate filtering trim hallucinated filler.
@@ -73,7 +85,7 @@ final class AmbientTranscriber {
     }
 
     /// Transcribe a WAV chunk. `language` nil → auto-detect.
-    func transcribe(chunk: URL, language: String? = nil) throws -> [TranscriptSegment] {
+    func transcribe(chunk: URL, language: String? = nil) throws -> TranscriptionResult {
         guard FileManager.default.isExecutableFile(atPath: binary.path) else {
             throw TranscribeError.binaryMissing(binary.path)
         }
@@ -122,7 +134,7 @@ final class AmbientTranscriber {
             throw TranscribeError.outputMissing(jsonURL.path)
         }
         let segments = try Self.parse(data)
-        return Self.filterRepetitions(segments)
+        return Self.classify(segments)
     }
 
     // MARK: - whisper.cpp JSON shape
@@ -152,14 +164,29 @@ final class AmbientTranscriber {
         }
     }
 
-    /// Drop obvious repeated loop text (consecutive identical segments) — a
-    /// common whisper hallucination on silence.
-    static func filterRepetitions(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
-        var out: [TranscriptSegment] = []
+    /// Split segments into kept vs skipped (with reasons) — drops consecutive
+    /// duplicates and internal-repetition hallucinations ("yeah yeah yeah ...").
+    static func classify(_ segments: [TranscriptSegment]) -> TranscriptionResult {
+        var kept: [TranscriptSegment] = []
+        var skipped: [SkippedSegment] = []
         for seg in segments {
-            if let last = out.last, last.text == seg.text { continue }
-            out.append(seg)
+            if isInternalRepetition(seg.text) {
+                skipped.append(SkippedSegment(reason: "internal_repetition", segment: seg))
+                continue
+            }
+            if let last = kept.last, last.text == seg.text {
+                skipped.append(SkippedSegment(reason: "immediate_duplicate", segment: seg))
+                continue
+            }
+            kept.append(seg)
         }
-        return out
+        return TranscriptionResult(kept: kept, skipped: skipped)
+    }
+
+    /// A segment that is essentially one short token/phrase repeated.
+    static func isInternalRepetition(_ text: String) -> Bool {
+        let words = text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        guard words.count >= 4 else { return false }
+        return Set(words).count <= max(1, words.count / 4)
     }
 }

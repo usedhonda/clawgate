@@ -21,11 +21,15 @@ final class AmbientCaptureManager {
     /// On-disk encoding (16-bit PCM mono 16 kHz) for whisper.cpp.
     private let fileSettings: [String: Any]
     private let chunkFrameLimit: AVAudioFrameCount
+    /// Carry the last N samples into the next chunk so a sentence split across
+    /// the boundary keeps context (matches the 3s overlap in the STT preset).
+    private let overlapFrames: Int
 
     private var currentFile: AVAudioFile?
     private var currentChunkURL: URL?
     private var framesInCurrentChunk: AVAudioFrameCount = 0
     private var chunkSeq = 0
+    private var overlapTail: [Float] = []
 
     private let lock = NSLock()
     private(set) var state: CaptureState = .idle
@@ -35,8 +39,9 @@ final class AmbientCaptureManager {
     var onChunkReady: ((URL) -> Void)?
     private let log: (String) -> Void
 
-    init(chunkSeconds: Int = 20, log: @escaping (String) -> Void = { _ in }) {
+    init(chunkSeconds: Int = 30, overlapSeconds: Int = 3, log: @escaping (String) -> Void = { _ in }) {
         self.chunkSeconds = max(5, chunkSeconds)
+        self.overlapFrames = max(0, overlapSeconds) * 16_000
         self.log = log
         self.recordFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -137,6 +142,7 @@ final class AmbientCaptureManager {
         if engine.isRunning { engine.stop() }
         if finalize { finalizeChunkLocked() }
         converter = nil
+        overlapTail.removeAll()
     }
 
     // MARK: - Chunk files (lock held except onChunkReady dispatch)
@@ -189,16 +195,52 @@ final class AmbientCaptureManager {
         }
 
         lock.lock(); defer { lock.unlock() }
+        guard currentFile != nil else { return }
+        writeBufferLocked(outBuf)
+    }
+
+    // MARK: - Write + overlap (lock held)
+
+    private func writeBufferLocked(_ buf: AVAudioPCMBuffer) {
         guard let file = currentFile else { return }
         do {
-            try file.write(from: outBuf)
-            framesInCurrentChunk += outBuf.frameLength
+            try file.write(from: buf)
+            framesInCurrentChunk += buf.frameLength
+            appendOverlapTail(buf)
             if framesInCurrentChunk >= chunkFrameLimit {
                 finalizeChunkLocked()
                 try openNewChunkLocked()
+                primeOverlapLocked()
             }
         } catch {
             log("ambient capture write error: \(error)")
+        }
+    }
+
+    /// Keep the most recent `overlapFrames` Float samples for the next chunk.
+    private func appendOverlapTail(_ buf: AVAudioPCMBuffer) {
+        guard overlapFrames > 0, let ch = buf.floatChannelData else { return }
+        let n = Int(buf.frameLength)
+        overlapTail.append(contentsOf: UnsafeBufferPointer(start: ch[0], count: n))
+        if overlapTail.count > overlapFrames {
+            overlapTail.removeFirst(overlapTail.count - overlapFrames)
+        }
+    }
+
+    /// Prepend the retained tail to a freshly opened chunk (3s overlap).
+    private func primeOverlapLocked() {
+        guard overlapFrames > 0, !overlapTail.isEmpty,
+              let buf = AVAudioPCMBuffer(pcmFormat: recordFormat,
+                                         frameCapacity: AVAudioFrameCount(overlapTail.count)),
+              let ch = buf.floatChannelData else { return }
+        let n = overlapTail.count
+        for i in 0..<n { ch[0][i] = overlapTail[i] }
+        buf.frameLength = AVAudioFrameCount(n)
+        do {
+            try currentFile?.write(from: buf)
+            framesInCurrentChunk += buf.frameLength
+        } catch {
+            log("ambient overlap prime error: \(error)")
         }
     }
 }

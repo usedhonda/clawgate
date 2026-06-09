@@ -18,6 +18,7 @@ final class AmbientController {
         var whisperAvailable: Bool
         var sessionID: String?
         var segmentsTotal: Int
+        var segmentsSkipped: Int
         var pendingChunks: Int
         var lastText: String?
         var lastError: String?
@@ -34,14 +35,18 @@ final class AmbientController {
     private var streaming = false
     private var sessionID: String?
     private var segmentsTotal = 0
+    private var skippedTotal = 0
     private var pendingChunks = 0
     private var lastText: String?
     private var lastError: String?
+    /// Recently kept segment texts, for cross-chunk rolling-duplicate filtering
+    /// (the 3s capture overlap re-transcribes boundary speech).
+    private var recentKeptTexts: [String] = []
 
     init(configStore: ConfigStore, log: @escaping (String) -> Void = { _ in }) {
         self.configStore = configStore
         self.log = log
-        self.capture = AmbientCaptureManager(chunkSeconds: 20, log: log)
+        self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.transcriber = AmbientTranscriber()
         self.capture.onChunkReady = { [weak self] url in self?.handleChunk(url) }
     }
@@ -82,6 +87,8 @@ final class AmbientController {
                     if self.sessionID == nil {
                         self.sessionID = Self.newSessionID()
                         self.segmentsTotal = 0
+                        self.skippedTotal = 0
+                        self.recentKeptTexts = []
                         AmbientStorage.ensureDir(self.transcriptDir())
                         self.writeSessionMetadata()
                     }
@@ -142,6 +149,7 @@ final class AmbientController {
                 whisperAvailable: transcriber.isAvailable,
                 sessionID: sessionID,
                 segmentsTotal: segmentsTotal,
+                segmentsSkipped: skippedTotal,
                 pendingChunks: pendingChunks,
                 lastText: lastText,
                 lastError: lastError
@@ -173,12 +181,29 @@ final class AmbientController {
             self.state.sync { self.pendingChunks += 1 }
             defer { self.state.sync { self.pendingChunks = max(0, self.pendingChunks - 1) } }
             do {
-                let segments = try self.transcriber.transcribe(chunk: url)
-                guard !segments.isEmpty else { return }
-                self.appendTranscripts(segments)
+                let result = try self.transcriber.transcribe(chunk: url)
+                var kept: [TranscriptSegment] = []
+                var rollingSkipped: [SkippedSegment] = []
                 self.state.sync {
-                    self.segmentsTotal += segments.count
-                    self.lastText = segments.last?.text
+                    for seg in result.kept {
+                        if self.recentKeptTexts.contains(seg.text) {
+                            rollingSkipped.append(SkippedSegment(reason: "rolling_duplicate", segment: seg))
+                        } else {
+                            kept.append(seg)
+                            self.recentKeptTexts.append(seg.text)
+                        }
+                    }
+                    if self.recentKeptTexts.count > 40 {
+                        self.recentKeptTexts.removeFirst(self.recentKeptTexts.count - 40)
+                    }
+                }
+                let allSkipped = result.skipped + rollingSkipped
+                if !kept.isEmpty { self.appendTranscripts(kept) }
+                if !allSkipped.isEmpty { self.appendSkipped(allSkipped) }
+                self.state.sync {
+                    self.segmentsTotal += kept.count
+                    self.skippedTotal += allSkipped.count
+                    if let last = kept.last { self.lastText = last.text }
                 }
             } catch {
                 self.state.sync { self.lastError = "\(error)" }
@@ -228,6 +253,19 @@ final class AmbientController {
         }
         append(rawLines, to: rawURL)
         append(mdLines, to: mdURL)
+    }
+
+    /// Record filtered-out segments with their reason for later quality audit.
+    private func appendSkipped(_ skipped: [SkippedSegment]) {
+        let url = transcriptDir().appendingPathComponent("skipped.jsonl")
+        let encoder = JSONEncoder()
+        var lines = ""
+        for s in skipped {
+            if let data = try? encoder.encode(s), let line = String(data: data, encoding: .utf8) {
+                lines += line + "\n"
+            }
+        }
+        append(lines, to: url)
     }
 
     private func append(_ text: String, to url: URL) {
