@@ -8,7 +8,7 @@
 
 The **client-side recording → text-transcription slice is implemented and verified end-to-end** on the client host (`ClawGate/Core/Ambient/`): runtime-role gate, `AVAudioEngine` capture into rolling 16 kHz mono WAV chunks, whisper.cpp transcription into per-session transcripts, `/v1/ambient/*` HTTP API, and menu-bar Start/Stop/Pause/Resume controls. whisper.cpp (`whisper-cli` + `ggml-large-v3-turbo`) is provisioned under Application Support. Live verified: mic → capture → transcript text via the API.
 
-Still **not** implemented (out of the "recording → text" scope): speaker diarization (pyannote), self/other speaker identity, the local delivery queue, and OpenClaw delivery (`ambient.transcript.delta` over Gateway WS) — the last is blocked on the cross-lane context-intake contract (oc-general). See Open Items. Implementation gotchas captured in memory `ambient-capture-gotchas`.
+Still **not** implemented (out of the "recording → text" scope): speaker diarization (pyannote), self/other speaker identity, the local delivery queue, and OpenClaw delivery (`ambient.ingest` req/res RPC over Gateway WS) — the last rides the cross-lane Ambient Context Contract (oc-general), whose first draft is now handed off (see Delivery Path). See Open Items. Implementation gotchas captured in memory `ambient-capture-gotchas`.
 
 ## Purpose
 
@@ -105,8 +105,8 @@ ambient-context/
 
 Suggested defaults:
 
-- audio chunks: 10 minutes
-- chunk overlap for ASR: 3 seconds
+- rolling capture chunks: 10 minutes is acceptable for storage, but the ASR worker should split or batch into 5-minute transcription windows
+- ASR chunk overlap: 3 seconds
 - rolling retention: 6 hours
 - saved sessions: retained until explicit deletion
 
@@ -134,6 +134,8 @@ The UI should make the separate states visible:
 
 Decision: ClawGate builds its **own** capture/ASR/diarization stack (whisper.cpp + pyannote + rolling buffer). It does not consume an external transcription app (e.g. a separately running voice-recording app on the same Mac). Trade-off accepted: a second always-on microphone consumer on the host, with duplicated power and disk cost — see Open Items for the coexistence rule that still needs deciding.
 
+For the STT quality preset, tuning rationale, known bad fallbacks, and benchmark acceptance criteria, use `docs/ambient-stt-quality.md` as the companion guide. The short version is: use the `large-metal-noisy-room-v1` preset, not a raw model picker.
+
 Use the same local-first approach as the retreat workflow:
 
 1. Capture or convert audio into ASR-friendly chunks.
@@ -150,12 +152,45 @@ Recommended ASR defaults:
 - acceleration: Metal
 - default model: `large-v3-turbo`
 - quality fallback: `large-v3`
-- speed fallback: `medium`
+- speed-only fallback: `medium`; do not treat `medium` as the quality fallback for noisy room audio
 - language: explicit when known, otherwise auto-detect
 - `max_context: 0`
 - `no_speech_threshold: 0.30`
 - `entropy_threshold: 2.80`
 - duplicate/repetition filtering enabled
+
+### ASR Tuning Rationale
+
+Carry over the tuning lessons from the retreat/noisy-room transcription workflow, not just the model name. The quality improvement came from the whole configuration:
+
+```text
+large-v3-turbo + whisper.cpp Metal
+5-minute ASR windows
+3-second overlap
+max_context = 0
+no_speech_threshold = 0.30
+entropy_threshold = 2.80
+contextual prompt with expected names/terms
+duplicate/repetition sidecar filtering
+```
+
+Observed behavior from that workflow:
+
+- `large-v3-turbo` was materially better than the earlier small-model transcript for synthesis and feedback work.
+- `large-v3-turbo` was fast enough on Apple Silicon with Metal, so speed alone did not justify dropping to `medium`.
+- `medium.en` is not a quality fallback for noisy room recordings; it also produced loop-like hallucinations in bad sections.
+- VAD made transcription faster but dropped too much useful content and still repeated on at least one noisy sample.
+- Greedy decoding worsened repeated hallucinations.
+- Baseline large settings still produced obvious repeated phrases; `max_context = 0` removed most of that repetition.
+- Threshold tuning reduced duplicate counts further without thinning useful content as much as VAD.
+
+For ClawGate, this means the first implementation should expose the ASR settings as named presets rather than only a model picker. A useful default preset name is:
+
+```text
+large-metal-noisy-room-v1
+```
+
+That preset should be considered the stable default for ambient context until ClawGate gathers its own side-by-side samples.
 
 Raw ASR output should be append-only. Cleaned transcript files may be regenerated.
 
@@ -238,15 +273,17 @@ OpenClaw needs enough metadata to understand when the conversation happened and 
 
 The event is context, not a command. It should not be delivered through the LINE adapter and should not be treated as a user instruction by default.
 
-Cross-lane ownership: the receiving context-intake contract lives in `~/projects/openclaw/oc-general/docs/contracts/` (alongside `event-contract.md`, `ws-event-contract.md`, `audio-fanout.md`). That hub is owned by the OpenClaw/oc-general lane — ClawGate cannot finalize the contract unilaterally. Because the agreed sequencing is "contract first," the first deliverable is a contract proposal handed to the oc-general lane, not client code. Note `audio-fanout.md` is the OpenClaw→client audio *out* (TTS) path, the opposite direction from this client→OpenClaw text *in* stream, so this is a sibling contract, not a duplicate; it should still reuse that hub's connect/subscribe envelope conventions.
+Cross-lane ownership: the receiving context-intake contract lives in `~/projects/openclaw/oc-general/docs/contracts/` (alongside `event-contract.md`, `ws-event-contract.md`, `audio-fanout.md`). That hub is owned by the OpenClaw/oc-general lane — ClawGate cannot finalize the contract unilaterally. Per the agreed "contract first" sequencing, the first deliverable was a contract proposal handed to the oc-general lane (not client code); that draft now exists as **Ambient Context Contract** (`ambient.ingest` RPC) and is staged for oc-general review+merge. Note `audio-fanout.md` is the OpenClaw→client audio *out* (TTS) path, the opposite direction from this client→OpenClaw text *in* stream, so this is a sibling contract, not a duplicate; it reuses that hub's connect envelope conventions.
 
-Suggested event type:
+Transport RPC (req/res with ACK, agreed cross-lane, supersedes the earlier `ambient.transcript.delta` WS-event sketch):
 
 ```text
-ambient.transcript.delta
+ambient.ingest
 ```
 
-Suggested top-level payload:
+> **Authoritative schema lives in the Ambient Context Contract**, not here. The contract defines the L1 state snapshot + L2 salient-event schemas, source tag, 3-layer dedup, privacy, throttle, and ACK/lifecycle. The payload sketch below predates the contract and is kept only as background intuition — defer to the contract on every field.
+
+Earlier payload sketch (background only, see note above):
 
 ```json
 {
@@ -295,13 +332,13 @@ Decided path (Gateway WS, not Federation):
 
 ```text
 Client capture/transcription
-  -> ambient.transcript.delta
-  -> Gateway WS (existing ClawGate connection: connect / sessions.messages.subscribe envelope)
-  -> server-side OpenClaw context intake
+  -> ambient.ingest (req/res RPC + ACK, operator.write)
+  -> Gateway WS (existing ClawGate connection: connect envelope)
+  -> server-side OpenClaw context intake (ambient-state.json / ambient-events.jsonl)
   -> OpenClaw agent context
 ```
 
-ClawGate is already a sanctioned Gateway WS consumer (`clawgate` in `oc-general/docs/contracts/audio-fanout.md`), using `connect`, `sessions.messages.subscribe`, and `chat.send` over event-contract v3 (port 18789). Ambient context delivery rides this proven connection by adding one new event type, reusing the existing connect/subscribe envelope conventions (`operator.read`/`operator.write`, `sessionKey`) rather than inventing a parallel scheme.
+ClawGate is already a sanctioned Gateway WS consumer (`clawgate` in `oc-general/docs/contracts/audio-fanout.md`), using `connect`, `sessions.messages.subscribe`, and `chat.send` over event-contract v3 (port 18789). Ambient context delivery rides this proven connection by adding one req/res RPC (`ambient.ingest`, scope `operator.write`), reusing the existing connect envelope conventions rather than inventing a parallel scheme. Unlike `chat.send`, `ambient.ingest` needs no subscription — it is a one-way producer→Gateway call whose ACK carries per-event idempotency/dedup status.
 
 Do not route ambient context through the FederationClient/FederationServer path. That cross-host ClawGate-to-ClawGate channel is gated on `cfg.federationEnabled`, which is `false` by default and is stripped on every `ConfigStore.save(_:)` (`AppConfig.swift:72`, `:246`), so it is dormant under normal config. Reviving a dormant transport and adding a server-side relay hop is strictly more work and risk than extending the live Gateway WS path. (An earlier draft's delivery diagram contradicted this section by routing through Federation; that contradiction is resolved here in favor of the Gateway WS path the prose already required.)
 
@@ -412,8 +449,8 @@ Relevant existing files:
 
 - `docs/SPEC-messaging.md`: current server/client topology and event model.
 - `ClawGate/Core/EventBus/EventBus.swift`: in-memory event buffer and payload shape.
-- `ClawGate/Core/OpenClaw/OpenClawWSClient.swift`: the live Gateway WS client (connect / subscribe / send). This is the delivery transport for `ambient.transcript.delta`, per the Delivery Path decision.
-- `ClawGate/Core/OpenClaw/OpenClawModels.swift`: Gateway WS message/event model shapes to extend for the new event type.
+- `ClawGate/Core/OpenClaw/OpenClawWSClient.swift`: the live Gateway WS client (connect / subscribe / send). This is the delivery transport for the `ambient.ingest` RPC, per the Delivery Path decision.
+- `ClawGate/Core/OpenClaw/OpenClawModels.swift`: Gateway WS message/RPC model shapes to extend for the `ambient.ingest` request/response.
 - `ClawGate/Core/Federation/*`: **not the transport for this feature** — listed only for context. `FederationClient`/`FederationServer` are dormant (gated on the off-by-default, save-stripped `federationEnabled`). Do not build ambient delivery on them.
 - `ClawGate/Core/BridgeServer/BridgeRequestHandler.swift`: route registration and threading model.
 - `ClawGate/Core/Config/AppConfig.swift`: `nodeRole` (note the broken save persistence at `:220`), LINE, and OpenClaw endpoint config.
