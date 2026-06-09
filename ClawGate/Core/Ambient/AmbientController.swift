@@ -41,7 +41,7 @@ final class AmbientController {
     init(configStore: ConfigStore, log: @escaping (String) -> Void = { _ in }) {
         self.configStore = configStore
         self.log = log
-        self.capture = AmbientCaptureManager(chunkSeconds: 60, log: log)
+        self.capture = AmbientCaptureManager(chunkSeconds: 20, log: log)
         self.transcriber = AmbientTranscriber()
         self.capture.onChunkReady = { [weak self] url in self?.handleChunk(url) }
     }
