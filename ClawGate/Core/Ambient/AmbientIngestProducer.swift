@@ -30,6 +30,21 @@ struct AmbientStateL1: Encodable {
     let sources: [AmbientSourceRef]
 }
 
+/// L2 salient event (contract "L2 Salient Event Schema").
+struct AmbientSalientEvent: Encodable {
+    let source: String
+    let sourceSeq: Int
+    let sourceEventId: String
+    let eventType: String
+    let normalizedSubject: String
+    let normalizedDateBucket: String?
+    let dedupKey: String
+    let summary: String
+    let confidence: Double
+    let sourceWindow: AmbientSourceWindow
+    let privacyFlags: [String]
+}
+
 struct AmbientIngestParams: Encodable {
     let source: String
     let device: String
@@ -40,6 +55,7 @@ struct AmbientIngestParams: Encodable {
     let sourceIds: [String]
     let confidence: Double
     let state: AmbientStateL1
+    let events: [AmbientSalientEvent]?
 }
 
 // MARK: - Producer
@@ -79,6 +95,9 @@ actor AmbientIngestProducer {
     private var window: [WindowSegment] = []
     private var sentTotal = 0
     private var lastError: String?
+    /// Layer-1 local suppression: dedupKeys already sent this run. The Gateway
+    /// still applies layer-3 semantic dedup; this just avoids re-sending.
+    private var sentDedupKeys = Set<String>()
 
     private static let flushIntervalNs: UInt64 = 60_000_000_000  // 60s window
     private static let staleAfterSeconds: TimeInterval = 180     // updatedAt + 3min
@@ -137,13 +156,42 @@ actor AmbientIngestProducer {
     private func flush() async {
         guard running, !window.isEmpty else { return }  // no new speech → no send
         let segments = window
+        let texts = segments.map { $0.text }
+        let windowStart = segments.first?.addedAt ?? Date()
+        let windowEnd = segments.last?.addedAt ?? Date()
+
+        // L2: extract salient events, suppress already-sent keys (layer 1).
+        let drafts = AmbientSalientExtractor.extract(from: texts)
+            .filter { !sentDedupKeys.contains($0.dedupKey) }
+        let sw = AmbientSourceWindow(
+            start: Int64(windowStart.timeIntervalSince1970 * 1000),
+            end: Int64(windowEnd.timeIntervalSince1970 * 1000)
+        )
+        let events: [AmbientSalientEvent] = drafts.map { d in
+            let seq = Self.nextSourceSeq()
+            return AmbientSalientEvent(
+                source: "clawgate_ambient",
+                sourceSeq: seq,
+                sourceEventId: "\(sessionID)-ev\(seq)",
+                eventType: d.eventType,
+                normalizedSubject: d.normalizedSubject,
+                normalizedDateBucket: d.normalizedDateBucket,
+                dedupKey: d.dedupKey,
+                summary: d.summary,
+                confidence: d.confidence,
+                sourceWindow: sw,
+                privacyFlags: []
+            )
+        }
+
         let params = Self.buildParams(
-            segmentTexts: segments.map { $0.text },
-            windowStart: segments.first?.addedAt ?? Date(),
-            windowEnd: segments.last?.addedAt ?? Date(),
+            segmentTexts: texts,
+            windowStart: windowStart,
+            windowEnd: windowEnd,
             sessionID: sessionID,
             sourceSeq: Self.nextSourceSeq(),
-            now: Date()
+            now: Date(),
+            events: events.isEmpty ? nil : events
         )
         do {
             try await ensureConnected()
@@ -153,7 +201,8 @@ actor AmbientIngestProducer {
             sentTotal += 1
             lastError = nil
             window.removeAll()
-            log("ambient ingest ok seq=\(params.sourceSeq) accepted=\(accepted) segs=\(segments.count)")
+            for d in drafts { sentDedupKeys.insert(d.dedupKey) }
+            log("ambient ingest ok seq=\(params.sourceSeq) accepted=\(accepted) segs=\(segments.count) events=\(events.count)")
             onUpdate(Update(sent: sentTotal, lastError: nil))
         } catch {
             // Keep the window; the next 60s tick retries once. No hammering.
@@ -218,7 +267,8 @@ actor AmbientIngestProducer {
                             windowEnd: Date,
                             sessionID: String,
                             sourceSeq: Int,
-                            now: Date) -> AmbientIngestParams {
+                            now: Date,
+                            events: [AmbientSalientEvent]? = nil) -> AmbientIngestParams {
         let sw = AmbientSourceWindow(
             start: Int64(windowStart.timeIntervalSince1970 * 1000),
             end: Int64(windowEnd.timeIntervalSince1970 * 1000)
@@ -265,30 +315,21 @@ actor AmbientIngestProducer {
             sourceSeq: sourceSeq,
             sourceIds: [sessionID],
             confidence: confidence,
-            state: state
+            state: state,
+            events: events
         )
     }
 
     /// Nouns that recur (>= 2 occurrences) across the window, excluding words
-    /// tagged as personal/place/organization names (default redact). Single
-    /// recurring terms are processed signal, never verbatim sentences.
+    /// tagged as personal/place/organization names (default redact, via the
+    /// shared AmbientSalientExtractor.contentNouns). Single recurring terms
+    /// are processed signal, never verbatim sentences.
     static func recurringKeywords(in segmentTexts: [String], limit: Int = 3) -> [String] {
         let joined = segmentTexts.joined(separator: "\n")
         guard !joined.isEmpty else { return [] }
         var freq: [String: Int] = [:]
-        let tagger = NLTagger(tagSchemes: [.nameTypeOrLexicalClass])
-        tagger.string = joined
-        tagger.enumerateTags(in: joined.startIndex..<joined.endIndex,
-                             unit: .word,
-                             scheme: .nameTypeOrLexicalClass,
-                             options: [.omitWhitespace, .omitPunctuation]) { tag, range in
-            // Only plain nouns. Name-typed tags (personalName/placeName/
-            // organizationName) fall through and are dropped — redaction.
-            if tag == .noun {
-                let w = String(joined[range]).lowercased()
-                if w.count >= 2 { freq[w, default: 0] += 1 }
-            }
-            return true
+        for w in AmbientSalientExtractor.contentNouns(in: joined) {
+            freq[w, default: 0] += 1
         }
         return freq.filter { $0.value >= 2 }
             .sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }

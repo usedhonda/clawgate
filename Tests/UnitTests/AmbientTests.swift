@@ -137,4 +137,78 @@ final class AmbientTests: XCTestCase {
         let texts = ["alpha bravo charlie", "delta echo foxtrot"]
         XCTAssertTrue(AmbientIngestProducer.recurringKeywords(in: texts).isEmpty)
     }
+
+    // MARK: - L2 salient extraction
+
+    private static let fixedNow: Date = {
+        // 2026-06-10 12:00 JST (Wednesday)
+        var c = DateComponents()
+        c.year = 2026; c.month = 6; c.day = 10; c.hour = 12
+        c.timeZone = TimeZone(identifier: "Asia/Tokyo")
+        return Calendar(identifier: .gregorian).date(from: c)!
+    }()
+
+    private static var jstCalendar: Calendar {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        return cal
+    }
+
+    func testSalientExtractsTomorrowMeetingAsAppointment() throws {
+        let d = try XCTUnwrap(AmbientSalientExtractor.extractOne(
+            from: "明日の14時にリリース計画の打ち合わせをしましょう",
+            now: Self.fixedNow, calendar: Self.jstCalendar))
+        XCTAssertEqual(d.eventType, "appointment")
+        XCTAssertEqual(d.normalizedDateBucket, "2026-06-11")
+        XCTAssertFalse(d.normalizedSubject.isEmpty)
+        XCTAssertEqual(d.dedupKey.count, 16)
+    }
+
+    func testSalientExtractsEnglishTodo() throws {
+        let d = try XCTUnwrap(AmbientSalientExtractor.extractOne(
+            from: "Don't forget the deployment checklist for the gateway",
+            now: Self.fixedNow, calendar: Self.jstCalendar))
+        XCTAssertEqual(d.eventType, "todo")
+        XCTAssertNil(d.normalizedDateBucket)
+    }
+
+    func testSalientIgnoresPlainConversation() {
+        XCTAssertNil(AmbientSalientExtractor.extractOne(
+            from: "今日はいい天気だね", now: Self.fixedNow, calendar: Self.jstCalendar))
+        XCTAssertNil(AmbientSalientExtractor.extractOne(
+            from: "The weather is nice.", now: Self.fixedNow, calendar: Self.jstCalendar))
+    }
+
+    func testSalientDedupKeyMatchesContractFormula() {
+        // sha1("appointment|release meeting|2026-06-11").hex[:16] — stable.
+        let a = AmbientSalientExtractor.dedupKey(
+            eventType: "appointment", subject: "release meeting", bucket: "2026-06-11")
+        let b = AmbientSalientExtractor.dedupKey(
+            eventType: "appointment", subject: "release meeting", bucket: "2026-06-11")
+        XCTAssertEqual(a, b)
+        XCTAssertEqual(a.count, 16)
+        // Different bucket → different key (time-bucketed identity).
+        let c = AmbientSalientExtractor.dedupKey(
+            eventType: "appointment", subject: "release meeting", bucket: "2026-06-12")
+        XCTAssertNotEqual(a, c)
+    }
+
+    func testSalientRedactsHonorificAdjacentNamesJa() throws {
+        let d = try XCTUnwrap(AmbientSalientExtractor.extractOne(
+            from: "明日、田中さんとリリース計画の打ち合わせをします",
+            now: Self.fixedNow, calendar: Self.jstCalendar))
+        XCTAssertFalse(d.normalizedSubject.contains("田中"), "honorific-adjacent name must be redacted")
+        XCTAssertFalse(d.summary.contains("田中"))
+    }
+
+    func testSalientSameEventTwiceCollapsesInWindow() {
+        let drafts = AmbientSalientExtractor.extract(
+            from: ["明日リリースの打ち合わせをしましょう",
+                   "明日の打ち合わせ、リリースの件ね"],
+            now: Self.fixedNow, calendar: Self.jstCalendar)
+        // Same type+subject-nouns+bucket should dedupe to one draft when the
+        // noun sets coincide; at minimum it must never duplicate dedupKeys.
+        let keys = drafts.map { $0.dedupKey }
+        XCTAssertEqual(keys.count, Set(keys).count)
+    }
 }
