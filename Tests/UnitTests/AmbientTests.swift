@@ -138,6 +138,40 @@ final class AmbientTests: XCTestCase {
         XCTAssertTrue(AmbientIngestProducer.recurringKeywords(in: texts).isEmpty)
     }
 
+    // MARK: - Log display grouping + segment timestamp compatibility
+
+    func testTranscriptSegmentDecodesLegacyLinesWithoutCapturedAt() throws {
+        let legacy = #"{"startSeconds":0,"endSeconds":4,"text":"right"}"#
+        let seg = try JSONDecoder().decode(TranscriptSegment.self, from: Data(legacy.utf8))
+        XCTAssertNil(seg.capturedAt)
+        XCTAssertEqual(seg.text, "right")
+    }
+
+    func testLogGroupingMergesCloseSegmentsAndSplitsOnGap() {
+        var s1 = TranscriptSegment(startSeconds: 0, endSeconds: 3, text: "こんにちは")
+        s1.capturedAt = 1_700_000_000
+        var s2 = TranscriptSegment(startSeconds: 3, endSeconds: 6, text: "今日の予定だけど")
+        s2.capturedAt = 1_700_000_010
+        var s3 = TranscriptSegment(startSeconds: 0, endSeconds: 4, text: "全然別の話")
+        s3.capturedAt = 1_700_000_500  // 490s later → new block
+
+        let blocks = AmbientLogGrouping.blocks(
+            from: [s1, s2, s3], timeZone: TimeZone(identifier: "Asia/Tokyo")!)
+        XCTAssertEqual(blocks.count, 2)
+        XCTAssertEqual(blocks[0].text, "こんにちは 今日の予定だけど")
+        XCTAssertNotNil(blocks[0].timeLabel)
+        XCTAssertEqual(blocks[1].text, "全然別の話")
+    }
+
+    func testLogGroupingHandlesLegacySegmentsWithoutTimestamps() {
+        let s1 = TranscriptSegment(startSeconds: 0, endSeconds: 3, text: "a")
+        let s2 = TranscriptSegment(startSeconds: 3, endSeconds: 6, text: "b")
+        let blocks = AmbientLogGrouping.blocks(from: [s1, s2])
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks[0].text, "a b")
+        XCTAssertNil(blocks[0].timeLabel)
+    }
+
     // MARK: - L2 salient extraction
 
     private static let fixedNow: Date = {

@@ -65,7 +65,9 @@ final class AmbientController {
         self.log = log
         self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.transcriber = AmbientTranscriber()
-        self.capture.onChunkReady = { [weak self] url, rms in self?.handleChunk(url, rms: rms) }
+        self.capture.onChunkReady = { [weak self] url, rms, startedAt in
+            self?.handleChunk(url, rms: rms, startedAt: startedAt)
+        }
     }
 
     /// The feature exists only on the client (host that points at a remote Gateway).
@@ -197,7 +199,7 @@ final class AmbientController {
 
     // MARK: - Chunk handling
 
-    private func handleChunk(_ url: URL, rms: Float) {
+    private func handleChunk(_ url: URL, rms: Float, startedAt: Date) {
         work.async { [weak self] in
             guard let self else { return }
             let shouldRun = self.state.sync { self.streaming }
@@ -220,10 +222,16 @@ final class AmbientController {
                     return
                 }
                 let result = try self.transcriber.transcribe(chunk: url)
+                // Stamp absolute utterance time: chunk start + in-chunk offset.
+                let stamped = result.kept.map { seg -> TranscriptSegment in
+                    var s = seg
+                    s.capturedAt = startedAt.timeIntervalSince1970 + seg.startSeconds
+                    return s
+                }
                 var kept: [TranscriptSegment] = []
                 var rollingSkipped: [SkippedSegment] = []
                 self.state.sync {
-                    for seg in result.kept {
+                    for seg in stamped {
                         if self.recentKeptTexts.contains(seg.text) {
                             rollingSkipped.append(SkippedSegment(reason: "rolling_duplicate", segment: seg))
                         } else {

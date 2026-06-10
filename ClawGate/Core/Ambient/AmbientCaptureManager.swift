@@ -35,6 +35,8 @@ final class AmbientCaptureManager {
     /// read immediately after the writer is released can race the header flush
     /// and fail — which silently disabled the silence gate (fail-open).
     private var sumSquaresInCurrentChunk: Double = 0
+    /// Wall-clock time the current chunk started (for absolute segment times).
+    private var chunkStartedAt = Date()
     private var chunkSeq = 0
     private var overlapTail: [Float] = []
 
@@ -43,9 +45,9 @@ final class AmbientCaptureManager {
 
     let chunkSeconds: Int
     /// Called (off the audio thread) when a chunk file is finalized and ready.
-    /// The second argument is the chunk's RMS level (0…1), measured during
-    /// capture so the silence gate never depends on re-reading the file.
-    var onChunkReady: ((URL, Float) -> Void)?
+    /// Arguments: file URL, RMS level (0…1, measured during capture so the
+    /// silence gate never re-reads the file), and the chunk's wall-clock start.
+    var onChunkReady: ((URL, Float, Date) -> Void)?
     private let log: (String) -> Void
 
     init(chunkSeconds: Int = 30,
@@ -170,12 +172,14 @@ final class AmbientCaptureManager {
         currentChunkURL = url
         framesInCurrentChunk = 0
         sumSquaresInCurrentChunk = 0
+        chunkStartedAt = Date()
     }
 
     private func finalizeChunkLocked() {
         guard let url = currentChunkURL else { return }
         let frames = framesInCurrentChunk
         let sumSquares = sumSquaresInCurrentChunk
+        let startedAt = chunkStartedAt
         currentFile = nil
         currentChunkURL = nil
         framesInCurrentChunk = 0
@@ -189,7 +193,7 @@ final class AmbientCaptureManager {
         let cb = onChunkReady
         let retain = retentionSeconds
         DispatchQueue.global(qos: .utility).async {
-            cb?(url, rms)
+            cb?(url, rms, startedAt)
             AmbientStorage.pruneRolling(olderThan: retain)
         }
     }

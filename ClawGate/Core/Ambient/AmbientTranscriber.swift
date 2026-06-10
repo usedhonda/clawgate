@@ -5,6 +5,10 @@ struct TranscriptSegment: Codable, Equatable {
     let startSeconds: Double
     let endSeconds: Double
     let text: String
+    /// Absolute wall-clock time of this utterance (unix seconds), stamped at
+    /// chunk-capture time. Optional for backward compatibility with raw.jsonl
+    /// lines written before timestamps existed.
+    var capturedAt: Double? = nil
 }
 
 /// A segment dropped during filtering, with the reason (for skipped.jsonl audit).
