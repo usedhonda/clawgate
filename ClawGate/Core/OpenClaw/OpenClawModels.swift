@@ -262,6 +262,8 @@ struct IncomingPayload: Decodable {
     let content: String?
     let delta: String?
     let messages: [HistoryMessage]?
+    /// ambient.ingest response: whether the Gateway latched the L1 state.
+    let stateAccepted: Bool?
 }
 
 struct HistoryMessage: Decodable {

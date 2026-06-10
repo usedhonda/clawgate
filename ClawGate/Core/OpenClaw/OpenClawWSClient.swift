@@ -15,6 +15,9 @@ actor OpenClawWSClient {
     private var pingDeadline: Task<Void, Error>?
     private var pingInFlight = false
     private var inFlightAcks: [String: CheckedContinuation<Void, Error>] = [:]
+    /// Requests that need the response payload back (e.g. ambient.ingest's
+    /// stateAccepted), not just an ok/err ACK.
+    private var inFlightResponses: [String: CheckedContinuation<IncomingPayload?, Error>] = [:]
 
     private var authToken: String?
     private var pendingRequestId: String?
@@ -179,6 +182,31 @@ actor OpenClawWSClient {
             params: SessionSubscribeParams(key: sessionKey)
         )
         try await sendJSON(request)
+    }
+
+    /// Generic RPC: send a request and return the response payload (ok:true),
+    /// or throw the server error. Used by ambient.ingest, which needs
+    /// payload.stateAccepted rather than a bare ACK.
+    func request<T: Encodable>(method: String, params: T) async throws -> IncomingPayload? {
+        let requestId = UUID().uuidString
+        let req = GatewayRequest(type: "req", id: requestId, method: method, params: params)
+        return try await withCheckedThrowingContinuation { cont in
+            inFlightResponses[requestId] = cont
+            Task {
+                do {
+                    try await self.sendJSON(req)
+                } catch {
+                    if let c = self.inFlightResponses.removeValue(forKey: requestId) {
+                        c.resume(throwing: error)
+                    }
+                    return
+                }
+                try? await Task.sleep(nanoseconds: Self.chatSendAckTimeout)
+                if let c = self.inFlightResponses.removeValue(forKey: requestId) {
+                    c.resume(throwing: OpenClawError.timeout)
+                }
+            }
+        }
     }
 
     private func sendAndAwaitAck<T: Encodable>(_ request: T, requestId: String) async throws {
@@ -407,6 +435,18 @@ actor OpenClawWSClient {
         let responseId = msg.id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         NSLog("[Pet] handleResponse: ok=%d id=%@ type=%@ error=%@", ok ? 1 : 0, responseId, msg.payload?.type ?? "nil", msg.error?.message ?? "none")
 
+        // Payload-returning requests (ambient.ingest etc.)
+        if !responseId.isEmpty, let cont = inFlightResponses.removeValue(forKey: responseId) {
+            if ok {
+                cont.resume(returning: msg.payload)
+            } else if let err = msg.error {
+                cont.resume(throwing: OpenClawError.serverError(code: err.code, message: err.message))
+            } else {
+                cont.resume(throwing: OpenClawError.unknown("Request failed"))
+            }
+            return
+        }
+
         // Check in-flight ACKs
         if !responseId.isEmpty, let ack = inFlightAcks.removeValue(forKey: responseId) {
             if ok {
@@ -465,6 +505,9 @@ actor OpenClawWSClient {
         let pending = inFlightAcks
         inFlightAcks.removeAll()
         for (_, cont) in pending { cont.resume(throwing: error) }
+        let pendingResponses = inFlightResponses
+        inFlightResponses.removeAll()
+        for (_, cont) in pendingResponses { cont.resume(throwing: error) }
     }
 
     // MARK: - Ping

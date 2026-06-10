@@ -6,8 +6,8 @@ import AVFoundation
 /// transcripts. Capture and streaming are independent states:
 ///   - capture  = the mic is recording rolling chunks (privacy-controlled)
 ///   - streaming = ready chunks are transcribed into text
-/// Delivery to OpenClaw is intentionally out of scope here (contract-first,
-/// owned by the oc-general lane).
+/// Delivery to OpenClaw rides AmbientIngestProducer (ambient.ingest RPC per
+/// the oc-general ambient-context contract); it starts/stops with streaming.
 final class AmbientController {
     struct Status: Codable {
         var role: String
@@ -22,6 +22,8 @@ final class AmbientController {
         var pendingChunks: Int
         var lastText: String?
         var lastError: String?
+        var ingestSent: Int
+        var ingestLastError: String?
     }
 
     private let configStore: ConfigStore
@@ -42,6 +44,21 @@ final class AmbientController {
     /// Recently kept segment texts, for cross-chunk rolling-duplicate filtering
     /// (the 3s capture overlap re-transcribes boundary speech).
     private var recentKeptTexts: [String] = []
+    private var ingestSent = 0
+    private var ingestLastError: String?
+
+    /// Gateway delivery (ambient.ingest). Starts/stops with the stream; send
+    /// failures never disturb capture/transcription (log + retry next window).
+    private lazy var ingest = AmbientIngestProducer(
+        log: log,
+        onUpdate: { [weak self] update in
+            guard let self else { return }
+            self.state.async {
+                self.ingestSent = update.sent
+                self.ingestLastError = update.lastError
+            }
+        }
+    )
 
     init(configStore: ConfigStore, log: @escaping (String) -> Void = { _ in }) {
         self.configStore = configStore
@@ -94,6 +111,9 @@ final class AmbientController {
                     }
                     self.streaming = true
                     self.lastError = nil
+                    if let sid = self.sessionID {
+                        Task { await self.ingest.start(sessionID: sid) }
+                    }
                     self.log("ambient stream started session=\(self.sessionID ?? "?")")
                     completion(.success(()))
                 } catch {
@@ -107,6 +127,7 @@ final class AmbientController {
     func stopStream() {
         state.async {
             self.streaming = false
+            Task { await self.ingest.stop() }
             self.log("ambient stream stopped (capture continues=\(self.capture.state == .capturing))")
         }
     }
@@ -115,6 +136,7 @@ final class AmbientController {
     func pauseCapture() {
         state.async {
             self.streaming = false
+            Task { await self.ingest.stop() }
             self.capture.stop()
         }
     }
@@ -152,7 +174,9 @@ final class AmbientController {
                 segmentsSkipped: skippedTotal,
                 pendingChunks: pendingChunks,
                 lastText: lastText,
-                lastError: lastError
+                lastError: lastError,
+                ingestSent: ingestSent,
+                ingestLastError: ingestLastError
             )
         }
     }
@@ -212,7 +236,11 @@ final class AmbientController {
                     }
                 }
                 let allSkipped = result.skipped + rollingSkipped
-                if !kept.isEmpty { self.appendTranscripts(kept) }
+                if !kept.isEmpty {
+                    self.appendTranscripts(kept)
+                    let toSend = kept
+                    Task { await self.ingest.add(toSend) }
+                }
                 if !allSkipped.isEmpty { self.appendSkipped(allSkipped) }
                 self.state.sync {
                     self.segmentsTotal += kept.count
