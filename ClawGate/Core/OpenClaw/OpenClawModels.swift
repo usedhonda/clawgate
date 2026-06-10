@@ -264,6 +264,16 @@ struct IncomingPayload: Decodable {
     let messages: [HistoryMessage]?
     /// ambient.ingest response: whether the Gateway latched the L1 state.
     let stateAccepted: Bool?
+    /// ambient.ingest response: per-event receipts (eventId/status/dedup).
+    let events: [AmbientEventReceipt]?
+}
+
+/// Per-event receipt in the ambient.ingest response payload.
+struct AmbientEventReceipt: Decodable {
+    let sourceEventId: String?
+    let eventId: String?
+    let status: String?
+    let dedup: String?
 }
 
 struct HistoryMessage: Decodable {

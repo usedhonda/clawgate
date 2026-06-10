@@ -201,6 +201,29 @@ final class AmbientTests: XCTestCase {
         XCTAssertFalse(d.summary.contains("田中"))
     }
 
+    func testSalientExtractsBelonging() throws {
+        let d = try XCTUnwrap(AmbientSalientExtractor.extractOne(
+            from: "傘を持っていくのを忘れないでね",
+            now: Self.fixedNow, calendar: Self.jstCalendar))
+        XCTAssertEqual(d.eventType, "belonging")
+    }
+
+    func testSalientPrecisionGuardsRejectNoise() {
+        let mustNotExtract = [
+            "昨日の打ち合わせは長かったね",                       // retrospective
+            "先週の会議で決まった件だけど",                       // retrospective
+            "ご視聴ありがとうございました",                       // media boilerplate
+            "Thanks for watching, don't forget to subscribe",   // media (beats todo marker)
+            "田中さんは明日打ち合わせがあるらしいよ",               // hearsay third-party plan
+            "今日はいい天気だね",                                // plain chatter
+        ]
+        for text in mustNotExtract {
+            XCTAssertNil(AmbientSalientExtractor.extractOne(
+                from: text, now: Self.fixedNow, calendar: Self.jstCalendar),
+                "must not extract from: \(text)")
+        }
+    }
+
     func testSalientSameEventTwiceCollapsesInWindow() {
         let drafts = AmbientSalientExtractor.extract(
             from: ["明日リリースの打ち合わせをしましょう",

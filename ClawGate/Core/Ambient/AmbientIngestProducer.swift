@@ -201,8 +201,13 @@ actor AmbientIngestProducer {
             sentTotal += 1
             lastError = nil
             window.removeAll()
+            // Everything sent successfully is locally suppressed (layer 1) —
+            // strictly stronger than suppressing only dedup:"duplicate"
+            // receipts. Receipts are still surfaced for observability.
             for d in drafts { sentDedupKeys.insert(d.dedupKey) }
-            log("ambient ingest ok seq=\(params.sourceSeq) accepted=\(accepted) segs=\(segments.count) events=\(events.count)")
+            let receipts = payload?.events ?? []
+            let dupCount = receipts.filter { $0.dedup == "duplicate" }.count
+            log("ambient ingest ok seq=\(params.sourceSeq) accepted=\(accepted) segs=\(segments.count) events=\(events.count) receipts=\(receipts.count) dup=\(dupCount)")
             onUpdate(Update(sent: sentTotal, lastError: nil))
         } catch {
             // Keep the window; the next 60s tick retries once. No hammering.

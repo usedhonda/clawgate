@@ -24,15 +24,33 @@ enum AmbientSalientExtractor {
 
     private static let todoMarkers = [
         "todo", "やらないと", "やらなきゃ", "しないと", "しなきゃ", "忘れずに", "やっておかないと",
-        "need to ", "have to ", "don't forget", "must ",
+        "買っておく", "need to ", "have to ", "don't forget", "must ",
     ]
     private static let appointmentMarkers = [
         "会う", "打ち合わせ", "ミーティング", "会議", "予定", "アポ",
         "meeting", "appointment", "meet ",
     ]
+    private static let belongingMarkers = [
+        "持ってく", "持っていく", "持って行く", "持ち物", "bring ",
+    ]
     private static let commitmentMarkers = [
         "約束", "しておきます", "しておくね", "やっておきます", "送っておきます",
         "i'll ", "i will ", "promise",
+    ]
+
+    /// Precision guards: a matching segment is NOT extracted at all.
+    /// False negatives are acceptable; injecting noise into Chi is not.
+    private static let retrospectiveMarkers = [
+        // Past events are recall material, not upcoming salient events.
+        "昨日", "先週", "先月", "yesterday", "last week", "last month",
+    ]
+    private static let mediaMarkers = [
+        // TV / video boilerplate (also whisper's favourite hallucination shapes).
+        "ご視聴", "チャンネル登録", "お送りしました", "thanks for watching", "subscribe",
+    ]
+    private static let hearsayMarkers = [
+        // Third-party plans relayed second-hand are not the 御大's commitments.
+        "らしい", "そうだ", "って言ってた", "みたいだよ", "apparently", "i heard",
     ]
 
     /// Extract drafts from one window's kept segment texts.
@@ -54,6 +72,12 @@ enum AmbientSalientExtractor {
                            now: Date = Date(),
                            calendar: Calendar = .current) -> Draft? {
         let lowered = text.lowercased()
+
+        // Precision guards first: retrospective talk, media boilerplate, and
+        // hearsay about third parties are never extracted.
+        let guarded = retrospectiveMarkers + mediaMarkers + hearsayMarkers
+        if guarded.contains(where: { lowered.contains($0) }) { return nil }
+
         let bucket = dateBucket(in: lowered, now: now, calendar: calendar)
 
         let eventType: String
@@ -61,11 +85,16 @@ enum AmbientSalientExtractor {
         if appointmentMarkers.contains(where: { lowered.contains($0) }), bucket != nil {
             // Appointment requires an explicit date reference — strongest signal.
             eventType = "appointment"; confidence = 0.7
+        } else if belongingMarkers.contains(where: { lowered.contains($0) }) {
+            eventType = "belonging"; confidence = 0.6
         } else if todoMarkers.contains(where: { lowered.contains($0) }) {
             eventType = "todo"; confidence = 0.6
         } else if commitmentMarkers.contains(where: { lowered.contains($0) }) {
             eventType = "commitment"; confidence = 0.55
         } else {
+            // proper_noun is deliberately NOT extracted in this slice: without
+            // JP POS/name tagging there is no precision-safe rule for it, and
+            // false negatives are the accepted trade (contract precision rule).
             return nil
         }
 
