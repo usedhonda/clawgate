@@ -227,6 +227,12 @@ enum AmbientSalientExtractor {
         "午前", "午後", "月曜", "火曜", "水曜", "木曜", "金曜", "土曜", "日曜", "曜日",
     ]
 
+    /// "Alice" / "Tanaka" — first letter uppercase, the rest lowercase.
+    private static func isTitleCaseLatin(_ t: String) -> Bool {
+        guard let first = t.first, first.isUppercase else { return false }
+        return t.dropFirst().allSatisfy { !$0.isUppercase }
+    }
+
     private static func japaneseContentTokens(_ tokens: [String]) -> [String] {
         var out: [String] = []
         for (i, t) in tokens.enumerated() {
@@ -238,6 +244,10 @@ enum AmbientSalientExtractor {
             let hasKatakana = t.unicodeScalars.contains { (0x30A0...0x30FF).contains($0.value) }
             let latinLetters = t.unicodeScalars.filter { (0x41...0x7A).contains($0.value) }.count
             guard hasKanji || hasKatakana || latinLetters >= 3 else { continue }
+            // Latin token inside JP text: NLTagger gives no name tags here, so
+            // title-case (Alice, Tanaka) is treated as a likely proper name and
+            // redacted. Lowercase words and ALL-CAPS acronyms stay.
+            if !hasKanji, !hasKatakana, latinLetters >= 3, isTitleCaseLatin(t) { continue }
             out.append(t.lowercased())
         }
         return out

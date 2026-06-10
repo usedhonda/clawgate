@@ -224,6 +224,25 @@ final class AmbientTests: XCTestCase {
         }
     }
 
+    func testSalientRedactsTaggedNamesEn() throws {
+        // EN path: NLTagger tags "Alice" as personalName (not noun) → excluded.
+        let d = try XCTUnwrap(AmbientSalientExtractor.extractOne(
+            from: "I'll send the report to Alice before the deadline",
+            now: Self.fixedNow, calendar: Self.jstCalendar))
+        XCTAssertFalse(d.normalizedSubject.contains("alice"), "EN tagged name must be redacted")
+        XCTAssertFalse(d.summary.lowercased().contains("alice"))
+    }
+
+    func testSalientRedactsLatinNameInJapaneseText() throws {
+        // JP fallback path: no name tags available, so title-case latin tokens
+        // are treated as likely proper names and redacted.
+        let d = try XCTUnwrap(AmbientSalientExtractor.extractOne(
+            from: "明日Aliceとリリース計画の打ち合わせの予定",
+            now: Self.fixedNow, calendar: Self.jstCalendar))
+        XCTAssertFalse(d.normalizedSubject.contains("alice"), "latin name in JP text must be redacted")
+        XCTAssertFalse(d.summary.lowercased().contains("alice"))
+    }
+
     func testSalientSameEventTwiceCollapsesInWindow() {
         let drafts = AmbientSalientExtractor.extract(
             from: ["明日リリースの打ち合わせをしましょう",
