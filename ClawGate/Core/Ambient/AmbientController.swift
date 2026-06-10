@@ -65,7 +65,7 @@ final class AmbientController {
         self.log = log
         self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.transcriber = AmbientTranscriber()
-        self.capture.onChunkReady = { [weak self] url in self?.handleChunk(url) }
+        self.capture.onChunkReady = { [weak self] url, rms in self?.handleChunk(url, rms: rms) }
     }
 
     /// The feature exists only on the client (host that points at a remote Gateway).
@@ -197,7 +197,7 @@ final class AmbientController {
 
     // MARK: - Chunk handling
 
-    private func handleChunk(_ url: URL) {
+    private func handleChunk(_ url: URL, rms: Float) {
         work.async { [weak self] in
             guard let self else { return }
             let shouldRun = self.state.sync { self.streaming }
@@ -207,10 +207,10 @@ final class AmbientController {
             do {
                 // Energy gate: whisper hallucinates ("Thank you." etc.) on silence,
                 // which would pollute always-on ambient context. Skip near-silent
-                // chunks before transcription. (Floor calibrated against real
-                // silence-vs-speech RMS — see silenceFloorRMS.)
-                let rms = Self.chunkRMS(url)
-                if let rms, rms < Self.silenceFloorRMS {
+                // chunks before transcription. RMS is measured during capture
+                // (see AmbientCaptureManager) — re-reading the file here raced
+                // the writer's header flush and silently disabled the gate.
+                if rms < Self.silenceFloorRMS {
                     self.log(String(format: "ambient chunk gated rms=%.4f < %.4f (silent)", rms, Self.silenceFloorRMS))
                     self.appendSkipped([SkippedSegment(
                         reason: "low_confidence_no_speech",
@@ -328,22 +328,10 @@ final class AmbientController {
     /// ("Thank you." / "ご視聴ありがとうございました") clustered in the 0.005–0.015
     /// near-silence band (noise floor, peak < 0.5), while genuine speech sat at
     /// rms ≥ 0.017 with peak ≈ 1.0. 0.005 let the whole hallucination band through.
+    /// The level itself is measured during capture (AmbientCaptureManager) —
+    /// the old read-back-from-file approach raced the header flush, returned
+    /// nil, and fail-opened the gate on every chunk.
     private static let silenceFloorRMS: Float = 0.015
-
-    /// Root-mean-square level of a WAV chunk (0…1 for Float32 PCM).
-    private static func chunkRMS(_ url: URL) -> Float? {
-        guard let file = try? AVAudioFile(forReading: url) else { return nil }
-        let frames = AVAudioFrameCount(file.length)
-        guard frames > 0,
-              let buf = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames),
-              (try? file.read(into: buf)) != nil,
-              let ch = buf.floatChannelData else { return nil }
-        let n = Int(buf.frameLength)
-        guard n > 0 else { return nil }
-        var sum: Double = 0
-        for i in 0..<n { let v = Double(ch[0][i]); sum += v * v }
-        return Float((sum / Double(n)).squareRoot())
-    }
 
     private static func newSessionID() -> String {
         let fmt = ISO8601DateFormatter()

@@ -30,6 +30,11 @@ final class AmbientCaptureManager {
     private var currentFile: AVAudioFile?
     private var currentChunkURL: URL?
     private var framesInCurrentChunk: AVAudioFrameCount = 0
+    /// Sum of squared samples for the current chunk, accumulated as we write.
+    /// RMS is measured here (not by re-reading the file on finalize) because a
+    /// read immediately after the writer is released can race the header flush
+    /// and fail — which silently disabled the silence gate (fail-open).
+    private var sumSquaresInCurrentChunk: Double = 0
     private var chunkSeq = 0
     private var overlapTail: [Float] = []
 
@@ -38,7 +43,9 @@ final class AmbientCaptureManager {
 
     let chunkSeconds: Int
     /// Called (off the audio thread) when a chunk file is finalized and ready.
-    var onChunkReady: ((URL) -> Void)?
+    /// The second argument is the chunk's RMS level (0…1), measured during
+    /// capture so the silence gate never depends on re-reading the file.
+    var onChunkReady: ((URL, Float) -> Void)?
     private let log: (String) -> Void
 
     init(chunkSeconds: Int = 30,
@@ -162,23 +169,27 @@ final class AmbientCaptureManager {
         currentFile = try AVAudioFile(forWriting: url, settings: fileSettings)
         currentChunkURL = url
         framesInCurrentChunk = 0
+        sumSquaresInCurrentChunk = 0
     }
 
     private func finalizeChunkLocked() {
         guard let url = currentChunkURL else { return }
         let frames = framesInCurrentChunk
+        let sumSquares = sumSquaresInCurrentChunk
         currentFile = nil
         currentChunkURL = nil
         framesInCurrentChunk = 0
+        sumSquaresInCurrentChunk = 0
         // Only surface chunks with real audio (skip empty stubs).
         guard frames > 16_000 else {  // < ~1s of audio
             try? FileManager.default.removeItem(at: url)
             return
         }
+        let rms = Float((sumSquares / Double(frames)).squareRoot())
         let cb = onChunkReady
         let retain = retentionSeconds
         DispatchQueue.global(qos: .utility).async {
-            cb?(url)
+            cb?(url, rms)
             AmbientStorage.pruneRolling(olderThan: retain)
         }
     }
@@ -216,6 +227,7 @@ final class AmbientCaptureManager {
         do {
             try file.write(from: buf)
             framesInCurrentChunk += buf.frameLength
+            accumulateSumSquares(buf)
             appendOverlapTail(buf)
             if framesInCurrentChunk >= chunkFrameLimit {
                 finalizeChunkLocked()
@@ -225,6 +237,15 @@ final class AmbientCaptureManager {
         } catch {
             log("ambient capture write error: \(error)")
         }
+    }
+
+    /// Accumulate squared sample energy for the current chunk's RMS.
+    private func accumulateSumSquares(_ buf: AVAudioPCMBuffer) {
+        guard let ch = buf.floatChannelData else { return }
+        let n = Int(buf.frameLength)
+        var sum = 0.0
+        for i in 0..<n { let v = Double(ch[0][i]); sum += v * v }
+        sumSquaresInCurrentChunk += sum
     }
 
     /// Keep the most recent `overlapFrames` Float samples for the next chunk.
@@ -249,6 +270,7 @@ final class AmbientCaptureManager {
         do {
             try currentFile?.write(from: buf)
             framesInCurrentChunk += buf.frameLength
+            accumulateSumSquares(buf)
         } catch {
             log("ambient overlap prime error: \(error)")
         }
