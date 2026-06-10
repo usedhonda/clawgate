@@ -27,7 +27,7 @@ struct TranscriptionResult {
 /// docs/ambient-stt-quality.md. `maxContext: 0` is the main loop-repetition
 /// killer; thresholds + duplicate filtering trim hallucinated filler.
 struct AmbientPreset: Codable {
-    var name = "large-metal-noisy-room-v1"
+    var name = "large-metal-noisy-room-v2"
     var engine = "whisper.cpp"
     var backend = "Metal"
     var model = "large-v3-turbo"
@@ -36,6 +36,15 @@ struct AmbientPreset: Codable {
     var noSpeechThreshold = 0.30
     var entropyThreshold = 2.80
     var duplicateFilter = true
+    /// Silero VAD gates whisper to actual speech regions. This is the root
+    /// hallucination fix: energy alone can't tell "loud non-speech" from
+    /// speech, and whisper invents text for the former (verified 2026-06-10:
+    /// three real garbage chunks → 0 segments with VAD, while rendered real
+    /// speech transcribed verbatim).
+    var vad = true
+    var vadModel = "silero-v5.1.2"
+    /// Suppress non-speech tokens ("*coughs*", "(music)") at decode time.
+    var suppressNonSpeech = true
 
     static let defaultPrompt = "This is a live room conversation. Expect startup, product, revenue, fundraising, operations, engineering, and personal-assistant context. Preserve names and technical terms when heard. Do not invent content for unclear audio."
 }
@@ -117,6 +126,15 @@ final class AmbientTranscriber {
             "--prompt", prompt,
             "-np",
         ]
+        if preset.suppressNonSpeech {
+            proc.arguments?.append("-sns")
+        }
+        // VAD only when the silero model is provisioned — degrade gracefully
+        // to the old (hallucination-prone) behavior rather than failing.
+        let vadModel = AmbientStorage.defaultVADModel
+        if preset.vad, FileManager.default.fileExists(atPath: vadModel.path) {
+            proc.arguments?.append(contentsOf: ["--vad", "-vm", vadModel.path])
+        }
         let errPipe = Pipe()
         proc.standardError = errPipe
         proc.standardOutput = Pipe()
@@ -168,12 +186,42 @@ final class AmbientTranscriber {
         }
     }
 
-    /// Split segments into kept vs skipped (with reasons) — drops consecutive
-    /// duplicates and internal-repetition hallucinations ("yeah yeah yeah ...").
+    /// Whole-segment texts that are canonical whisper hallucinations (media
+    /// sign-offs and filler whisper invents on unclear audio). Matched only
+    /// when they constitute the entire segment — never inside real sentences.
+    static let hallucinationBoilerplate: Set<String> = [
+        "thank you.", "thank you", "thanks for watching", "thanks for watching.",
+        "you", "bye.", "see you next time.", "we'll be right back.",
+        "ご視聴ありがとうございました", "ご視聴ありがとうございました。",
+        "チャンネル登録お願いします", "最後までご視聴ありがとうございました",
+    ]
+
+    /// Split segments into kept vs skipped (with reasons). Defense-in-depth
+    /// behind the VAD: drops zero-duration boundary fillers, sound-effect
+    /// markers, canonical hallucination boilerplate, consecutive duplicates,
+    /// and repetition loops.
     static func classify(_ segments: [TranscriptSegment]) -> TranscriptionResult {
         var kept: [TranscriptSegment] = []
         var skipped: [SkippedSegment] = []
         for seg in segments {
+            // Zero/near-zero duration segments at chunk boundaries are EOF
+            // hallucinations ("- Thank you." at [30.0-30.0s]).
+            if seg.endSeconds - seg.startSeconds < 0.5 {
+                skipped.append(SkippedSegment(reason: "zero_duration", segment: seg))
+                continue
+            }
+            let trimmed = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // "*coughs*", "(music)", "[applause]" — non-speech markers.
+            if isNonSpeechMarker(trimmed) {
+                skipped.append(SkippedSegment(reason: "non_speech_marker", segment: seg))
+                continue
+            }
+            let normalized = trimmed.lowercased()
+                .trimmingCharacters(in: CharacterSet(charactersIn: "-– "))
+            if hallucinationBoilerplate.contains(normalized) {
+                skipped.append(SkippedSegment(reason: "hallucination_boilerplate", segment: seg))
+                continue
+            }
             if isInternalRepetition(seg.text) {
                 skipped.append(SkippedSegment(reason: "internal_repetition", segment: seg))
                 continue
@@ -187,10 +235,45 @@ final class AmbientTranscriber {
         return TranscriptionResult(kept: kept, skipped: skipped)
     }
 
-    /// A segment that is essentially one short token/phrase repeated.
+    /// Sound-effect annotation covering the whole segment: *coughs*, (music).
+    static func isNonSpeechMarker(_ text: String) -> Bool {
+        guard let first = text.first, let last = text.last else { return false }
+        switch (first, last) {
+        case ("*", "*"), ("(", ")"), ("[", "]"): return true
+        default: return false
+        }
+    }
+
+    /// A segment that is essentially a token/phrase repeated in a loop.
     static func isInternalRepetition(_ text: String) -> Bool {
+        // Word-level: few unique words spread over many ("yeah yeah yeah").
         let words = text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
-        guard words.count >= 4 else { return false }
-        return Set(words).count <= max(1, words.count / 4)
+        if words.count >= 4, Set(words).count <= max(1, words.count / 4) { return true }
+        // Phrase-level: any 3-word phrase occurring 3+ times ("I was in the
+        // first place. I was in the first place. I was…").
+        if words.count >= 9 {
+            var counts: [String: Int] = [:]
+            for i in 0...(words.count - 3) {
+                let gram = words[i...(i + 2)].joined(separator: " ")
+                counts[gram, default: 0] += 1
+                if counts[gram] == 3 { return true }
+            }
+        }
+        // Character-level for unspaced JP: the text is one short unit repeated
+        // ("餃子餃子餃子").
+        let chars = Array(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        if chars.count >= 6 {
+            for unit in 2...max(2, chars.count / 3) {
+                guard chars.count % unit == 0 else { continue }
+                let first = Array(chars[0..<unit])
+                var repeats = true
+                for start in stride(from: unit, to: chars.count, by: unit)
+                where Array(chars[start..<(start + unit)]) != first {
+                    repeats = false; break
+                }
+                if repeats { return true }
+            }
+        }
+        return false
     }
 }

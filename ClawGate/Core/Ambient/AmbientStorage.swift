@@ -41,6 +41,11 @@ enum AmbientStorage {
         whisperRoot.appendingPathComponent("models/ggml-large-v3-turbo.bin", isDirectory: false)
     }
 
+    /// Silero VAD model for whisper.cpp --vad (the root hallucination fix).
+    static var defaultVADModel: URL {
+        whisperRoot.appendingPathComponent("models/ggml-silero-v5.1.2.bin", isDirectory: false)
+    }
+
     @discardableResult
     static func ensureDir(_ url: URL) -> Bool {
         do {

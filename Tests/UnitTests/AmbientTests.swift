@@ -138,6 +138,51 @@ final class AmbientTests: XCTestCase {
         XCTAssertTrue(AmbientIngestProducer.recurringKeywords(in: texts).isEmpty)
     }
 
+    // MARK: - Hallucination filters (shapes from the real 2026-06-10 session)
+
+    func testClassifyDropsZeroDurationBoundaryFillers() {
+        let segs = [
+            TranscriptSegment(startSeconds: 30, endSeconds: 30, text: "We'll be right back."),
+            TranscriptSegment(startSeconds: 30, endSeconds: 30.12, text: "you"),
+            TranscriptSegment(startSeconds: 0, endSeconds: 5, text: "実際の発話はちゃんと残る"),
+        ]
+        let r = AmbientTranscriber.classify(segs)
+        XCTAssertEqual(r.kept.map(\.text), ["実際の発話はちゃんと残る"])
+        XCTAssertTrue(r.skipped.allSatisfy { $0.reason == "zero_duration" })
+    }
+
+    func testClassifyDropsNonSpeechMarkers() {
+        let segs = [
+            TranscriptSegment(startSeconds: 0, endSeconds: 9, text: "*coughs*"),
+            TranscriptSegment(startSeconds: 0, endSeconds: 2, text: "*Louds of the street*"),
+            TranscriptSegment(startSeconds: 0, endSeconds: 3, text: "(música)"),
+        ]
+        let r = AmbientTranscriber.classify(segs)
+        XCTAssertTrue(r.kept.isEmpty)
+        XCTAssertTrue(r.skipped.allSatisfy { $0.reason == "non_speech_marker" })
+    }
+
+    func testClassifyDropsCanonicalBoilerplate() {
+        let segs = [
+            TranscriptSegment(startSeconds: 0, endSeconds: 30, text: "ご視聴ありがとうございました"),
+            TranscriptSegment(startSeconds: 0, endSeconds: 30, text: "- Thank you."),
+            TranscriptSegment(startSeconds: 0, endSeconds: 4, text: "Thank you for the report, it helped."),
+        ]
+        let r = AmbientTranscriber.classify(segs)
+        // Boilerplate only when it is the whole segment — real sentences stay.
+        XCTAssertEqual(r.kept.map(\.text), ["Thank you for the report, it helped."])
+        XCTAssertTrue(r.skipped.allSatisfy { $0.reason == "hallucination_boilerplate" })
+    }
+
+    func testRepetitionDetectorCatchesLoopsAndJpPeriodic() {
+        XCTAssertTrue(AmbientTranscriber.isInternalRepetition("餃子餃子餃子"))
+        XCTAssertTrue(AmbientTranscriber.isInternalRepetition(
+            "The first time I was in the first place, I was in the first place. I was in the first place."))
+        XCTAssertFalse(AmbientTranscriber.isInternalRepetition("明日の打ち合わせの資料をまとめておきます"))
+        XCTAssertFalse(AmbientTranscriber.isInternalRepetition(
+            "We should review the release plan and the test results before Thursday."))
+    }
+
     // MARK: - Log display grouping + segment timestamp compatibility
 
     func testTranscriptSegmentDecodesLegacyLinesWithoutCapturedAt() throws {
