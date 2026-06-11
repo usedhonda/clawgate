@@ -60,14 +60,15 @@ struct AmbientIngestParams: Encodable {
 
 // MARK: - Producer
 
-/// Sends privacy-processed L1 ambient state to the OpenClaw Gateway via the
-/// `ambient.ingest` RPC (Phase 1: L1 only, no L2 events).
+/// Sends L1 ambient state (+ extracted L2 events) to the OpenClaw Gateway via
+/// the `ambient.ingest` RPC.
 ///
-/// Privacy invariants (contract "Privacy / Redaction"):
-///  - summary is a processed template + recurring noun keywords, never verbatim
-///    transcript sentences; raw transcript stays in local 6h-retention storage.
-///  - words tagged as personal/place/organization names are excluded from
-///    keywords (default redact, fail-closed — Phase 1 sends no names at all).
+/// Content policy (御大 ruling 2026-06-11): the summary carries the window's
+/// actual transcript text — this is the owner's own assistant receiving the
+/// owner's own room audio, so no self-imposed redaction. The earlier
+/// template-only summary ("conversation observed, recurring terms: …") is
+/// kept only as topicHint/activityHint metadata. Audio itself never leaves
+/// the device; rolling WAVs stay in local 6h retention.
 ///
 /// Throttle (contract "Throttle"): one 60s window; a window with no new kept
 /// segments sends nothing ("no change → no send"). Failed sends keep the
@@ -280,13 +281,14 @@ actor AmbientIngestProducer {
         )
         let nowMs = Int64(now.timeIntervalSince1970 * 1000)
         let keywords = recurringKeywords(in: segmentTexts)
-        let minutes = max(windowEnd.timeIntervalSince(windowStart) / 60, 0)
-        let span = max(1, Int(minutes.rounded()))
 
-        var summary = "Nearby conversation observed: \(segmentTexts.count) spoken segment(s) over ~\(span) min."
-        if !keywords.isEmpty {
-            summary += " Recurring terms: \(keywords.joined(separator: ", "))."
-        }
+        // The summary carries the actual window transcript. This is the
+        // owner's own assistant receiving the owner's own room audio — 御大
+        // ruling 2026-06-11: deliver the real text, no self-imposed redaction
+        // (the earlier template-only summary made the feature useless, like a
+        // minutes app that refuses to share the minutes). Capped to the most
+        // recent tail to stay clear of payload limits.
+        let summary = Self.windowTranscript(segmentTexts)
 
         let activity: String
         switch segmentTexts.count {
@@ -325,10 +327,20 @@ actor AmbientIngestProducer {
         )
     }
 
-    /// Nouns that recur (>= 2 occurrences) across the window, excluding words
-    /// tagged as personal/place/organization names (default redact, via the
-    /// shared AmbientSalientExtractor.contentNouns). Single recurring terms
-    /// are processed signal, never verbatim sentences.
+    /// The window's transcript text, joined chronologically and capped to the
+    /// most recent `maxChars` so a dense window can't trip PAYLOAD_TOO_LARGE.
+    static func windowTranscript(_ segmentTexts: [String], maxChars: Int = 1500) -> String {
+        let joined = segmentTexts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard joined.count > maxChars else { return joined }
+        return "…" + String(joined.suffix(maxChars))
+    }
+
+    /// Nouns that recur (>= 2 occurrences) across the window (via the shared
+    /// AmbientSalientExtractor.contentNouns) — a compact topicHint alongside
+    /// the verbatim summary.
     static func recurringKeywords(in segmentTexts: [String], limit: Int = 3) -> [String] {
         let joined = segmentTexts.joined(separator: "\n")
         guard !joined.isEmpty else { return [] }

@@ -67,7 +67,7 @@ final class AmbientTests: XCTestCase {
 
     // MARK: - ambient.ingest L1 producer (privacy + schema)
 
-    func testIngestSummaryContainsNoVerbatimTranscript() {
+    func testIngestSummaryCarriesTheWindowTranscript() {
         let segments = [
             "We should ship the release on Thursday after the review meeting.",
             "The release branch still has two failing integration tests today.",
@@ -81,14 +81,18 @@ final class AmbientTests: XCTestCase {
             sourceSeq: 1,
             now: Date(timeIntervalSince1970: 1_700_000_061)
         )
-        // Contract: summary is processed, never a verbatim transcript sentence.
+        // 御大 ruling 2026-06-11: the assistant gets the actual text, like any
+        // minutes app — no self-imposed redaction of the owner's own audio.
         for s in segments {
-            XCTAssertFalse(params.state.summary.contains(s), "summary leaked verbatim segment: \(s)")
+            XCTAssertTrue(params.state.summary.contains(s), "summary must carry the transcript: \(s)")
         }
-        XCTAssertFalse(params.state.summary.isEmpty)
-        // Phase 1 sends no people hints at all (default redact, no diarization).
-        XCTAssertTrue(params.state.peopleHintRedacted.isEmpty)
-        XCTAssertNil(params.state.placeHint)
+    }
+
+    func testWindowTranscriptCapsToRecentTail() {
+        let long = Array(repeating: "0123456789", count: 300)  // 3000+ chars
+        let capped = AmbientIngestProducer.windowTranscript(long, maxChars: 100)
+        XCTAssertTrue(capped.count <= 101)  // ellipsis + tail
+        XCTAssertTrue(capped.hasPrefix("…"))
     }
 
     func testIngestParamsSchemaShape() throws {
