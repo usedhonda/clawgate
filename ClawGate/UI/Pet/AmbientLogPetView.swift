@@ -73,7 +73,9 @@ private final class AmbientLogModel: ObservableObject {
     }
 
     private func load() {
-        let (label, segs) = AmbientStorage.latestSessionSegments(limit: 300)
+        // 2000 segments ≈ a full multi-hour meeting — the start of a long
+        // session must stay scrollable, not fall off the top.
+        let (label, segs) = AmbientStorage.latestSessionSegments(limit: 2000)
         // Publish only on change: each publish rebuilds the Text and clears
         // any in-progress selection — copy-paste must survive quiet refreshes.
         if label != sessionLabel { sessionLabel = label }
@@ -173,8 +175,20 @@ struct AmbientLogPetView: View {
                 }
                 .padding(12)
             }
-            .onChange(of: model.blocks.count) { _ in
+            // Follow ANY content change, not just new blocks: continuous talk
+            // appends to the tail block (count unchanged), and the viewport
+            // must still track it — this is what made the log look frozen
+            // during a long conversation.
+            .onChange(of: model.blocks) { _ in
                 proxy.scrollTo("ambient-log-bottom", anchor: .bottom)
+            }
+            // Land on the newest content when the tab opens, after the first
+            // layout pass (scrollTo inside onAppear itself is a no-op while
+            // the text has no size yet).
+            .onAppear {
+                DispatchQueue.main.async {
+                    proxy.scrollTo("ambient-log-bottom", anchor: .bottom)
+                }
             }
         }
     }
