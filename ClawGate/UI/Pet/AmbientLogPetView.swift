@@ -74,8 +74,11 @@ private final class AmbientLogModel: ObservableObject {
 
     private func load() {
         let (label, segs) = AmbientStorage.latestSessionSegments(limit: 300)
-        sessionLabel = label
-        blocks = AmbientLogGrouping.blocks(from: segs)
+        // Publish only on change: each publish rebuilds the Text and clears
+        // any in-progress selection — copy-paste must survive quiet refreshes.
+        if label != sessionLabel { sessionLabel = label }
+        let newBlocks = AmbientLogGrouping.blocks(from: segs)
+        if newBlocks != blocks { blocks = newBlocks }
     }
 }
 
@@ -99,6 +102,32 @@ struct AmbientLogPetView: View {
 
     static func speakerColor(_ speaker: String?) -> Color {
         speaker == "self" ? Color(red: 0.55, green: 0.78, blue: 1.0) : .white.opacity(0.6)
+    }
+
+    /// The whole log as ONE attributed text. SwiftUI text selection is scoped
+    /// to a single Text view — per-block Texts made it impossible to select
+    /// across utterances for copy-paste. Heads ("11:02 ご主人様") stay styled
+    /// and are included in the copied text, which reads like a transcript.
+    static func attributedTranscript(_ blocks: [AmbientLogGrouping.Block]) -> AttributedString {
+        var out = AttributedString()
+        for (i, block) in blocks.enumerated() {
+            if i > 0 { out += AttributedString("\n\n") }
+            var headText = block.timeLabel ?? ""
+            if let name = speakerName(block.speaker) {
+                headText += headText.isEmpty ? name : " " + name
+            }
+            if !headText.isEmpty {
+                var head = AttributedString(headText + "\n")
+                head.font = .system(size: 10, weight: .bold).monospacedDigit()
+                head.foregroundColor = speakerColor(block.speaker)
+                out += head
+            }
+            var body = AttributedString(block.text)
+            body.font = .system(size: 13)
+            body.foregroundColor = .white.opacity(0.85)
+            out += body
+        }
+        return out
     }
 
     var body: some View {
@@ -134,31 +163,12 @@ struct AmbientLogPetView: View {
     private var logList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    ForEach(Array(model.blocks.enumerated()), id: \.offset) { _, block in
-                        VStack(alignment: .leading, spacing: 5) {
-                            HStack(spacing: 6) {
-                                Text(block.timeLabel ?? "–:–")
-                                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
-                                    .foregroundColor(.white.opacity(0.45))
-                                if let name = Self.speakerName(block.speaker) {
-                                    Text(name)
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(Self.speakerColor(block.speaker))
-                                }
-                                Rectangle()
-                                    .fill(Color.white.opacity(0.08))
-                                    .frame(height: 1)
-                            }
-                            Text(block.text)
-                                .font(.system(size: 13))
-                                .foregroundColor(.white.opacity(0.85))
-                                .lineSpacing(3)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(Self.attributedTranscript(model.blocks))
+                        .lineSpacing(3)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     Color.clear.frame(height: 1).id("ambient-log-bottom")
                 }
                 .padding(12)

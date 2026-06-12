@@ -297,6 +297,18 @@ final class AmbientTests: XCTestCase {
         XCTAssertTrue(capped.hasPrefix("…"))
     }
 
+    func testAttributedTranscriptJoinsAllBlocksIntoOneSelectableText() {
+        let blocks = [
+            AmbientLogGrouping.Block(timeLabel: "11:02", speaker: "self", text: "明日の予定だけど"),
+            AmbientLogGrouping.Block(timeLabel: "11:02", speaker: "other", text: "14時でどうですか"),
+            AmbientLogGrouping.Block(timeLabel: nil, speaker: nil, text: "旧データはヘッダなし"),
+        ]
+        let plain = String(AmbientLogPetView.attributedTranscript(blocks).characters)
+        XCTAssertTrue(plain.contains("11:02 ご主人様\n明日の予定だけど"))
+        XCTAssertTrue(plain.contains("11:02 相手\n14時でどうですか"))
+        XCTAssertTrue(plain.hasSuffix("旧データはヘッダなし"))
+    }
+
     func testPresentSpeakersReflectsDiarizedParties() {
         let both: [AmbientIngestProducer.Line] = [
             .init(text: "a", speaker: "self", capturedAt: nil),
