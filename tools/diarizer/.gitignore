@@ -1,0 +1,8 @@
+# >>> project-bootstrap managed >>>
+.cc-status-bar.voice.json
+# <<< project-bootstrap managed <<<
+.build/
+.codex/
+AGENTS.md
+CLAUDE.md
+docs/

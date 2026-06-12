@@ -46,6 +46,22 @@ enum AmbientStorage {
         whisperRoot.appendingPathComponent("models/ggml-silero-v5.1.2.bin", isDirectory: false)
     }
 
+    // Speaker diarization helper (separate binary — the app stays macOS 12 /
+    // universal while the helper needs macOS 14+/Apple Silicon; absent helper
+    // simply means no speaker labels).
+    static var diarizerRoot: URL {
+        appSupportRoot.appendingPathComponent("diarizer", isDirectory: true)
+    }
+
+    static var defaultDiarizerBinary: URL {
+        diarizerRoot.appendingPathComponent("bin/clawgate-diarizer", isDirectory: false)
+    }
+
+    /// Enrolled "self" voiceprint (ご主人様) produced by `clawgate-diarizer enroll`.
+    static var defaultSelfVoiceprint: URL {
+        diarizerRoot.appendingPathComponent("self.json", isDirectory: false)
+    }
+
     @discardableResult
     static func ensureDir(_ url: URL) -> Bool {
         do {

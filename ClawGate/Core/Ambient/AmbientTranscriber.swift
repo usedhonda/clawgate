@@ -9,6 +9,9 @@ struct TranscriptSegment: Codable, Equatable {
     /// chunk-capture time. Optional for backward compatibility with raw.jsonl
     /// lines written before timestamps existed.
     var capturedAt: Double? = nil
+    /// Speaker label from diarization: "self" (ご主人様) or "other". nil when
+    /// the diarizer is unavailable (old Macs) or for legacy lines.
+    var speaker: String? = nil
 }
 
 /// A segment dropped during filtering, with the reason (for skipped.jsonl audit).

@@ -1,12 +1,14 @@
 import SwiftUI
 
 /// Groups raw whisper segments into readable conversation blocks: segments
-/// whose absolute times are close (< gap) merge into one paragraph headed by
-/// the wall-clock time of its first utterance. Old segments without
-/// timestamps continue the current block (no time info to split on).
+/// whose absolute times are close (< gap) and share a speaker merge into one
+/// paragraph headed by the wall-clock time of its first utterance. A speaker
+/// change starts a new block. Old segments without timestamps continue the
+/// current block (no time info to split on).
 enum AmbientLogGrouping {
     struct Block: Equatable {
         let timeLabel: String?   // "11:02", nil when the block has no timestamp
+        let speaker: String?     // "self" | "other" | nil (unlabeled/legacy)
         let text: String
     }
 
@@ -16,6 +18,7 @@ enum AmbientLogGrouping {
         var result: [Block] = []
         var currentTexts: [String] = []
         var currentStart: Double?
+        var currentSpeaker: String?
         var lastTime: Double?
 
         let fmt = DateFormatter()
@@ -25,12 +28,17 @@ enum AmbientLogGrouping {
         func closeBlock() {
             guard !currentTexts.isEmpty else { return }
             let label = currentStart.map { fmt.string(from: Date(timeIntervalSince1970: $0)) }
-            result.append(Block(timeLabel: label, text: currentTexts.joined(separator: " ")))
+            result.append(Block(timeLabel: label,
+                                speaker: currentSpeaker,
+                                text: currentTexts.joined(separator: " ")))
             currentTexts = []
             currentStart = nil
         }
 
         for seg in segments {
+            if !currentTexts.isEmpty && seg.speaker != currentSpeaker {
+                closeBlock()
+            }
             if let t = seg.capturedAt {
                 if let last = lastTime, t - last > gapSeconds {
                     closeBlock()
@@ -38,6 +46,7 @@ enum AmbientLogGrouping {
                 if currentStart == nil { currentStart = t }
                 lastTime = t
             }
+            currentSpeaker = seg.speaker
             let trimmed = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { currentTexts.append(trimmed) }
         }
@@ -80,6 +89,18 @@ struct AmbientLogPetView: View {
     /// showing the desktop behind it.
     private static let panelBg = Color(red: 0.11, green: 0.12, blue: 0.16)
 
+    static func speakerName(_ speaker: String?) -> String? {
+        switch speaker {
+        case "self": return "ご主人様"
+        case "other": return "相手"
+        default: return nil
+        }
+    }
+
+    static func speakerColor(_ speaker: String?) -> Color {
+        speaker == "self" ? Color(red: 0.55, green: 0.78, blue: 1.0) : .white.opacity(0.6)
+    }
+
     var body: some View {
         Group {
             if model.blocks.isEmpty {
@@ -120,6 +141,11 @@ struct AmbientLogPetView: View {
                                 Text(block.timeLabel ?? "–:–")
                                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
                                     .foregroundColor(.white.opacity(0.45))
+                                if let name = Self.speakerName(block.speaker) {
+                                    Text(name)
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(Self.speakerColor(block.speaker))
+                                }
                                 Rectangle()
                                     .fill(Color.white.opacity(0.08))
                                     .frame(height: 1)

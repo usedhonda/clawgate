@@ -16,6 +16,7 @@ final class AmbientController {
         var streaming: Bool
         var micAuthorization: String
         var whisperAvailable: Bool
+        var diarizerAvailable: Bool
         var sessionID: String?
         var segmentsTotal: Int
         var segmentsSkipped: Int
@@ -30,6 +31,7 @@ final class AmbientController {
     private let log: (String) -> Void
     private let capture: AmbientCaptureManager
     private let transcriber: AmbientTranscriber
+    private let diarizer: AmbientDiarizer
 
     private let state = DispatchQueue(label: "ai.clawgate.ambient.state")
     private let work = DispatchQueue(label: "ai.clawgate.ambient.transcribe")
@@ -65,6 +67,7 @@ final class AmbientController {
         self.log = log
         self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.transcriber = AmbientTranscriber()
+        self.diarizer = AmbientDiarizer(log: log)
         self.capture.onChunkReady = { [weak self] url, rms, startedAt in
             self?.handleChunk(url, rms: rms, startedAt: startedAt)
         }
@@ -171,6 +174,7 @@ final class AmbientController {
                 streaming: streaming,
                 micAuthorization: Self.authString(AmbientCaptureManager.micAuthorizationStatus()),
                 whisperAvailable: transcriber.isAvailable,
+                diarizerAvailable: diarizer.isAvailable,
                 sessionID: sessionID,
                 segmentsTotal: segmentsTotal,
                 segmentsSkipped: skippedTotal,
@@ -222,8 +226,13 @@ final class AmbientController {
                     return
                 }
                 let result = try self.transcriber.transcribe(chunk: url)
+                // Speaker labels (self/other) — fail-soft: nil turns leave
+                // segments unlabeled, transcription is never blocked.
+                let turns = result.kept.isEmpty ? nil : self.diarizer.diarize(chunk: url)
+                let labeled = turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
+                    ?? result.kept
                 // Stamp absolute utterance time: chunk start + in-chunk offset.
-                let stamped = result.kept.map { seg -> TranscriptSegment in
+                let stamped = labeled.map { seg -> TranscriptSegment in
                     var s = seg
                     s.capturedAt = startedAt.timeIntervalSince1970 + seg.startSeconds
                     return s

@@ -89,8 +89,16 @@ actor AmbientIngestProducer {
     private var running = false
     private var sessionID = ""
 
-    private struct WindowSegment {
+    /// One transcript line flowing into the 60s window — text plus the speaker
+    /// label and capture time needed for the dialogue-format summary.
+    struct Line {
         let text: String
+        let speaker: String?   // "self" | "other" | nil (no diarization)
+        let capturedAt: Date?
+    }
+
+    private struct WindowSegment {
+        let line: Line
         let addedAt: Date
     }
     private var window: [WindowSegment] = []
@@ -143,7 +151,14 @@ actor AmbientIngestProducer {
     func add(_ segments: [TranscriptSegment]) {
         guard running, !segments.isEmpty else { return }
         let now = Date()
-        window.append(contentsOf: segments.map { WindowSegment(text: $0.text, addedAt: now) })
+        window.append(contentsOf: segments.map {
+            WindowSegment(
+                line: Line(text: $0.text,
+                           speaker: $0.speaker,
+                           capturedAt: $0.capturedAt.map { Date(timeIntervalSince1970: $0) }),
+                addedAt: now
+            )
+        })
         if window.count > Self.windowCap {
             window.removeFirst(window.count - Self.windowCap)
         }
@@ -157,7 +172,8 @@ actor AmbientIngestProducer {
     private func flush() async {
         guard running, !window.isEmpty else { return }  // no new speech → no send
         let segments = window
-        let texts = segments.map { $0.text }
+        let lines = segments.map { $0.line }
+        let texts = lines.map { $0.text }
         let windowStart = segments.first?.addedAt ?? Date()
         let windowEnd = segments.last?.addedAt ?? Date()
 
@@ -186,7 +202,7 @@ actor AmbientIngestProducer {
         }
 
         let params = Self.buildParams(
-            segmentTexts: texts,
+            lines: lines,
             windowStart: windowStart,
             windowEnd: windowEnd,
             sessionID: sessionID,
@@ -268,13 +284,15 @@ actor AmbientIngestProducer {
 
     // MARK: - L1 construction (pure, testable)
 
-    static func buildParams(segmentTexts: [String],
+    static func buildParams(lines: [Line],
                             windowStart: Date,
                             windowEnd: Date,
                             sessionID: String,
                             sourceSeq: Int,
                             now: Date,
-                            events: [AmbientSalientEvent]? = nil) -> AmbientIngestParams {
+                            events: [AmbientSalientEvent]? = nil,
+                            timeZone: TimeZone = .current) -> AmbientIngestParams {
+        let segmentTexts = lines.map { $0.text }
         let sw = AmbientSourceWindow(
             start: Int64(windowStart.timeIntervalSince1970 * 1000),
             end: Int64(windowEnd.timeIntervalSince1970 * 1000)
@@ -287,8 +305,10 @@ actor AmbientIngestProducer {
         // ruling 2026-06-11: deliver the real text, no self-imposed redaction
         // (the earlier template-only summary made the feature useless, like a
         // minutes app that refuses to share the minutes). Capped to the most
-        // recent tail to stay clear of payload limits.
-        let summary = Self.windowTranscript(segmentTexts)
+        // recent tail to stay clear of payload limits. With diarization the
+        // text becomes dialogue-formatted: "[HH:mm] ご主人様: …" / "相手: …";
+        // unlabeled lines render without a speaker head (legacy behavior).
+        let summary = Self.dialogueSummary(lines, timeZone: timeZone)
 
         let activity: String
         switch segmentTexts.count {
@@ -309,7 +329,7 @@ actor AmbientIngestProducer {
             placeHint: nil,
             topicHint: keywords.isEmpty ? nil : keywords.joined(separator: ", "),
             activityHint: activity,
-            peopleHintRedacted: [],  // Phase 1: no diarization — no people hints at all
+            peopleHintRedacted: presentSpeakers(in: lines),
             privacyFlags: [],
             sources: [AmbientSourceRef(source: "clawgate_ambient", sourceWindow: sw, confidence: confidence)]
         )
@@ -336,6 +356,58 @@ actor AmbientIngestProducer {
             .joined(separator: " ")
         guard joined.count > maxChars else { return joined }
         return "…" + String(joined.suffix(maxChars))
+    }
+
+    /// Dialogue-formatted window transcript: consecutive same-speaker lines
+    /// merge into one utterance headed by "[HH:mm] ご主人様: " / "[HH:mm] 相手: "
+    /// (no speaker head when unlabeled). Same 1500-char recent-tail cap as
+    /// windowTranscript. With no speakers and no timestamps this degrades to
+    /// the plain joined transcript.
+    static func dialogueSummary(_ lines: [Line],
+                                maxChars: Int = 1500,
+                                timeZone: TimeZone = .current) -> String {
+        struct Utterance {
+            let speaker: String?
+            let time: Date?
+            var texts: [String]
+        }
+        var utterances: [Utterance] = []
+        for line in lines {
+            let trimmed = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if !utterances.isEmpty, utterances[utterances.count - 1].speaker == line.speaker {
+                utterances[utterances.count - 1].texts.append(trimmed)
+            } else {
+                utterances.append(Utterance(speaker: line.speaker, time: line.capturedAt, texts: [trimmed]))
+            }
+        }
+        guard !utterances.isEmpty else { return "" }
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        fmt.timeZone = timeZone
+
+        let rendered = utterances.map { u -> String in
+            var head = ""
+            if let t = u.time { head += "[" + fmt.string(from: t) + "] " }
+            switch u.speaker {
+            case "self": head += "ご主人様: "
+            case "other": head += "相手: "
+            default: break
+            }
+            return head + u.texts.joined(separator: " ")
+        }.joined(separator: "\n")
+
+        guard rendered.count > maxChars else { return rendered }
+        return "…" + String(rendered.suffix(maxChars))
+    }
+
+    /// Presence hint for L1: which diarized parties spoke in this window.
+    static func presentSpeakers(in lines: [Line]) -> [String] {
+        var people: [String] = []
+        if lines.contains(where: { $0.speaker == "self" }) { people.append("ご主人様") }
+        if lines.contains(where: { $0.speaker == "other" }) { people.append("相手") }
+        return people
     }
 
     /// Nouns that recur (>= 2 occurrences) across the window (via the shared

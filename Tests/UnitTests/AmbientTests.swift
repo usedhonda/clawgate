@@ -74,7 +74,7 @@ final class AmbientTests: XCTestCase {
             "Let me check the release pipeline before the meeting starts.",
         ]
         let params = AmbientIngestProducer.buildParams(
-            segmentTexts: segments,
+            lines: segments.map { .init(text: $0, speaker: nil, capturedAt: nil) },
             windowStart: Date(timeIntervalSince1970: 1_700_000_000),
             windowEnd: Date(timeIntervalSince1970: 1_700_000_060),
             sessionID: "ctx-test",
@@ -97,7 +97,10 @@ final class AmbientTests: XCTestCase {
 
     func testIngestParamsSchemaShape() throws {
         let params = AmbientIngestProducer.buildParams(
-            segmentTexts: ["release planning discussion", "release timing details"],
+            lines: [
+                .init(text: "release planning discussion", speaker: nil, capturedAt: nil),
+                .init(text: "release timing details", speaker: nil, capturedAt: nil),
+            ],
             windowStart: Date(timeIntervalSince1970: 1_700_000_000),
             windowEnd: Date(timeIntervalSince1970: 1_700_000_060),
             sessionID: "ctx-test",
@@ -219,6 +222,98 @@ final class AmbientTests: XCTestCase {
         XCTAssertEqual(blocks.count, 1)
         XCTAssertEqual(blocks[0].text, "a b")
         XCTAssertNil(blocks[0].timeLabel)
+        XCTAssertNil(blocks[0].speaker)
+    }
+
+    // MARK: - Speaker diarization (helper merge + grouping + dialogue summary)
+
+    func testTranscriptSegmentDecodesLegacyLinesWithoutSpeaker() throws {
+        let legacy = #"{"startSeconds":0,"endSeconds":4,"text":"right","capturedAt":1700000000}"#
+        let seg = try JSONDecoder().decode(TranscriptSegment.self, from: Data(legacy.utf8))
+        XCTAssertNil(seg.speaker)
+    }
+
+    func testDiarizerLabelAssignsSpeakerByMaxOverlap() {
+        let segs = [
+            TranscriptSegment(startSeconds: 0, endSeconds: 4, text: "おはよう"),
+            TranscriptSegment(startSeconds: 4, endSeconds: 8, text: "はい、おはようございます"),
+            TranscriptSegment(startSeconds: 20, endSeconds: 22, text: "枠外の発話"),
+        ]
+        let turns = [
+            SpeakerTurn(start: 0, end: 4.5, speaker: "self", score: 0.8),
+            SpeakerTurn(start: 4.5, end: 9, speaker: "other", score: 0.3),
+        ]
+        let labeled = AmbientDiarizer.label(segments: segs, with: turns)
+        XCTAssertEqual(labeled[0].speaker, "self")
+        XCTAssertEqual(labeled[1].speaker, "other")  // 3.5s other vs 0.5s self
+        XCTAssertNil(labeled[2].speaker, "no overlapping turn → unlabeled")
+    }
+
+    func testLogGroupingSplitsOnSpeakerChange() {
+        var s1 = TranscriptSegment(startSeconds: 0, endSeconds: 3, text: "明日の予定だけど")
+        s1.capturedAt = 1_700_000_000; s1.speaker = "self"
+        var s2 = TranscriptSegment(startSeconds: 3, endSeconds: 6, text: "14時でどうですか")
+        s2.capturedAt = 1_700_000_005; s2.speaker = "other"
+        var s3 = TranscriptSegment(startSeconds: 6, endSeconds: 9, text: "それでいこう")
+        s3.capturedAt = 1_700_000_010; s3.speaker = "self"
+
+        let blocks = AmbientLogGrouping.blocks(
+            from: [s1, s2, s3], timeZone: TimeZone(identifier: "Asia/Tokyo")!)
+        XCTAssertEqual(blocks.count, 3)
+        XCTAssertEqual(blocks.map(\.speaker), ["self", "other", "self"])
+        XCTAssertEqual(blocks[1].text, "14時でどうですか")
+    }
+
+    func testDialogueSummaryFormatsSpeakerTurns() {
+        let jst = TimeZone(identifier: "Asia/Tokyo")!
+        let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+        let lines: [AmbientIngestProducer.Line] = [
+            .init(text: "明日の打ち合わせだけど", speaker: "self", capturedAt: t0),
+            .init(text: "14時からにしよう", speaker: "self", capturedAt: t0.addingTimeInterval(4)),
+            .init(text: "はい、14時で大丈夫です", speaker: "other", capturedAt: t0.addingTimeInterval(8)),
+        ]
+        let summary = AmbientIngestProducer.dialogueSummary(lines, timeZone: jst)
+        let rendered = summary.components(separatedBy: "\n")
+        XCTAssertEqual(rendered.count, 2, "consecutive same-speaker lines merge into one utterance")
+        XCTAssertTrue(rendered[0].contains("ご主人様: 明日の打ち合わせだけど 14時からにしよう"))
+        XCTAssertTrue(rendered[0].hasPrefix("["), "utterance carries a [HH:mm] head")
+        XCTAssertTrue(rendered[1].contains("相手: はい、14時で大丈夫です"))
+    }
+
+    func testDialogueSummaryDegradesToPlainTranscriptWithoutSpeakers() {
+        let lines: [AmbientIngestProducer.Line] = [
+            .init(text: "plain one", speaker: nil, capturedAt: nil),
+            .init(text: "plain two", speaker: nil, capturedAt: nil),
+        ]
+        XCTAssertEqual(AmbientIngestProducer.dialogueSummary(lines), "plain one plain two")
+    }
+
+    func testDialogueSummaryCapsToRecentTail() {
+        let lines = (0..<300).map {
+            AmbientIngestProducer.Line(text: "0123456789", speaker: $0 % 2 == 0 ? "self" : "other", capturedAt: nil)
+        }
+        let capped = AmbientIngestProducer.dialogueSummary(lines, maxChars: 100)
+        XCTAssertTrue(capped.count <= 101)
+        XCTAssertTrue(capped.hasPrefix("…"))
+    }
+
+    func testPresentSpeakersReflectsDiarizedParties() {
+        let both: [AmbientIngestProducer.Line] = [
+            .init(text: "a", speaker: "self", capturedAt: nil),
+            .init(text: "b", speaker: "other", capturedAt: nil),
+        ]
+        XCTAssertEqual(AmbientIngestProducer.presentSpeakers(in: both), ["ご主人様", "相手"])
+        let none: [AmbientIngestProducer.Line] = [.init(text: "a", speaker: nil, capturedAt: nil)]
+        XCTAssertTrue(AmbientIngestProducer.presentSpeakers(in: none).isEmpty)
+    }
+
+    func testDiarizerUnavailableWhenBinaryOrVoiceprintMissing() {
+        let d = AmbientDiarizer(
+            binary: URL(fileURLWithPath: "/nonexistent/clawgate-diarizer"),
+            voiceprint: URL(fileURLWithPath: "/nonexistent/self.json"))
+        XCTAssertFalse(d.isAvailable)
+        XCTAssertNil(d.diarize(chunk: URL(fileURLWithPath: "/tmp/whatever.wav")),
+                     "missing helper must fail soft (nil), never throw or block")
     }
 
     // MARK: - L2 salient extraction

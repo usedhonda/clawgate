@@ -97,7 +97,7 @@ final class AmbientLiveIngestTests: XCTestCase {
 
         func ingest(_ events: [AmbientSalientEvent], texts: [String], label: String) async throws -> [AmbientEventReceipt] {
             let params = AmbientIngestProducer.buildParams(
-                segmentTexts: texts,
+                lines: texts.map { .init(text: $0, speaker: nil, capturedAt: nil) },
                 windowStart: windowStart,
                 windowEnd: now,
                 sessionID: runID,
