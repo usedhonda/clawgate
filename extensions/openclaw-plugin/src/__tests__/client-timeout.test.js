@@ -38,7 +38,7 @@ describe("clawgate HTTP client timeouts", () => {
   });
 
   it("allows LINE send requests 30s for AX and event-loop jitter", async () => {
-    await clawgateSend("http://127.0.0.1:8765", "Yuzuru Honda", "test", "trace-1");
+    await clawgateSend("http://127.0.0.1:8765", "Test User", "test", "trace-1");
     assert.deepEqual(timeoutCalls, [30_000]);
     assert.equal(clearCalls.length, 1);
   });

@@ -9,7 +9,7 @@ applications via Accessibility (AX) UI automation. It exposes a localhost-only H
 - **Server**: SwiftNIO HTTP/1.1 on `127.0.0.1:8765`
 - **Platform**: macOS 12+ (SwiftPM, swift-tools-version 5.9)
 - **Dependency**: swift-nio 2.67+ (NIOCore, NIOHTTP1, NIOPosix)
-- **Signing**: Developer ID Application (Team ID `F588423ZWS`) via `$SIGNING_ID` in `.local/secrets/release.env` — preserves TCC bindings across rebuilds
+- **Signing**: Developer ID Application: <Your Name> (<TEAM_ID>) via `$SIGNING_ID` in `.local/secrets/release.env` — preserves TCC bindings across rebuilds
 
 ---
 
@@ -775,7 +775,7 @@ codesign --force --deep --options runtime \
 ```
 
 **Important**: Always sign with the `$SIGNING_ID` exported from
-`.local/secrets/release.env` (typically `Developer ID Application: Yuzuru Honda (F588423ZWS)`).
+`.local/secrets/release.env` (typically `Developer ID Application: <Your Name> (<TEAM_ID>)`).
 Never use `--sign -` (ad-hoc) — ad-hoc signing produces a different CDHash each time
 and invalidates the TCC Accessibility and Screen Recording entries. The Developer ID
 Application identity binds TCC to the Apple-issued Team ID, so rebuilds preserve

@@ -346,8 +346,8 @@ final class AmbientController {
     /// near-silence band (noise floor, peak < 0.5), while genuine speech sat at
     /// rms ≥ 0.017 with peak ≈ 1.0. 0.005 let the whole hallucination band through.
     /// The level itself is measured during capture (AmbientCaptureManager) —
-    /// the old read-back-from-file approach raced the header flush, returned
-    /// nil, and fail-opened the gate on every chunk.
+    /// the old approach of reading the level back from the file raced the
+    /// header flush, returned nil, and fail-opened the gate on every chunk.
     private static let silenceFloorRMS: Float = 0.015
 
     private static func newSessionID() -> String {

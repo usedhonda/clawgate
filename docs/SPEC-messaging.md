@@ -845,7 +845,7 @@ Observe / Autonomous dispatches can append a read-only doc snapshot via external
 Root resolution order:
 1. `projectView.projects[project].root`
 2. `projectView.projectRoots[project]`
-3. Derived from resolved absolute project path under `projectView.rootPrefix` (default `/Users/usedhonda/projects`)
+3. Derived from resolved absolute project path under `projectView.rootPrefix` (default `/Users/you/projects`)
 
 File list resolution order:
 1. `projectView.projects[project].files`
@@ -864,7 +864,7 @@ Safety behavior:
 {
   "enabled": true,
   "command": "chi-projects-read",
-  "rootPrefix": "/Users/usedhonda/projects",
+  "rootPrefix": "/Users/you/projects",
   "projectRoots": {
     "clawgate": "ios/clawgate"
   },

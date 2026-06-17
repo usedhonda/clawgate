@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
+<!-- Template: replace YOUR_USERNAME with your macOS account name before loading. -->
 <dict>
   <key>Label</key>
   <string>ai.clawgate.watchdog</string>
@@ -8,7 +9,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/usedhonda/projects/ios/clawgate/scripts/macmini-clawgate-watchdog.sh</string>
+    <string>/Users/YOUR_USERNAME/projects/ios/clawgate/scripts/macmini-clawgate-watchdog.sh</string>
   </array>
 
   <key>StartInterval</key>
@@ -18,10 +19,10 @@
   <true/>
 
   <key>StandardOutPath</key>
-  <string>/Users/usedhonda/.openclaw/logs/clawgate-watchdog.out.log</string>
+  <string>/Users/YOUR_USERNAME/.openclaw/logs/clawgate-watchdog.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/usedhonda/.openclaw/logs/clawgate-watchdog.err.log</string>
+  <string>/Users/YOUR_USERNAME/.openclaw/logs/clawgate-watchdog.err.log</string>
 
   <key>ProcessType</key>
   <string>Background</string>

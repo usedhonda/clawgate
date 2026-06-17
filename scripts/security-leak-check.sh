@@ -43,6 +43,17 @@ SECRET_PATTERNS=(
   'authorization[[:space:]]*[:=][[:space:]]*["'"'"'\'']?bearer[[:space:]]+[A-Za-z0-9._-]*[0-9][A-Za-z0-9._-]{11,}'
 )
 
+# Personal / local-environment identifiers that must never reach the public
+# repo. The GitHub handle in URLs (github.com/<handle>) is intentional and
+# allowed; only the LOCAL home-path form and the real signing identity are
+# blocked here. This checker file skips itself so its own denylist never
+# self-trips.
+PERSONAL_PATTERNS=(
+  '/Users/usedhonda'
+  'Yuzuru[[:space:]]+Honda'
+  'F588423ZWS'
+)
+
 FILES=()
 if [[ "$MODE" == "all" ]]; then
   while IFS= read -r -d '' file; do
@@ -89,6 +100,28 @@ scan_content_for_secret() {
   return 0
 }
 
+scan_content_for_personal() {
+  local path="$1"
+  local content="$2"
+  local pattern
+  local match
+
+  case "$path" in
+    */security-leak-check.sh) return 0 ;;
+  esac
+
+  for pattern in "${PERSONAL_PATTERNS[@]}"; do
+    match="$(printf '%s' "$content" | grep -aEn -- "$pattern" | head -n 1 || true)"
+    if [[ -n "$match" ]]; then
+      echo "[leak-guard] personal/local identifier in: $path"
+      echo "  $match"
+      return 1
+    fi
+  done
+
+  return 0
+}
+
 for file in "${FILES[@]}"; do
   if contains_blocked_path "$file"; then
     echo "[leak-guard] blocked private path detected: $file"
@@ -111,6 +144,10 @@ for file in "${FILES[@]}"; do
   fi
 
   if ! scan_content_for_secret "$file" "$content"; then
+    violations=$((violations + 1))
+  fi
+
+  if ! scan_content_for_personal "$file" "$content"; then
     violations=$((violations + 1))
   fi
 done

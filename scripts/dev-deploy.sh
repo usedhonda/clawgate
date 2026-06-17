@@ -83,11 +83,13 @@ if [[ -f "$PROJECT_DIR/.local/secrets/release.env" ]]; then
     # shellcheck disable=SC1091
     set -a; source "$PROJECT_DIR/.local/secrets/release.env"; set +a
 fi
-DEFAULT_DEVID="Developer ID Application: Yuzuru Honda (F588423ZWS)"
+# Keep the real signing identity out of the public source tree: set SIGNING_ID
+# (preferred) or CLAWGATE_DEFAULT_DEVID in .local/secrets/release.env.
+DEFAULT_DEVID="${CLAWGATE_DEFAULT_DEVID:-}"
 RESOLVED_SIGNING_ID=""
 if [[ -n "${SIGNING_ID:-}" ]] && /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGNING_ID"; then
     RESOLVED_SIGNING_ID="$SIGNING_ID"
-elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$DEFAULT_DEVID"; then
+elif [[ -n "$DEFAULT_DEVID" ]] && /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -qF "$DEFAULT_DEVID"; then
     RESOLVED_SIGNING_ID="$DEFAULT_DEVID"
 elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
     RESOLVED_SIGNING_ID="ClawGate Dev"

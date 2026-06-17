@@ -2,7 +2,7 @@
 
 These scripts belong to the self-signed `ClawGate Dev` cert era that
 ended on 2026-04-10, when ClawGate migrated to signing with
-`Developer ID Application: Yuzuru Honda (F588423ZWS)`.
+`Developer ID Application: <Your Name> (<TEAM_ID>)`.
 
 They are kept here only as historical reference. **Do not run them for
 new work.** Running `setup-cert.sh` or `setup-cert-macmini.sh` will
