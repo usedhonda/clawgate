@@ -19,6 +19,16 @@ Claude Code (tmux) <--WS--> cc-status-bar <--WS--> ClawGate <--HTTP--> OpenClaw 
 3. **OpenClaw plugin** polls ClawGate for events, sends task completions and questions to an AI for review
 4. The AI responds with `<cc_task>` tags that ClawGate sends back to Claude Code / Codex via tmux
 
+## Ambient Context (optional)
+
+Beyond session monitoring, ClawGate can give the agent a sense of what is happening *around* the machine. Start **Recording** from the menu bar and ClawGate captures nearby speech, transcribes it on-device with whisper.cpp, and sends periodic text summaries to OpenClaw so the agent has ambient context — it is a context stream, not a recording archive, and audio never leaves the machine.
+
+- **On-device only**: capture and transcription run locally; only text summaries are delivered.
+- **Speaker labeling (optional)**: on Apple Silicon / macOS 14+, an optional helper can label each utterance as *self* vs *other* by matching against a locally enrolled voiceprint. On Intel / older macOS the app runs normally with labeling off.
+- **Log tab**: the pet chat panel shows the running, time-stamped transcript grouped by speaker.
+
+This feature is off until you start Recording.
+
 ## Installation
 
 ### Download
