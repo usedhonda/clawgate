@@ -167,6 +167,11 @@ final class AppRuntime {
         if configStore.load().isClientRole {
             core.ambientController = ambientController
             logger.log(.info, "Ambient Context Stream available (client role)")
+            // Auto-resume recording if it was on before this launch. A deploy /
+            // watchdog restart must not silently leave recording off (the
+            // 2026-06-21 80-min gap); resumeIfWasStreaming no-ops on a clean
+            // user stop or when the mic is denied.
+            ambientController.resumeIfWasStreaming()
         } else {
             logger.log(.info, "Ambient Context Stream disabled (server role)")
         }

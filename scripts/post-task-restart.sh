@@ -51,6 +51,96 @@ done
 
 cd "$PROJECT_PATH"
 
+ambient_status_json() {
+  curl -fsS -m 5 http://127.0.0.1:8765/v1/ambient/status 2>/dev/null || true
+}
+
+ambient_extract_field() {
+  local field="$1"
+  python3 -c 'import json, sys
+field = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+    result = data.get("result") or {}
+    value = result.get(field, None)
+    if value is None:
+        print("")
+    elif isinstance(value, bool):
+        print("true" if value else "false")
+    else:
+        print(value)
+except Exception:
+    print("")
+' "$field"
+}
+
+ambient_response_ok() {
+  python3 -c 'import json, sys
+try:
+    data = json.load(sys.stdin)
+    print("true" if data.get("ok") is True else "false")
+except Exception:
+    print("false")
+'
+}
+
+ambient_verify_chunks_after_restart() {
+  echo "[verify] Host B ambient capture liveness"
+  local status start_result before after liveness streaming
+  status="$(ambient_status_json)"
+  if [[ -z "$status" ]]; then
+    echo "WARN: ambient status unavailable, skipping ambient verify" >&2
+    return 0
+  fi
+  if [[ "$(printf '%s' "$status" | ambient_extract_field available)" != "true" ]]; then
+    echo "skip (ambient unavailable on this host)"
+    return 0
+  fi
+
+  start_result="$(curl -fsS -m 30 -X POST http://127.0.0.1:8765/v1/ambient/stream/start 2>/dev/null || true)"
+  if [[ -z "$start_result" ]]; then
+    echo "FAIL: ambient stream start returned empty response" >&2
+    return 1
+  fi
+  if [[ "$(printf '%s' "$start_result" | ambient_response_ok)" != "true" ]]; then
+    echo "FAIL: ambient stream start failed: $start_result" >&2
+    return 1
+  fi
+
+  before="$(printf '%s' "$start_result" | ambient_extract_field chunksSurfaced)"
+  [[ "$before" =~ ^-?[0-9]+$ ]] || before="$(printf '%s' "$start_result" | ambient_extract_field chunks_surfaced)"
+  [[ "$before" =~ ^-?[0-9]+$ ]] || before=0
+  liveness="$(printf '%s' "$start_result" | ambient_extract_field captureLiveness)"
+  streaming="$(printf '%s' "$start_result" | ambient_extract_field streaming)"
+  echo "ambient start ok (streaming=$streaming liveness=${liveness:-unknown} chunksSurfaced=$before)"
+
+  sleep 35
+  status="$(ambient_status_json)"
+  after="$(printf '%s' "$status" | ambient_extract_field chunksSurfaced)"
+  [[ "$after" =~ ^-?[0-9]+$ ]] || after="$(printf '%s' "$status" | ambient_extract_field chunks_surfaced)"
+  [[ "$after" =~ ^-?[0-9]+$ ]] || after=0
+  liveness="$(printf '%s' "$status" | ambient_extract_field captureLiveness)"
+  if (( after > before )); then
+    echo "ok (chunksSurfaced $before -> $after, liveness=${liveness:-unknown})"
+    return 0
+  fi
+
+  echo "FAIL: ambient chunksSurfaced did not increase after restart ($before -> $after, liveness=${liveness:-unknown}); attempting one hard recover" >&2
+  curl -fsS -m 30 -X POST http://127.0.0.1:8765/v1/ambient/capture/recover >/dev/null 2>&1 || true
+  sleep 35
+  status="$(ambient_status_json)"
+  after="$(printf '%s' "$status" | ambient_extract_field chunksSurfaced)"
+  [[ "$after" =~ ^-?[0-9]+$ ]] || after="$(printf '%s' "$status" | ambient_extract_field chunks_surfaced)"
+  [[ "$after" =~ ^-?[0-9]+$ ]] || after=0
+  liveness="$(printf '%s' "$status" | ambient_extract_field captureLiveness)"
+  if (( after > before )); then
+    echo "ok after recover (chunksSurfaced $before -> $after, liveness=${liveness:-unknown})"
+    return 0
+  fi
+  echo "FAIL: ambient capture did not surface chunks after recover ($before -> $after, liveness=${liveness:-unknown})" >&2
+  return 1
+}
+
 source "$PROJECT_PATH/scripts/lib-ops-log.sh"
 ops_log info "post_task_begin" "post-task restart begin (remote_host=$REMOTE_HOST skip_sync=$SKIP_SYNC)"
 trap 'ops_log error "post_task_failed" "post-task restart failed (line=$LINENO exit=$?)"' ERR
@@ -108,6 +198,8 @@ echo
 echo "[verify] Host B health"
 curl -fsS -m 3 http://127.0.0.1:8765/v1/health >/dev/null
 echo "ok"
+
+ambient_verify_chunks_after_restart
 
 echo "[verify] Host A health"
 ssh "$REMOTE_HOST" "curl -fsS -m 3 http://127.0.0.1:8765/v1/health >/dev/null"

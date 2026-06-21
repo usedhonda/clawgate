@@ -25,6 +25,14 @@ final class AmbientController {
         var lastError: String?
         var ingestSent: Int
         var ingestLastError: String?
+        // Capture liveness (truthful health, independent of captureState which is
+        // only the intended state and lies when the engine silently wedges).
+        var captureLiveness: String       // live | stale | wedged | unknown
+        var secondsSinceLastTap: Int      // -1 when not capturing / no tap yet
+        var secondsSinceLastChunk: Int    // -1 when no chunk surfaced yet
+        var chunksSurfaced: Int           // cumulative chunks finalized (incl. silence)
+        var recoveryCount: Int
+        var lastRecoveryReason: String?
     }
 
     private let configStore: ConfigStore
@@ -61,6 +69,10 @@ final class AmbientController {
             }
         }
     )
+
+    /// In-app self-heal: detects a silently-wedged capture and hard-recovers it.
+    /// Runs only while streaming.
+    private lazy var healthMonitor = AmbientHealthMonitor(controller: self, log: log)
 
     init(configStore: ConfigStore, log: @escaping (String) -> Void = { _ in }) {
         self.configStore = configStore
@@ -115,10 +127,12 @@ final class AmbientController {
                         self.writeSessionMetadata()
                     }
                     self.streaming = true
+                    self.setWasStreaming(true)
                     self.lastError = nil
                     if let sid = self.sessionID {
                         Task { await self.ingest.start(sessionID: sid) }
                     }
+                    self.healthMonitor.start()
                     self.log("ambient stream started session=\(self.sessionID ?? "?")")
                     completion(.success(()))
                 } catch {
@@ -132,6 +146,8 @@ final class AmbientController {
     func stopStream() {
         state.async {
             self.streaming = false
+            self.setWasStreaming(false)
+            self.healthMonitor.stop()
             Task { await self.ingest.stop() }
             self.log("ambient stream stopped (capture continues=\(self.capture.state == .capturing))")
         }
@@ -141,8 +157,47 @@ final class AmbientController {
     func pauseCapture() {
         state.async {
             self.streaming = false
+            self.setWasStreaming(false)
+            self.healthMonitor.stop()
             Task { await self.ingest.stop() }
             self.capture.stop()
+        }
+    }
+
+    /// Hard-recover a wedged capture in-process (in-app monitor trigger,
+    /// /v1/ambient/capture/recover, or the external watchdog backstop).
+    func recover(reason: String) {
+        state.sync { self.capture.hardRecover(reason: reason) }
+    }
+
+    /// TEST ONLY: simulate a capture wedge (engine torn down, captureState left
+    /// "capturing") so the detect→recover loop can be verified on demand.
+    func simulateWedge() {
+        state.sync { self.capture.simulateWedge() }
+    }
+
+    // MARK: - Auto-resume across restarts
+
+    /// Persisted intent: was the stream running when the process last lived? A
+    /// crash / deploy restart leaves this true so the app resumes itself on
+    /// launch; a clean user stop/pause clears it so we never auto-resume after an
+    /// intentional stop. This kills the flaky "restart → manual curl restore"
+    /// race that left recording silently off for 80min on 2026-06-21.
+    private static let wasStreamingKey = "clawgate.ambient.wasStreaming"
+    private func setWasStreaming(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: Self.wasStreamingKey)
+    }
+
+    /// Called once at app startup: if the stream was on before this launch and
+    /// the mic is usable, resume recording automatically.
+    func resumeIfWasStreaming() {
+        guard isAvailable, UserDefaults.standard.bool(forKey: Self.wasStreamingKey) else { return }
+        log("ambient auto-resume: stream was on before launch, restarting")
+        startStream { [weak self] result in
+            switch result {
+            case .success: self?.log("ambient auto-resume ok")
+            case .failure(let e): self?.log("ambient auto-resume failed: \(e)")
+            }
         }
     }
 
@@ -167,7 +222,19 @@ final class AmbientController {
 
     func snapshot() -> Status {
         state.sync {
-            Status(
+            let capturing = capture.state == .capturing
+            let live = capture.livenessSnapshot()
+            let now = Date()
+            // Liveness is meaningful only while capturing AND streaming (a paused
+            // or idle capture is intentionally quiet, not wedged).
+            let sinceTap = (capturing && streaming)
+                ? live.lastTapAt.map { Int(now.timeIntervalSince($0)) } ?? -1
+                : -1
+            let sinceChunk = live.lastChunkReadyAt.map { Int(now.timeIntervalSince($0)) } ?? -1
+            let liveness = (capturing && streaming)
+                ? AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: sinceTap)
+                : "unknown"
+            return Status(
                 role: configStore.load().runtimeRole.rawValue,
                 available: isAvailable,
                 captureState: capture.state.rawValue,
@@ -182,7 +249,13 @@ final class AmbientController {
                 lastText: lastText,
                 lastError: lastError,
                 ingestSent: ingestSent,
-                ingestLastError: ingestLastError
+                ingestLastError: ingestLastError,
+                captureLiveness: liveness,
+                secondsSinceLastTap: sinceTap,
+                secondsSinceLastChunk: sinceChunk,
+                chunksSurfaced: live.chunksSurfaced,
+                recoveryCount: live.recoveryCount,
+                lastRecoveryReason: live.lastRecoveryReason
             )
         }
     }

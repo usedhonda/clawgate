@@ -814,6 +814,22 @@ final class BridgeCore {
         return ambientRunControl(c) { c.resumeCapture(completion: $0) }
     }
 
+    /// Hard-recover a wedged capture in-process (manual trigger / external
+    /// watchdog backstop). Returns the post-recovery status.
+    func ambientCaptureRecover() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        c.recover(reason: "manual /v1/ambient/capture/recover")
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
+    }
+
+    /// TEST ONLY: simulate a capture wedge so the detect→recover loop can be
+    /// verified without waiting for a spontaneous engine death.
+    func ambientSimulateWedge() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        c.simulateWedge()
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
+    }
+
     func ambientSessions() -> HTTPResult {
         guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.sessionIDs(), error: nil)))
@@ -1610,6 +1626,45 @@ final class BridgeCore {
                 message: "Gateway poll is fresh",
                 details: "age=\(Int(age))s"
             ))
+        }
+
+        // Check 11c: Ambient capture liveness — detects the silent wedge where
+        // the AVAudioEngine stops delivering buffers but captureState still says
+        // "capturing" (pgrep + /v1/health both miss it; 2026-06-21 cost 80min of
+        // lost recording). Keyed on tap-staleness, which is silence-safe: the tap
+        // fires even in a quiet room, so it only goes stale when the engine dies —
+        // never on empty transcripts (a quiet room correctly produces none).
+        if let ambient = ambientController, ambient.isAvailable {
+            let s = ambient.snapshot()
+            if !s.streaming {
+                checks.append(DoctorCheck(
+                    name: "ambient_capture_liveness",
+                    status: "ok",
+                    message: "Ambient not streaming",
+                    details: "captureState=\(s.captureState)"
+                ))
+            } else if s.captureLiveness == "wedged" {
+                checks.append(DoctorCheck(
+                    name: "ambient_capture_liveness",
+                    status: "error",
+                    message: "Ambient capture wedged (engine stopped delivering audio)",
+                    details: "secondsSinceLastTap=\(s.secondsSinceLastTap)s chunksSurfaced=\(s.chunksSurfaced) recoveryCount=\(s.recoveryCount)"
+                ))
+            } else if s.captureLiveness == "stale" {
+                checks.append(DoctorCheck(
+                    name: "ambient_capture_liveness",
+                    status: "warning",
+                    message: "Ambient capture tap stale",
+                    details: "secondsSinceLastTap=\(s.secondsSinceLastTap)s chunksSurfaced=\(s.chunksSurfaced)"
+                ))
+            } else {
+                checks.append(DoctorCheck(
+                    name: "ambient_capture_liveness",
+                    status: "ok",
+                    message: "Ambient capture live",
+                    details: "captureLiveness=\(s.captureLiveness) secondsSinceLastTap=\(s.secondsSinceLastTap)s chunksSurfaced=\(s.chunksSurfaced)"
+                ))
+            }
         }
 
         // Calculate summary

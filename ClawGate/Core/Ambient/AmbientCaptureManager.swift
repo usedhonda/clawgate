@@ -14,7 +14,9 @@ import AVFoundation
 final class AmbientCaptureManager {
     enum CaptureState: String { case idle, capturing, paused }
 
-    private let engine = AVAudioEngine()
+    /// `var` so a wedge recovery can swap in a fresh AVAudioEngine object — the
+    /// only reliable in-process reset when the engine stops delivering buffers.
+    private var engine = AVAudioEngine()
     private var converter: AVAudioConverter?
     /// Buffer format handed to AVAudioFile.write — must match AVAudioFile.processingFormat.
     private let recordFormat: AVAudioFormat
@@ -42,6 +44,63 @@ final class AmbientCaptureManager {
 
     private let lock = NSLock()
     private(set) var state: CaptureState = .idle
+
+    /// Liveness signals. The audio tap thread writes these; the status/monitor
+    /// threads read them. A separate lock keeps tap recording off the main
+    /// capture lock's hot path. `lastTapAt` is the earliest, finest wedge signal
+    /// (the tap fires ~10×/s even in a silent room, so it going stale means the
+    /// engine stopped delivering buffers — i.e. wedged).
+    private let livenessLock = NSLock()
+    private var _lastTapAt: Date?
+    private var _lastChunkReadyAt: Date?
+    private var _chunksSurfaced = 0
+    private var _recoveryCount = 0
+    private var _lastRecoveryAt: Date?
+    private var _lastRecoveryReason: String?
+
+    /// Snapshot of capture liveness for /v1/ambient/status, the doctor check,
+    /// and the in-app health monitor.
+    struct Liveness {
+        var lastTapAt: Date?
+        var lastChunkReadyAt: Date?
+        var chunksSurfaced: Int
+        var recoveryCount: Int
+        var lastRecoveryAt: Date?
+        var lastRecoveryReason: String?
+    }
+
+    func livenessSnapshot() -> Liveness {
+        livenessLock.lock(); defer { livenessLock.unlock() }
+        return Liveness(lastTapAt: _lastTapAt,
+                        lastChunkReadyAt: _lastChunkReadyAt,
+                        chunksSurfaced: _chunksSurfaced,
+                        recoveryCount: _recoveryCount,
+                        lastRecoveryAt: _lastRecoveryAt,
+                        lastRecoveryReason: _lastRecoveryReason)
+    }
+
+    /// Classify capture liveness from the tap-staleness. Shared by status, the
+    /// doctor check, and the health monitor so all three agree. Pure + testable.
+    /// `capturing` must be true (state == .capturing); otherwise liveness is N/A.
+    static func classifyLiveness(capturing: Bool, secondsSinceLastTap: Int) -> String {
+        guard capturing else { return "unknown" }
+        if secondsSinceLastTap < 0 { return "unknown" }   // capturing but no tap recorded yet (just started)
+        if secondsSinceLastTap <= livenessStaleSeconds { return "live" }
+        if secondsSinceLastTap <= livenessWedgedSeconds { return "stale" }
+        return "wedged"
+    }
+    /// A healthy tap fires ~10×/s, so >15s without one is suspicious and >30s
+    /// while still "capturing" means the engine has stopped (wedged).
+    static let livenessStaleSeconds = 15
+    static let livenessWedgedSeconds = 30
+
+    private func recordTap() {
+        livenessLock.lock(); _lastTapAt = Date(); livenessLock.unlock()
+    }
+
+    private func recordChunkReady() {
+        livenessLock.lock(); _lastChunkReadyAt = Date(); _chunksSurfaced += 1; livenessLock.unlock()
+    }
 
     let chunkSeconds: Int
     /// Called (off the audio thread) when a chunk file is finalized and ready.
@@ -129,6 +188,48 @@ final class AmbientCaptureManager {
         log("ambient capture stopped")
     }
 
+    /// Hard-recover a wedged capture in-process: tear down the (dead) engine and
+    /// tap, swap in a FRESH AVAudioEngine, and re-install the tap. Keeps `state`
+    /// == .capturing and the same session/chunk sequence so continuity and the
+    /// ingest window are preserved. This is the self-heal action; if the fresh
+    /// engine also fails to start, state stays .capturing so the monitor/watchdog
+    /// escalates (e.g. to a process restart).
+    func hardRecover(reason: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard state == .capturing else { return }
+        log("ambient capture hardRecover: \(reason)")
+        teardownEngineLocked(finalize: true)
+        engine = AVAudioEngine()   // fresh object — re-acquires the HAL input
+        do {
+            try beginEngineLocked()
+            recordRecovery(reason: reason)
+            log("ambient capture hardRecover ok")
+        } catch {
+            recordRecovery(reason: "\(reason) (FAILED: \(error.localizedDescription))")
+            log("ambient capture hardRecover FAILED: \(error)")
+        }
+    }
+
+    /// TEST ONLY: simulate the wedge by tearing down the engine/tap WITHOUT
+    /// changing `state`, exactly reproducing the observed failure (taps stop,
+    /// captureState still reports "capturing"). Lets the detect→recover loop be
+    /// verified on demand instead of waiting for a rare spontaneous engine death.
+    func simulateWedge() {
+        lock.lock(); defer { lock.unlock() }
+        guard state == .capturing else { return }
+        teardownEngineLocked(finalize: false)
+        log("ambient capture WEDGE SIMULATED (engine torn down, state left .capturing)")
+    }
+
+    private func recordRecovery(reason: String) {
+        livenessLock.lock()
+        _recoveryCount += 1
+        _lastRecoveryAt = Date()
+        _lastRecoveryReason = reason
+        _lastTapAt = Date()   // give the fresh engine the staleness window before re-flagging
+        livenessLock.unlock()
+    }
+
     // MARK: - Engine (lock held)
 
     private func beginEngineLocked() throws {
@@ -190,6 +291,7 @@ final class AmbientCaptureManager {
             return
         }
         let rms = Float((sumSquares / Double(frames)).squareRoot())
+        recordChunkReady()   // a real chunk was finalized (incl. silence chunks — silence-safe liveness)
         let cb = onChunkReady
         let retain = retentionSeconds
         DispatchQueue.global(qos: .utility).async {
@@ -201,6 +303,7 @@ final class AmbientCaptureManager {
     // MARK: - Audio thread
 
     private func handleTap(_ buffer: AVAudioPCMBuffer) {
+        recordTap()   // engine delivered a buffer — liveness proof, even before conversion
         guard let converter else { return }
         let ratio = recordFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024

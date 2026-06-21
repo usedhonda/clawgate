@@ -443,4 +443,26 @@ final class AmbientTests: XCTestCase {
         let keys = drafts.map { $0.dedupKey }
         XCTAssertEqual(keys.count, Set(keys).count)
     }
+
+    // MARK: - Capture liveness classification (wedge detection)
+
+    func testCaptureLivenessClassification() {
+        let stale = AmbientCaptureManager.livenessStaleSeconds
+        let wedged = AmbientCaptureManager.livenessWedgedSeconds
+        // Not capturing → liveness is N/A.
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: false, secondsSinceLastTap: 0), "unknown")
+        // Capturing but no tap recorded yet (just started) → unknown, not wedged.
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: -1), "unknown")
+        // Fresh tap → live.
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: 0), "live")
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: stale), "live")
+        // Past stale but not yet wedged → stale.
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: stale + 1), "stale")
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: wedged), "stale")
+        // Past wedged threshold → wedged (the engine stopped delivering audio).
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: wedged + 1), "wedged")
+        XCTAssertEqual(AmbientCaptureManager.classifyLiveness(capturing: true, secondsSinceLastTap: 600), "wedged")
+        // Thresholds are ordered sanely.
+        XCTAssertLessThan(stale, wedged)
+    }
 }

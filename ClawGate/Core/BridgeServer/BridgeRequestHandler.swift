@@ -50,6 +50,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         (.POST, "/v1/ambient/stream/stop"),
         (.POST, "/v1/ambient/capture/pause"),
         (.POST, "/v1/ambient/capture/resume"),
+        (.POST, "/v1/ambient/capture/recover"),
+        (.POST, "/v1/ambient/capture/_simulate_wedge"),
         (.GET, "/v1/ambient/sessions"),
         (.GET, "/v1/ambient/transcript"),
     ]
@@ -251,6 +253,10 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
                 result = core.ambientCapturePause()
             } else if method == .POST && path == "/v1/ambient/capture/resume" {
                 result = core.ambientCaptureResume()
+            } else if method == .POST && path == "/v1/ambient/capture/recover" {
+                result = core.ambientCaptureRecover()
+            } else if method == .POST && path == "/v1/ambient/capture/_simulate_wedge" {
+                result = core.ambientSimulateWedge()
             } else if method == .GET && path == "/v1/ambient/sessions" {
                 result = core.ambientSessions()
             } else if method == .GET && path == "/v1/ambient/transcript" {
