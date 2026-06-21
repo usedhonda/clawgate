@@ -92,6 +92,10 @@ function envFlag(name, fallback = false) {
 const ENABLE_INTERACTION_PENDING_STRICT_V2 = envFlag("CLAWGATE_INTERACTION_PENDING_STRICT_V2", true);
 const ENABLE_AUTONOMOUS_LOOP_GUARD_V2 = envFlag("CLAWGATE_AUTONOMOUS_LOOP_GUARD_V2", true);
 const ENABLE_INGRESS_DEDUP_TUNE_V2 = envFlag("CLAWGATE_INGRESS_DEDUP_TUNE_V2", true);
+// Outbound reply fail-safe: a tproj-msg / dev-lane inbound must never have its
+// reply leak to LINE. Toggle off (CLAWGATE_OUTBOUND_REPLY_FAILSAFE=0) to restore
+// the legacy line-first routing if this ever misbehaves.
+const ENABLE_OUTBOUND_REPLY_FAILSAFE = envFlag("CLAWGATE_OUTBOUND_REPLY_FAILSAFE", true);
 const OBSERVE_REQUIRED_TOKENS = ["goal", "scope", "risk", "3-8"];
 const AUTONOMOUS_REQUIRED_TOKENS = ["<cc_task>"];
 const AUTONOMOUS_FORBIDDEN_PROMPT_PATTERNS = [
@@ -1437,7 +1441,14 @@ function inferIngressOrigin(adapter, source) {
  * Telegram is the default for CC/Cdx development traffic; LINE is reserved for normal secretary workflows.
  * Chi can explicitly route to Telegram using <send_telegram> tags.
  */
-function resolveOutboundChannel({ ingressAdapter, tprojHeader, mode } = {}) {
+export function resolveOutboundChannel({ ingressAdapter, tprojHeader, mode, failsafe = ENABLE_OUTBOUND_REPLY_FAILSAFE } = {}) {
+  // 0. Fail-safe (A): a tproj-msg sourced inbound returns to its origin lane
+  //    (Telegram/session), never LINE. Evaluate the tproj header BEFORE the
+  //    line-ingress check so a header-bearing reply can't be misrouted to LINE
+  //    when the ingress adapter was (mis)labeled "line". This is the documented
+  //    "ingress > tproj header" priority, corrected: a dev-lane reply outranks a
+  //    stale/defaulted line label.
+  if (failsafe && tprojHeader) return "telegram";
   // 1. Reply: send back to originating channel
   if (ingressAdapter === "telegram") return "telegram";
   if (ingressAdapter === "line") return "line";
@@ -2740,7 +2751,11 @@ function buildMsgContext(event, accountId, defaultConversation) {
     OriginatingChannel: "clawgate",
     OriginatingTo: conversation,
     _clawgateSource: source,
-    _ingressAdapter: event.adapter || "line",
+    // (B) Never default an unknown adapter to "line": a dev-lane inbound with no
+    // explicit adapter must not be treated as LINE ingress (which would beat the
+    // tproj-header routing and leak the reply to LINE). Align with the main
+    // dispatch loop, which already defaults to "unknown".
+    _ingressAdapter: event.adapter || (ENABLE_OUTBOUND_REPLY_FAILSAFE ? "unknown" : "line"),
   };
 
   // Build BodyForAgent with location + project roster + active tasks prefixes
@@ -2780,7 +2795,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       status: "suppressed",
       reason: "noise_only_after_normalization",
       source: event.payload?.source || "poll",
-      adapter: event.adapter || "line",
+      adapter: event.adapter || "unknown",
     });
     log?.info?.(`clawgate: [${accountId}] inbound suppressed as noise-only after normalization`);
     return;
@@ -2845,7 +2860,28 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   clearActiveProject(conversationKey);
 
   // Resolve outbound channel once for the entire inbound message handling
-  const replyChannel = resolveOutboundChannel({ ingressAdapter: ctx._ingressAdapter, tprojHeader });
+  let replyChannel = resolveOutboundChannel({ ingressAdapter: ctx._ingressAdapter, tprojHeader });
+
+  // Delivery preflight (defense-in-depth): a dev-lane inbound (tproj-msg sourced,
+  // or any non-LINE ingress) must never have its reply delivered to LINE. If
+  // routing still resolved to "line" for such an inbound, divert to Telegram and
+  // surface the original channel/target/reason instead of silently leaking to LINE.
+  if (ENABLE_OUTBOUND_REPLY_FAILSAFE && replyChannel === "line") {
+    const devLaneInbound = !!tprojHeader || (ctx._ingressAdapter && ctx._ingressAdapter !== "line");
+    if (devLaneInbound) {
+      traceLog(log, "warn", {
+        trace_id: traceId,
+        stage: "gateway_outbound_preflight_diverted",
+        action: "dispatch_inbound_message",
+        status: "diverted",
+        reason: "dev_lane_inbound_blocked_from_line",
+        ingress_adapter: ctx._ingressAdapter || "unknown",
+        tproj_header: tprojHeader ? "present" : "absent",
+      });
+      log?.warn?.(`clawgate: [${accountId}] outbound preflight: dev-lane inbound (adapter=${ctx._ingressAdapter || "unknown"}, tprojHeader=${tprojHeader ? "present" : "absent"}) blocked from LINE -> Telegram`);
+      replyChannel = "telegram";
+    }
+  }
 
   // Collect plain reply blocks so multi-block AI responses are sent as a single LINE message.
   const collectedLineBlocks = [];
@@ -4565,7 +4601,7 @@ export async function startAccount(ctx) {
       stage: "ingress_buffered",
       action: "coalesce_wait",
       status: "queued",
-      adapter: event.adapter || "line",
+      adapter: event.adapter || "unknown",
       source,
       conversation,
       coalesce_count: buffer.entries.length,
