@@ -2936,6 +2936,13 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     if (tprojHeader?.reply === "session" && tprojHeader.workspace && tprojHeader.sender) {
       const replyText = text;
       const returnUrl = tprojHeader.return_url;
+      // Identify this reverse-reply as Chi using the canonical
+      // [from:OpenClaw Agent - {Mode}] tag (same marker as the cc_task/redirect
+      // paths), passed to tproj-msg via --as so the tag IS the sender header —
+      // NOT [from:gate]. Mode = the originating session's resolved mode.
+      const replyProject = `${tprojHeader.sender || tprojHeader.workspace || ""}`.split(".")[0].trim();
+      const replyMode = sessionModes.get(replyProject) || "autonomous";
+      const senderAs = `OpenClaw Agent - ${replyMode.charAt(0).toUpperCase()}${replyMode.slice(1)}`;
 
       if (returnUrl) {
         // Federation-aware: HTTP forward to origin host's /v1/tproj-msg-deliver
@@ -2948,6 +2955,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
               session: tprojHeader.workspace,
               target: tprojHeader.sender,
               text: replyText,
+              senderAs,
             }),
             signal: AbortSignal.timeout(12000),
           });
@@ -2976,7 +2984,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
             "--allow-relay", "gate-reverse-channel",
             "--force",
             "--session", tprojHeader.workspace,
-            "--as", "gate",
+            "--as", senderAs,
             tprojHeader.sender,
             replyText,
           ]);

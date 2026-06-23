@@ -850,6 +850,7 @@ final class BridgeCore {
             let session: String
             let target: String
             let text: String
+            let senderAs: String?
         }
         do {
             let req = try jsonDecoder.decode(TprojMsgDeliverRequest.self, from: body)
@@ -871,9 +872,13 @@ final class BridgeCore {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/bash")
             let esc = { (s: String) -> String in "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            // Identify the reverse-reply as Chi via the canonical sender tag the
+            // plugin passes ([from:OpenClaw Agent - {Mode}]); default "gate" for
+            // backward compatibility with older plugin callers.
+            let senderAs = req.senderAs ?? "gate"
             process.arguments = [
                 "-l", "-c",
-                "\(tprojMsgPath) --allow-relay gate-reverse-channel --force --as gate --session \(esc(req.session)) \(esc(req.target)) \(esc(req.text))",
+                "\(tprojMsgPath) --allow-relay gate-reverse-channel --force --as \(esc(senderAs)) --session \(esc(req.session)) \(esc(req.target)) \(esc(req.text))",
             ]
 
             let pipe = Pipe()
