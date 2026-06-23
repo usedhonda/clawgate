@@ -32,7 +32,7 @@ import {
   setClawgateAuthToken,
   telegramSend,
 } from "./client.js";
-import { setActiveProject, getActiveProject, clearActiveProject, setSessionMode } from "./shared-state.js";
+import { setActiveProject, getActiveProject, clearActiveProject, setSessionMode, registerDevLaneEnqueue } from "./shared-state.js";
 import defaultPrompts from "./prompts.js";
 import {
   getProjectContext,
@@ -813,6 +813,28 @@ async function flushPendingTaskQueue({
     }
   }
 }
+
+// Bridge: let outbound.js hand a busy (retriable 503) dev-lane pane redirect off
+// to the SAME pendingTaskQueue + flushPendingTaskQueue retry machinery the cc_task
+// loop uses, so a busy pane no longer drops the autonomous review. outbound.js
+// passes the ALREADY-prefixed text as `text`; we store it verbatim as prefixedTask
+// (no double-prefix) and strip the canonical prefix only to derive a stable
+// dedup taskText. Registered via shared-state to avoid importing outbound.js here.
+registerDevLaneEnqueue(({ project, text, mode, traceId }) => {
+  const targetProject = `${project || ""}`.trim();
+  if (!targetProject || !text) return false;
+  const taskText = `${text}`.replace(/^\[from:OpenClaw Agent - [^\]]*\]\s*/, "");
+  enqueuePendingTask({
+    project: targetProject,
+    targetProject,
+    taskText,
+    prefixedTask: `${text}`,
+    mode: `${mode || ""}`,
+    traceId: `${traceId || ""}`,
+    log: _runtime?.log,
+  });
+  return true;
+});
 
 function shouldSkipCompletionDispatch({ project, mode, sessionType, text }) {
   const now = Date.now();

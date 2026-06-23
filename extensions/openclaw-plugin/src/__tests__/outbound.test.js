@@ -13,6 +13,10 @@ import assert from "node:assert/strict";
 let stubAccount = {};
 let lastSendArgs = null;
 let lastTmuxArgs = null;
+// When set, clawgateTmuxSend returns this instead of ok. Used to simulate
+// a retriable 503 (pane busy) so the redirect must queue instead of throwing.
+let stubTmuxResult = null;
+let lastEnqueueArgs = null;
 
 // Mock config.js
 mock.module("../config.js", {
@@ -31,6 +35,7 @@ mock.module("../client.js", {
     },
     clawgateTmuxSend: async (_apiUrl, project, text) => {
       lastTmuxArgs = { project, text };
+      if (stubTmuxResult) return stubTmuxResult;
       return { ok: true, result: { message_id: "tmux-1", timestamp: new Date().toISOString() } };
     },
   },
@@ -42,6 +47,10 @@ mock.module("../shared-state.js", {
   namedExports: {
     getActiveProject: () => ({ project: "", sessionType: "claude_code" }),
     getSessionMode: (_project) => stubSessionMode,
+    enqueueDevLaneText: (entry) => {
+      lastEnqueueArgs = entry;
+      return true;
+    },
   },
 });
 
@@ -67,6 +76,8 @@ describe("outbound conversation_hint mapping", () => {
   beforeEach(() => {
     lastSendArgs = null;
     lastTmuxArgs = null;
+    stubTmuxResult = null;
+    lastEnqueueArgs = null;
     stubSessionMode = "ignore";
     stubAccount = makeAccount();
   });
@@ -135,7 +146,9 @@ describe("outbound conversation_hint mapping", () => {
       stubSessionMode = "autonomous";
       await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
       assert.equal(lastTmuxArgs.project, "oc-general");
-      assert.equal(lastTmuxArgs.text, "hello");
+      // Pane redirect prefixes the body with the canonical OpenClaw-origin tag
+      // (same format as gateway.js cc_task) so CC/Codex treat it as OpenClaw-origin.
+      assert.equal(lastTmuxArgs.text, "[from:OpenClaw Agent - Autonomous] hello");
       assert.equal(lastSendArgs, null); // LINE send must NOT happen
     });
 
@@ -170,8 +183,105 @@ describe("outbound conversation_hint mapping", () => {
       stubSessionMode = "autonomous";
       await outbound.sendMedia({ ...baseSendParams, to: "LINE", mediaUrl: null, sessionKey: TMUX_KEY });
       assert.equal(lastTmuxArgs.project, "oc-general");
-      assert.equal(lastTmuxArgs.text, "hello");
+      assert.equal(lastTmuxArgs.text, "[from:OpenClaw Agent - Autonomous] hello");
       assert.equal(lastSendArgs, null);
+    });
+  });
+
+  // --- dev-lane redirect: busy-aware (retriable 503 -> queue, not throw) ---
+
+  describe("dev-lane redirect busy handling", () => {
+    const TMUX_KEY = "clawgate:default:tmux:oc-general";
+
+    it("autonomous redirect prefixes the body with [from:OpenClaw Agent - Autonomous]", async () => {
+      stubSessionMode = "autonomous";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(lastTmuxArgs.text, "[from:OpenClaw Agent - Autonomous] hello");
+    });
+
+    it("auto redirect prefixes the body with [from:OpenClaw Agent - Auto]", async () => {
+      stubSessionMode = "auto";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(lastTmuxArgs.text, "[from:OpenClaw Agent - Auto] hello");
+    });
+
+    it("retriable 503 (session_busy) does NOT throw: queues prefixed text + returns clawgate success shape", async () => {
+      stubSessionMode = "autonomous";
+      stubTmuxResult = { ok: false, error: { code: "session_busy", retriable: true, message: "session busy" } };
+      const res = await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(res.channel, "clawgate");
+      assert.equal(res.chatId, "oc-general");
+      assert.ok(res.messageId.startsWith("cg-queued-"));
+      assert.ok(lastEnqueueArgs, "enqueueDevLaneText must be called");
+      assert.equal(lastEnqueueArgs.project, "oc-general");
+      assert.equal(lastEnqueueArgs.text, "[from:OpenClaw Agent - Autonomous] hello");
+      assert.equal(lastEnqueueArgs.mode, "autonomous");
+      assert.equal(lastSendArgs, null); // must NOT fall back to LINE
+    });
+
+    it("retriable 503 session_typing_busy also queues", async () => {
+      stubSessionMode = "autonomous";
+      stubTmuxResult = { ok: false, error: { code: "session_typing_busy", retriable: true } };
+      const res = await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.ok(res.messageId.startsWith("cg-queued-"));
+      assert.ok(lastEnqueueArgs);
+      assert.equal(lastSendArgs, null);
+    });
+
+    it("retriable 503 session_not_found also queues", async () => {
+      stubSessionMode = "autonomous";
+      stubTmuxResult = { ok: false, error: { code: "session_not_found", retriable: true } };
+      const res = await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.ok(res.messageId.startsWith("cg-queued-"));
+      assert.ok(lastEnqueueArgs);
+      assert.equal(lastSendArgs, null);
+    });
+
+    it("sendMedia retriable 503 queues the prefixed caption", async () => {
+      stubSessionMode = "autonomous";
+      stubTmuxResult = { ok: false, error: { code: "session_busy", retriable: true } };
+      const res = await outbound.sendMedia({ ...baseSendParams, to: "LINE", mediaUrl: null, sessionKey: TMUX_KEY });
+      assert.ok(res.messageId.startsWith("cg-queued-"));
+      assert.equal(lastEnqueueArgs.text, "[from:OpenClaw Agent - Autonomous] hello");
+      assert.equal(lastSendArgs, null);
+    });
+
+    it("non-retriable error still throws (not queued)", async () => {
+      stubSessionMode = "autonomous";
+      stubTmuxResult = { ok: false, error: { code: "internal_error", message: "boom" } };
+      await assert.rejects(
+        () => outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY }),
+        /clawgate tmux send failed/
+      );
+      assert.equal(lastEnqueueArgs, null);
+      assert.equal(lastSendArgs, null);
+    });
+
+    it("ok tmux send returns success shape with tmux message_id (no queue)", async () => {
+      stubSessionMode = "autonomous";
+      const res = await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(res.channel, "clawgate");
+      assert.equal(res.messageId, "tmux-1");
+      assert.equal(res.chatId, "oc-general");
+      assert.equal(lastEnqueueArgs, null);
+    });
+
+    it("observe stays on LINE and is NOT prefixed (no pane redirect)", async () => {
+      stubSessionMode = "observe";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
+      assert.equal(lastSendArgs.text, "hello"); // no OpenClaw-origin prefix on LINE
+      assert.equal(lastTmuxArgs, null);
+      assert.equal(lastEnqueueArgs, null);
+    });
+
+    it("non-tmux sessionKey stays on LINE unprefixed regardless of mode", async () => {
+      stubSessionMode = "autonomous";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: "clawgate:line:Alice Smith" });
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
+      assert.equal(lastSendArgs.text, "hello");
+      assert.equal(lastTmuxArgs, null);
+      assert.equal(lastEnqueueArgs, null);
     });
   });
 });

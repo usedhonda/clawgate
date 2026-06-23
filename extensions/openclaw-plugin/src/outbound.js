@@ -4,7 +4,12 @@
 
 import { resolveAccount } from "./config.js";
 import { clawgateSend, clawgateTmuxSend, setClawgateAuthToken } from "./client.js";
-import { getSessionMode } from "./shared-state.js";
+import { getSessionMode, enqueueDevLaneText } from "./shared-state.js";
+import { appendFileSync } from "node:fs";
+
+// TEMP diagnostic: file-append so capture doesn't depend on gateway.log stdout routing.
+function diag(msg) { try { appendFileSync("/tmp/clawgate-outbound-diag.log", `${msg}\n`); } catch {} }
+diag("[load] outbound.js module loaded (diag active)");
 
 /**
  * For a dev-lane tmux session in autonomous/auto mode, return the project name
@@ -17,11 +22,61 @@ import { getSessionMode } from "./shared-state.js";
  * @returns {string|null} project name when the reply must go to the pane, else null
  */
 function devLanePaneProject(sessionKey) {
-  if (!sessionKey || !sessionKey.includes(":tmux:")) return null;
+  if (!sessionKey || !sessionKey.includes(":tmux:")) {
+    diag(`[diag] devLanePaneProject sessionKey=${JSON.stringify(sessionKey)} -> null (no :tmux:)`);
+    return null;
+  }
   const project = sessionKey.split(":tmux:")[1];
   if (!project) return null;
   const mode = getSessionMode(project);
-  return (mode === "autonomous" || mode === "auto") ? project : null;
+  const result = (mode === "autonomous" || mode === "auto") ? project : null;
+  diag(`[diag] devLanePaneProject sessionKey=${sessionKey} project=${project} mode=${mode} -> ${JSON.stringify(result)}`);
+  return result;
+}
+
+// Retriable 503 codes the Host B (ClawGate Swift) tmux adapter returns when the
+// pane is busy / typing / momentarily not found — it does NOT queue these, so we
+// retry via the gateway pendingTaskQueue instead of dropping the reply.
+const REDIRECT_RETRIABLE_CODES = new Set(["session_busy", "session_typing_busy", "session_not_found"]);
+
+/**
+ * Send a dev-lane (autonomous/auto tmux) reply to the originating CC session pane.
+ * Prefixes the body with the canonical OpenClaw-origin tag (same format as
+ * gateway.js cc_task: "[from:OpenClaw Agent - {Mode}] {body}") so CC/Codex treat
+ * it as OpenClaw-origin. On a retriable 503 (pane busy) the prefixed text is
+ * queued for idle retry via the gateway pendingTaskQueue, and a success-shaped
+ * result is returned so core does NOT fall back to LINE. Non-retriable errors throw.
+ * @param {string} apiUrl
+ * @param {string} paneProject
+ * @param {string} body — raw reply text (caption or message), not yet prefixed
+ * @returns {Promise<{channel: string, messageId: string, chatId: string, timestamp: number}>}
+ */
+async function sendDevLanePaneRedirect(apiUrl, paneProject, body) {
+  const mode = getSessionMode(paneProject);
+  const label = mode ? mode.charAt(0).toUpperCase() + mode.slice(1) : "Unknown";
+  const prefixed = `[from:OpenClaw Agent - ${label}] ${body}`;
+  const tmuxResult = await clawgateTmuxSend(apiUrl, paneProject, prefixed);
+  if (tmuxResult.ok) {
+    diag(`[diag] devLane redirect SENT project=${paneProject} mode=${mode} id=${tmuxResult.result?.message_id ?? ""}`);
+    return {
+      channel: "clawgate",
+      messageId: tmuxResult.result?.message_id ?? `cg-${Date.now()}`,
+      chatId: paneProject,
+      timestamp: tmuxResult.result?.timestamp ? Date.parse(tmuxResult.result.timestamp) : Date.now(),
+    };
+  }
+  const code = `${tmuxResult.error?.code ?? ""}`.toLowerCase();
+  if (REDIRECT_RETRIABLE_CODES.has(code)) {
+    enqueueDevLaneText({ project: paneProject, text: prefixed, mode, traceId: "" });
+    diag(`[diag] devLane redirect QUEUED project=${paneProject} mode=${mode} code=${code}`);
+    return {
+      channel: "clawgate",
+      messageId: `cg-queued-${Date.now()}`,
+      chatId: paneProject,
+      timestamp: Date.now(),
+    };
+  }
+  throw new Error(`clawgate tmux send failed: ${tmuxResult.error?.message ?? JSON.stringify(tmuxResult)}`);
 }
 
 export const outbound = {
@@ -39,6 +94,7 @@ export const outbound = {
    */
   sendMedia: async ({ to, text, mediaUrl, accountId, cfg, sessionKey }) => {
     // LINE via ClawGate does not support media — send text fallback
+    diag(`[entry] sendMedia sessionKey=${JSON.stringify(sessionKey)} mediaUrl=${JSON.stringify(mediaUrl)} to=${JSON.stringify(to)}`);
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
     const caption = text || (mediaUrl ? `[media: ${mediaUrl}]` : "[media]");
@@ -46,16 +102,7 @@ export const outbound = {
     // pane, not the user's LINE. observe stays on LINE (SPEC-messaging.md §6).
     const paneProject = devLanePaneProject(sessionKey);
     if (paneProject) {
-      const tmuxResult = await clawgateTmuxSend(account.apiUrl, paneProject, caption);
-      if (!tmuxResult.ok) {
-        throw new Error(`clawgate tmux send failed: ${tmuxResult.error?.message ?? JSON.stringify(tmuxResult)}`);
-      }
-      return {
-        channel: "clawgate",
-        messageId: tmuxResult.result?.message_id ?? `cg-${Date.now()}`,
-        chatId: paneProject,
-        timestamp: tmuxResult.result?.timestamp ? Date.parse(tmuxResult.result.timestamp) : Date.now(),
-      };
+      return await sendDevLanePaneRedirect(account.apiUrl, paneProject, caption);
     }
     const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
       ? (account.defaultConversation || to)
@@ -75,6 +122,7 @@ export const outbound = {
   },
 
   sendText: async ({ to, text, accountId, cfg, sessionKey }) => {
+    diag(`[entry] sendText sessionKey=${JSON.stringify(sessionKey)} to=${JSON.stringify(to)}`);
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
     // Dev-lane (autonomous/auto tmux): route the reply back to the originating CC
@@ -83,16 +131,8 @@ export const outbound = {
     // observe stays on LINE (SPEC-messaging.md §6).
     const paneProject = devLanePaneProject(sessionKey);
     if (paneProject) {
-      const tmuxResult = await clawgateTmuxSend(account.apiUrl, paneProject, text);
-      if (!tmuxResult.ok) {
-        throw new Error(`clawgate tmux send failed: ${tmuxResult.error?.message ?? JSON.stringify(tmuxResult)}`);
-      }
-      return {
-        channel: "clawgate",
-        messageId: tmuxResult.result?.message_id ?? `cg-${Date.now()}`,
-        chatId: paneProject,
-        timestamp: tmuxResult.result?.timestamp ? Date.parse(tmuxResult.result.timestamp) : Date.now(),
-      };
+      diag(`[diag] sendText->devLane redirect apiUrl=${account.apiUrl} project=${paneProject}`);
+      return await sendDevLanePaneRedirect(account.apiUrl, paneProject, text);
     }
     // Account-format targets (e.g. "default", "clawgate:default") -> use defaultConversation
     const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
