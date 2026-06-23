@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 
 let stubAccount = {};
 let lastSendArgs = null;
+let lastTmuxArgs = null;
 
 // Mock config.js
 mock.module("../config.js", {
@@ -28,13 +29,19 @@ mock.module("../client.js", {
       lastSendArgs = { conversationHint, text };
       return { ok: true, result: { message_id: "test-1", timestamp: new Date().toISOString() } };
     },
+    clawgateTmuxSend: async (_apiUrl, project, text) => {
+      lastTmuxArgs = { project, text };
+      return { ok: true, result: { message_id: "tmux-1", timestamp: new Date().toISOString() } };
+    },
   },
 });
 
 // Mock shared-state.js
+let stubSessionMode = "ignore";
 mock.module("../shared-state.js", {
   namedExports: {
     getActiveProject: () => ({ project: "", sessionType: "claude_code" }),
+    getSessionMode: (_project) => stubSessionMode,
   },
 });
 
@@ -59,6 +66,8 @@ const baseSendParams = { text: "hello", accountId: "default", cfg: {} };
 describe("outbound conversation_hint mapping", () => {
   beforeEach(() => {
     lastSendArgs = null;
+    lastTmuxArgs = null;
+    stubSessionMode = "ignore";
     stubAccount = makeAccount();
   });
 
@@ -114,6 +123,55 @@ describe("outbound conversation_hint mapping", () => {
       stubAccount = makeAccount({ defaultConversation: "" });
       await outbound.sendMedia({ ...baseSendParams, to: "LINE", mediaUrl: null });
       assert.equal(lastSendArgs.conversationHint, "LINE");
+    });
+  });
+
+  // --- dev-lane sessionKey routing (autonomous/auto -> pane, observe -> LINE) ---
+
+  describe("dev-lane sessionKey routing (SPEC-messaging.md §6)", () => {
+    const TMUX_KEY = "clawgate:default:tmux:oc-general";
+
+    it("autonomous tmux sessionKey routes to pane (clawgateTmuxSend), NOT LINE", async () => {
+      stubSessionMode = "autonomous";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(lastTmuxArgs.project, "oc-general");
+      assert.equal(lastTmuxArgs.text, "hello");
+      assert.equal(lastSendArgs, null); // LINE send must NOT happen
+    });
+
+    it("auto tmux sessionKey routes to pane", async () => {
+      stubSessionMode = "auto";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(lastTmuxArgs.project, "oc-general");
+      assert.equal(lastSendArgs, null);
+    });
+
+    it("observe tmux sessionKey stays on LINE, NOT pane", async () => {
+      stubSessionMode = "observe";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: TMUX_KEY });
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
+      assert.equal(lastTmuxArgs, null); // observe must NOT be redirected to pane
+    });
+
+    it("no sessionKey stays on LINE (secretary/normal conversation unchanged)", async () => {
+      await outbound.sendText({ ...baseSendParams, to: "LINE" });
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
+      assert.equal(lastTmuxArgs, null);
+    });
+
+    it("non-tmux sessionKey stays on LINE regardless of mode", async () => {
+      stubSessionMode = "autonomous";
+      await outbound.sendText({ ...baseSendParams, to: "LINE", sessionKey: "clawgate:line:Alice Smith" });
+      assert.equal(lastSendArgs.conversationHint, "Alice Smith");
+      assert.equal(lastTmuxArgs, null);
+    });
+
+    it("sendMedia with autonomous tmux sessionKey routes caption to pane", async () => {
+      stubSessionMode = "autonomous";
+      await outbound.sendMedia({ ...baseSendParams, to: "LINE", mediaUrl: null, sessionKey: TMUX_KEY });
+      assert.equal(lastTmuxArgs.project, "oc-general");
+      assert.equal(lastTmuxArgs.text, "hello");
+      assert.equal(lastSendArgs, null);
     });
   });
 });

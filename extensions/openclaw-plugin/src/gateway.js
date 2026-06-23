@@ -32,7 +32,7 @@ import {
   setClawgateAuthToken,
   telegramSend,
 } from "./client.js";
-import { setActiveProject, getActiveProject, clearActiveProject } from "./shared-state.js";
+import { setActiveProject, getActiveProject, clearActiveProject, setSessionMode } from "./shared-state.js";
 import defaultPrompts from "./prompts.js";
 import {
   getProjectContext,
@@ -417,6 +417,7 @@ function recomputeProjectMode(project) {
     }
   }
   sessionModes.set(normalizedProject, bestMode);
+  setSessionMode(normalizedProject, bestMode); // mirror to shared-state so outbound.sendText can route dev-lane (autonomous/auto tmux) to the pane, not LINE
   return bestMode;
 }
 

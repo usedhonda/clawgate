@@ -50,3 +50,32 @@ export function clearActiveProject(conversation) {
   if (!conversation) return;
   activeDispatchProjects.delete(conversation);
 }
+
+/** @type {Map<string, string>} project -> resolved session mode (mirrored from gateway.js sessionModes) */
+const sessionModeByProject = new Map();
+
+/**
+ * Mirror a project's resolved session mode so outbound.sendText can route
+ * dev-lane (autonomous/auto tmux) replies back to the CC session pane instead
+ * of the user's LINE. Called by gateway.js whenever a project's mode is
+ * (re)computed (recomputeProjectMode).
+ * @param {string} project
+ * @param {string} mode
+ */
+export function setSessionMode(project, mode) {
+  const p = `${project || ""}`.trim();
+  if (!p) return;
+  sessionModeByProject.set(p, `${mode || "ignore"}`.trim().toLowerCase() || "ignore");
+}
+
+/**
+ * Get a project's resolved session mode ("ignore" when unknown).
+ * Called by outbound.js to decide pane (autonomous/auto) vs LINE (observe/other).
+ * @param {string} project
+ * @returns {string}
+ */
+export function getSessionMode(project) {
+  const p = `${project || ""}`.trim();
+  if (!p) return "ignore";
+  return sessionModeByProject.get(p) || "ignore";
+}
