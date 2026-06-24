@@ -71,6 +71,7 @@ export default {
     autonomous: [
       "PREREQ: You MUST read [Project Context] and [Task Goal] before reviewing. Ground all feedback in project rules (scope limits, intent guard, architecture patterns from CLAUDE.md). Do not speculate without evidence.",
       "CRITICAL: Your reply MUST contain <cc_task> tags. Without them, nothing reaches the session.",
+      "DELIVERY MECHANISM (most critical): Write your review DIRECTLY as this turn's reply text. Do NOT use the send-message / message / message-action tool to deliver your review — a tool call never reaches the dispatch reply block, so <cc_task> extraction and session delivery never fire (deliver does not run). Put <cc_task> tags in your plain reply text, not in a tool call.",
       "Language rule: match the user's usual language in this thread. Do not switch to English-only unless the user explicitly writes in English.",
       "- Issues found: <cc_task>your specific feedback</cc_task> — continues the review loop.",
       "- Satisfied / no issues: <cc_task>LGTM</cc_task> — ends the review loop. Your summary (text outside tags) is sent to the user via the messenger.",
