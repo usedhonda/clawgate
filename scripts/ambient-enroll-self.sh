@@ -20,7 +20,7 @@
 set -euo pipefail
 
 HOST="${ENROLL_REMOTE_HOST:?set ENROLL_REMOTE_HOST (ssh alias)}"
-LABEL="${ENROLL_SPEAKER_LABEL:?set ENROLL_SPEAKER_LABEL (owner's speaker_label)}"
+LABEL="${ENROLL_SPEAKER_LABEL:?set ENROLL_SPEAKER_LABEL (owner speaker_label)}"
 VL_ROOT="${ENROLL_VOICELOG_ROOT:-~/projects/Mac/voicelog}"
 LIMIT="${ENROLL_LIMIT:-15}"
 
@@ -58,12 +58,12 @@ echo "  $COUNT segments"
 echo "[3/4] Copy originals (read-only) + trim/resample to 16k mono wav"
 mkdir -p "$WORK/src" "$WORK/wavs"
 i=0
-while IFS='|' read -r rec path start end; do
+while IFS='|' read -r _ path start end; do
   [[ -n "$path" ]] || continue
   i=$((i+1))
   scp -q "$HOST:$VL_ROOT/data/original/$path" "$WORK/src/$path"
   dur=$(echo "$end $start" | awk '{ print $1 - $2 }')
-  ffmpeg -hide_banner -loglevel error -y -ss "$start" -t "$dur" \
+  ffmpeg -nostdin -hide_banner -loglevel error -y -ss "$start" -t "$dur" \
     -i "$WORK/src/$path" -ar 16000 -ac 1 -c:a pcm_s16le \
     "$WORK/wavs/clip$(printf '%02d' "$i").wav"
 done < "$WORK/segments.txt"
