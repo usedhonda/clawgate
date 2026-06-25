@@ -304,10 +304,15 @@ final class BridgeCoreTests: XCTestCase {
         let json = """
         {"adapter":"line","action":"send_message","payload":{"conversation_hint":"TestUser","text":"hello","enter_to_send":true}}
         """
+        // LINE disabled locally means a `line` send is FORWARDED to the remote
+        // openclawHost (client→server LINE architecture), not hard-rejected. The
+        // test ConfigStore's openclawHost defaults to loopback, which is not a
+        // valid forward target (it would loop) → 503 line_forward_unavailable.
+        // (The old 403 line_disabled path was replaced by this forward contract.)
         let response = core.send(body: Data(json.utf8), traceID: nil)
-        XCTAssertEqual(response.status, .forbidden)
+        XCTAssertEqual(response.status, .serviceUnavailable)
         let parsed = try! JSONDecoder().decode(APIResponse<SendResult>.self, from: response.body)
-        XCTAssertEqual(parsed.error?.code, "line_disabled")
+        XCTAssertEqual(parsed.error?.code, "line_forward_unavailable")
     }
 
     func testConfigOmitsLegacyNodeRole() {
