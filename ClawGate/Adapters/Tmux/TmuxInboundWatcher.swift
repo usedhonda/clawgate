@@ -86,9 +86,13 @@ final class TmuxInboundWatcher {
     private func handleStateChange(session: SessionSnapshot,
                                    oldStatus: String, newStatus: String,
                                    source: String = "ws") {
-        // Time-based dedup: suppress duplicate fires for the same project+status within 5 seconds
+        // Time-based dedup: suppress duplicate fires for the same project+sessionType+status
+        // within 5 seconds. sessionType MUST be in the key: a project can have both a cc and a
+        // codex pane, and they often settle to waiting_input within the same window. Without
+        // sessionType, whichever pane fires first (e.g. an ignore-mode codex pane) suppresses the
+        // other (e.g. the autonomous cc pane), dropping its completion entirely.
         let now = Date()
-        let dedupKey = "\(session.project):\(newStatus)"
+        let dedupKey = "\(session.project):\(session.sessionType):\(newStatus)"
         if let lastFire = lastStateChangeTime[dedupKey],
            now.timeIntervalSince(lastFire) < stateChangeDedupInterval {
             logger.log(.debug, "TmuxInboundWatcher: dedup skip \(session.project) \(oldStatus)->\(newStatus)")
