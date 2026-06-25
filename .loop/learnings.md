@@ -2,7 +2,7 @@
 
 恒久ルール（再発失敗から1つずつ追記。クラスごと殺す予防を優先）:
 
-- （まだ無し。最初の run でルールを書き始める）
+- **LINE 無効時の send は「forward 契約」**: `lineEnabled=false` + adapter=`line` の send は reject ではなく remote openclawHost へ forward される（`BridgeCore.rejectLineOnClient` -> `forwardLineRequest`）。openclawHost が loopback（localhost/127.0.0.1/::1/0.0.0.0）だと forward 先が無く **503 `line_forward_unavailable`** を返す。旧 **403 `line_disabled`** は廃止済（送信パスに該当コードは存在しない）。LINE 無効まわりのテスト/挙動を扱うときは forward 契約を前提にすること。
 
 ## 観察待ちの仮説（確定したらルールへ昇格）
-- LINE 無効時の send レスポンスコードが 403/`line_disabled` -> 503/`line_forward_unavailable` に変わっている。これが意図的な仕様変更（forward 不能を 503 で表す）なら、`testLineSendIsRejectedWhenLineDisabled` の期待値を更新するのが正。regression なら code を直すのが正。**run 1 でどちらか確定し、ここに結論を書く。**
+- （現状なし）

@@ -4,13 +4,14 @@
 iteration cap 6 / no-progress 2 / wall-clock 30min
 
 ## Done
-(まだ無し)
+- iteration 1: `testLineSendIsRejectedWhenLineDisabled` の root cause を確定（code が正・test が stale）。LINE 無効時の send は forward 契約で 503 `line_forward_unavailable` を返す（旧 403 `line_disabled` は廃止）。test の期待値を 503/`line_forward_unavailable` に正し、設計説明コメントを追加。
+- VERIFY: `swift test --filter BridgeCoreTests` = 27/0。full `swift test` = **227 tests / 1 skipped / 0 failures**。
 
 ## Failed / blocked
-(まだ無し)
+(なし)
 
-## Known red（run 開始時点）
-- `BridgeCoreTests.testLineSendIsRejectedWhenLineDisabled`（:310）: `line_disabled`/403 を期待、実際は `line_forward_unavailable`/503。期待値 drift。**code が正か test が正かを source/intent から判断してから直すこと**（assertion を 503 に雑に書き換えない）。
+## Result
+SUCCESS — full `swift test` green（0 failures, exit 0）。accept 率 1/1。assertion 弱体化なし、触ったのは Tests/UnitTests/BridgeCoreTests.swift のみ。
 
 ## Next step
-`swift build` -> `swift test --filter BridgeCoreTests` で対象を再現し、`/v1/...` の LINE-disabled 送信が 503/line_forward_unavailable を返す経路を BridgeCore.swift で読んで、403/line_disabled から 503 へ変わったのが意図的か regression かを確定する。
+(完了。今後 suite が red になったら本ループを再度回す)
