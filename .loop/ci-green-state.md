@@ -4,14 +4,19 @@
 iteration cap 8 / no-progress 2 / wall-clock 40min
 
 ## Done
-(まだ無し)
+- iteration 1: pre-gate で leak guard が赤（outbound.test.js に owner の実名が混入）。generic 名にジェネリック化（177/280 行、commit 8fcc1a4）。
+- iteration 1: shellcheck 導入（brew install shellcheck 0.11.0）。`ambient-enroll-self.sh` が赤 → `${:?}` 内アポストロフィ除去（カスケード誤検知の根本）+ 未使用 `rec` を `_` + ffmpeg `-nostdin`（潜在 stdin 食いバグも修正、commit 9ee58eb）。
 
 ## Failed / blocked
-(まだ無し)
+(なし)
 
-## 既知の状態（run 開始時点）
-- `swift test` は別ループ swift-test-green で全緑化済み（227 tests / 0 failures、commit afb5935）。pre-gate で再確認すること。
-- `shellcheck` がローカル未導入の可能性あり。未導入なら `brew install shellcheck`、不能ならここに coverage gap として記録。
+## Result
+SUCCESS — full ladder 全緑:
+1 leak guard OK / 2 shellcheck OK / 3 JS syntax OK / 4 plugin tests 56/0 / 5 swift build OK / 6 swift test 227/0。
+regression なし。accept 率 2/2。No fake green（検査スクリプトは緩めず実値を修正）。
+
+## 環境メモ
+- shellcheck はこの run で `brew install` 済（0.11.0）。次回 run では導入済みのはず。
 
 ## Next step
-pre-gate（ladder）を fastest -> slowest で1周回し、6 gate のどれが赤いかを確定する。最初に落ちた gate から潰す。
+(完了。今後 push 前にこのループを回せば、CI 落ちを事前に潰せる)
