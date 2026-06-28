@@ -31,8 +31,8 @@ const REDIRECT_RETRIABLE_CODES = new Set(["session_busy", "session_typing_busy",
 
 /**
  * Send a dev-lane (autonomous/auto tmux) reply to the originating CC session pane.
- * Prefixes the body with the canonical OpenClaw-origin tag (same format as
- * gateway.js cc_task: "[from:OpenClaw Agent - {Mode}] {body}") so CC/Codex treat
+ * Prefixes the body with the canonical dev-lane mode tag
+ * ("[from:OpenClaw Agent - Autonomous]" / "Auto") so CC/Codex treat
  * it as OpenClaw-origin. On a retriable 503 (pane busy) the prefixed text is
  * queued for idle retry via the gateway pendingTaskQueue, and a success-shaped
  * result is returned so core does NOT fall back to LINE. Non-retriable errors throw.
@@ -70,15 +70,14 @@ async function sendDevLanePaneRedirect(apiUrl, paneProject, body) {
 /**
  * Route a gate:direct Chi reply back to the originating dev pane via the remembered
  * tproj-msg return_url (POST /v1/tproj-msg-deliver), mirroring gateway.js's reverse
- * channel — instead of leaking it to the user's LINE. tproj-msg --as senderAs adds
- * the [from:OpenClaw Agent - {Mode}] tag, so the body is passed raw. Throws on a
+ * channel — instead of leaking it to the user's LINE. This is a Reply-context
+ * message, so tproj-msg --as uses [from:OpenClaw Agent - Reply]. Throws on a
  * non-2xx so the caller can fall through to the LINE path (reply never dropped).
  * @param {{ returnUrl: string, sender: string, workspace: string, mode: string }} origin
  * @param {string} body  raw reply text
  */
 async function sendTprojReturnUrlRedirect(origin, body) {
-  const label = `${origin.mode || "autonomous"}`;
-  const senderAs = `OpenClaw Agent - ${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+  const senderAs = "OpenClaw Agent - Reply";
   const resp = await fetch(`${origin.returnUrl}/v1/tproj-msg-deliver`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

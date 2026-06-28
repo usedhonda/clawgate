@@ -403,6 +403,15 @@ function modeRank(mode) {
   }
 }
 
+export const OPENCLAW_AGENT_REPLY_SENDER_AS = "OpenClaw Agent - Reply";
+
+export function resolveOpenClawAgentPrefixLabel({ originLabel = "", mode = "", targetMode = "" } = {}) {
+  const explicitOriginLabel = `${originLabel || ""}`.trim();
+  if (explicitOriginLabel) return explicitOriginLabel;
+  const sourceMode = `${mode || ""}`.trim() || `${targetMode || ""}`.trim();
+  return sourceMode ? sourceMode.charAt(0).toUpperCase() + sourceMode.slice(1) : "Unknown";
+}
+
 function recomputeProjectMode(project) {
   const normalizedProject = `${project || ""}`.trim();
   if (!normalizedProject) return "ignore";
@@ -2275,10 +2284,11 @@ function extractSendTelegramBlocks(text) {
  * @param {string} params.project — source tmux project (defaults target unless tag overrides)
  * @param {string} params.apiUrl
  * @param {object} [params.log]
+ * @param {string} [params.originLabel] - fixed OpenClaw Agent label for non-mode contexts (for example Proactive)
  * @returns {Promise<{lineText: string, taskText: string} | {error: Error, lineText: string} | null>}
  */
 async function tryExtractAndSendTask({
-  replyText, project, apiUrl, traceId, log, mode,
+  replyText, project, apiUrl, traceId, log, mode, originLabel,
   resolveMode = (targetProject) => sessionModes.get(targetProject) || "ignore",
 }) {
   const taskMatch = replyText.match(/<cc_task(?:\s+project="([^"]+)")?>([\s\S]*?)<\/cc_task>/i);
@@ -2317,11 +2327,12 @@ async function tryExtractAndSendTask({
     return { lineText, taskText, targetProject, terminated: true };
   }
 
-  // Prefix task with canonical wrapped form so CC/Codex can treat it as OpenClaw-origin
-  // while preserving sender metadata compatibility: [from:OpenClaw Agent - {Mode}]
+  // Prefix task with canonical wrapped form so CC/Codex can treat it as OpenClaw-origin.
+  // The label is a message-context label when provided (for example Proactive),
+  // otherwise it remains the dev-lane session mode (Autonomous/Auto).
   const sourceMode = `${mode || ""}`.trim() || targetMode;
-  const modeLabel = sourceMode ? sourceMode.charAt(0).toUpperCase() + sourceMode.slice(1) : "Unknown";
-  const prefixedTask = `[from:OpenClaw Agent - ${modeLabel}] ${taskText}`;
+  const prefixLabel = resolveOpenClawAgentPrefixLabel({ originLabel, mode: sourceMode });
+  const prefixedTask = `[from:OpenClaw Agent - ${prefixLabel}] ${taskText}`;
 
   // 3 tries total (initial + two retries) to absorb federation round-trip instability.
   const MAX_RETRIES = 2;
@@ -2948,13 +2959,9 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     if (tprojHeader?.reply === "session" && tprojHeader.workspace && tprojHeader.sender) {
       const replyText = text;
       const returnUrl = tprojHeader.return_url;
-      // Identify this reverse-reply as Chi using the canonical
-      // [from:OpenClaw Agent - {Mode}] tag (same marker as the cc_task/redirect
-      // paths), passed to tproj-msg via --as so the tag IS the sender header —
-      // NOT [from:gate]. Mode = the originating session's resolved mode.
-      const replyProject = `${tprojHeader.sender || tprojHeader.workspace || ""}`.split(".")[0].trim();
-      const replyMode = sessionModes.get(replyProject) || "autonomous";
-      const senderAs = `OpenClaw Agent - ${replyMode.charAt(0).toUpperCase()}${replyMode.slice(1)}`;
+      // Identify direct reverse-replies by message context, not dev-lane mode.
+      // tproj-msg uses senderAs as the visible [from:...] header.
+      const senderAs = OPENCLAW_AGENT_REPLY_SENDER_AS;
 
       if (returnUrl) {
         // Federation-aware: HTTP forward to origin host's /v1/tproj-msg-deliver
@@ -3059,6 +3066,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       traceId,
       log,
       mode: sourceTaskMode,
+      originLabel: "Proactive",
       resolveMode: (targetProject) => sessionModes.get(targetProject) || "ignore",
     });
     if (result) {

@@ -5,7 +5,7 @@
  * must be mapped to account.defaultConversation before being sent to ClawGate.
  */
 
-import { describe, it, beforeEach, mock } from "node:test";
+import { describe, it, beforeEach, after, mock } from "node:test";
 import assert from "node:assert/strict";
 
 // --- Stubs -----------------------------------------------------------
@@ -17,6 +17,8 @@ let lastTmuxArgs = null;
 // a retriable 503 (pane busy) so the redirect must queue instead of throwing.
 let stubTmuxResult = null;
 let lastEnqueueArgs = null;
+let lastFetchArgs = null;
+const originalFetch = globalThis.fetch;
 
 // Mock config.js
 mock.module("../config.js", {
@@ -75,11 +77,18 @@ const baseSendParams = { text: "hello", accountId: "default", cfg: {} };
 // --- Tests -----------------------------------------------------------
 
 describe("outbound conversation_hint mapping", () => {
+  after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   beforeEach(() => {
     lastSendArgs = null;
     lastTmuxArgs = null;
     stubTmuxResult = null;
     lastEnqueueArgs = null;
+    lastFetchArgs = null;
+    globalThis.fetch = originalFetch;
+    stubTprojOrigin = null;
     stubSessionMode = "ignore";
     stubAccount = makeAccount();
   });
@@ -284,6 +293,37 @@ describe("outbound conversation_hint mapping", () => {
       assert.equal(lastSendArgs.text, "hello");
       assert.equal(lastTmuxArgs, null);
       assert.equal(lastEnqueueArgs, null);
+    });
+
+    it("tproj return_url reply uses Reply sender label independent of remembered mode", async () => {
+      stubTprojOrigin = {
+        returnUrl: "http://origin.test",
+        sender: "oc-general.cdx",
+        workspace: "tproj-workspace",
+        mode: "autonomous",
+      };
+      globalThis.fetch = async (url, options) => {
+        lastFetchArgs = { url, body: JSON.parse(options.body) };
+        return { ok: true };
+      };
+
+      const res = await outbound.sendText({
+        ...baseSendParams,
+        to: "oc-general",
+        sessionKey: "clawgate:default:oc-general",
+      });
+
+      assert.equal(res.channel, "clawgate");
+      assert.equal(res.chatId, "oc-general.cdx");
+      assert.equal(lastFetchArgs.url, "http://origin.test/v1/tproj-msg-deliver");
+      assert.deepEqual(lastFetchArgs.body, {
+        session: "tproj-workspace",
+        target: "oc-general.cdx",
+        text: "hello",
+        senderAs: "OpenClaw Agent - Reply",
+      });
+      assert.equal(lastSendArgs, null);
+      assert.equal(lastTmuxArgs, null);
     });
   });
 });

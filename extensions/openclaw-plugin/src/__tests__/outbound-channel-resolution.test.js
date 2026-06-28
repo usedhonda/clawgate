@@ -1,7 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveOutboundChannel } from "../gateway.js";
+import {
+  OPENCLAW_AGENT_REPLY_SENDER_AS,
+  resolveOpenClawAgentPrefixLabel,
+  resolveOutboundChannel,
+} from "../gateway.js";
 
 const header = { sender: "clawgate.cc", project: "clawgate", workspace: "tproj-workspace", reply: "session" };
 
@@ -58,5 +62,26 @@ describe("resolveOutboundChannel fail-safe routing", () => {
   it("defaults empty input to telegram", () => {
     assert.equal(resolveOutboundChannel(), "telegram");
     assert.equal(resolveOutboundChannel({}), "telegram");
+  });
+});
+
+
+describe("OpenClaw Agent prefix label contract", () => {
+  it("uses Reply for direct tproj reverse replies", () => {
+    assert.equal(OPENCLAW_AGENT_REPLY_SENDER_AS, "OpenClaw Agent - Reply");
+  });
+
+  it("lets Proactive override dev-lane mode for non-session inbound cc_task", () => {
+    assert.equal(
+      resolveOpenClawAgentPrefixLabel({ originLabel: "Proactive", mode: "autonomous" }),
+      "Proactive"
+    );
+  });
+
+  it("keeps dev-lane mode labels when no origin context is provided", () => {
+    assert.equal(resolveOpenClawAgentPrefixLabel({ mode: "autonomous" }), "Autonomous");
+    assert.equal(resolveOpenClawAgentPrefixLabel({ mode: "auto" }), "Auto");
+    assert.equal(resolveOpenClawAgentPrefixLabel({ targetMode: "observe" }), "Observe");
+    assert.equal(resolveOpenClawAgentPrefixLabel(), "Unknown");
   });
 });
