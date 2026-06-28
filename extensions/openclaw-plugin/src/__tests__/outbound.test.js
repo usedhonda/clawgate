@@ -43,6 +43,7 @@ mock.module("../client.js", {
 
 // Mock shared-state.js
 let stubSessionMode = "ignore";
+let stubTprojOrigin = null;
 mock.module("../shared-state.js", {
   namedExports: {
     getActiveProject: () => ({ project: "", sessionType: "claude_code" }),
@@ -51,6 +52,7 @@ mock.module("../shared-state.js", {
       lastEnqueueArgs = entry;
       return true;
     },
+    lookupTprojOrigin: (_conversation) => stubTprojOrigin,
   },
 });
 

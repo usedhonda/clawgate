@@ -112,3 +112,39 @@ export function enqueueDevLaneText({ project, text, mode, traceId = "" } = {}) {
     return false;
   }
 }
+
+// Remembered gate:direct origins. When an inbound carries a reply=session
+// tprojHeader with a return_url, we remember {returnUrl, sender, workspace, mode}
+// keyed by conversation, so Chi's async message-tool reply (which no longer has
+// the header) can be routed back to the originating dev pane via the return_url
+// instead of leaking to the user's LINE. Entries expire after the TTL.
+const tprojOriginStore = new Map();
+const TPROJ_ORIGIN_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Remember a gate:direct origin keyed by conversation.
+ * @param {string} conversation  e.g. "tproj"
+ * @param {{ returnUrl: string, sender: string, workspace: string, mode?: string }} origin
+ */
+export function rememberTprojOrigin(conversation, { returnUrl, sender, workspace, mode } = {}) {
+  if (!conversation || !returnUrl || !sender || !workspace) return;
+  tprojOriginStore.set(`${conversation}`, {
+    returnUrl, sender, workspace, mode: mode || "autonomous", ts: Date.now(),
+  });
+}
+
+/**
+ * Look up a live (within TTL) remembered origin for a conversation; null if none.
+ * @param {string} conversation
+ * @returns {{ returnUrl: string, sender: string, workspace: string, mode: string } | null}
+ */
+export function lookupTprojOrigin(conversation) {
+  if (!conversation) return null;
+  const rec = tprojOriginStore.get(`${conversation}`);
+  if (!rec) return null;
+  if (Date.now() - rec.ts > TPROJ_ORIGIN_TTL_MS) {
+    tprojOriginStore.delete(`${conversation}`);
+    return null;
+  }
+  return rec;
+}

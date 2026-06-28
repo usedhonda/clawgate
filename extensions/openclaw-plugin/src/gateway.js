@@ -32,7 +32,7 @@ import {
   setClawgateAuthToken,
   telegramSend,
 } from "./client.js";
-import { setActiveProject, getActiveProject, clearActiveProject, setSessionMode, registerDevLaneEnqueue } from "./shared-state.js";
+import { setActiveProject, getActiveProject, clearActiveProject, setSessionMode, registerDevLaneEnqueue, rememberTprojOrigin } from "./shared-state.js";
 import defaultPrompts from "./prompts.js";
 import {
   getProjectContext,
@@ -2839,6 +2839,18 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       }
     }
     log?.info?.(`clawgate: [${accountId}] tproj-msg header detected: sender=${tprojHeader.sender} reply=${tprojHeader.reply} workspace=${tprojHeader.workspace}`);
+    // Remember this gate:direct origin so Chi's async message-tool reply (which no
+    // longer carries the header) can be routed back to the dev pane via return_url
+    // instead of leaking to the user's LINE. Keyed by conversation; see outbound.js.
+    if (tprojHeader.reply === "session" && tprojHeader.return_url) {
+      const originProject = `${tprojHeader.sender || ""}`.split(".")[0].trim();
+      rememberTprojOrigin(conversation, {
+        returnUrl: tprojHeader.return_url,
+        sender: tprojHeader.sender,
+        workspace: tprojHeader.workspace,
+        mode: sessionModes.get(originProject) || "autonomous",
+      });
+    }
   }
 
   traceLog(log, "info", {

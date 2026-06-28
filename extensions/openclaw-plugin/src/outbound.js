@@ -4,7 +4,7 @@
 
 import { resolveAccount } from "./config.js";
 import { clawgateSend, clawgateTmuxSend, setClawgateAuthToken } from "./client.js";
-import { getSessionMode, enqueueDevLaneText } from "./shared-state.js";
+import { getSessionMode, enqueueDevLaneText, lookupTprojOrigin } from "./shared-state.js";
 
 /**
  * For a dev-lane tmux session in autonomous/auto mode, return the project name
@@ -67,6 +67,45 @@ async function sendDevLanePaneRedirect(apiUrl, paneProject, body) {
   throw new Error(`clawgate tmux send failed: ${tmuxResult.error?.message ?? JSON.stringify(tmuxResult)}`);
 }
 
+/**
+ * Route a gate:direct Chi reply back to the originating dev pane via the remembered
+ * tproj-msg return_url (POST /v1/tproj-msg-deliver), mirroring gateway.js's reverse
+ * channel — instead of leaking it to the user's LINE. tproj-msg --as senderAs adds
+ * the [from:OpenClaw Agent - {Mode}] tag, so the body is passed raw. Throws on a
+ * non-2xx so the caller can fall through to the LINE path (reply never dropped).
+ * @param {{ returnUrl: string, sender: string, workspace: string, mode: string }} origin
+ * @param {string} body  raw reply text
+ */
+async function sendTprojReturnUrlRedirect(origin, body) {
+  const label = `${origin.mode || "autonomous"}`;
+  const senderAs = `OpenClaw Agent - ${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+  const resp = await fetch(`${origin.returnUrl}/v1/tproj-msg-deliver`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session: origin.workspace, target: origin.sender, text: body, senderAs }),
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!resp.ok) throw new Error(`tproj return_url deliver failed: HTTP ${resp.status}`);
+  return {
+    channel: "clawgate",
+    messageId: `cg-tproj-${Date.now()}`,
+    chatId: origin.sender,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Look up a remembered tproj-msg origin for a reply's sessionKey. The conversation
+ * is the last ":"-segment ("clawgate:default:tproj" -> "tproj"). Returns null when
+ * there is no live origin, so the caller uses the normal LINE path.
+ * @param {string|undefined} sessionKey
+ */
+function tprojOriginForSessionKey(sessionKey) {
+  if (!sessionKey || !sessionKey.includes(":")) return null;
+  const conversation = sessionKey.split(":").pop();
+  return conversation ? lookupTprojOrigin(conversation) : null;
+}
+
 export const outbound = {
   deliveryMode: "direct",
   chunker: null,
@@ -90,6 +129,13 @@ export const outbound = {
     const paneProject = devLanePaneProject(sessionKey);
     if (paneProject) {
       return await sendDevLanePaneRedirect(account.apiUrl, paneProject, caption);
+    }
+    // Gate:direct origin: route Chi's message-tool reply to the dev pane via the
+    // remembered return_url, not the user's LINE. On failure, fall through to LINE.
+    const tprojOrigin = tprojOriginForSessionKey(sessionKey);
+    if (tprojOrigin) {
+      try { return await sendTprojReturnUrlRedirect(tprojOrigin, caption); }
+      catch { /* return_url deliver failed -> fall through to LINE */ }
     }
     const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
       ? (account.defaultConversation || to)
@@ -118,6 +164,14 @@ export const outbound = {
     const paneProject = devLanePaneProject(sessionKey);
     if (paneProject) {
       return await sendDevLanePaneRedirect(account.apiUrl, paneProject, text);
+    }
+    // Gate:direct origin: route Chi's message-tool reply back to the dev pane via
+    // the remembered return_url instead of the user's LINE. On deliver failure,
+    // fall through to LINE so the reply is never dropped.
+    const tprojOrigin = tprojOriginForSessionKey(sessionKey);
+    if (tprojOrigin) {
+      try { return await sendTprojReturnUrlRedirect(tprojOrigin, text); }
+      catch { /* return_url deliver failed -> fall through to LINE */ }
     }
     // Account-format targets (e.g. "default", "clawgate:default") -> use defaultConversation
     const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
