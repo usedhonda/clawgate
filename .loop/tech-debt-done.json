@@ -235,9 +235,9 @@
   "impact": "Pet UI 中核",
   "risk": "high",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-08",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2: 読み専精査完了 (sonnet survey + main 検収)。2レーン段階分割計画 (レーンA=CC純粋7項目 / レーンB=Cdx所有5段) + 壊れやすい箇所14点 + spec 乖離2点を .loop/es08-petmodel-plan.md に確定。レーンB 実装は Cdx 主導必須を明記",
+  "commit": "pending"
  },
  {
   "id": "ES-09",
