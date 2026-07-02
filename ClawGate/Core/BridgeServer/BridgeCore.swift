@@ -1700,9 +1700,10 @@ final class BridgeCore {
         let path = components?.path ?? command.path
         let method = httpMethod(from: command.method)
 
-        // Federation dispatch is vestigial — federation server is no longer
-        // started and the IP filter on the regular HTTP path already covers
-        // any reachable client. No additional auth needed here.
+        // In-process federation only starts under `federationEnabled`, which
+        // defaults false and is purged in save(), so it is effectively
+        // unreachable. This dispatch path is kept for maintenance; the IP
+        // filter on the regular HTTP path already covers any reachable client.
 
         let result: HTTPResult
         switch (method, path) {

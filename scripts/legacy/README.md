@@ -26,3 +26,9 @@ cert revoked, private key lost), these scripts are the documented way
 to fall back to a self-signed dev identity. That is the **only** case
 where they should be consulted, and even then, the canonical rule in
 `memory/feedback_tcc_stable_signing.md` should be checked first.
+
+## Retired federation/relay e2e (2026-07-02)
+
+`federation-e2e.sh` and `host-a-host-b-e2e.sh` were retired here on
+2026-07-02: they are inconsistent with the direct-forward architecture
+(tied to the removed ClawGateRelay, ES-01). Kept for reference only.

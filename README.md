@@ -425,7 +425,6 @@ ClawGate/
     Federation/                           # WebSocket federation (server + client)
     Logging/                              # AppLogger
   UI/                                     # MenuBarApp, SettingsView
-ClawGateRelay/                            # DEPRECATED (replaced by Direct Federation)
 Tests/
   UnitTests/                              # Unit tests
 scripts/
