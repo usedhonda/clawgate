@@ -1576,13 +1576,13 @@ function recordStableInbound(eventText, conversation) {
   recentStableInbounds.push({ key: stableKey(eventText, conversation), time: Date.now() });
 }
 
-const SYSTEM_NOTICE_EXACT_LINES = new Set([
+export const SYSTEM_NOTICE_EXACT_LINES = new Set([
   "LINEアプリを最新バージョンにアップデートしてください。",
   "“ecosystem-watchdog”はバックグラウンドで実行できる項目です。",
   "これは“ログイン項目と機能拡張”で管理できます。",
 ]);
 
-function isHybridFusionSource(source) {
+export function isHybridFusionSource(source) {
   return source === "hybrid_fusion" || source === "line_hybrid_fusion";
 }
 
@@ -1608,11 +1608,11 @@ function isUiChromeLine(line, options = {}) {
   return false;
 }
 
-function normalizeCompactLine(text) {
+export function normalizeCompactLine(text) {
   return `${text || ""}`.replace(/\s+/g, " ").trim();
 }
 
-function containsJapaneseText(text) {
+export function containsJapaneseText(text) {
   return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(`${text || ""}`);
 }
 
@@ -1902,7 +1902,7 @@ function normalizeLineReplyText(text, { project = "", sessionType = "claude_code
   return result;
 }
 
-function stripChoiceTags(text) {
+export function stripChoiceTags(text) {
   let result = `${text || ""}`.trim();
   if (!result) return "";
   result = result
@@ -2264,7 +2264,7 @@ async function inspectTmuxDraftBeforeTaskSend({ apiUrl, project, traceId, log })
  * Extract <send_telegram>...</send_telegram> blocks from text.
  * Returns { telegramTexts: string[], remaining: string } if any blocks found, else null.
  */
-function extractSendTelegramBlocks(text) {
+export function extractSendTelegramBlocks(text) {
   const blocks = [];
   const remaining = text.replace(/<send_telegram>([\s\S]*?)<\/send_telegram>/gi, (_, content) => {
     const trimmed = content.trim();

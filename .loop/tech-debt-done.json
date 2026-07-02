@@ -271,9 +271,9 @@
   "impact": "false green リスク",
   "risk": "mid",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-11",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2 (take over 実装): drift ゼロ確認後、独立純関数6つ (telegram 2 + noise-filter 4) を export キーワードのみ追加しテストを本物 import に切替。_filterDisplayName 依存5関数は理由コメント付き inline copy 維持 (setter export は別途 GO 要の将来項目)。gate main 独立実測 green (plugin 142/0, js-check, leak)。false-green 面を 11→5 関数に縮小",
+  "commit": "pending"
  },
  {
   "id": "ES-12",

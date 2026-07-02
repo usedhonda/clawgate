@@ -1,17 +1,23 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
+// Import the real `_filterDisplayName`-independent pure functions / constant from gateway.js.
+import {
+  SYSTEM_NOTICE_EXACT_LINES,
+  isHybridFusionSource,
+  normalizeCompactLine,
+  containsJapaneseText,
+} from "../gateway.js";
+
+// ── Intentional inline copies (drift risk acknowledged) ─────────────
+// gateway.js keeps the display-name filter in a module-scope `_filterDisplayName`
+// with no exported setter, so importing the functions below would run them against
+// gateway's empty default instead of the "Alice Smith" fixture. Until a setter
+// export is separately GO'd, the `_filterDisplayName`-dependent functions
+// (direct: isUiChromeLine, stripDisplayNameNoisePrefix;
+//  indirect: looksLikeShortOcrGarbage, mergeWrappedLines, normalizeInboundText)
+// are intentionally kept as inline copies. Keep them byte-identical to gateway.js.
 let _filterDisplayName = "Alice Smith";
-
-const SYSTEM_NOTICE_EXACT_LINES = new Set([
-  "LINEアプリを最新バージョンにアップデートしてください。",
-  "“ecosystem-watchdog”はバックグラウンドで実行できる項目です。",
-  "これは“ログイン項目と機能拡張”で管理できます。",
-]);
-
-function isHybridFusionSource(source) {
-  return source === "hybrid_fusion" || source === "line_hybrid_fusion";
-}
 
 function isUiChromeLine(line, options = {}) {
   const s = line.trim();
@@ -29,14 +35,6 @@ function isUiChromeLine(line, options = {}) {
   if (/^\d+$/.test(s)) return true;
   if (/^[\p{P}\p{S}\s_]+$/u.test(s)) return true;
   return false;
-}
-
-function normalizeCompactLine(text) {
-  return `${text || ""}`.replace(/\s+/g, " ").trim();
-}
-
-function containsJapaneseText(text) {
-  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(`${text || ""}`);
 }
 
 function looksLikeShortOcrGarbage(text, options = {}) {

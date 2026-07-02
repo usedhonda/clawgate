@@ -11,30 +11,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-// ── Inline copies of the pure functions from gateway.js ─────────────
-// Kept in sync via test assertions against known behavior.
-
-function extractSendTelegramBlocks(text) {
-  const blocks = [];
-  const remaining = text.replace(/<send_telegram>([\s\S]*?)<\/send_telegram>/gi, (_, content) => {
-    const trimmed = content.trim();
-    if (trimmed) blocks.push(trimmed);
-    return "";
-  });
-  return blocks.length > 0 ? { telegramTexts: blocks, remaining: remaining.trim() } : null;
-}
-
-function stripChoiceTags(text) {
-  let result = `${text || ""}`.trim();
-  if (!result) return "";
-  result = result
-    .replace(/<send_telegram>([\s\S]*?)<\/send_telegram>/gi, "")
-    .replace(/<cc_task(?:\s+project="[^"]*")?>([\s\S]*?)<\/cc_task>/gi, "")
-    .replace(/<cc_answer\s+project="[^"]*">([\s\S]*?)<\/cc_answer>/gi, "")
-    .replace(/<cc_read\s+project="[^"]+"\s*\/?>(?:<\/cc_read>)?/gi, "")
-    .trim();
-  return result;
-}
+// Import the real pure functions from gateway.js (no mocks needed).
+import { extractSendTelegramBlocks, stripChoiceTags } from "../gateway.js";
 
 // ── Tests ───────────────────────────────────────────────────────────
 
