@@ -17,8 +17,11 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 - [it3] TD-04 pass: context-reader.test.js 新規（6 suite / 18 test、tmp fixture・非 git dir で決定論化、src 変更ゼロ）。post-gate main 独立実測 green（plugin 144/0, leak, js-check）。export 疑惑2件（extractReferencedFiles/smartTruncate）はテスト import により正当と確定 → 削除不要。
   - 未検証領域メモ: 実 git 状態での builder 成功系（getGitInfo 等 private）は fixture 非 git のため対象外。
 
+- [it4] TD-05 pass: RuntimeRoleTests.swift 新規（10 test、AppConfig.default ベース、RFC 5737/3849 fixture のみ）。post-gate main 独立実測 green（swift 237/1skip/0fail, build, leak）。safety-net phase 完了（TD-02〜05）。
+  - TD-09 向け固定事項: RuntimeRole 集合は `::` を含み .server 判定 / 完全一致セマンティクス（port 付き・subdomain は loopback 扱いしない）/ runtimeRole は persisted nodeRole を無視。単一定義化でこれを壊すな。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 4: TD-05 RuntimeRole.swift loopback 判定の特性化テスト（Swift。新規 or 既存テストファイルに追加、`Tests/UnitTests/`）。TD-09（loopback 集合統一）の安全網になる。post-gate は swift build + swift test を含む。
+ITERATION 5: TD-06 dead export 削除（context-cache.js の clearProgressSnapshot / getKnownProjects）。**注意: TD-03 で追加したテスト中の該当 suite（progress snapshots の clear / getKnownProjects）も同一 commit で削除**（export 削除に伴う正当な除去）。ただし clearProgressSnapshot は progress snapshot の clear 機能そのもの → 「機能の無断削除」に当たらないか map の根拠（呼び出しゼロ）を再確認してから。post-gate は leak + js-check + plugin tests。
