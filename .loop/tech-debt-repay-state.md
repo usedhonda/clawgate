@@ -46,4 +46,25 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 - 実返済 12/12 pass、escalated 15件（提案書完備）、既存テスト改変ゼロ、frozen 不可侵、full ladder 全緑。
 - テスト 227 → 276（Swift +49）、plugin 56 → 142（+86、dead export 分 -2 込み）。
 - TD-11 の Pet 所有権: **Cdx が ratify**（2026-07-02 [DONE: Pet ownership ratify]。実挙動不変・tolerance/strict-< 維持・hidingSide 等更新規約不触を所有者確認。PetGeometryTests 9/0 + PetStateMachineTests 21/0 を Cdx 側でも実行）。以後 Pet tracking/hide/facing の実ロジック変更は引き続き Cdx 所有。
-- deploy: ratify 受領により block 解除 → ./scripts/post-task-restart.sh 実行。
+- deploy: ratify 受領により block 解除 → ./scripts/post-task-restart.sh 実行、verify 全緑（run1 分）。
+
+## RUN 2（escalations 15件完遂キャンペーン、御主人様 /goal 2026-07-02）
+体制: Fable=委任設計+検証+判断のみ / 実装・調査=sonnet subagent / Cdx=ES-11・04 予定→usage limit 停止で take over（FYI 済み）。
+
+済（13/15、全て main 独立検証 + commit 済み）:
+- ES-07 447c1e5: write-only は誤診（診断ログ専用と git 考古学で確定）→ intent コメント化
+- ES-12 / ES-15 698564a: 実測根拠つき「現状維持」判断で決着（deploy chain リスク / frozen caller）
+- ES-14 9a042ba: 127.0.0.1 host permission 削除のみ。activeTab は file:// 実効機能ありで残置（実機 reload+capture smoke は御主人様の一目確認待ち）
+- ES-01/06/13 aaa4f54: Relay 退役（-1433行、両ホスト死亡実測後）+ e2e 2本 legacy 退避 + vestigial コメント事実化。full ladder 全緑
+- ES-10 e798678 / ES-09 74ff638 / ES-05 e17f546 / ES-08 780fc23: 段階計画を .loop/es*-plan.md に確定（D群は計画で決着、実装は承認単位ごと。Pet 系レーンB は Cdx 主導）
+- ES-11 d0c580f (take over): gateway.js export 6行のみ + テスト本物 import 化。_filterDisplayName 依存5関数は理由付き copy 維持（setter export は将来 GO 項目）。false-green 面 11→5
+- ES-03 bb1c84d: doctor 246→23行 thin delegate（DoctorChecks.swift 新設、BridgeCore -514行）、13 check 順序固定 shape テスト先行。swift 277/0
+
+進行中 / 残:
+- ES-04: send() 関心分離 — es04-impl 作業中（testSend* 9本が安全網、verbatim 分割・挙動不変指示）
+- ES-02: routing 3重化 — ES-04 完了後に直列（characterization matrix 先行）
+- 締め: full ladder → deploy (post-task-restart.sh) → LINE 実機確認（gateway.js 変更のため必須）→ 最終報告
+
+## Failed / blocked（run2）
+- Cdx: usage limit 停止 → 復帰後も ES-11 タスク未消化 → 45分 ACK 無しで take over（§8.5.1 準拠、FYI 済み）
+- 教訓（learnings 昇格候補）: 並列 subagent が git rm/mv で index を使う間、main の commit は pathspec 必須（ES-14 で巻き込み事故→即 reset で回復）
