@@ -29,8 +29,11 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 
 - [it8] TD-09 pass: AppConfig.loopbackHosts に単一定義化（RuntimeRole + BridgeCore forward-guard の inline 集合2つを置換）。`::` 差分の分析: 現挙動は到達不能 "http://[::]:8765" へ 9s timeout 失敗、統一後は即 503 line_forward_unavailable(retriable) = fail-closed 改善、新エラーコード無しで contract 不変。cleanup phase 完了（TD-06〜09）。post-gate main 独立実測 green（swift 237/0）。
 
+- [it9] TD-10 pass: OpsLogSummarizer.swift 新設（humanReadableSummary/parseMessageFields/parseKeyValueMessage/shortProject + leaf 依存 compactMessage 同伴、MenuBarApp -96行）+ OpsLogSummarizerTests 23本を同一 commit（1 fix + 1 guard）。post-gate main 独立実測 green（swift 260/0）。
+  - out-of-scope candidate: parseKeyValueMessage の別コピーが BridgeCore.swift:2369 に存在（BridgeCore 内部4箇所で使用）。2コピーの一本化は次 run 候補。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 9: TD-10 MenuBarApp のログ解析 pure helper（parseMessageFields :1234 / parseKeyValueMessage :1254 / shortProject :1268 / humanReadableSummary :1180）を独立型へ抽出 + characterization test（separation phase 開始。挙動不変の移動のみ、AppKit 依存を持ち込まない）。post-gate は swift build + test。
+ITERATION 10: TD-11 PetModel の座標変換純関数（roughlySameFrame :562 / appKitRectForTrackedFrame :611）を PetGeometry へ抽出 + characterization test（挙動不変の移動のみ）。post-gate は swift build + test。
