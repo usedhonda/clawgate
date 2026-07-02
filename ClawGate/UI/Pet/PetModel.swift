@@ -559,13 +559,6 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
-    private func roughlySameFrame(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 20) -> Bool {
-        abs(lhs.origin.x - rhs.origin.x) < tolerance
-            && abs(lhs.origin.y - rhs.origin.y) < tolerance
-            && abs(lhs.width - rhs.width) < tolerance
-            && abs(lhs.height - rhs.height) < tolerance
-    }
-
     private func clearPlacementLock() {
         lockedPlacementSide = nil
         lockedPlacementWindowFrame = nil
@@ -611,12 +604,7 @@ final class PetModel: NSObject, ObservableObject {
 
     private func appKitRectForTrackedFrame(_ frame: CGRect) -> CGRect {
         let desktopMaxY = NSScreen.screens.map(\.frame.maxY).max() ?? (NSScreen.main?.frame.maxY ?? frame.maxY)
-        return CGRect(
-            x: frame.origin.x,
-            y: desktopMaxY - frame.origin.y - frame.height,
-            width: frame.width,
-            height: frame.height
-        )
+        return PetGeometry.appKitRect(forTrackedFrame: frame, desktopMaxY: desktopMaxY)
     }
 
     private func screenForTrackedFrame(_ frame: CGRect) -> NSScreen? {
@@ -646,7 +634,7 @@ final class PetModel: NSObject, ObservableObject {
             candidates.append(window)
         }
         for candidate in candidates {
-            if let axFrame = AXQuery.copyFrameAttribute(candidate), roughlySameFrame(axFrame, cgBounds) {
+            if let axFrame = AXQuery.copyFrameAttribute(candidate), PetGeometry.roughlySameFrame(axFrame, cgBounds) {
                 if let screen = screenForTrackedFrame(axFrame) {
                     return (candidate, axFrame, appKitRectForTrackedFrame(axFrame), screen)
                 }
@@ -750,7 +738,7 @@ final class PetModel: NSObject, ObservableObject {
         lastTrackedWindow = focusedWin
         lastTrackedWindowFrame = frame
 
-        if let lockFrame = lockedPlacementWindowFrame, !roughlySameFrame(lockFrame, frame) {
+        if let lockFrame = lockedPlacementWindowFrame, !PetGeometry.roughlySameFrame(lockFrame, frame) {
             clearPlacementLock()
         }
 

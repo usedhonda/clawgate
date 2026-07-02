@@ -32,8 +32,10 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 - [it9] TD-10 pass: OpsLogSummarizer.swift 新設（humanReadableSummary/parseMessageFields/parseKeyValueMessage/shortProject + leaf 依存 compactMessage 同伴、MenuBarApp -96行）+ OpsLogSummarizerTests 23本を同一 commit（1 fix + 1 guard）。post-gate main 独立実測 green（swift 260/0）。
   - out-of-scope candidate: parseKeyValueMessage の別コピーが BridgeCore.swift:2369 に存在（BridgeCore 内部4箇所で使用）。2コピーの一本化は次 run 候補。
 
+- [it10] TD-11 pass: PetGeometry.swift 新設（roughlySameFrame 全移動、y 反転式は desktopMaxY 引数化で純粋抽出・NSScreen wrapper は PetModel 残置）+ PetGeometryTests 9本（involution 性質含む）。separation phase 完了。post-gate main 独立実測 green（swift 269/0）。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 10: TD-11 PetModel の座標変換純関数（roughlySameFrame :562 / appKitRectForTrackedFrame :611）を PetGeometry へ抽出 + characterization test（挙動不変の移動のみ）。post-gate は swift build + test。
+ITERATION 11（最終実装項目）: TD-12 boundary — openclaw.json 手 parse 2箇所（BridgeCore.openclawInfo :183-200 / OpenClawWSClient :582-583）を型付き reader に集約。**着手前に memory/reference_architecture.md 読了必須**（Core/Config + Core/OpenClaw 接触）。characterization test 先行。完了後: full ladder → 独立完了チェック → FINAL。
