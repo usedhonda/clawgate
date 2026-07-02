@@ -187,9 +187,9 @@
   "impact": "送信ホットパス",
   "risk": "high",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-04",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2 実装: send() 161行を orchestrator 59行 + validateSendRequest / preflightFederationForward / dispatchToAdapter に verbatim 分離。catch (federation fallback + typing_busy streak 順序) は意図的残置の部分分割。testSend* 9本 + 503 contract test 含め swift 277 pass 1 skip 0 fail + leak を main 独立実測",
+  "commit": "pending"
  },
  {
   "id": "ES-05",

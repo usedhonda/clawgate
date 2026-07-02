@@ -554,6 +554,121 @@ final class BridgeCore {
         return (request, encode(request))
     }
 
+    private func validateSendRequest(_ request: SendRequest, trace: String) throws {
+        guard request.action == "send_message" else {
+            throw BridgeRuntimeError(
+                code: "unsupported_action",
+                message: "Only send_message action is supported",
+                retriable: false,
+                failedStep: "validate_request",
+                details: request.action
+            )
+        }
+        guard !request.payload.conversationHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BridgeRuntimeError(
+                code: "invalid_conversation_hint",
+                message: "conversation_hint is required",
+                retriable: false,
+                failedStep: "validate_request",
+                details: nil
+            )
+        }
+        // Reject conversation hints that are clearly not real conversation names.
+        // These pollute the LINE search field when external agents send garbage values.
+        let hintLower = request.payload.conversationHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let blockedHints = [
+            "heartbeat",
+            "line",
+            "ping",
+            "test",
+            "health",
+            "status",
+            "default",
+            "clawgate:default"
+        ]
+        if request.adapter == "line" && blockedHints.contains(hintLower) {
+            throw BridgeRuntimeError(
+                code: "invalid_conversation_hint",
+                message: "conversation_hint '\(request.payload.conversationHint)' is not a valid conversation name",
+                retriable: false,
+                failedStep: "validate_request",
+                details: "blocked_hint"
+            )
+        }
+        guard !request.payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BridgeRuntimeError(
+                code: "invalid_text",
+                message: "text is required",
+                retriable: false,
+                failedStep: "validate_request",
+                details: nil
+            )
+        }
+    }
+
+    private func preflightFederationForward(request: SendRequest, forwardBody: Data, trace: String, start: Date) -> HTTPResult? {
+        // Pre-flight: if tmux + federation connected + no local authoritative mode,
+        // skip TmuxAdapter entirely and forward to federation client directly.
+        // This avoids the throw-catch round-trip for sessions that live on the remote host.
+        if request.adapter == "tmux",
+           let fedServer = federationServer, fedServer.hasConnectedClient() {
+            let project = request.payload.conversationHint
+            let modes = configStore.load().tmuxSessionModes
+            // Check both session types — a project may be CC-only, Codex-only, or both
+            let ccMode = modes[AppConfig.modeKey(sessionType: "claude_code", project: project)]
+            let codexMode = modes[AppConfig.modeKey(sessionType: "codex", project: project)]
+            let hasLocalAuthoritative = ccMode == "autonomous" || ccMode == "auto" || codexMode == "autonomous" || codexMode == "auto"
+            if !hasLocalAuthoritative {
+                do {
+                    let fedResult = try forwardToFederationClient(body: forwardBody, traceID: trace, fedServer: fedServer)
+                    let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+                    writeOps(level: "info", event: "federation_preflight_forward_ok", traceID: trace, stage: "federation", action: "forward_send", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
+                    return fedResult
+                } catch {
+                    logger.log(.warning, "Pre-flight federation forward failed: \(error), falling through to local adapter")
+                }
+            }
+        }
+        return nil
+    }
+
+    private func dispatchToAdapter(request: SendRequest, trace: String, start: Date) throws -> HTTPResult {
+        guard let adapter = registry.adapter(for: request.adapter) else {
+            throw BridgeRuntimeError(
+                code: "adapter_not_found",
+                message: "Specified adapter is not registered",
+                retriable: false,
+                failedStep: "resolve_adapter",
+                details: request.adapter
+            )
+        }
+
+        let adapterAction = request.adapter == "line" ? "line_send" : "gateway_forward"
+        writeOps(level: "info", event: "\(adapterAction)_start", traceID: trace, stage: "adapter", action: adapterAction, status: "start", errorCode: nil, errorMessage: nil, latencyMs: nil)
+        let (result, steps) = try adapter.sendMessage(payload: request.payload)
+        logger.log(.info, "send_message completed with \(steps.count) steps")
+        let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
+        writeOps(level: "info", event: "\(adapterAction)_ok", traceID: trace, stage: "adapter", action: adapterAction, status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
+        typingBusyStreakCount = 0
+        statsCollector.increment("sent", adapter: request.adapter)
+        eventBus.append(type: "outbound_message", adapter: request.adapter, payload: [
+            "text": String(request.payload.text.prefix(100)),
+            "conversation": request.payload.conversationHint,
+            "trace_id": trace,
+        ])
+        ClawGateActualLogger.shared.append(
+            channel: request.adapter,
+            conversation: request.payload.conversationHint,
+            text: request.payload.text,
+            traceID: trace,
+            durationMs: latencyMs,
+            logger: logger
+        )
+
+        let content = APIResponse(ok: true, result: result, error: nil)
+        return jsonResponse(status: .ok, body: encode(content), traceID: trace)
+    }
+
     func send(body: Data, traceID: String?, pathAndQuery: String = "/v1/send", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
         let requestTrace = normalizedTraceID(traceID)
         let start = Date()
@@ -562,116 +677,14 @@ final class BridgeCore {
             let (request, forwardBody) = try decodeSendRequest(from: body)
             let trace = normalizedTraceID(request.payload.traceID ?? requestTrace)
             writeOps(level: "info", event: "ingress_validated", traceID: trace, stage: "bridge_server", action: "send_message", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: nil)
-            guard request.action == "send_message" else {
-                throw BridgeRuntimeError(
-                    code: "unsupported_action",
-                    message: "Only send_message action is supported",
-                    retriable: false,
-                    failedStep: "validate_request",
-                    details: request.action
-                )
-            }
-            guard !request.payload.conversationHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw BridgeRuntimeError(
-                    code: "invalid_conversation_hint",
-                    message: "conversation_hint is required",
-                    retriable: false,
-                    failedStep: "validate_request",
-                    details: nil
-                )
-            }
-            // Reject conversation hints that are clearly not real conversation names.
-            // These pollute the LINE search field when external agents send garbage values.
-            let hintLower = request.payload.conversationHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let blockedHints = [
-                "heartbeat",
-                "line",
-                "ping",
-                "test",
-                "health",
-                "status",
-                "default",
-                "clawgate:default"
-            ]
-            if request.adapter == "line" && blockedHints.contains(hintLower) {
-                throw BridgeRuntimeError(
-                    code: "invalid_conversation_hint",
-                    message: "conversation_hint '\(request.payload.conversationHint)' is not a valid conversation name",
-                    retriable: false,
-                    failedStep: "validate_request",
-                    details: "blocked_hint"
-                )
-            }
-            guard !request.payload.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                throw BridgeRuntimeError(
-                    code: "invalid_text",
-                    message: "text is required",
-                    retriable: false,
-                    failedStep: "validate_request",
-                    details: nil
-                )
-            }
+            try validateSendRequest(request, trace: trace)
             if let denied = rejectLineOnClient(adapterName: request.adapter, method: .POST, pathAndQuery: pathAndQuery, body: forwardBody, headers: headers, traceID: trace) {
                 return denied
             }
-
-            // Pre-flight: if tmux + federation connected + no local authoritative mode,
-            // skip TmuxAdapter entirely and forward to federation client directly.
-            // This avoids the throw-catch round-trip for sessions that live on the remote host.
-            if request.adapter == "tmux",
-               let fedServer = federationServer, fedServer.hasConnectedClient() {
-                let project = request.payload.conversationHint
-                let modes = configStore.load().tmuxSessionModes
-                // Check both session types — a project may be CC-only, Codex-only, or both
-                let ccMode = modes[AppConfig.modeKey(sessionType: "claude_code", project: project)]
-                let codexMode = modes[AppConfig.modeKey(sessionType: "codex", project: project)]
-                let hasLocalAuthoritative = ccMode == "autonomous" || ccMode == "auto" || codexMode == "autonomous" || codexMode == "auto"
-                if !hasLocalAuthoritative {
-                    do {
-                        let fedResult = try forwardToFederationClient(body: forwardBody, traceID: trace, fedServer: fedServer)
-                        let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
-                        writeOps(level: "info", event: "federation_preflight_forward_ok", traceID: trace, stage: "federation", action: "forward_send", status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
-                        return fedResult
-                    } catch {
-                        logger.log(.warning, "Pre-flight federation forward failed: \(error), falling through to local adapter")
-                    }
-                }
+            if let forwarded = preflightFederationForward(request: request, forwardBody: forwardBody, trace: trace, start: start) {
+                return forwarded
             }
-
-            guard let adapter = registry.adapter(for: request.adapter) else {
-                throw BridgeRuntimeError(
-                    code: "adapter_not_found",
-                    message: "Specified adapter is not registered",
-                    retriable: false,
-                    failedStep: "resolve_adapter",
-                    details: request.adapter
-                )
-            }
-
-            let adapterAction = request.adapter == "line" ? "line_send" : "gateway_forward"
-            writeOps(level: "info", event: "\(adapterAction)_start", traceID: trace, stage: "adapter", action: adapterAction, status: "start", errorCode: nil, errorMessage: nil, latencyMs: nil)
-            let (result, steps) = try adapter.sendMessage(payload: request.payload)
-            logger.log(.info, "send_message completed with \(steps.count) steps")
-            let latencyMs = Int(Date().timeIntervalSince(start) * 1000)
-            writeOps(level: "info", event: "\(adapterAction)_ok", traceID: trace, stage: "adapter", action: adapterAction, status: "ok", errorCode: nil, errorMessage: nil, latencyMs: latencyMs)
-            typingBusyStreakCount = 0
-            statsCollector.increment("sent", adapter: request.adapter)
-            eventBus.append(type: "outbound_message", adapter: request.adapter, payload: [
-                "text": String(request.payload.text.prefix(100)),
-                "conversation": request.payload.conversationHint,
-                "trace_id": trace,
-            ])
-            ClawGateActualLogger.shared.append(
-                channel: request.adapter,
-                conversation: request.payload.conversationHint,
-                text: request.payload.text,
-                traceID: trace,
-                durationMs: latencyMs,
-                logger: logger
-            )
-
-            let content = APIResponse(ok: true, result: result, error: nil)
-            return jsonResponse(status: .ok, body: encode(content), traceID: trace)
+            return try dispatchToAdapter(request: request, trace: trace, start: start)
         } catch let err as BridgeRuntimeError {
             // Federation fallback: if tmux session_not_found and we have a federation server with connected clients
             if err.code == "session_not_found" || err.code == "tmux_target_missing" {
