@@ -60,10 +60,13 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 - ES-11 d0c580f (take over): gateway.js export 6行のみ + テスト本物 import 化。_filterDisplayName 依存5関数は理由付き copy 維持（setter export は将来 GO 項目）。false-green 面 11→5
 - ES-03 bb1c84d: doctor 246→23行 thin delegate（DoctorChecks.swift 新設、BridgeCore -514行）、13 check 順序固定 shape テスト先行。swift 277/0
 
-進行中 / 残:
-- ES-04: send() 関心分離 — es04-impl 作業中（testSend* 9本が安全網、verbatim 分割・挙動不変指示）
-- ES-02: routing 3重化 — ES-04 完了後に直列（characterization matrix 先行）
-- 締め: full ladder → deploy (post-task-restart.sh) → LINE 実機確認（gateway.js 変更のため必須）→ 最終報告
+- ES-04 a1df141: send() 161→59行 orchestrator + validate/preflight/dispatch 分離（catch の streak 順序は意図的残置）。swift 277/0
+- ES-02 73ef91d: 37 route matrix 5テスト先行 → テーブルを handler 辞書から導出（単一ソース化）。federation switch は project-context-read の実挙動差発見により統合見送り、subset guard で機械検知化。swift 282/0
+
+## RUN 2 RESULT: 完遂（15/15、2026-07-02）
+- 実装9件 + 判断決着2件 + 段階計画4件。全て main 独立検証 + commit。将来 GO 項目5点を escalations.md に記録。
+- deploy: post-task-restart.sh 全緑（Host B health / ambient live / Host A health・gateway / **LINE conversation navigated ok**）。
+- テスト最終: swift 282 pass 1 skip 0 fail / plugin 142 pass 0 fail。BridgeCore 累計 -約1000行、Relay -1433行。
 
 ## Failed / blocked（run2）
 - Cdx: usage limit 停止 → 復帰後も ES-11 タスク未消化 → 45分 ACK 無しで take over（§8.5.1 準拠、FYI 済み）

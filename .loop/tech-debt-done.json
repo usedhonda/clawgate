@@ -165,7 +165,7 @@
   "verify": "n/a (提案)",
   "status": "pass",
   "verified_by": "run2 実装: 37 route の characterization matrix 5本先行 (完全 freeze + 405/404 matrix + federation subset guard) → routes テーブルを handler 辞書から導出する単一ソース化。federation switch は project-context-read の実挙動差を発見したため統合せず 2重+guard で機械検知化 (保守判断)。full ladder 全緑 (main 独立実測: swift 282 pass 1 skip 0 fail, plugin 142/0)",
-  "commit": "pending"
+  "commit": "73ef91d"
  },
  {
   "id": "ES-03",
@@ -177,7 +177,7 @@
   "verify": "n/a (提案)",
   "status": "pass",
   "verified_by": "run2 実装: shape 固定テスト先行 (13 check の name 完全順序 + summary 整合を厳密 assert) → DoctorChecks.swift へ verbatim 移動 (doctor 246→23行 thin delegate、BridgeCore -514行)。/v1/doctor JSON 不変。swift 277 pass 1 skip 0 fail + leak を main 独立実測",
-  "commit": "pending"
+  "commit": "bb1c84d"
  },
  {
   "id": "ES-04",
@@ -189,7 +189,7 @@
   "verify": "n/a (提案)",
   "status": "pass",
   "verified_by": "run2 実装: send() 161行を orchestrator 59行 + validateSendRequest / preflightFederationForward / dispatchToAdapter に verbatim 分離。catch (federation fallback + typing_busy streak 順序) は意図的残置の部分分割。testSend* 9本 + 503 contract test 含め swift 277 pass 1 skip 0 fail + leak を main 独立実測",
-  "commit": "pending"
+  "commit": "a1df141"
  },
  {
   "id": "ES-05",
@@ -201,7 +201,7 @@
   "verify": "n/a (提案)",
   "status": "pass",
   "verified_by": "run2: 読み専精査完了 (sonnet survey + main 検収)。純粋4関数の特定 + 3段抽出計画 (live 検証不要な第1段 / 機械的移動の第2段 / 御主人様同席 live 検証の第3段) + TCC/timing 不変条件を .loop/es05-oauth-ax-plan.md に確定",
-  "commit": "pending"
+  "commit": "e17f546"
  },
  {
   "id": "ES-06",
@@ -237,7 +237,7 @@
   "verify": "n/a (提案)",
   "status": "pass",
   "verified_by": "run2: 読み専精査完了 (sonnet survey + main 検収)。2レーン段階分割計画 (レーンA=CC純粋7項目 / レーンB=Cdx所有5段) + 壊れやすい箇所14点 + spec 乖離2点を .loop/es08-petmodel-plan.md に確定。レーンB 実装は Cdx 主導必須を明記",
-  "commit": "pending"
+  "commit": "780fc23"
  },
  {
   "id": "ES-09",
@@ -249,7 +249,7 @@
   "verify": "n/a (提案)",
   "status": "pass",
   "verified_by": "run2: 読み専精査完了 (sonnet survey + main 検収)。3段階分割計画 + 壊れやすい箇所7点を .loop/es09-menubar-plan.md に確定。第1段は TD-10 同型で即着手可能な粒度",
-  "commit": "pending"
+  "commit": "74ff638"
  },
  {
   "id": "ES-10",
@@ -273,7 +273,7 @@
   "verify": "n/a (提案)",
   "status": "pass",
   "verified_by": "run2 (take over 実装): drift ゼロ確認後、独立純関数6つ (telegram 2 + noise-filter 4) を export キーワードのみ追加しテストを本物 import に切替。_filterDisplayName 依存5関数は理由コメント付き inline copy 維持 (setter export は別途 GO 要の将来項目)。gate main 独立実測 green (plugin 142/0, js-check, leak)。false-green 面を 11→5 関数に縮小",
-  "commit": "pending"
+  "commit": "d0c580f"
  },
  {
   "id": "ES-12",
