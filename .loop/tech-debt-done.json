@@ -247,9 +247,9 @@
   "impact": "menu bar UI 全体",
   "risk": "high",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-09",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2: 読み専精査完了 (sonnet survey + main 検収)。3段階分割計画 + 壊れやすい箇所7点を .loop/es09-menubar-plan.md に確定。第1段は TD-10 同型で即着手可能な粒度",
+  "commit": "pending"
  },
  {
   "id": "ES-10",
