@@ -199,9 +199,9 @@
   "impact": "OAuth flow",
   "risk": "high",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-05",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2: 読み専精査完了 (sonnet survey + main 検収)。純粋4関数の特定 + 3段抽出計画 (live 検証不要な第1段 / 機械的移動の第2段 / 御主人様同席 live 検証の第3段) + TCC/timing 不変条件を .loop/es05-oauth-ax-plan.md に確定",
+  "commit": "pending"
  },
  {
   "id": "ES-06",
