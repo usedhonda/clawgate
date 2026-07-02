@@ -37,6 +37,9 @@ final class BridgeCore {
     private let autonomousStatusLock = NSLock()
     private var reportedAutonomousStalledTraceIDs: Set<String> = []
     private let autonomousStallThresholdSeconds: TimeInterval = 120
+    // Diagnostic-only counter feeding the typing_busy streak debug log below;
+    // intentionally never read for control flow (introduced in b7846fc to
+    // distinguish one-off vs consecutive typing_busy stalls).
     private var typingBusyStreakCount = 0
 
     init(eventBus: EventBus, registry: AdapterRegistry, logger: AppLogger, opsLogStore: OpsLogStore, configStore: ConfigStore, statsCollector: StatsCollector) {
