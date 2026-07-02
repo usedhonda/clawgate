@@ -571,15 +571,6 @@ actor OpenClawWSClient {
 
 /// Read OpenClaw Gateway config from ~/.openclaw/openclaw.json
 func readOpenClawGatewayConfig() -> (token: String, port: Int, host: String)? {
-    let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
-    guard let data = FileManager.default.contents(atPath: configPath),
-          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let gateway = json["gateway"] as? [String: Any],
-          let auth = gateway["auth"] as? [String: Any],
-          let token = auth["token"] as? String, !token.isEmpty else {
-        return nil
-    }
-    let port = gateway["port"] as? Int ?? AppConfig.defaultOpenClawPort
-    let host = gateway["host"] as? String ?? "127.0.0.1"
-    return (token: token, port: port, host: host)
+    guard let info = OpenClawGatewayInfo.load() else { return nil }
+    return (token: info.token, port: info.port, host: info.host ?? "127.0.0.1")
 }

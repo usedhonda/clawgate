@@ -180,12 +180,7 @@ final class BridgeCore {
             }
         }
 
-        let configPath = NSString("~/.openclaw/openclaw.json").expandingTildeInPath
-        guard let data = FileManager.default.contents(atPath: configPath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let gateway = json["gateway"] as? [String: Any],
-              let auth = gateway["auth"] as? [String: Any],
-              let token = auth["token"] as? String, !token.isEmpty else {
+        guard let info = OpenClawGatewayInfo.load() else {
             let payload = ErrorPayload(
                 code: "openclaw_not_configured",
                 message: "OpenClaw config not found",
@@ -195,9 +190,10 @@ final class BridgeCore {
             )
             return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
-        let port = gateway["port"] as? Int ?? AppConfig.defaultOpenClawPort
+        let token = info.token
+        let port = info.port
         let host = OwnHostnameResolver.resolve()
-        let gatewayHost = (gateway["host"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? host
+        let gatewayHost = info.host.flatMap { $0.isEmpty ? nil : $0 } ?? host
 
         let result: [String: Any] = [
             "ok": true,
