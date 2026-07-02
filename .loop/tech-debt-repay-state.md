@@ -14,8 +14,11 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
   - 発見メモ: deduplicateTrailAgainst のコメント「>50% で drop」と実挙動「>=50% で drop」が乖離（テストで現挙動固定済み）。filterPaneNoise 末尾の \n{3,} collapse は実質デッド。どちらも次 run 候補。
   - **TD-06 への注意**: TD-03 のテストが dead export（clearProgressSnapshot / getKnownProjects）もカバーした。TD-06 で export を削除する際は、対応するテストも同一 commit で削除すること（export 削除に伴う正当な除去であり test-weakening ではない）。
 
+- [it3] TD-04 pass: context-reader.test.js 新規（6 suite / 18 test、tmp fixture・非 git dir で決定論化、src 変更ゼロ）。post-gate main 独立実測 green（plugin 144/0, leak, js-check）。export 疑惑2件（extractReferencedFiles/smartTruncate）はテスト import により正当と確定 → 削除不要。
+  - 未検証領域メモ: 実 git 状態での builder 成功系（getGitInfo 等 private）は fixture 非 git のため対象外。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 3: TD-04 context-reader.js テスト（extractReferencedFiles / smartTruncate。テストが import することで「不要 export 疑惑」も解消される）。src 変更ゼロ。post-gate は leak + js-check + plugin tests。
+ITERATION 4: TD-05 RuntimeRole.swift loopback 判定の特性化テスト（Swift。新規 or 既存テストファイルに追加、`Tests/UnitTests/`）。TD-09（loopback 集合統一）の安全網になる。post-gate は swift build + swift test を含む。
