@@ -163,9 +163,9 @@
   "impact": "routing 全体 (405/404 契約)",
   "risk": "high",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-02",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2 実装: 37 route の characterization matrix 5本先行 (完全 freeze + 405/404 matrix + federation subset guard) → routes テーブルを handler 辞書から導出する単一ソース化。federation switch は project-context-read の実挙動差を発見したため統合せず 2重+guard で機械検知化 (保守判断)。full ladder 全緑 (main 独立実測: swift 282 pass 1 skip 0 fail, plugin 142/0)",
+  "commit": "pending"
  },
  {
   "id": "ES-03",

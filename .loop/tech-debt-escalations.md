@@ -1,5 +1,14 @@
 # Tech-Debt Escalations（提案のみ・実装は御主人様 GO 待ち）
 
+> **RUN 2（2026-07-02）で 15件全て決着済み**。各項目の結末は `.loop/tech-debt-done.json` の verified_by を正とする。本ファイルは提案の原文 + 下記の「将来 GO 項目」を保持する。
+
+## 将来 GO 項目（run2 で発見、未着手）
+- **gateway.js `_filterDisplayName` setter export**: noise-filter テストの inline copy 残り5関数を本物 import 化するのに必要。frozen ファイルへの新規 API 面のため個別 GO 要（ES-11 部分解決の残り）
+- **federation switch の routes 統合**: ES-02 で project-context-read のハンドラ分岐（HTTP=projectContextRead vs federation=runLocalProjectContextRead 直呼び）という実挙動差を発見したため統合を見送り、subset-guard テストで機械検知化。真の統合はこの分岐の意図確定が先
+- **federation 経由で到達不能な 23 route**: ES-02 の対応表で確定（既存挙動、federationEnabled 実質 false のため実害なし）。in-process federation の将来（ES-06 の残置判断）と合わせて扱う
+- **parseKeyValueMessage の2コピー統一**（MenuBarApp 版は OpsLogSummarizer へ抽出済み、BridgeCore.swift 内部にもう1コピー）
+- **lookupTprojOrigin の内部 `ts` 漏れ**（JSDoc 乖離、TD-02 で挙動固定済み）
+
 iteration 0（2026-07-02）の負債マップから、loop の escalate 条件（機能削除 P0 / 公開 API / 仕様がコードから導出不能 / off-limits / スコープ大）に該当した15件。各提案 = {何を / なぜ / どう検証 / 触るファイル}。
 
 ## ES-01 ClawGateRelay の退役 — 推定効果: 大

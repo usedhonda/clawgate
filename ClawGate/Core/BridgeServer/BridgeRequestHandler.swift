@@ -16,45 +16,124 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
-    private static let routes: [(HTTPMethod, String)] = [
-        (.GET, "/v1/health"),
-        (.GET, "/v1/config"),
-        (.GET, "/v1/adapters"),
-        (.GET, "/v1/tmux/session-mode"),
-        (.PUT, "/v1/tmux/session-mode"),
-        (.GET, "/v1/poll"),
-        (.GET, "/v1/stats"),
-        (.GET, "/v1/ops/logs"),
-        (.GET, "/v1/autonomous/status"),
-        (.POST, "/v1/send"),
-        (.POST, "/v1/bubble-notify"),
-        (.GET, "/v1/context"),
-        (.GET, "/v1/messages"),
-        (.GET, "/v1/conversations"),
-        (.GET, "/v1/axdump"),
-        (.GET, "/v1/doctor"),
-        (.GET, "/v1/openclaw-info"),
-        (.GET, "/v1/events"),
-        (.POST, "/v1/debug/inject"),
-        (.POST, "/v1/oauth/safari-open"),
-        (.GET, "/v1/debug/line-dedup"),
-        (.GET, "/v1/debug/line-health"),
-        (.GET, "/v1/debug/tmux-direct"),
-        (.GET, "/v1/tmux/prompt-state"),
-        (.POST, "/v1/tproj-msg-deliver"),
-        (.GET, "/v1/project-context-read"),
-        (.POST, "/v1/line/ensure-conversation"),
-        (.POST, "/v1/debug/reset-line-baseline"),
-        (.GET, "/v1/ambient/status"),
-        (.POST, "/v1/ambient/stream/start"),
-        (.POST, "/v1/ambient/stream/stop"),
-        (.POST, "/v1/ambient/capture/pause"),
-        (.POST, "/v1/ambient/capture/resume"),
-        (.POST, "/v1/ambient/capture/recover"),
-        (.POST, "/v1/ambient/capture/_simulate_wedge"),
-        (.GET, "/v1/ambient/sessions"),
-        (.GET, "/v1/ambient/transcript"),
+    struct RouteKey: Hashable {
+        let method: HTTPMethod
+        let path: String
+        init(_ method: HTTPMethod, _ path: String) {
+            self.method = method
+            self.path = path
+        }
+        // HTTPMethod is Equatable but not Hashable in this NIO version, so hash
+        // on its stable string form.
+        static func == (lhs: RouteKey, rhs: RouteKey) -> Bool {
+            lhs.method == rhs.method && lhs.path == rhs.path
+        }
+        func hash(into hasher: inout Hasher) {
+            hasher.combine("\(method)")
+            hasher.combine(path)
+        }
+    }
+
+    /// A blocking-queue endpoint handler. Receives the parsed query components,
+    /// the request head, and the body so per-route parsing lives with the route.
+    typealias BlockingRouteHandler = (BridgeCore, URLComponents?, HTTPRequestHead, Data) -> HTTPResult
+
+    /// Endpoints answered synchronously on the event loop (health check, config
+    /// reads, poll, SSE). Their dispatch stays inline in `handleRequest` because
+    /// each has a bespoke position relative to the auth/CSRF/tracking pipeline;
+    /// listing them here only feeds the 405/404 route table below.
+    private static let eventLoopRoutes: [RouteKey] = [
+        RouteKey(.GET, "/v1/health"),
+        RouteKey(.GET, "/v1/openclaw-info"),
+        RouteKey(.GET, "/v1/config"),
+        RouteKey(.GET, "/v1/adapters"),
+        RouteKey(.GET, "/v1/stats"),
+        RouteKey(.GET, "/v1/autonomous/status"),
+        RouteKey(.GET, "/v1/poll"),
+        RouteKey(.GET, "/v1/ops/logs"),
+        RouteKey(.GET, "/v1/events"),
     ]
+
+    /// Endpoints offloaded to the blocking queue (AX queries, subprocesses,
+    /// forwards). This dictionary is the single source of truth for both the
+    /// dispatch (see `handleRequest`) and the 405/404 route table.
+    private static let blockingRoutes: [RouteKey: BlockingRouteHandler] = [
+        RouteKey(.GET, "/v1/debug/line-dedup"): { core, _, _, _ in core.handleLineDedupDebug() },
+        RouteKey(.GET, "/v1/debug/line-health"): { core, _, _, _ in core.handleLineHealthDebug() },
+        RouteKey(.GET, "/v1/debug/tmux-direct"): { core, _, _, _ in core.handleTmuxDirectDebug() },
+        RouteKey(.POST, "/v1/debug/inject"): { core, _, _, body in core.debugInject(body: body) },
+        RouteKey(.POST, "/v1/oauth/safari-open"): { core, _, _, body in core.oauthSafariOpen(body: body) },
+        RouteKey(.POST, "/v1/send"): { core, _, head, body in
+            let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
+            return core.send(body: body, traceID: traceID, pathAndQuery: head.uri, headers: head.headers)
+        },
+        RouteKey(.POST, "/v1/bubble-notify"): { core, _, _, body in core.bubbleNotify(body: body) },
+        RouteKey(.GET, "/v1/context"): { core, components, head, _ in
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            return core.context(adapter: adapter, pathAndQuery: head.uri, headers: head.headers)
+        },
+        RouteKey(.GET, "/v1/messages"): { core, components, head, _ in
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
+            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+            let conversation = components?.queryItems?.first(where: { $0.name == "conversation" })?.value
+            return core.messages(adapter: adapter, limit: limit, conversation: conversation, pathAndQuery: head.uri, headers: head.headers)
+        },
+        RouteKey(.GET, "/v1/conversations"): { core, components, head, _ in
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
+            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+            return core.conversations(adapter: adapter, limit: limit, pathAndQuery: head.uri, headers: head.headers)
+        },
+        RouteKey(.GET, "/v1/axdump"): { core, components, head, _ in
+            let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
+            return core.axdump(adapter: adapter, pathAndQuery: head.uri, headers: head.headers)
+        },
+        RouteKey(.GET, "/v1/doctor"): { core, _, _, _ in core.doctor() },
+        RouteKey(.GET, "/v1/tmux/session-mode"): { core, components, _, _ in
+            let sessionType = components?.queryItems?.first(where: { $0.name == "session_type" })?.value ?? ""
+            let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
+            return core.tmuxSessionMode(sessionType: sessionType, project: project)
+        },
+        RouteKey(.PUT, "/v1/tmux/session-mode"): { core, _, _, body in core.setTmuxSessionMode(body: body) },
+        RouteKey(.GET, "/v1/tmux/prompt-state"): { core, components, _, _ in
+            let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
+            return core.tmuxPromptState(project: project)
+        },
+        RouteKey(.POST, "/v1/tproj-msg-deliver"): { core, _, _, body in core.tprojMsgDeliver(body: body) },
+        RouteKey(.GET, "/v1/project-context-read"): { core, components, _, _ in
+            let cmd = components?.queryItems?.first(where: { $0.name == "cmd" })?.value ?? "list"
+            let arg = components?.queryItems?.first(where: { $0.name == "arg" })?.value ?? ""
+            let federation = components?.queryItems?.first(where: { $0.name == "federation" })?.value == "1"
+            let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
+            return core.projectContextRead(cmd: cmd, arg: arg, federation: federation, project: project)
+        },
+        RouteKey(.POST, "/v1/line/ensure-conversation"): { core, _, head, body in
+            let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
+            return core.ensureLineConversation(body: body, pathAndQuery: head.uri, headers: head.headers, traceID: traceID)
+        },
+        RouteKey(.POST, "/v1/debug/reset-line-baseline"): { core, _, _, _ in core.resetLineBaseline() },
+        RouteKey(.GET, "/v1/ambient/status"): { core, _, _, _ in core.ambientStatus() },
+        RouteKey(.POST, "/v1/ambient/stream/start"): { core, _, _, _ in core.ambientStreamStart() },
+        RouteKey(.POST, "/v1/ambient/stream/stop"): { core, _, _, _ in core.ambientStreamStop() },
+        RouteKey(.POST, "/v1/ambient/capture/pause"): { core, _, _, _ in core.ambientCapturePause() },
+        RouteKey(.POST, "/v1/ambient/capture/resume"): { core, _, _, _ in core.ambientCaptureResume() },
+        RouteKey(.POST, "/v1/ambient/capture/recover"): { core, _, _, _ in core.ambientCaptureRecover() },
+        RouteKey(.POST, "/v1/ambient/capture/_simulate_wedge"): { core, _, _, _ in core.ambientSimulateWedge() },
+        RouteKey(.GET, "/v1/ambient/sessions"): { core, _, _, _ in core.ambientSessions() },
+        RouteKey(.GET, "/v1/ambient/transcript"): { core, components, _, _ in
+            let sessionID = components?.queryItems?.first(where: { $0.name == "session_id" })?.value ?? ""
+            return core.ambientTranscript(sessionID: sessionID)
+        },
+    ]
+
+    /// Canonical (method, path) table used for the 405/404 decision. Derived
+    /// from the two route sources above so route membership is declared exactly
+    /// once (event-loop routes) or lives with its handler (blocking routes).
+    static let routes: [(HTTPMethod, String)] = {
+        eventLoopRoutes.map { ($0.method, $0.path) }
+            + blockingRoutes.keys.map { ($0.method, $0.path) }
+    }()
 
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer = ByteBuffer()
@@ -187,81 +266,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         BlockingWork.queue.async { [self, core] in
             let result: HTTPResult
 
-            if method == .GET && path == "/v1/debug/line-dedup" {
-                result = core.handleLineDedupDebug()
-            } else if method == .GET && path == "/v1/debug/line-health" {
-                result = core.handleLineHealthDebug()
-            } else if method == .GET && path == "/v1/debug/tmux-direct" {
-                result = core.handleTmuxDirectDebug()
-            } else if method == .POST && path == "/v1/debug/inject" {
-                result = core.debugInject(body: bodyData)
-            } else if method == .POST && path == "/v1/oauth/safari-open" {
-                result = core.oauthSafariOpen(body: bodyData)
-            } else if method == .POST && path == "/v1/send" {
-                let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
-                result = core.send(body: bodyData, traceID: traceID, pathAndQuery: head.uri, headers: head.headers)
-            } else if method == .POST && path == "/v1/bubble-notify" {
-                result = core.bubbleNotify(body: bodyData)
-            } else if method == .GET && path == "/v1/context" {
-                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-                result = core.context(adapter: adapter, pathAndQuery: head.uri, headers: head.headers)
-            } else if method == .GET && path == "/v1/messages" {
-                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-                let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
-                let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
-                let conversation = components?.queryItems?.first(where: { $0.name == "conversation" })?.value
-                result = core.messages(adapter: adapter, limit: limit, conversation: conversation, pathAndQuery: head.uri, headers: head.headers)
-            } else if method == .GET && path == "/v1/conversations" {
-                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-                let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
-                let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
-                result = core.conversations(adapter: adapter, limit: limit, pathAndQuery: head.uri, headers: head.headers)
-            } else if method == .GET && path == "/v1/axdump" {
-                let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-                result = core.axdump(adapter: adapter, pathAndQuery: head.uri, headers: head.headers)
-            } else if method == .GET && path == "/v1/doctor" {
-                result = core.doctor()
-            } else if method == .GET && path == "/v1/tmux/session-mode" {
-                let sessionType = components?.queryItems?.first(where: { $0.name == "session_type" })?.value ?? ""
-                let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
-                result = core.tmuxSessionMode(sessionType: sessionType, project: project)
-            } else if method == .PUT && path == "/v1/tmux/session-mode" {
-                result = core.setTmuxSessionMode(body: bodyData)
-            } else if method == .GET && path == "/v1/tmux/prompt-state" {
-                let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
-                result = core.tmuxPromptState(project: project)
-            } else if method == .POST && path == "/v1/tproj-msg-deliver" {
-                result = core.tprojMsgDeliver(body: bodyData)
-            } else if method == .GET && path == "/v1/project-context-read" {
-                let cmd = components?.queryItems?.first(where: { $0.name == "cmd" })?.value ?? "list"
-                let arg = components?.queryItems?.first(where: { $0.name == "arg" })?.value ?? ""
-                let federation = components?.queryItems?.first(where: { $0.name == "federation" })?.value == "1"
-                let project = components?.queryItems?.first(where: { $0.name == "project" })?.value ?? ""
-                result = core.projectContextRead(cmd: cmd, arg: arg, federation: federation, project: project)
-            } else if method == .POST && path == "/v1/line/ensure-conversation" {
-                let traceID = head.headers.first(name: "X-Trace-ID") ?? head.headers.first(name: "x-trace-id")
-                result = core.ensureLineConversation(body: bodyData, pathAndQuery: head.uri, headers: head.headers, traceID: traceID)
-            } else if method == .POST && path == "/v1/debug/reset-line-baseline" {
-                result = core.resetLineBaseline()
-            } else if method == .GET && path == "/v1/ambient/status" {
-                result = core.ambientStatus()
-            } else if method == .POST && path == "/v1/ambient/stream/start" {
-                result = core.ambientStreamStart()
-            } else if method == .POST && path == "/v1/ambient/stream/stop" {
-                result = core.ambientStreamStop()
-            } else if method == .POST && path == "/v1/ambient/capture/pause" {
-                result = core.ambientCapturePause()
-            } else if method == .POST && path == "/v1/ambient/capture/resume" {
-                result = core.ambientCaptureResume()
-            } else if method == .POST && path == "/v1/ambient/capture/recover" {
-                result = core.ambientCaptureRecover()
-            } else if method == .POST && path == "/v1/ambient/capture/_simulate_wedge" {
-                result = core.ambientSimulateWedge()
-            } else if method == .GET && path == "/v1/ambient/sessions" {
-                result = core.ambientSessions()
-            } else if method == .GET && path == "/v1/ambient/transcript" {
-                let sessionID = components?.queryItems?.first(where: { $0.name == "session_id" })?.value ?? ""
-                result = core.ambientTranscript(sessionID: sessionID)
+            if let handler = Self.blockingRoutes[RouteKey(method, path)] {
+                result = handler(core, components, head, bodyData)
             } else {
                 let notFound = Data("{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"not found\",\"retriable\":false}}".utf8)
                 var headers = HTTPHeaders()
