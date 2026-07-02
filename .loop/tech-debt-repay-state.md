@@ -24,8 +24,11 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 
 - [it6] TD-07 pass: BridgeCore の ad-hoc ISO8601DateFormatter 4箇所 → Self.isoFormatter に統一（4行同型置換のみ）。共有側は素の default 生成で出力バイト同一を事前確認 = 同値変換。post-gate main 独立実測 green（swift 237/0, build, leak）。
 
+- [it7] TD-08 pass: 18789→AppConfig.defaultOpenClawPort / 8765→BridgeServer.defaultPort に集約（意味別2定数）。doctor message は実値化せず定数 interpolate（BridgeServer は main.swift で port 省略構築 = 定数が常に真値、divergence ゼロ）。出力 byte 同一。post-gate main 独立実測 green（swift 237/0）。
+  - out-of-scope candidates（agent 申告、未変更）: main.swift/QRCodeView/SettingsView の UI・log 面のポートリテラル、BridgeCore:1507 コメントの "8765" 表記。次 run or 御主人様判断。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 7: TD-08 ポートリテラル 18789/8765 の named constant 集約（BridgeCore.swift:198,1508,1513,2164 / AppConfig.swift:71 / OpenClawWSClient.swift:582 / BridgeServer.swift:18）。doctor message 文字列内の 8765 が「実際の設定値」を反映すべきか「固定の案内文」かを先に判定してから設計（嘘をつく doctor の解消が本旨）。post-gate は swift build + test。
+ITERATION 8: TD-09 loopback ホスト集合の単一定義化（BridgeCore.swift:2158 の集合は `::` 欠落、RuntimeRole.swift:23 と不一致）。TD-05 の RuntimeRoleTests が安全網。**注意**: 統一により BridgeCore 側の判定に `::` が加わる = 厳密には挙動変更。BridgeCore:2158 の用途（forward-target 判定）で `::` を loopback 扱いに変えて安全かをコード文脈で確認し、疑義があれば escalate に切替（ledger の verify 欄に明記済み）。post-gate は swift build + test。

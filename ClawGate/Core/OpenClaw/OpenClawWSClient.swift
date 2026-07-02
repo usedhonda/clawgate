@@ -579,7 +579,7 @@ func readOpenClawGatewayConfig() -> (token: String, port: Int, host: String)? {
           let token = auth["token"] as? String, !token.isEmpty else {
         return nil
     }
-    let port = gateway["port"] as? Int ?? 18789
+    let port = gateway["port"] as? Int ?? AppConfig.defaultOpenClawPort
     let host = gateway["host"] as? String ?? "127.0.0.1"
     return (token: token, port: port, host: host)
 }

@@ -15,7 +15,10 @@ final class BridgeServer {
 
     private var channel: Channel?
 
-    init(core: BridgeCore, host: String = "127.0.0.1", port: Int = 8765,
+    /// Default bridge HTTP API port — single source of truth for the 8765 default.
+    static let defaultPort = 8765
+
+    init(core: BridgeCore, host: String = "127.0.0.1", port: Int = BridgeServer.defaultPort,
          federationServer: FederationServer? = nil, configStore: ConfigStore, logger: AppLogger) {
         self.core = core
         self.host = host

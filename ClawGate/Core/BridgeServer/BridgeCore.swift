@@ -195,7 +195,7 @@ final class BridgeCore {
             )
             return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
-        let port = gateway["port"] as? Int ?? 18789
+        let port = gateway["port"] as? Int ?? AppConfig.defaultOpenClawPort
         let host = OwnHostnameResolver.resolve()
         let gatewayHost = (gateway["host"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? host
 
@@ -1505,12 +1505,12 @@ final class BridgeCore {
         checks.append(lineSurfaceHealthCheck(lineEnabled: lineEnabled, lineRunning: lineRunning))
 
         // Check 8: Port 8765 (we're already listening, so this is informational)
-        let portDetails = "0.0.0.0:8765 (remote access)"
+        let portDetails = "0.0.0.0:\(BridgeServer.defaultPort) (remote access)"
         let federationSuffix = cfg.federationEnabled ? " + ws:/federation" : ""
         checks.append(DoctorCheck(
             name: "server_port",
             status: "ok",
-            message: "Server is listening on port 8765",
+            message: "Server is listening on port \(BridgeServer.defaultPort)",
             details: portDetails + federationSuffix
         ))
 
@@ -2161,7 +2161,7 @@ final class BridgeCore {
         var components = URLComponents()
         components.scheme = "http"
         components.host = host
-        components.port = 8765
+        components.port = BridgeServer.defaultPort
         return components.url
     }
 

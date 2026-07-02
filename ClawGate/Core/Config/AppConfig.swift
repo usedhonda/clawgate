@@ -49,6 +49,9 @@ struct AppConfig: Codable {
         return "\(prefix):\(project)"
     }
 
+    /// Default OpenClaw Gateway port — single source of truth for the 18789 default.
+    static let defaultOpenClawPort = 18789
+
     static let `default` = AppConfig(
         nodeRole: .client,
         debugLogging: false,
@@ -68,7 +71,7 @@ struct AppConfig: Codable {
         ocrUsesLanguageCorrection: true,
         ocrCandidateCount: 3,
         openclawHost: "127.0.0.1",
-        openclawPort: 18789,
+        openclawPort: defaultOpenClawPort,
         federationEnabled: false,
         federationURL: "",
         federationToken: "",
