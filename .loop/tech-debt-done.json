@@ -259,9 +259,9 @@
   "impact": "Pet 表示",
   "risk": "high",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-10",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2: 読み専精査完了 (sonnet survey + main 検収)。責務マップ + CC/Cdx 2レーン段階分割計画を .loop/es10-pet-ui-plan.md に確定。実装は計画の承認単位ごと (Pet 配下は Cdx レビュー必須)",
+  "commit": "aaa4f54"
  },
  {
   "id": "ES-11",
