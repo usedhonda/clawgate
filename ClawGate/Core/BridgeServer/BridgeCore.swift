@@ -2155,8 +2155,7 @@ final class BridgeCore {
         }
 
         let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
-        let loopbackHosts = ["localhost", "127.0.0.1", "::1", "0.0.0.0"]
-        guard !loopbackHosts.contains(normalized) else { return nil }
+        guard !AppConfig.loopbackHosts.contains(normalized) else { return nil }
 
         var components = URLComponents()
         components.scheme = "http"

@@ -20,8 +20,7 @@ extension AppConfig {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         if host.isEmpty { return .server }
-        let localHosts: Set<String> = ["127.0.0.1", "localhost", "::1", "0.0.0.0", "::"]
-        if localHosts.contains(host) { return .server }
+        if Self.loopbackHosts.contains(host) { return .server }
         return .client
     }
 

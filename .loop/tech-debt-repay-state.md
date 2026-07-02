@@ -27,8 +27,10 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 - [it7] TD-08 pass: 18789→AppConfig.defaultOpenClawPort / 8765→BridgeServer.defaultPort に集約（意味別2定数）。doctor message は実値化せず定数 interpolate（BridgeServer は main.swift で port 省略構築 = 定数が常に真値、divergence ゼロ）。出力 byte 同一。post-gate main 独立実測 green（swift 237/0）。
   - out-of-scope candidates（agent 申告、未変更）: main.swift/QRCodeView/SettingsView の UI・log 面のポートリテラル、BridgeCore:1507 コメントの "8765" 表記。次 run or 御主人様判断。
 
+- [it8] TD-09 pass: AppConfig.loopbackHosts に単一定義化（RuntimeRole + BridgeCore forward-guard の inline 集合2つを置換）。`::` 差分の分析: 現挙動は到達不能 "http://[::]:8765" へ 9s timeout 失敗、統一後は即 503 line_forward_unavailable(retriable) = fail-closed 改善、新エラーコード無しで contract 不変。cleanup phase 完了（TD-06〜09）。post-gate main 独立実測 green（swift 237/0）。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 8: TD-09 loopback ホスト集合の単一定義化（BridgeCore.swift:2158 の集合は `::` 欠落、RuntimeRole.swift:23 と不一致）。TD-05 の RuntimeRoleTests が安全網。**注意**: 統一により BridgeCore 側の判定に `::` が加わる = 厳密には挙動変更。BridgeCore:2158 の用途（forward-target 判定）で `::` を loopback 扱いに変えて安全かをコード文脈で確認し、疑義があれば escalate に切替（ledger の verify 欄に明記済み）。post-gate は swift build + test。
+ITERATION 9: TD-10 MenuBarApp のログ解析 pure helper（parseMessageFields :1234 / parseKeyValueMessage :1254 / shortProject :1268 / humanReadableSummary :1180）を独立型へ抽出 + characterization test（separation phase 開始。挙動不変の移動のみ、AppKit 依存を持ち込まない）。post-gate は swift build + test。
