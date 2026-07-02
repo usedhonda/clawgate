@@ -40,5 +40,10 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 - [it11] TD-12 pass: OpenClawGatewayInfo.swift 新設（token/port/host? の共通 parse 一本化、host fallback は各呼び出し側残置 = 2サイトの挙動差維持）+ OpenClawGatewayInfoTests 7本。BridgeCore -8/+4、WSClient -11/+2、PetModel 不触。**full ladder 全緑を main 独立実測**（leak / shellcheck / js-check / plugin 142/0 / build / swift 276 pass 1 skip 0 fail）。全 TD 12項目 pass。
   - arch doc 整合: reference_architecture.md の「読み手」記述（BridgeCore /v1/openclaw-info, PetModel readOpenClawGatewayConfig）は現状と一致、reader 新設は内部実装の変化のみで doc 更新不要（Arch doc: current）。
 
-## Next step
-FINAL 前の独立完了チェック（maker != checker）: fresh sub-agent に ledger + contract SUCCESS CRITERIA + 直近 diff を渡して検証。PASS なら FINAL（TD-11 の Cdx ratify/reject 判定は pending のまま報告に含める）。
+- [it12] 独立完了チェック PASS（fresh sub-agent、6項目全 PASS: ledger 完全性 / escalations 実在 / map 品質・根拠2件実照合 / 既存テスト改変ゼロ 1160挿入0削除 / frozen 不可侵 diff 空 / swift test 276/0 を検証者自身が実行）。cosmetic 指摘の ES-09 独立見出しは修正済み。learnings に「off-limits 設計は memory/ P0 も走査」を UNVERIFIED 追記。
+
+## RUN 1 RESULT: stop_reason=success（FINAL）
+- 実返済 12/12 pass、escalated 15件（提案書完備）、既存テスト改変ゼロ、frozen 不可侵、full ladder 全緑。
+- テスト 227 → 276（Swift +49）、plugin 56 → 142（+86、dead export 分 -2 込み）。
+- 残 pending: TD-11 の Pet 所有権 ratify/reject（Cdx レビュー中）。reject なら 50f4114 revert。
+- deploy: Swift + plugin 変更あり → Cdx の ratify 確認後に ./scripts/post-task-restart.sh を実行する（未 ratify の Pet コードを本番に載せない判断）。

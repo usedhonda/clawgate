@@ -9,4 +9,4 @@
 - **ffmpeg は `while read` ループ内で `-nostdin` 必須**（SC2095）: 付けないとループの stdin（リダイレクトしたファイル）を飲み込み、2件目以降の行が処理されない潜在バグになる。
 
 ## 観察待ちの仮説（確定したらルールへ昇格）
-- （現状なし）
+- **off-limits 設計は memory/ の P0 feedback 群も走査してから固める**（tech-debt-repay run 1, 2026-07-02）: loop contract の OFF-LIMITS を CLAUDE.md だけから作ったため、memory `feedback_pet_tracking_cdx_required.md`（PetModel tracking 系は Cdx 所有・CC 編集禁止）を見落とし、TD-11 で PetModel を CC 経路で編集してしまった（挙動不変・green だったが規律違反として Cdx レビューへ）。次の loop 設計時に再発しなければ DURABLE 昇格。
