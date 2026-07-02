@@ -175,9 +175,9 @@
   "impact": "ops tooling",
   "risk": "mid",
   "verify": "n/a (提案)",
-  "status": "escalated",
-  "verified_by": "escalations.md ES-03",
-  "commit": ""
+  "status": "pass",
+  "verified_by": "run2 実装: shape 固定テスト先行 (13 check の name 完全順序 + summary 整合を厳密 assert) → DoctorChecks.swift へ verbatim 移動 (doctor 246→23行 thin delegate、BridgeCore -514行)。/v1/doctor JSON 不変。swift 277 pass 1 skip 0 fail + leak を main 独立実測",
+  "commit": "pending"
  },
  {
   "id": "ES-04",

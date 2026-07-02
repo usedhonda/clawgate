@@ -224,6 +224,50 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertTrue(parsed.checks.contains(where: { $0.name == "line_caretaker_state" }))
     }
 
+    /// Characterization test: freezes the /v1/doctor response shape (ES-03 refactor).
+    /// The check name list + order and the top-level keys are a public API surface
+    /// consumed by ops tooling, so any decomposition of doctor() must preserve them.
+    /// In makeCore() federation is disabled and no TmuxDirectPoller/AmbientController is
+    /// wired, so the three conditional checks (federation, tmux_session_discovery,
+    /// ambient_capture_liveness) are absent and the list is deterministic regardless of
+    /// host state (lineRunning / axTrusted only affect status/message, not names/order).
+    func testDoctorResponseShapeIsStable() throws {
+        let core = makeCore()
+        let response = core.doctor()
+        let parsed = try JSONDecoder().decode(DoctorReport.self, from: response.body)
+
+        let expectedNames = [
+            "app_signature",
+            "accessibility_permission",
+            "line_running",
+            "line_inbound_watcher_freshness",
+            "line_inbound_flow",
+            "line_inbound_dedup_health",
+            "line_caretaker_state",
+            "line_window_accessible",
+            "line_surface_health",
+            "server_port",
+            "screen_recording_permission",
+            "eventbus_activity",
+            "gateway_poll_freshness"
+        ]
+        XCTAssertEqual(parsed.checks.map { $0.name }, expectedNames)
+
+        // Top-level shape
+        XCTAssertEqual(parsed.version, "0.1.0")
+        XCTAssertEqual(parsed.summary.total, parsed.checks.count)
+        XCTAssertEqual(parsed.summary.total, expectedNames.count)
+        XCTAssertEqual(parsed.summary.passed + parsed.summary.warnings + parsed.summary.errors, parsed.checks.count)
+        XCTAssertFalse(parsed.timestamp.isEmpty)
+
+        // Per-check field invariants
+        for check in parsed.checks {
+            XCTAssertFalse(check.name.isEmpty)
+            XCTAssertFalse(check.message.isEmpty)
+            XCTAssertTrue(["ok", "warning", "error"].contains(check.status), "unexpected status \(check.status) for \(check.name)")
+        }
+    }
+
     func testAuthorizationAllowsLoopbackIPv4() {
         let core = makeCore()
         XCTAssertNil(core.checkAuthorization(remoteAddress: "127.0.0.1"))
