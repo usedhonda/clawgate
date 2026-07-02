@@ -22,8 +22,10 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 
 - [it5] TD-06 pass: dead export 2関数を関数ごと削除（clearProgressSnapshot / getKnownProjects、33 del）+ TD-03 対応テスト除去。削除前 grep 三重確認で production caller ゼロ（機能の無断削除に非該当 = 呼ばれない関数は機能ではない）。post-gate main 独立実測 green（plugin 142/0, leak, js-check）+ diff 目視。
 
+- [it6] TD-07 pass: BridgeCore の ad-hoc ISO8601DateFormatter 4箇所 → Self.isoFormatter に統一（4行同型置換のみ）。共有側は素の default 生成で出力バイト同一を事前確認 = 同値変換。post-gate main 独立実測 green（swift 237/0, build, leak）。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 6: TD-07 BridgeCore の ad-hoc `ISO8601DateFormatter()` 4箇所（:728,1691,2470,2797）を既存の共有 `Self.isoFormatter`（:33）に統一。挙動同値変換（format option は default 同士で一致することを確認してから）。post-gate は swift build + test 含む。
+ITERATION 7: TD-08 ポートリテラル 18789/8765 の named constant 集約（BridgeCore.swift:198,1508,1513,2164 / AppConfig.swift:71 / OpenClawWSClient.swift:582 / BridgeServer.swift:18）。doctor message 文字列内の 8765 が「実際の設定値」を反映すべきか「固定の案内文」かを先に判定してから設計（嘘をつく doctor の解消が本旨）。post-gate は swift build + test。

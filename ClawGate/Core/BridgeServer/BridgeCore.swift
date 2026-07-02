@@ -725,7 +725,7 @@ final class BridgeCore {
             fingerprintWindowSec: 0,
             pipelineHistory: [],
             suppressionMetrics: .empty,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: Self.isoFormatter.string(from: Date())
         )
         return jsonResponse(status: .ok, body: encode(snapshot))
     }
@@ -1688,7 +1688,7 @@ final class BridgeCore {
                 warnings: warnings,
                 errors: errors
             ),
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: Self.isoFormatter.string(from: Date())
         )
 
         return jsonResponse(status: allOk ? .ok : .serviceUnavailable, body: encode(report))
@@ -2467,7 +2467,7 @@ final class BridgeCore {
             conversationName: conversation,
             messages: messages,
             messageCount: messages.count,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: Self.isoFormatter.string(from: Date())
         )
     }
 
@@ -2794,7 +2794,7 @@ final class BridgeCore {
             adapter: "tmux",
             conversations: entries,
             count: entries.count,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: Self.isoFormatter.string(from: Date())
         )
     }
 }
