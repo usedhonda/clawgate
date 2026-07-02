@@ -45,5 +45,5 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 ## RUN 1 RESULT: stop_reason=success（FINAL）
 - 実返済 12/12 pass、escalated 15件（提案書完備）、既存テスト改変ゼロ、frozen 不可侵、full ladder 全緑。
 - テスト 227 → 276（Swift +49）、plugin 56 → 142（+86、dead export 分 -2 込み）。
-- 残 pending: TD-11 の Pet 所有権 ratify/reject（Cdx レビュー中）。reject なら 50f4114 revert。
-- deploy: Swift + plugin 変更あり → Cdx の ratify 確認後に ./scripts/post-task-restart.sh を実行する（未 ratify の Pet コードを本番に載せない判断）。
+- TD-11 の Pet 所有権: **Cdx が ratify**（2026-07-02 [DONE: Pet ownership ratify]。実挙動不変・tolerance/strict-< 維持・hidingSide 等更新規約不触を所有者確認。PetGeometryTests 9/0 + PetStateMachineTests 21/0 を Cdx 側でも実行）。以後 Pet tracking/hide/facing の実ロジック変更は引き続き Cdx 所有。
+- deploy: ratify 受領により block 解除 → ./scripts/post-task-restart.sh 実行。
