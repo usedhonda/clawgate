@@ -20,8 +20,10 @@ iteration cap 12 / no-progress streak 3 / wall-clock 120min
 - [it4] TD-05 pass: RuntimeRoleTests.swift 新規（10 test、AppConfig.default ベース、RFC 5737/3849 fixture のみ）。post-gate main 独立実測 green（swift 237/1skip/0fail, build, leak）。safety-net phase 完了（TD-02〜05）。
   - TD-09 向け固定事項: RuntimeRole 集合は `::` を含み .server 判定 / 完全一致セマンティクス（port 付き・subdomain は loopback 扱いしない）/ runtimeRole は persisted nodeRole を無視。単一定義化でこれを壊すな。
 
+- [it5] TD-06 pass: dead export 2関数を関数ごと削除（clearProgressSnapshot / getKnownProjects、33 del）+ TD-03 対応テスト除去。削除前 grep 三重確認で production caller ゼロ（機能の無断削除に非該当 = 呼ばれない関数は機能ではない）。post-gate main 独立実測 green（plugin 142/0, leak, js-check）+ diff 目視。
+
 ## Failed / blocked
 （まだ無し）
 
 ## Next step
-ITERATION 5: TD-06 dead export 削除（context-cache.js の clearProgressSnapshot / getKnownProjects）。**注意: TD-03 で追加したテスト中の該当 suite（progress snapshots の clear / getKnownProjects）も同一 commit で削除**（export 削除に伴う正当な除去）。ただし clearProgressSnapshot は progress snapshot の clear 機能そのもの → 「機能の無断削除」に当たらないか map の根拠（呼び出しゼロ）を再確認してから。post-gate は leak + js-check + plugin tests。
+ITERATION 6: TD-07 BridgeCore の ad-hoc `ISO8601DateFormatter()` 4箇所（:728,1691,2470,2797）を既存の共有 `Self.isoFormatter`（:33）に統一。挙動同値変換（format option は default 同士で一致することを確認してから）。post-gate は swift build + test 含む。

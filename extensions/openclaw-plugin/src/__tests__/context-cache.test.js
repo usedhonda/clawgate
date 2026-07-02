@@ -155,20 +155,6 @@ describe("resolveProjectPath", () => {
   });
 });
 
-describe("registerProjectPath / getKnownProjects", () => {
-  it("registers a path exposed via getKnownProjects", () => {
-    cc.registerProjectPath("kp-proj", "/abs/kp-proj");
-    assert.equal(cc.getKnownProjects().get("kp-proj"), "/abs/kp-proj");
-  });
-
-  it("getKnownProjects returns a copy that does not mutate internal state", () => {
-    cc.registerProjectPath("kp-copy", "/abs/kp-copy");
-    const snapshot = cc.getKnownProjects();
-    snapshot.delete("kp-copy");
-    assert.equal(cc.getKnownProjects().get("kp-copy"), "/abs/kp-copy");
-  });
-});
-
 describe("stable context dedup (getStableContext / markContextSent)", () => {
   it("returns null when the path cannot be resolved", () => {
     assert.equal(cc.getStableContext("sc-none"), null);
@@ -195,14 +181,12 @@ describe("getDynamicEnvelope", () => {
 });
 
 describe("progress snapshots", () => {
-  it("set then get returns text and a timestamp; clear removes it; unknown is null", () => {
+  it("set then get returns text and a timestamp; unknown is null", () => {
     assert.equal(cc.getProgressSnapshot("ps-unknown"), null);
     cc.setProgressSnapshot("ps-proj", "building the thing");
     const snap = cc.getProgressSnapshot("ps-proj");
     assert.equal(snap.text, "building the thing");
     assert.equal(typeof snap.timestamp, "number");
-    cc.clearProgressSnapshot("ps-proj");
-    assert.equal(cc.getProgressSnapshot("ps-proj"), null);
   });
 });
 

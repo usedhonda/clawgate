@@ -177,14 +177,6 @@ export function getProgressSnapshot(project) {
   return progressSnapshots.get(project) || null;
 }
 
-/**
- * Clear a progress snapshot (e.g. on task completion).
- * @param {string} project
- */
-export function clearProgressSnapshot(project) {
-  progressSnapshots.delete(project);
-}
-
 // ── Progress noise filtering ─────────────────────────────────
 // tmux captures include Claude Code's status bar, separators, spinners, etc.
 // We strip these to keep only meaningful work descriptions.
@@ -371,14 +363,6 @@ export function clearTaskGoal(project) {
  */
 export function invalidateProject(project) {
   contextCache.delete(project);
-}
-
-/**
- * Get all known project paths (for roster building).
- * @returns {Map<string, string>}
- */
-export function getKnownProjects() {
-  return new Map(pathCache);
 }
 
 /**
