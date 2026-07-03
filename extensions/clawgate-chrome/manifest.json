@@ -9,7 +9,8 @@
     "activeTab",
     "scripting",
     "contextMenus",
-    "storage"
+    "storage",
+    "alarms"
   ],
   "host_permissions": [
     "http://*/*",

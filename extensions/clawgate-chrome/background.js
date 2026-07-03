@@ -2,6 +2,7 @@ const DEFAULT_SETTINGS = {
   bridgePort: 8765,
   gatewayURL: '',
   gatewayToken: '',
+  passiveTracking: true,
 };
 
 const CONTEXT_MENU_ID = 'clawgate-send-to-chi';
@@ -10,15 +11,27 @@ const POLL_ERROR_BACKOFF_MS = 5000;
 const IMAGE_FETCH_PORT_NAME = 'clawgate_image_fetch';
 const OCR_SANDBOX_PATH = 'sandbox/ocr.html';
 
+const PASSIVE_DWELL_MS = 8000;
+const PASSIVE_DEDUP_WINDOW_MS = 30 * 60 * 1000;
+const PASSIVE_QUEUE_LIMIT = 50;
+const PASSIVE_FLUSH_ALARM = 'clawgate-passive-flush';
+const PASSIVE_FLUSH_PERIOD_MINUTES = 1.5;
+
 let cursor = '';
 let pollTimer = null;
 let pollInFlight = false;
+
+let passiveVisit = null;
+const passiveQueue = [];
+const passiveSentAtByURL = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
   await createContextMenu();
   await restoreCursor();
   await refreshBadge();
+  ensurePassiveAlarm().catch(() => undefined);
+  armDwellForActiveTab().catch(() => undefined);
   startPolling();
 });
 
@@ -27,6 +40,8 @@ chrome.runtime.onStartup.addListener(async () => {
   await createContextMenu();
   await restoreCursor();
   await refreshBadge();
+  ensurePassiveAlarm().catch(() => undefined);
+  armDwellForActiveTab().catch(() => undefined);
   startPolling();
 });
 
@@ -75,6 +90,32 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   await captureAndSend(tab, { preferredImageURL: typeof info.srcUrl === 'string' ? info.srcUrl : '' });
 });
 
+chrome.tabs.onActivated.addListener(async ({ tabId }) => {
+  try {
+    await startPassiveVisit(await chrome.tabs.get(tabId));
+  } catch {
+    resetPassiveVisit();
+  }
+});
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete' || !tab?.active) {
+    return;
+  }
+  try {
+    await startPassiveVisit(tab.id === tabId ? tab : await chrome.tabs.get(tabId));
+  } catch {
+    resetPassiveVisit();
+  }
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== PASSIVE_FLUSH_ALARM) {
+    return;
+  }
+  flushPassiveQueue().catch(() => undefined);
+});
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') {
     return;
@@ -85,6 +126,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     startPolling().catch(() => undefined);
     notifySettingsUpdated().catch(() => undefined);
   }
+  if (changes.passiveTracking) {
+    if (changes.passiveTracking.newValue) {
+      armDwellForActiveTab().catch(() => undefined);
+    } else {
+      resetPassiveVisit();
+      passiveQueue.length = 0;
+    }
+  }
 });
 
 async function ensureDefaults() {
@@ -93,6 +142,7 @@ async function ensureDefaults() {
     bridgePort: normalizePort(current.bridgePort),
     gatewayURL: typeof current.gatewayURL === 'string' ? current.gatewayURL : DEFAULT_SETTINGS.gatewayURL,
     gatewayToken: typeof current.gatewayToken === 'string' ? current.gatewayToken : DEFAULT_SETTINGS.gatewayToken,
+    passiveTracking: typeof current.passiveTracking === 'boolean' ? current.passiveTracking : DEFAULT_SETTINGS.passiveTracking,
   };
   await chrome.storage.local.set(next);
 }
@@ -127,6 +177,7 @@ async function getSettings() {
     bridgePort: normalizePort(settings.bridgePort),
     gatewayURL: typeof settings.gatewayURL === 'string' ? settings.gatewayURL : '',
     gatewayToken: typeof settings.gatewayToken === 'string' ? settings.gatewayToken : '',
+    passiveTracking: typeof settings.passiveTracking === 'boolean' ? settings.passiveTracking : DEFAULT_SETTINGS.passiveTracking,
   };
 }
 
@@ -149,6 +200,12 @@ async function refreshBadge() {
   const configured = Boolean(gatewayURL && gatewayToken);
   await chrome.action.setBadgeBackgroundColor({ color: configured ? '#0D111B' : '#F26B6B' });
   await chrome.action.setBadgeText({ text: configured ? '' : '!' });
+}
+
+async function ensurePassiveAlarm() {
+  await chrome.alarms.create(PASSIVE_FLUSH_ALARM, {
+    periodInMinutes: PASSIVE_FLUSH_PERIOD_MINUTES,
+  });
 }
 
 function scheduleNextPoll(delayMs = POLL_INTERVAL_MS) {
@@ -238,12 +295,127 @@ async function captureAndSend(tab, options = {}) {
   const title = tab.title || result?.title || '';
   const domain = safeHostname(url);
 
-  const payload = {
-    entries: [{
+  const entries = [{
+    id: makeUUID(),
+    url,
+    title,
+    domain,
+    content,
+    visitedAt: new Date().toISOString(),
+    meta: {
+      description: meta.description || '',
+      ogTitle: meta.ogTitle || '',
+      ogImage: meta.ogImage || '',
+      imageContext,
+      contentMetrics,
+    },
+    engagement: {
+      activeSeconds: 0,
+      scrollDepthPct: 0,
+      engaged: false,
+    },
+    userInitiated: true,
+  }];
+
+  await postWebHistoryEntries(entries, { gatewayURL, gatewayToken });
+
+  await chrome.action.setBadgeText({ text: '✓' });
+  setTimeout(() => {
+    chrome.action.setBadgeText({ text: '' }).catch(() => undefined);
+  }, 1000);
+  await notifySettingsUpdated({ gatewayConnected: true, lastCaptureURL: url });
+}
+
+async function armDwellForActiveTab() {
+  const tab = await getActiveTab();
+  await startPassiveVisit(tab);
+}
+
+async function startPassiveVisit(tab) {
+  resetPassiveVisit();
+
+  const settings = await getSettings();
+  if (!settings.passiveTracking || !isPassiveEligibleURL(tab?.url, settings.gatewayURL)) {
+    return;
+  }
+
+  const visit = {
+    tabId: tab.id,
+    url: tab.url,
+    startedAt: Date.now(),
+    timerId: null,
+  };
+  visit.timerId = setTimeout(() => {
+    handlePassiveDwell(visit).catch(() => undefined);
+  }, PASSIVE_DWELL_MS);
+  passiveVisit = visit;
+}
+
+function resetPassiveVisit() {
+  if (passiveVisit?.timerId) {
+    clearTimeout(passiveVisit.timerId);
+  }
+  passiveVisit = null;
+}
+
+async function handlePassiveDwell(visit) {
+  if (passiveVisit !== visit) {
+    return;
+  }
+  passiveVisit = null;
+
+  const settings = await getSettings();
+  if (!settings.passiveTracking || !settings.gatewayURL || !settings.gatewayToken) {
+    return;
+  }
+
+  let tab;
+  try {
+    tab = await chrome.tabs.get(visit.tabId);
+  } catch {
+    return;
+  }
+
+  if (!tab?.active || tab.url !== visit.url || !isPassiveEligibleURL(tab.url, settings.gatewayURL)) {
+    return;
+  }
+  if (isPassiveDuplicate(tab.url)) {
+    return;
+  }
+
+  const activeSeconds = Math.max(0, Math.round((Date.now() - visit.startedAt) / 1000));
+  const entry = await buildPassiveEntry(tab, activeSeconds);
+  if (!entry) {
+    return;
+  }
+
+  passiveSentAtByURL.set(entry.url, Date.now());
+  enqueuePassiveEntry(entry);
+}
+
+async function buildPassiveEntry(tab, activeSeconds) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content.js'],
+    });
+
+    const result = await chrome.tabs.sendMessage(tab.id, {
+      type: 'extract_content',
+      preferredImageURL: '',
+    });
+    const content = typeof result?.content === 'string' ? result.content : '';
+    const meta = result?.meta && typeof result.meta === 'object' ? result.meta : {};
+    const imageContext = result?.imageContext && typeof result.imageContext === 'object' ? result.imageContext : null;
+    const contentMetrics = result?.contentMetrics && typeof result.contentMetrics === 'object' ? result.contentMetrics : {};
+    const url = tab.url || result?.url || '';
+    const title = tab.title || result?.title || '';
+
+    return {
       id: makeUUID(),
       url,
       title,
-      domain,
+      domain: safeHostname(url),
       content,
       visitedAt: new Date().toISOString(),
       meta: {
@@ -252,35 +424,79 @@ async function captureAndSend(tab, options = {}) {
         ogImage: meta.ogImage || '',
         imageContext,
         contentMetrics,
+        source: 'passive',
       },
       engagement: {
-        activeSeconds: 0,
+        activeSeconds,
         scrollDepthPct: 0,
-        engaged: false,
+        engaged: true,
       },
-      userInitiated: true,
-    }],
-  };
+      userInitiated: false,
+    };
+  } catch {
+    return null;
+  }
+}
 
-  const endpoint = new URL('/api/web-history', gatewayURL).toString();
+function enqueuePassiveEntry(entry) {
+  passiveQueue.push(entry);
+  while (passiveQueue.length > PASSIVE_QUEUE_LIMIT) {
+    passiveQueue.shift();
+  }
+}
+
+async function flushPassiveQueue() {
+  if (!passiveQueue.length) {
+    return;
+  }
+
+  const settings = await getSettings();
+  if (!settings.passiveTracking || !settings.gatewayURL || !settings.gatewayToken) {
+    return;
+  }
+
+  const entries = passiveQueue.slice();
+  await postWebHistoryEntries(entries, settings);
+  passiveQueue.splice(0, entries.length);
+}
+
+async function postWebHistoryEntries(entries, settings) {
+  const endpoint = new URL('/api/web-history', settings.gatewayURL).toString();
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${gatewayToken}`,
+      Authorization: `Bearer ${settings.gatewayToken}`,
     },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ entries }),
   });
 
   if (!response.ok) {
     throw new Error(`Gateway rejected capture (${response.status})`);
   }
+  return response;
+}
 
-  await chrome.action.setBadgeText({ text: '✓' });
-  setTimeout(() => {
-    chrome.action.setBadgeText({ text: '' }).catch(() => undefined);
-  }, 1000);
-  await notifySettingsUpdated({ gatewayConnected: true, lastCaptureURL: url });
+function isPassiveDuplicate(url) {
+  const previous = passiveSentAtByURL.get(url);
+  return previous != null && Date.now() - previous < PASSIVE_DEDUP_WINDOW_MS;
+}
+
+function isPassiveEligibleURL(value, gatewayURL) {
+  let url;
+  try {
+    url = new URL(value || '');
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return false;
+  }
+  if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+    return false;
+  }
+  const gatewayHost = safeHostname(gatewayURL);
+  return !gatewayHost || url.hostname !== gatewayHost;
 }
 
 async function fetchImageDataURL(url) {

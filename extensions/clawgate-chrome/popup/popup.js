@@ -2,6 +2,7 @@ const DEFAULT_SETTINGS = {
   bridgePort: 8765,
   gatewayURL: '',
   gatewayToken: '',
+  passiveTracking: true,
 };
 
 const statusDot = document.getElementById('status-dot');
@@ -10,6 +11,7 @@ const gatewayURLInput = document.getElementById('gateway-url');
 const gatewayTokenInput = document.getElementById('gateway-token');
 const connectButton = document.getElementById('connect-button');
 const testButton = document.getElementById('test-button');
+const passiveToggle = document.getElementById('passive-toggle');
 
 init().catch((error) => {
   setStatus(false, error?.message || 'Disconnected');
@@ -19,6 +21,9 @@ async function init() {
   await syncFromStorage();
   connectButton.addEventListener('click', connectToClawGate);
   testButton.addEventListener('click', testConnection);
+  passiveToggle.addEventListener('change', () => {
+    chrome.storage.local.set({ passiveTracking: passiveToggle.checked });
+  });
 
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type !== 'settings_updated') {
@@ -42,6 +47,10 @@ function applySettings(settings) {
   gatewayURLInput.value = gatewayURL;
   gatewayTokenInput.value = maskToken(gatewayToken);
   connectButton.textContent = gatewayURL && gatewayToken ? 'Reconnect to ClawGate' : 'Connect to ClawGate';
+
+  if (typeof settings.passiveTracking === 'boolean') {
+    passiveToggle.checked = settings.passiveTracking;
+  }
 }
 
 async function connectToClawGate() {
