@@ -739,6 +739,10 @@ function respondWithExtractionError(sendResponse, error) {
 }
 
 function handleRuntimeMessage(message, _sender, sendResponse) {
+  if (message?.type === 'ping') {
+    sendResponse({ ok: true });
+    return false;
+  }
   if (message?.type !== 'extract_content') {
     return undefined;
   }
@@ -755,7 +759,7 @@ function handleRuntimeMessage(message, _sender, sendResponse) {
       respondWithExtractionError(sendResponse, error);
     })
     .finally(() => {
-      finalizeInjectedSession();
+      teardownExtensionBindings();
     });
 
   return true;

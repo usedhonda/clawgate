@@ -267,6 +267,21 @@ async function getActiveTab() {
   return tabs[0] || null;
 }
 
+async function ensureContentScript(tabId) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, { type: 'ping' });
+    if (response?.ok) {
+      return;
+    }
+  } catch {
+    // No content script reachable in this context -> inject below.
+  }
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content.js'],
+  });
+}
+
 async function captureAndSend(tab, options = {}) {
   const { gatewayURL, gatewayToken } = await getSettings();
   if (!tab?.id) {
@@ -278,10 +293,7 @@ async function captureAndSend(tab, options = {}) {
     return;
   }
 
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ['content.js'],
-  });
+  await ensureContentScript(tab.id);
 
   const result = await chrome.tabs.sendMessage(tab.id, {
     type: 'extract_content',
@@ -395,10 +407,7 @@ async function handlePassiveDwell(visit) {
 
 async function buildPassiveEntry(tab, activeSeconds) {
   try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['content.js'],
-    });
+    await ensureContentScript(tab.id);
 
     const result = await chrome.tabs.sendMessage(tab.id, {
       type: 'extract_content',
