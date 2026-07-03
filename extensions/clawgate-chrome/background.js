@@ -418,6 +418,7 @@ async function buildPassiveEntry(tab, activeSeconds) {
       domain: safeHostname(url),
       content,
       visitedAt: new Date().toISOString(),
+      dwellSeconds: activeSeconds,
       meta: {
         description: meta.description || '',
         ogTitle: meta.ogTitle || '',
