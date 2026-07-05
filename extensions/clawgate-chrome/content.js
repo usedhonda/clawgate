@@ -269,6 +269,21 @@ function pickPrimaryImageCandidate(root, preferredImageURL = '') {
 
 const EXTENSION_CONTEXT_INVALIDATED_REASON = 'extension_context_invalidated';
 const IMAGE_FETCH_PORT_NAME = 'clawgate_image_fetch';
+const activeImageFetchPorts = new Set();
+
+function disconnectImageFetchPort(port) {
+  if (!port) return;
+  activeImageFetchPorts.delete(port);
+  try { port.disconnect(); } catch {}
+}
+
+function disconnectActiveImageFetchPorts() {
+  for (const port of Array.from(activeImageFetchPorts)) {
+    disconnectImageFetchPort(port);
+  }
+}
+
+window.addEventListener('pagehide', disconnectActiveImageFetchPorts);
 
 function requestImageDataURL(url) {
   return new Promise((resolve, reject) => {
@@ -283,18 +298,19 @@ function requestImageDataURL(url) {
     const finishResolve = (value) => {
       if (settled) return;
       settled = true;
-      try { port?.disconnect(); } catch {}
+      disconnectImageFetchPort(port);
       resolve(value);
     };
     const finishReject = (error) => {
       if (settled) return;
       settled = true;
-      try { port?.disconnect(); } catch {}
+      disconnectImageFetchPort(port);
       reject(error);
     };
 
     try {
       port = runtime.connect({ name: IMAGE_FETCH_PORT_NAME });
+      activeImageFetchPorts.add(port);
     } catch (error) {
       finishReject(markExtensionContextInvalidated(error));
       return;
@@ -319,6 +335,7 @@ function requestImageDataURL(url) {
     };
 
     const handleDisconnect = () => {
+      activeImageFetchPorts.delete(port);
       const runtimeError = getLastRuntimeErrorOrInvalidate();
       if (runtimeError && isContextInvalidationError(runtimeError)) {
         finishReject(markExtensionContextInvalidated(runtimeError));
@@ -369,6 +386,8 @@ function rejectPendingOCRRequests(error) {
 }
 
 function teardownExtensionBindings() {
+  disconnectActiveImageFetchPorts();
+
   if (windowMessageListenerAttached) {
     window.removeEventListener('message', handleSandboxMessage);
     windowMessageListenerAttached = false;
