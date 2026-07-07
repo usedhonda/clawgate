@@ -1391,6 +1391,16 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func sendLogInstruction(instruction: String, transcript: String) {
+        let userEntry = NotificationEntry(
+            id: UUID().uuidString, text: instruction,
+            source: "log_user", timestamp: Date()
+        )
+        logReplies.append(userEntry)
+        if logReplies.count > 100 {
+            logReplies.removeFirst(logReplies.count - 100)
+        }
+        PetLogStore.save(logReplies, file: "log.json")
+        logThreadPaneOpen = true
         let maxTranscriptCharacters = 12_000
         let trimmedTranscript = String(transcript.suffix(maxTranscriptCharacters))
         let prompt: String

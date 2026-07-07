@@ -287,20 +287,27 @@ struct AmbientLogPetView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            dayNavBar
-            sceneChipBar
-            Divider().opacity(0.12)
-            Group {
-                if logModel.blocks.isEmpty {
-                    emptyState
-                } else {
-                    logList
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                dayNavBar
+                sceneChipBar
+                Divider().opacity(0.12)
+                Group {
+                    if logModel.blocks.isEmpty {
+                        emptyState
+                    } else {
+                        logList
+                    }
                 }
+                actionBar
+                inputBar
             }
-            repliesView
-            actionBar
-            inputBar
+            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+
+            if model.logThreadPaneOpen {
+                Divider().opacity(0.12)
+                threadPane
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Self.panelBg)
@@ -420,38 +427,88 @@ struct AmbientLogPetView: View {
         }
     }
 
-    private var repliesView: some View {
-        Group {
-            if !model.logReplies.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Chi replies")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.white.opacity(0.35))
+    private var threadPane: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("ちーとの対話")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.75))
+                Spacer()
+                Button {
+                    model.logThreadPaneOpen = false
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.45))
+                        .frame(width: 22, height: 22)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            Divider().opacity(0.12)
+
+            if model.logReplies.isEmpty {
+                VStack(spacing: 6) {
+                    Spacer()
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 22))
+                        .foregroundColor(.white.opacity(0.18))
+                    Text("まだ会話がありません")
+                        .font(.system(size: 12))
+                        .foregroundColor(.white.opacity(0.38))
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollViewReader { proxy in
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(Array(model.logReplies.reversed().prefix(3))) { entry in
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(timeString(entry.timestamp))
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.white.opacity(0.35))
-                                    Text(entry.text)
-                                        .font(.system(size: 11))
-                                        .foregroundColor(.white.opacity(0.82))
-                                        .textSelection(.enabled)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(8)
-                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.06)))
+                        VStack(spacing: 8) {
+                            ForEach(model.logReplies) { entry in
+                                threadBubble(entry)
+                                    .id(entry.id)
+                            }
+                        }
+                        .padding(12)
+                    }
+                    .onChange(of: model.logReplies.count) { _ in
+                        if let last = model.logReplies.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                    .onAppear {
+                        DispatchQueue.main.async {
+                            if let last = model.logReplies.last {
+                                proxy.scrollTo(last.id, anchor: .bottom)
                             }
                         }
                     }
-                    .frame(maxHeight: 120)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                Divider().opacity(0.12)
             }
+        }
+        .frame(width: 360)
+    }
+
+    private func threadBubble(_ entry: NotificationEntry) -> some View {
+        let isUser = entry.source == "log_user"
+        return HStack {
+            if isUser { Spacer(minLength: 36) }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(timeString(entry.timestamp))
+                    .font(.system(size: 9))
+                    .foregroundColor(.white.opacity(0.35))
+                Text(entry.text)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.84))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(9)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isUser ? Color(red: 0.55, green: 0.78, blue: 1.0).opacity(0.20) : Color.white.opacity(0.06))
+            )
+            if !isUser { Spacer(minLength: 36) }
         }
     }
 
