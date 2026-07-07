@@ -411,11 +411,11 @@ private final class PetTabHeaderNSView: NSView {
     private let stackView = NSStackView()
     private var buttons: [PetTabButton] = []
     private let tabs: [(title: String, id: String)] = [
+        ("Log", "log"),
         ("Chat", "chat"),
         ("Summon", "summon"),
         ("Notifs", "notifications"),
         ("Local", "local"),
-        ("Log", "log"),
     ]
 
     override init(frame frameRect: NSRect) {
@@ -539,12 +539,25 @@ private final class PetTabButton: NSButton {
 
 struct PetChatContainerView: View {
     @ObservedObject var model: PetModel
-    @State private var selectedTab = "chat"
+    @State private var selectedTab = "log"
 
     var body: some View {
         VStack(spacing: 0) {
             PetTabHeaderView(selectedTab: $selectedTab)
                 .frame(height: 30)
+                .overlay(alignment: .trailing) {
+                    Button {
+                        model.stateMachine.isChatOpen = false
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white.opacity(0.45))
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 6)
+                }
             .background(PetColors.tabBarBg)
 
             Divider().opacity(0.15)
