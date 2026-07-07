@@ -24,6 +24,15 @@ private func saveLogThreadPaneFraction(_ fraction: CGFloat) {
     UserDefaults.standard.set(Double(clampedLogThreadPaneFraction(fraction)), forKey: petLogThreadPaneFractionKey)
 }
 
+private struct PetPressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.55 : 1)
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+}
+
 private struct PaneResizeHandleView: NSViewRepresentable {
     var onDrag: (CGFloat) -> Void
     var onEnd: () -> Void
@@ -450,7 +459,7 @@ struct AmbientLogPetView: View {
     private var dayNavBar: some View {
         HStack(spacing: 8) {
             Button("‹") { logModel.moveDay(by: -1) }
-                .buttonStyle(.plain)
+                .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(logModel.canMovePrevious ? .white.opacity(0.75) : .white.opacity(0.22))
                 .disabled(!logModel.canMovePrevious)
@@ -459,12 +468,12 @@ struct AmbientLogPetView: View {
                 .foregroundColor(.white.opacity(0.75))
                 .frame(minWidth: 72)
             Button("›") { logModel.moveDay(by: 1) }
-                .buttonStyle(.plain)
+                .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(logModel.canMoveNext ? .white.opacity(0.75) : .white.opacity(0.22))
                 .disabled(!logModel.canMoveNext)
             Button("今日") { logModel.jumpToToday() }
-                .buttonStyle(.plain)
+                .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(logModel.isTodaySelected ? .white.opacity(0.3) : Color(red: 0.55, green: 0.78, blue: 1.0))
                 .disabled(logModel.isTodaySelected)
@@ -509,7 +518,7 @@ struct AmbientLogPetView: View {
                     Capsule().fill(selected ? Color(red: 0.55, green: 0.78, blue: 1.0) : Color.white.opacity(0.07))
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PetPressableButtonStyle())
     }
 
     private var emptyState: some View {
@@ -574,7 +583,7 @@ struct AmbientLogPetView: View {
                         .foregroundColor(.white.opacity(0.45))
                         .frame(width: 22, height: 22)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PetPressableButtonStyle())
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -600,19 +609,22 @@ struct AmbientLogPetView: View {
                                 threadBubble(entry)
                                     .id(entry.id)
                             }
+                            if model.logAwaitingReply {
+                                awaitingReplyBubble
+                                    .id("log-awaiting-reply")
+                            }
                         }
                         .padding(12)
                     }
                     .onChange(of: model.logReplies.count) { _ in
-                        if let last = model.logReplies.last {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
+                        scrollThreadToBottom(proxy)
+                    }
+                    .onChange(of: model.logAwaitingReply) { _ in
+                        scrollThreadToBottom(proxy)
                     }
                     .onAppear {
                         DispatchQueue.main.async {
-                            if let last = model.logReplies.last {
-                                proxy.scrollTo(last.id, anchor: .bottom)
-                            }
+                            scrollThreadToBottom(proxy)
                         }
                     }
                 }
@@ -653,6 +665,34 @@ struct AmbientLogPetView: View {
         threadPaneDragStartFraction = startFraction
         let startWidth = totalWidth * startFraction
         threadPaneFraction = clampedLogThreadPaneFraction((startWidth - translationX) / totalWidth)
+    }
+
+    private var awaitingReplyBubble: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ちーが考え中…")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.72))
+                ProgressView()
+                    .scaleEffect(0.55)
+            }
+            .padding(9)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.white.opacity(0.06))
+            )
+            Spacer(minLength: 36)
+        }
+    }
+
+    private func scrollThreadToBottom(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async {
+            if model.logAwaitingReply {
+                proxy.scrollTo("log-awaiting-reply", anchor: .bottom)
+            } else if let last = model.logReplies.last {
+                proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        }
     }
 
     private func threadBubble(_ entry: NotificationEntry) -> some View {
@@ -718,14 +758,14 @@ struct AmbientLogPetView: View {
                 sendInstruction(instructionText)
                 instructionText = ""
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PetPressableButtonStyle())
             .font(.system(size: 12, weight: .semibold))
-            .foregroundColor(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
-            .disabled(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .foregroundColor((instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.logAwaitingReply) ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
+            .disabled(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.logAwaitingReply)
             Button(editingCustomActions ? "✓" : "✎") {
                 editingCustomActions.toggle()
             }
-            .buttonStyle(.plain)
+            .buttonStyle(PetPressableButtonStyle())
             .font(.system(size: 12, weight: .semibold))
             .foregroundColor(editingCustomActions ? Color(red: 0.55, green: 0.78, blue: 1.0) : .white.opacity(0.45))
             .padding(.horizontal, 8)
@@ -739,12 +779,14 @@ struct AmbientLogPetView: View {
         Button(title) {
             sendInstruction(instruction)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PetPressableButtonStyle())
         .font(.system(size: 10, weight: .semibold))
         .foregroundColor(Color(red: 0.55, green: 0.78, blue: 1.0))
         .frame(maxWidth: .infinity)
         .padding(.vertical, 7)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
+        .disabled(model.logAwaitingReply)
+        .opacity(model.logAwaitingReply ? 0.45 : 1)
     }
 
     private func customActionButton(_ index: Int) -> some View {
@@ -756,7 +798,7 @@ struct AmbientLogPetView: View {
                 sendInstruction(action.prompt)
             }
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PetPressableButtonStyle())
         .font(.system(size: 10, weight: .semibold))
         .foregroundColor(action == nil ? .white.opacity(0.45) : Color(red: 0.55, green: 0.78, blue: 1.0))
         .frame(maxWidth: .infinity)
@@ -769,6 +811,8 @@ struct AmbientLogPetView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(Color(red: 0.55, green: 0.78, blue: 1.0).opacity(action == nil ? 0.16 : 0.35), lineWidth: 1)
         )
+        .disabled(model.logAwaitingReply)
+        .opacity(model.logAwaitingReply ? 0.45 : 1)
     }
 
     private func customActionEditor(_ index: Int) -> some View {

@@ -115,6 +115,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var logReplies: [NotificationEntry] = []
     @Published var logSceneNames: [String: String] = [:]  // scene id -> ちー命名 (memory only)
     @Published var logThreadPaneOpen: Bool = false
+    @Published var logAwaitingReply: Bool = false
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
 
@@ -1362,6 +1363,7 @@ final class PetModel: NSObject, ObservableObject {
     private var pendingSummonSource: String?
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
+    private var logAwaitingReplyToken: UUID?
 
     private static let messagingBundles: Set<String> = [
         "jp.naver.line.mac",
@@ -1403,6 +1405,14 @@ final class PetModel: NSObject, ObservableObject {
         }
         PetLogStore.save(logReplies, file: "log.json")
         logThreadPaneOpen = true
+        let token = UUID()
+        logAwaitingReplyToken = token
+        logAwaitingReply = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self] in
+            guard let self, self.logAwaitingReplyToken == token, self.logAwaitingReply else { return }
+            self.logAwaitingReply = false
+            self.logAwaitingReplyToken = nil
+        }
         let maxTranscriptCharacters = 12_000
         let trimmedTranscript = String(transcript.suffix(maxTranscriptCharacters))
         let prompt: String
@@ -1497,6 +1507,8 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         if source == "log" {
+            logAwaitingReply = false
+            logAwaitingReplyToken = nil
             let entry = NotificationEntry(
                 id: UUID().uuidString, text: text,
                 source: source, timestamp: Date()
