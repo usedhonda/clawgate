@@ -50,12 +50,14 @@ private struct PaneResizeHandleView: NSViewRepresentable {
 private final class PaneResizeHandleNSView: NSView {
     var onDrag: (CGFloat) -> Void
     var onEnd: () -> Void
-    private var dragStartX: CGFloat?
 
     init(onDrag: @escaping (CGFloat) -> Void, onEnd: @escaping () -> Void) {
         self.onDrag = onDrag
         self.onEnd = onEnd
         super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+        addGestureRecognizer(NSPanGestureRecognizer(target: self, action: #selector(handlePan(_:))))
     }
 
     required init?(coder: NSCoder) {
@@ -64,22 +66,26 @@ private final class PaneResizeHandleNSView: NSView {
 
     override var mouseDownCanMoveWindow: Bool { false }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .resizeLeftRight)
     }
 
-    override func mouseDown(with event: NSEvent) {
-        dragStartX = NSEvent.mouseLocation.x
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let dragStartX else { return }
-        onDrag(NSEvent.mouseLocation.x - dragStartX)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        dragStartX = nil
-        onEnd()
+    @objc private func handlePan(_ gesture: NSPanGestureRecognizer) {
+        switch gesture.state {
+        case .began, .changed:
+            onDrag(gesture.translation(in: self).x)
+        case .ended, .cancelled, .failed:
+            onEnd()
+            gesture.setTranslation(.zero, in: self)
+        default:
+            break
+        }
     }
 }
 
@@ -370,6 +376,7 @@ struct AmbientLogPetView: View {
     @State private var draftCustomPrompt = ""
     @State private var threadPaneFraction: CGFloat = petLogThreadPaneDefaultFraction
     @State private var threadPaneDragStartFraction: CGFloat?
+    @State private var threadPaneHandleHover = false
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -635,7 +642,20 @@ struct AmbientLogPetView: View {
 
     private func threadPaneResizeHandle(totalWidth: CGFloat) -> some View {
         ZStack {
-            Divider().opacity(0.12)
+            Rectangle()
+                .fill(Color.white.opacity(threadPaneHandleHover ? 0.08 : 0.001))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Rectangle()
+                .fill(Color.white.opacity(threadPaneHandleHover ? 0.28 : 0.12))
+                .frame(width: 1)
+                .frame(maxHeight: .infinity)
+            VStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle()
+                        .fill(Color.white.opacity(threadPaneHandleHover ? 0.55 : 0.35))
+                        .frame(width: 2, height: 2)
+                }
+            }
             PaneResizeHandleView(
                 onDrag: { translationX in
                     updateThreadPaneFraction(translationX: translationX, totalWidth: totalWidth)
@@ -648,6 +668,8 @@ struct AmbientLogPetView: View {
             .frame(width: petLogThreadPaneHandleWidth)
         }
         .frame(width: petLogThreadPaneHandleWidth)
+        .frame(maxHeight: .infinity)
+        .onHover { threadPaneHandleHover = $0 }
     }
 
     private func threadPaneWidth(totalWidth: CGFloat) -> CGFloat {
