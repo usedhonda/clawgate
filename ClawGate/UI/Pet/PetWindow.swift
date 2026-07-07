@@ -3,20 +3,25 @@ import Combine
 import SwiftUI
 
 private let petChatWindowFrameKey = "PetChatWindowFrame"
-private let petLogThreadPaneWidthKey = "PetLogThreadPaneWidth"
-private let petLogThreadPaneDefaultWidth: CGFloat = 360
-private let petLogThreadPaneMinWidth: CGFloat = 240
-private let petLogThreadPaneMaxWidth: CGFloat = 560
+private let petLogThreadPaneFractionKey = "PetLogThreadPaneFraction"
+private let petLogThreadPaneDefaultFraction: CGFloat = 0.43
+private let petLogThreadPaneMinFraction: CGFloat = 0.25
+private let petLogThreadPaneMaxFraction: CGFloat = 0.6
 
-private func clampedLogThreadPaneWidth(_ width: CGFloat) -> CGFloat {
-    min(max(width, petLogThreadPaneMinWidth), petLogThreadPaneMaxWidth)
+private func clampedLogThreadPaneFraction(_ fraction: CGFloat) -> CGFloat {
+    min(max(fraction, petLogThreadPaneMinFraction), petLogThreadPaneMaxFraction)
 }
 
-private func preferredLogThreadPaneWidth() -> CGFloat {
-    guard let stored = UserDefaults.standard.object(forKey: petLogThreadPaneWidthKey) as? Double else {
-        return petLogThreadPaneDefaultWidth
+private func preferredLogThreadPaneFraction() -> CGFloat {
+    guard let stored = UserDefaults.standard.object(forKey: petLogThreadPaneFractionKey) as? Double else {
+        return petLogThreadPaneDefaultFraction
     }
-    return clampedLogThreadPaneWidth(CGFloat(stored))
+    return clampedLogThreadPaneFraction(CGFloat(stored))
+}
+
+private func logThreadPaneDelta(forBaseWidth baseWidth: CGFloat) -> CGFloat {
+    let fraction = preferredLogThreadPaneFraction()
+    return baseWidth * fraction / (1 - fraction)
 }
 
 /// Transparent always-on-top window for the pet character
@@ -663,11 +668,10 @@ private final class PetContentView: NSView {
     private func setLogThreadPaneOpen(_ open: Bool) {
         guard let cw = chatWindow, let parentWindow = window else { return }
         if open {
-            let paneWidth = preferredLogThreadPaneWidth()
             let baseWidth = chatBaseWidth ?? cw.frame.width
             chatBaseWidth = baseWidth
             var frame = cw.frame
-            frame.size.width = baseWidth + paneWidth
+            frame.size.width = baseWidth + logThreadPaneDelta(forBaseWidth: baseWidth)
             cw.setFrame(clampedChatFrame(frame, relativeTo: parentWindow), display: true)
         } else if let baseWidth = chatBaseWidth {
             var frame = cw.frame
@@ -747,7 +751,8 @@ private final class PetContentView: NSView {
                 if let baseWidth = chatBaseWidth {
                     frameToSave.size.width = baseWidth
                 } else {
-                    frameToSave.size.width = max(cw.minSize.width, cw.frame.width - preferredLogThreadPaneWidth())
+                    let fraction = preferredLogThreadPaneFraction()
+                    frameToSave.size.width = max(cw.minSize.width, cw.frame.width * (1 - fraction))
                 }
                 if let parentWindow = window {
                     frameToSave = clampedChatFrame(frameToSave, relativeTo: parentWindow)

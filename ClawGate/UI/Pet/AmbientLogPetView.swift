@@ -1,23 +1,77 @@
+import AppKit
 import SwiftUI
 
-private let petLogThreadPaneWidthKey = "PetLogThreadPaneWidth"
-private let petLogThreadPaneDefaultWidth: CGFloat = 360
-private let petLogThreadPaneMinWidth: CGFloat = 240
-private let petLogThreadPaneMaxWidth: CGFloat = 560
+private let petLogThreadPaneFractionKey = "PetLogThreadPaneFraction"
+private let petLogThreadPaneDefaultFraction: CGFloat = 0.43
+private let petLogThreadPaneMinFraction: CGFloat = 0.25
+private let petLogThreadPaneMaxFraction: CGFloat = 0.6
+private let petLogThreadPaneMinPixelWidth: CGFloat = 240
+private let petLogThreadPaneLeftMinWidth: CGFloat = 360
+private let petLogThreadPaneHandleWidth: CGFloat = 8
 
-private func clampedLogThreadPaneWidth(_ width: CGFloat) -> CGFloat {
-    min(max(width, petLogThreadPaneMinWidth), petLogThreadPaneMaxWidth)
+private func clampedLogThreadPaneFraction(_ fraction: CGFloat) -> CGFloat {
+    min(max(fraction, petLogThreadPaneMinFraction), petLogThreadPaneMaxFraction)
 }
 
-private func preferredLogThreadPaneWidth() -> CGFloat {
-    guard let stored = UserDefaults.standard.object(forKey: petLogThreadPaneWidthKey) as? Double else {
-        return petLogThreadPaneDefaultWidth
+private func preferredLogThreadPaneFraction() -> CGFloat {
+    guard let stored = UserDefaults.standard.object(forKey: petLogThreadPaneFractionKey) as? Double else {
+        return petLogThreadPaneDefaultFraction
     }
-    return clampedLogThreadPaneWidth(CGFloat(stored))
+    return clampedLogThreadPaneFraction(CGFloat(stored))
 }
 
-private func saveLogThreadPaneWidth(_ width: CGFloat) {
-    UserDefaults.standard.set(Double(clampedLogThreadPaneWidth(width)), forKey: petLogThreadPaneWidthKey)
+private func saveLogThreadPaneFraction(_ fraction: CGFloat) {
+    UserDefaults.standard.set(Double(clampedLogThreadPaneFraction(fraction)), forKey: petLogThreadPaneFractionKey)
+}
+
+private struct PaneResizeHandleView: NSViewRepresentable {
+    var onDrag: (CGFloat) -> Void
+    var onEnd: () -> Void
+
+    func makeNSView(context: Context) -> PaneResizeHandleNSView {
+        PaneResizeHandleNSView(onDrag: onDrag, onEnd: onEnd)
+    }
+
+    func updateNSView(_ nsView: PaneResizeHandleNSView, context: Context) {
+        nsView.onDrag = onDrag
+        nsView.onEnd = onEnd
+    }
+}
+
+private final class PaneResizeHandleNSView: NSView {
+    var onDrag: (CGFloat) -> Void
+    var onEnd: () -> Void
+    private var dragStartX: CGFloat?
+
+    init(onDrag: @escaping (CGFloat) -> Void, onEnd: @escaping () -> Void) {
+        self.onDrag = onDrag
+        self.onEnd = onEnd
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStartX = NSEvent.mouseLocation.x
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let dragStartX else { return }
+        onDrag(NSEvent.mouseLocation.x - dragStartX)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartX = nil
+        onEnd()
+    }
 }
 
 /// Groups raw whisper segments into readable conversation blocks: segments
@@ -305,8 +359,8 @@ struct AmbientLogPetView: View {
     @State private var editingActionIndex: Int?
     @State private var draftCustomLabel = ""
     @State private var draftCustomPrompt = ""
-    @State private var threadPaneWidth: CGFloat = petLogThreadPaneDefaultWidth
-    @State private var threadPaneDragStartWidth: CGFloat?
+    @State private var threadPaneFraction: CGFloat = petLogThreadPaneDefaultFraction
+    @State private var threadPaneDragStartFraction: CGFloat?
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -351,34 +405,36 @@ struct AmbientLogPetView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(spacing: 0) {
-                dayNavBar
-                sceneChipBar
-                Divider().opacity(0.12)
-                Group {
-                    if logModel.blocks.isEmpty {
-                        emptyState
-                    } else {
-                        logList
+        GeometryReader { geo in
+            HStack(spacing: 0) {
+                VStack(spacing: 0) {
+                    dayNavBar
+                    sceneChipBar
+                    Divider().opacity(0.12)
+                    Group {
+                        if logModel.blocks.isEmpty {
+                            emptyState
+                        } else {
+                            logList
+                        }
                     }
+                    actionBar
+                    customActionBar
+                    inputBar
                 }
-                actionBar
-                customActionBar
-                inputBar
-            }
-            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: petLogThreadPaneLeftMinWidth, maxWidth: .infinity, maxHeight: .infinity)
 
-            if model.logThreadPaneOpen {
-                threadPaneResizeHandle
-                threadPane
+                if model.logThreadPaneOpen {
+                    threadPaneResizeHandle(totalWidth: geo.size.width)
+                    threadPane(totalWidth: geo.size.width)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Self.panelBg)
         .onAppear {
             customActions = LogCustomActionStore.load()
-            threadPaneWidth = preferredLogThreadPaneWidth()
+            threadPaneFraction = preferredLogThreadPaneFraction()
             logModel.start()
             requestSceneNamesIfNeeded()
         }
@@ -386,7 +442,7 @@ struct AmbientLogPetView: View {
             requestSceneNamesIfNeeded()
         }
         .onChange(of: model.logThreadPaneOpen) { open in
-            if open { threadPaneWidth = preferredLogThreadPaneWidth() }
+            if open { threadPaneFraction = preferredLogThreadPaneFraction() }
         }
         .onDisappear { logModel.stop() }
     }
@@ -503,7 +559,7 @@ struct AmbientLogPetView: View {
         }
     }
 
-    private var threadPane: some View {
+    private func threadPane(totalWidth: CGFloat) -> some View {
         VStack(spacing: 0) {
             HStack {
                 Text("ちーとの対話")
@@ -562,35 +618,41 @@ struct AmbientLogPetView: View {
                 }
             }
         }
-        .frame(width: threadPaneWidth)
+        .frame(width: threadPaneWidth(totalWidth: totalWidth))
     }
 
-    private var threadPaneResizeHandle: some View {
+    private func threadPaneResizeHandle(totalWidth: CGFloat) -> some View {
         ZStack {
             Divider().opacity(0.12)
-            Color.clear.frame(width: 6)
-        }
-        .frame(width: 6)
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            if hovering {
-                NSCursor.resizeLeftRight.push()
-            } else {
-                NSCursor.pop()
-            }
-        }
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .onChanged { value in
-                    let start = threadPaneDragStartWidth ?? threadPaneWidth
-                    threadPaneDragStartWidth = start
-                    threadPaneWidth = clampedLogThreadPaneWidth(start - value.translation.width)
+            PaneResizeHandleView(
+                onDrag: { translationX in
+                    updateThreadPaneFraction(translationX: translationX, totalWidth: totalWidth)
+                },
+                onEnd: {
+                    saveLogThreadPaneFraction(threadPaneFraction)
+                    threadPaneDragStartFraction = nil
                 }
-                .onEnded { _ in
-                    saveLogThreadPaneWidth(threadPaneWidth)
-                    threadPaneDragStartWidth = nil
-                }
-        )
+            )
+            .frame(width: petLogThreadPaneHandleWidth)
+        }
+        .frame(width: petLogThreadPaneHandleWidth)
+    }
+
+    private func threadPaneWidth(totalWidth: CGFloat) -> CGFloat {
+        let desired = totalWidth * threadPaneFraction
+        let maxPaneWidth = max(0, totalWidth - petLogThreadPaneLeftMinWidth - petLogThreadPaneHandleWidth)
+        if maxPaneWidth < petLogThreadPaneMinPixelWidth {
+            return maxPaneWidth
+        }
+        return min(max(desired, petLogThreadPaneMinPixelWidth), maxPaneWidth)
+    }
+
+    private func updateThreadPaneFraction(translationX: CGFloat, totalWidth: CGFloat) {
+        guard totalWidth > 0 else { return }
+        let startFraction = threadPaneDragStartFraction ?? threadPaneFraction
+        threadPaneDragStartFraction = startFraction
+        let startWidth = totalWidth * startFraction
+        threadPaneFraction = clampedLogThreadPaneFraction((startWidth - translationX) / totalWidth)
     }
 
     private func threadBubble(_ entry: NotificationEntry) -> some View {
