@@ -114,6 +114,55 @@ enum AmbientStorage {
         return (latest.lastPathComponent, segs)
     }
 
+    /// All kept transcript segments captured on the given local calendar day,
+    /// merged across every session and sorted by capture time. Sessions live
+    /// until app restart, so one session can straddle midnight — the day is
+    /// selected per-segment via `capturedAt`, never by the session-id date.
+    /// Legacy lines without `capturedAt` are excluded.
+    static func segments(forDay day: Date, timeZone: TimeZone) -> [TranscriptSegment] {
+        segments(forDay: day, timeZone: timeZone, sessionsRoot: sessionsRoot)
+    }
+
+    /// Testable overload reading from an injected sessions root, so tests never
+    /// touch the real Application Support tree.
+    static func segments(forDay day: Date, timeZone: TimeZone, sessionsRoot: URL) -> [TranscriptSegment] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let dayStart = cal.startOfDay(for: day)
+        guard let dayEnd = cal.date(byAdding: .day, value: 1, to: dayStart) else { return [] }
+        let startEpoch = dayStart.timeIntervalSince1970
+        let endEpoch = dayEnd.timeIntervalSince1970
+
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: sessionsRoot, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return []
+        }
+        let decoder = JSONDecoder()
+        var out: [TranscriptSegment] = []
+        for dir in dirs where dir.lastPathComponent.hasPrefix("ctx-") {
+            let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
+            // Skip sessions whose transcript was last written before this day
+            // started: they cannot hold segments from it. A session that crossed
+            // midnight keeps a newer mod time, so it is still read (safe side).
+            let mod = (try? raw.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate
+            if let mod, mod < dayStart { continue }
+            guard let data = try? Data(contentsOf: raw),
+                  let text = String(data: data, encoding: .utf8) else { continue }
+            for line in text.split(separator: "\n") {
+                guard let d = line.data(using: .utf8),
+                      let seg = try? decoder.decode(TranscriptSegment.self, from: d),
+                      let at = seg.capturedAt else { continue }
+                if at >= startEpoch && at < endEpoch {
+                    out.append(seg)
+                }
+            }
+        }
+        out.sort { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
+        return out
+    }
+
     /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune
     /// emptied day directories. Sessions under sessions/ are intentionally NOT
     /// touched — they are kept until explicit deletion (design retention policy).
