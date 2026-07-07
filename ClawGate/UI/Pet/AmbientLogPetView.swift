@@ -1,5 +1,25 @@
 import SwiftUI
 
+private let petLogThreadPaneWidthKey = "PetLogThreadPaneWidth"
+private let petLogThreadPaneDefaultWidth: CGFloat = 360
+private let petLogThreadPaneMinWidth: CGFloat = 240
+private let petLogThreadPaneMaxWidth: CGFloat = 560
+
+private func clampedLogThreadPaneWidth(_ width: CGFloat) -> CGFloat {
+    min(max(width, petLogThreadPaneMinWidth), petLogThreadPaneMaxWidth)
+}
+
+private func preferredLogThreadPaneWidth() -> CGFloat {
+    guard let stored = UserDefaults.standard.object(forKey: petLogThreadPaneWidthKey) as? Double else {
+        return petLogThreadPaneDefaultWidth
+    }
+    return clampedLogThreadPaneWidth(CGFloat(stored))
+}
+
+private func saveLogThreadPaneWidth(_ width: CGFloat) {
+    UserDefaults.standard.set(Double(clampedLogThreadPaneWidth(width)), forKey: petLogThreadPaneWidthKey)
+}
+
 /// Groups raw whisper segments into readable conversation blocks: segments
 /// whose absolute times are close (< gap) and share a speaker merge into one
 /// paragraph headed by the wall-clock time of its first utterance. A speaker
@@ -285,6 +305,8 @@ struct AmbientLogPetView: View {
     @State private var editingActionIndex: Int?
     @State private var draftCustomLabel = ""
     @State private var draftCustomPrompt = ""
+    @State private var threadPaneWidth: CGFloat = petLogThreadPaneDefaultWidth
+    @State private var threadPaneDragStartWidth: CGFloat?
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -348,7 +370,7 @@ struct AmbientLogPetView: View {
             .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
 
             if model.logThreadPaneOpen {
-                Divider().opacity(0.12)
+                threadPaneResizeHandle
                 threadPane
             }
         }
@@ -356,11 +378,15 @@ struct AmbientLogPetView: View {
         .background(Self.panelBg)
         .onAppear {
             customActions = LogCustomActionStore.load()
+            threadPaneWidth = preferredLogThreadPaneWidth()
             logModel.start()
             requestSceneNamesIfNeeded()
         }
         .onChange(of: logModel.scenes) { _ in
             requestSceneNamesIfNeeded()
+        }
+        .onChange(of: model.logThreadPaneOpen) { open in
+            if open { threadPaneWidth = preferredLogThreadPaneWidth() }
         }
         .onDisappear { logModel.stop() }
     }
@@ -536,7 +562,35 @@ struct AmbientLogPetView: View {
                 }
             }
         }
-        .frame(width: 360)
+        .frame(width: threadPaneWidth)
+    }
+
+    private var threadPaneResizeHandle: some View {
+        ZStack {
+            Divider().opacity(0.12)
+            Color.clear.frame(width: 6)
+        }
+        .frame(width: 6)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { value in
+                    let start = threadPaneDragStartWidth ?? threadPaneWidth
+                    threadPaneDragStartWidth = start
+                    threadPaneWidth = clampedLogThreadPaneWidth(start - value.translation.width)
+                }
+                .onEnded { _ in
+                    saveLogThreadPaneWidth(threadPaneWidth)
+                    threadPaneDragStartWidth = nil
+                }
+        )
     }
 
     private func threadBubble(_ entry: NotificationEntry) -> some View {
@@ -568,9 +622,6 @@ struct AmbientLogPetView: View {
             actionButton("要点", instruction: "この会話ログの要点を3〜5個の箇条書きで簡潔にまとめて。")
             actionButton("TODO", instruction: "この会話ログから、やるべきこと(TODO)を抽出して。担当・期限が読み取れれば添えて。")
             actionButton("区切り", instruction: "私のカレンダーの予定に照らして、この会話ログをどの時点で区切るのが自然か提案して。予定はあなたが把握しているものを使って。")
-            Color.clear
-                .frame(width: 26)
-                .padding(.vertical, 7)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
@@ -587,15 +638,6 @@ struct AmbientLogPetView: View {
                         customActionEditor(index)
                     }
             }
-            Button(editingCustomActions ? "✓" : "✎") {
-                editingCustomActions.toggle()
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundColor(editingCustomActions ? Color(red: 0.55, green: 0.78, blue: 1.0) : .white.opacity(0.45))
-            .frame(width: 26)
-            .padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
         }
         .padding(.horizontal, 12)
         .padding(.top, 6)
@@ -618,6 +660,15 @@ struct AmbientLogPetView: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundColor(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
             .disabled(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button(editingCustomActions ? "✓" : "✎") {
+                editingCustomActions.toggle()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(editingCustomActions ? Color(red: 0.55, green: 0.78, blue: 1.0) : .white.opacity(0.45))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
         }
         .padding(12)
     }

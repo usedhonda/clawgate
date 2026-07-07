@@ -3,6 +3,21 @@ import Combine
 import SwiftUI
 
 private let petChatWindowFrameKey = "PetChatWindowFrame"
+private let petLogThreadPaneWidthKey = "PetLogThreadPaneWidth"
+private let petLogThreadPaneDefaultWidth: CGFloat = 360
+private let petLogThreadPaneMinWidth: CGFloat = 240
+private let petLogThreadPaneMaxWidth: CGFloat = 560
+
+private func clampedLogThreadPaneWidth(_ width: CGFloat) -> CGFloat {
+    min(max(width, petLogThreadPaneMinWidth), petLogThreadPaneMaxWidth)
+}
+
+private func preferredLogThreadPaneWidth() -> CGFloat {
+    guard let stored = UserDefaults.standard.object(forKey: petLogThreadPaneWidthKey) as? Double else {
+        return petLogThreadPaneDefaultWidth
+    }
+    return clampedLogThreadPaneWidth(CGFloat(stored))
+}
 
 /// Transparent always-on-top window for the pet character
 final class PetWindowController {
@@ -605,11 +620,15 @@ private final class PetContentView: NSView {
 
         let bw = KeyableWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
-            styleMask: [.resizable, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: [.titled, .resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
         bw.titleVisibility = .hidden
+        bw.titlebarAppearsTransparent = true
+        bw.standardWindowButton(.closeButton)?.isHidden = true
+        bw.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        bw.standardWindowButton(.zoomButton)?.isHidden = true
         bw.isOpaque = false
         bw.backgroundColor = .clear
         bw.level = .floating
@@ -644,10 +663,11 @@ private final class PetContentView: NSView {
     private func setLogThreadPaneOpen(_ open: Bool) {
         guard let cw = chatWindow, let parentWindow = window else { return }
         if open {
+            let paneWidth = preferredLogThreadPaneWidth()
             let baseWidth = chatBaseWidth ?? cw.frame.width
             chatBaseWidth = baseWidth
             var frame = cw.frame
-            frame.size.width = baseWidth + 360
+            frame.size.width = baseWidth + paneWidth
             cw.setFrame(clampedChatFrame(frame, relativeTo: parentWindow), display: true)
         } else if let baseWidth = chatBaseWidth {
             var frame = cw.frame
@@ -723,8 +743,12 @@ private final class PetContentView: NSView {
     private func hideChatWindow() {
         if let cw = chatWindow {
             var frameToSave = cw.frame
-            if model.logThreadPaneOpen, let baseWidth = chatBaseWidth {
-                frameToSave.size.width = baseWidth
+            if model.logThreadPaneOpen {
+                if let baseWidth = chatBaseWidth {
+                    frameToSave.size.width = baseWidth
+                } else {
+                    frameToSave.size.width = max(cw.minSize.width, cw.frame.width - preferredLogThreadPaneWidth())
+                }
                 if let parentWindow = window {
                     frameToSave = clampedChatFrame(frameToSave, relativeTo: parentWindow)
                 }
