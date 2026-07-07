@@ -111,7 +111,10 @@ enum AmbientLogGrouping {
 
 private final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
+    @Published var scenes: [AmbientLogGrouping.Scene] = []
+    @Published var selectedSceneID: String?
     @Published var selectedDay: Date
+    var sceneNames: [String: String] = [:]
     private let timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
     private lazy var calendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
@@ -119,6 +122,7 @@ private final class AmbientLogModel: ObservableObject {
         return cal
     }()
     private var cachedBlocksByDay: [Date: [AmbientLogGrouping.Block]] = [:]
+    private var cachedScenesByDay: [Date: [AmbientLogGrouping.Scene]] = [:]
     private var timer: Timer?
 
     init() {
@@ -141,12 +145,19 @@ private final class AmbientLogModel: ObservableObject {
 
     func moveDay(by days: Int) {
         guard let day = calendar.date(byAdding: .day, value: days, to: selectedDay) else { return }
+        selectedSceneID = nil
         selectedDay = clampedDay(day)
         load()
     }
 
     func jumpToToday() {
+        selectedSceneID = nil
         selectedDay = today
+        load()
+    }
+
+    func selectScene(_ id: String?) {
+        selectedSceneID = id
         load()
     }
 
@@ -184,16 +195,29 @@ private final class AmbientLogModel: ObservableObject {
     private func load() {
         let day = clampedDay(selectedDay)
         if day != selectedDay { selectedDay = day }
-        let newBlocks: [AmbientLogGrouping.Block]
+        let allBlocks: [AmbientLogGrouping.Block]
+        let newScenes: [AmbientLogGrouping.Scene]
         if day == today {
             let (_, segs) = AmbientStorage.latestSessionSegments(limit: 2000)
-            newBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
+            newScenes = AmbientLogGrouping.scenes(from: segs, timeZone: timeZone)
+            allBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
         } else if let cached = cachedBlocksByDay[day] {
-            newBlocks = cached
+            allBlocks = cached
+            newScenes = cachedScenesByDay[day] ?? []
         } else {
             let segs = AmbientStorage.segments(forDay: day, timeZone: timeZone)
-            newBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
-            cachedBlocksByDay[day] = newBlocks
+            newScenes = AmbientLogGrouping.scenes(from: segs, timeZone: timeZone)
+            allBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
+            cachedBlocksByDay[day] = allBlocks
+            cachedScenesByDay[day] = newScenes
+        }
+        if newScenes != scenes { scenes = newScenes }
+        let newBlocks: [AmbientLogGrouping.Block]
+        if let selectedSceneID,
+           let scene = newScenes.first(where: { $0.id == selectedSceneID }) {
+            newBlocks = AmbientLogGrouping.blocks(from: scene.segments, timeZone: timeZone)
+        } else {
+            newBlocks = allBlocks
         }
         if newBlocks != blocks { blocks = newBlocks }
     }
@@ -265,6 +289,7 @@ struct AmbientLogPetView: View {
     var body: some View {
         VStack(spacing: 0) {
             dayNavBar
+            sceneChipBar
             Divider().opacity(0.12)
             Group {
                 if logModel.blocks.isEmpty {
@@ -308,6 +333,44 @@ struct AmbientLogPetView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var sceneChipBar: some View {
+        Group {
+            if logModel.scenes.count > 1 {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        sceneChip(title: "全日", selected: logModel.selectedSceneID == nil) {
+                            logModel.selectScene(nil)
+                        }
+                        ForEach(logModel.scenes, id: \.id) { scene in
+                            sceneChip(
+                                title: logModel.sceneNames[scene.id] ?? scene.timeLabel,
+                                selected: logModel.selectedSceneID == scene.id
+                            ) {
+                                logModel.selectScene(scene.id)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                }
+            }
+        }
+    }
+
+    private func sceneChip(title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title.isEmpty ? "Unknown" : title)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(selected ? .black.opacity(0.82) : .white.opacity(0.65))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule().fill(selected ? Color(red: 0.55, green: 0.78, blue: 1.0) : Color.white.opacity(0.07))
+                )
+        }
+        .buttonStyle(.plain)
     }
 
     private var emptyState: some View {
