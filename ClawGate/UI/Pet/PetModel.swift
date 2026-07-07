@@ -112,6 +112,7 @@ final class PetModel: NSObject, ObservableObject {
     }
     @Published var notificationHistory: [NotificationEntry] = []
     @Published var summonResults: [NotificationEntry] = []
+    @Published var logReplies: [NotificationEntry] = []
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
 
@@ -876,6 +877,7 @@ final class PetModel: NSObject, ObservableObject {
         // Restore persisted logs
         notificationHistory = PetLogStore.load(file: "notifications.json")
         summonResults = PetLogStore.load(file: "summon.json")
+        logReplies = PetLogStore.load(file: "log.json")
         localResults = PetLogStore.load(file: "local.json")
 
         characterManager.scan()
@@ -1387,6 +1389,18 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    func sendLogInstruction(instruction: String, transcript: String) {
+        let maxTranscriptCharacters = 12_000
+        let trimmedTranscript = String(transcript.suffix(maxTranscriptCharacters))
+        let prompt: String
+        if trimmedTranscript.isEmpty {
+            prompt = instruction
+        } else {
+            prompt = "\(instruction)\n\n--- 会話ログ ---\n\(trimmedTranscript)"
+        }
+        sendSummon(prompt, source: "log")
+    }
+
     func addSummonResult(text: String, source: String) {
         // Draft reply detection: if messaging app + <draft_reply> tag → place in input field
         if source == "omakase",
@@ -1420,6 +1434,18 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func appendSummonEntry(text: String, source: String) {
+        if source == "log" {
+            let entry = NotificationEntry(
+                id: UUID().uuidString, text: text,
+                source: source, timestamp: Date()
+            )
+            logReplies.append(entry)
+            if logReplies.count > 100 {
+                logReplies.removeFirst(logReplies.count - 100)
+            }
+            PetLogStore.save(logReplies, file: "log.json")
+            return
+        }
         if Self.isLocalSource(source) {
             addLocalEntry(text: text, source: source)
             return
