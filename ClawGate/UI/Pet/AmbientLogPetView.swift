@@ -568,6 +568,9 @@ struct AmbientLogPetView: View {
             actionButton("要点", instruction: "この会話ログの要点を3〜5個の箇条書きで簡潔にまとめて。")
             actionButton("TODO", instruction: "この会話ログから、やるべきこと(TODO)を抽出して。担当・期限が読み取れれば添えて。")
             actionButton("区切り", instruction: "私のカレンダーの予定に照らして、この会話ログをどの時点で区切るのが自然か提案して。予定はあなたが把握しているものを使って。")
+            Color.clear
+                .frame(width: 26)
+                .padding(.vertical, 7)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
