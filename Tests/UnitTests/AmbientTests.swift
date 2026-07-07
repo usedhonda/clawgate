@@ -225,6 +225,70 @@ final class AmbientTests: XCTestCase {
         XCTAssertNil(blocks[0].speaker)
     }
 
+    // MARK: - Scene splitting (15-minute meeting boundaries)
+
+    private static func seg(_ text: String, at epoch: Double?) -> TranscriptSegment {
+        var s = TranscriptSegment(startSeconds: 0, endSeconds: 1, text: text)
+        s.capturedAt = epoch
+        return s
+    }
+
+    func testScenesKeepsCloseSegmentsInOneScene() {
+        let jst = TimeZone(identifier: "Asia/Tokyo")!
+        let base = 1_700_000_000.0  // 2023-11-15 06:13 JST
+        let scenes = AmbientLogGrouping.scenes(
+            from: [Self.seg("a", at: base),
+                   Self.seg("b", at: base + 300),   // +5m
+                   Self.seg("c", at: base + 600)],  // +10m
+            timeZone: jst)
+        XCTAssertEqual(scenes.count, 1)
+        XCTAssertEqual(scenes[0].segments.count, 3)
+        XCTAssertEqual(scenes[0].startEpoch, base, accuracy: 0.001)
+        XCTAssertEqual(scenes[0].endEpoch, base + 600, accuracy: 0.001)
+    }
+
+    func testScenesSplitOnGapOverFifteenMinutes() {
+        let jst = TimeZone(identifier: "Asia/Tokyo")!
+        let base = 1_700_000_000.0
+        let scenes = AmbientLogGrouping.scenes(
+            from: [Self.seg("morning-1", at: base),
+                   Self.seg("morning-2", at: base + 120),
+                   Self.seg("afternoon-1", at: base + 120 + 1000),  // +16m40s gap
+                   Self.seg("afternoon-2", at: base + 120 + 1000 + 60)],
+            timeZone: jst)
+        XCTAssertEqual(scenes.count, 2)
+        XCTAssertEqual(scenes[0].segments.map(\.text), ["morning-1", "morning-2"])
+        XCTAssertEqual(scenes[1].segments.map(\.text), ["afternoon-1", "afternoon-2"])
+        XCTAssertFalse(scenes[0].timeLabel.isEmpty)
+        XCTAssertTrue(scenes[0].timeLabel.contains("–"), "label is HH:mm–HH:mm")
+        XCTAssertNotEqual(scenes[0].id, scenes[1].id)
+    }
+
+    func testScenesDoNotSplitAtExactlyFourteenMinutes() {
+        let jst = TimeZone(identifier: "Asia/Tokyo")!
+        let base = 1_700_000_000.0
+        let scenes = AmbientLogGrouping.scenes(
+            from: [Self.seg("a", at: base),
+                   Self.seg("b", at: base + 840)],  // exactly 14m ≤ 15m
+            timeZone: jst)
+        XCTAssertEqual(scenes.count, 1)
+    }
+
+    func testScenesTreatAllUntimestampedSegmentsAsOneScene() {
+        let scenes = AmbientLogGrouping.scenes(
+            from: [Self.seg("a", at: nil), Self.seg("b", at: nil)],
+            timeZone: TimeZone(identifier: "Asia/Tokyo")!)
+        XCTAssertEqual(scenes.count, 1)
+        XCTAssertEqual(scenes[0].id, "unknown")
+        XCTAssertEqual(scenes[0].timeLabel, "")
+        XCTAssertEqual(scenes[0].segments.count, 2)
+    }
+
+    func testScenesReturnEmptyForEmptyInput() {
+        let scenes = AmbientLogGrouping.scenes(from: [], timeZone: .current)
+        XCTAssertTrue(scenes.isEmpty)
+    }
+
     // MARK: - Speaker diarization (helper merge + grouping + dialogue summary)
 
     func testTranscriptSegmentDecodesLegacyLinesWithoutSpeaker() throws {

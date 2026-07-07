@@ -53,6 +53,60 @@ enum AmbientLogGrouping {
         closeBlock()
         return result
     }
+
+    /// One conversation scene (a meeting): a run of segments with no gap longer
+    /// than `gapSeconds` between consecutive timestamped utterances. This is a
+    /// coarser layer than `blocks()` — 15-minute silences split meetings apart.
+    struct Scene: Equatable {
+        let id: String           // String(Int(startEpoch)), "unknown" for all-nil
+        let startEpoch: Double   // first capturedAt in the scene (0 when all nil)
+        let endEpoch: Double     // last capturedAt in the scene (0 when all nil)
+        let timeLabel: String    // "HH:mm–HH:mm", "" when the scene has no timestamps
+        let segments: [TranscriptSegment]
+    }
+
+    static func scenes(from segments: [TranscriptSegment],
+                       gapSeconds: Double = 900,
+                       timeZone: TimeZone) -> [Scene] {
+        var result: [Scene] = []
+        var current: [TranscriptSegment] = []
+        var firstEpoch: Double?
+        var lastEpoch: Double?
+
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        fmt.timeZone = timeZone
+
+        func closeScene() {
+            guard !current.isEmpty else { return }
+            if let first = firstEpoch, let last = lastEpoch {
+                let label = fmt.string(from: Date(timeIntervalSince1970: first))
+                    + "–" + fmt.string(from: Date(timeIntervalSince1970: last))
+                result.append(Scene(id: String(Int(first)),
+                                    startEpoch: first, endEpoch: last,
+                                    timeLabel: label, segments: current))
+            } else {
+                result.append(Scene(id: "unknown", startEpoch: 0, endEpoch: 0,
+                                    timeLabel: "", segments: current))
+            }
+            current = []
+            firstEpoch = nil
+            lastEpoch = nil
+        }
+
+        for seg in segments {
+            if let t = seg.capturedAt {
+                if let last = lastEpoch, t - last > gapSeconds {
+                    closeScene()
+                }
+                if firstEpoch == nil { firstEpoch = t }
+                lastEpoch = t
+            }
+            current.append(seg)
+        }
+        closeScene()
+        return result
+    }
 }
 
 private final class AmbientLogModel: ObservableObject {
