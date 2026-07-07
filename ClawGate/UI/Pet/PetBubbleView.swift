@@ -571,7 +571,7 @@ struct PetChatContainerView: View {
             case "local":
                 LocalResultsView(model: model)
             case "log":
-                AmbientLogPetView()
+                AmbientLogPetView(model: model)
             default:
                 NotificationListView(model: model)
             }

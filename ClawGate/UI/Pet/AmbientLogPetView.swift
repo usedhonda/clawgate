@@ -57,8 +57,21 @@ enum AmbientLogGrouping {
 
 private final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
-    @Published var sessionLabel: String = ""
+    @Published var selectedDay: Date
+    private let timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+    private lazy var calendar: Calendar = {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        return cal
+    }()
+    private var cachedBlocksByDay: [Date: [AmbientLogGrouping.Block]] = [:]
     private var timer: Timer?
+
+    init() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+        selectedDay = cal.startOfDay(for: Date())
+    }
 
     func start() {
         load()
@@ -72,15 +85,76 @@ private final class AmbientLogModel: ObservableObject {
         timer = nil
     }
 
+    func moveDay(by days: Int) {
+        guard let day = calendar.date(byAdding: .day, value: days, to: selectedDay) else { return }
+        selectedDay = clampedDay(day)
+        load()
+    }
+
+    func jumpToToday() {
+        selectedDay = today
+        load()
+    }
+
+    var canMovePrevious: Bool {
+        selectedDay > earliestDay
+    }
+
+    var canMoveNext: Bool {
+        selectedDay < today
+    }
+
+    var isTodaySelected: Bool {
+        selectedDay == today
+    }
+
+    var dayLabel: String {
+        if isTodaySelected { return "今日" }
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "ja_JP")
+        fmt.timeZone = timeZone
+        fmt.dateFormat = "M/d(E)"
+        return fmt.string(from: selectedDay)
+    }
+
+    func transcriptText() -> String {
+        blocks.map { block in
+            var headText = block.timeLabel ?? ""
+            if let name = AmbientLogPetView.speakerName(block.speaker) {
+                headText += headText.isEmpty ? name : " " + name
+            }
+            return headText.isEmpty ? block.text : "\(headText)\n\(block.text)"
+        }.joined(separator: "\n\n")
+    }
+
     private func load() {
-        // 2000 segments ≈ a full multi-hour meeting — the start of a long
-        // session must stay scrollable, not fall off the top.
-        let (label, segs) = AmbientStorage.latestSessionSegments(limit: 2000)
-        // Publish only on change: each publish rebuilds the Text and clears
-        // any in-progress selection — copy-paste must survive quiet refreshes.
-        if label != sessionLabel { sessionLabel = label }
-        let newBlocks = AmbientLogGrouping.blocks(from: segs)
+        let day = clampedDay(selectedDay)
+        if day != selectedDay { selectedDay = day }
+        let newBlocks: [AmbientLogGrouping.Block]
+        if day == today {
+            let (_, segs) = AmbientStorage.latestSessionSegments(limit: 2000)
+            newBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
+        } else if let cached = cachedBlocksByDay[day] {
+            newBlocks = cached
+        } else {
+            let segs = AmbientStorage.segments(forDay: day, timeZone: timeZone)
+            newBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
+            cachedBlocksByDay[day] = newBlocks
+        }
         if newBlocks != blocks { blocks = newBlocks }
+    }
+
+    private var today: Date {
+        calendar.startOfDay(for: Date())
+    }
+
+    private var earliestDay: Date {
+        calendar.date(byAdding: .day, value: -6, to: today) ?? today
+    }
+
+    private func clampedDay(_ day: Date) -> Date {
+        let start = calendar.startOfDay(for: day)
+        return min(max(start, earliestDay), today)
     }
 }
 
@@ -88,7 +162,9 @@ private final class AmbientLogModel: ObservableObject {
 /// conversation (most recent session), grouped into time-stamped paragraphs.
 /// Machine transcript — context, not quote-safe record.
 struct AmbientLogPetView: View {
-    @StateObject private var model = AmbientLogModel()
+    @ObservedObject var model: PetModel
+    @StateObject private var logModel = AmbientLogModel()
+    @State private var instructionText = ""
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -133,17 +209,51 @@ struct AmbientLogPetView: View {
     }
 
     var body: some View {
-        Group {
-            if model.blocks.isEmpty {
-                emptyState
-            } else {
-                logList
+        VStack(spacing: 0) {
+            dayNavBar
+            Divider().opacity(0.12)
+            Group {
+                if logModel.blocks.isEmpty {
+                    emptyState
+                } else {
+                    logList
+                }
             }
+            repliesView
+            actionBar
+            inputBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Self.panelBg)
-        .onAppear { model.start() }
-        .onDisappear { model.stop() }
+        .onAppear { logModel.start() }
+        .onDisappear { logModel.stop() }
+    }
+
+    private var dayNavBar: some View {
+        HStack(spacing: 8) {
+            Button("‹") { logModel.moveDay(by: -1) }
+                .buttonStyle(.plain)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(logModel.canMovePrevious ? .white.opacity(0.75) : .white.opacity(0.22))
+                .disabled(!logModel.canMovePrevious)
+            Text(logModel.dayLabel)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.white.opacity(0.75))
+                .frame(minWidth: 72)
+            Button("›") { logModel.moveDay(by: 1) }
+                .buttonStyle(.plain)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(logModel.canMoveNext ? .white.opacity(0.75) : .white.opacity(0.22))
+                .disabled(!logModel.canMoveNext)
+            Button("今日") { logModel.jumpToToday() }
+                .buttonStyle(.plain)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(logModel.isTodaySelected ? .white.opacity(0.3) : Color(red: 0.55, green: 0.78, blue: 1.0))
+                .disabled(logModel.isTodaySelected)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     private var emptyState: some View {
@@ -166,7 +276,7 @@ struct AmbientLogPetView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(Self.attributedTranscript(model.blocks))
+                    Text(Self.attributedTranscript(logModel.blocks))
                         .lineSpacing(3)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -179,7 +289,7 @@ struct AmbientLogPetView: View {
             // appends to the tail block (count unchanged), and the viewport
             // must still track it — this is what made the log look frozen
             // during a long conversation.
-            .onChange(of: model.blocks) { _ in
+            .onChange(of: logModel.blocks) { _ in
                 proxy.scrollTo("ambient-log-bottom", anchor: .bottom)
             }
             // Land on the newest content when the tab opens, after the first
@@ -191,5 +301,96 @@ struct AmbientLogPetView: View {
                 }
             }
         }
+    }
+
+    private var repliesView: some View {
+        Group {
+            if !model.logReplies.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Chi replies")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.35))
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(model.logReplies.reversed().prefix(3))) { entry in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(timeString(entry.timestamp))
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.white.opacity(0.35))
+                                    Text(entry.text)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.white.opacity(0.82))
+                                        .textSelection(.enabled)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.06)))
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 120)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                Divider().opacity(0.12)
+            }
+        }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 6) {
+            actionButton("質問まとめ", instruction: "この会話ログの中から、確認・回答すべき質問事項を箇条書きでまとめて。")
+            actionButton("要点", instruction: "この会話ログの要点を3〜5個の箇条書きで簡潔にまとめて。")
+            actionButton("TODO", instruction: "この会話ログから、やるべきこと(TODO)を抽出して。担当・期限が読み取れれば添えて。")
+            actionButton("区切り", instruction: "私のカレンダーの予定に照らして、この会話ログをどの時点で区切るのが自然か提案して。予定はあなたが把握しているものを使って。")
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+    }
+
+    private var inputBar: some View {
+        HStack(spacing: 8) {
+            TextField("ちーに聞く", text: $instructionText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundColor(.white.opacity(0.9))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
+            Button("送信") {
+                sendInstruction(instructionText)
+                instructionText = ""
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
+            .disabled(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(12)
+    }
+
+    private func actionButton(_ title: String, instruction: String) -> some View {
+        Button(title) {
+            sendInstruction(instruction)
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundColor(Color(red: 0.55, green: 0.78, blue: 1.0))
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
+    }
+
+    private func sendInstruction(_ instruction: String) {
+        let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        model.sendLogInstruction(instruction: trimmed, transcript: logModel.transcriptText())
+    }
+
+    private func timeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter.string(from: date)
     }
 }
