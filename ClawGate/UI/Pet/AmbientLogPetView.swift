@@ -236,6 +236,29 @@ private final class AmbientLogModel: ObservableObject {
     }
 }
 
+struct LogCustomAction: Codable, Equatable {
+    var label: String
+    var prompt: String
+}
+
+enum LogCustomActionStore {
+    private static let key = "pet.logCustomActions"
+
+    static func load() -> [LogCustomAction?] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([LogCustomAction?].self, from: data) else {
+            return Array(repeating: nil, count: 4)
+        }
+        return Array(decoded.prefix(4)) + Array(repeating: nil, count: max(0, 4 - decoded.count))
+    }
+
+    static func save(_ actions: [LogCustomAction?]) {
+        let clamped = Array(actions.prefix(4)) + Array(repeating: nil, count: max(0, 4 - actions.count))
+        guard let data = try? JSONEncoder().encode(clamped) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
 /// "Log" tab in the pet chat panel: the ambient transcript of the surrounding
 /// conversation (most recent session), grouped into time-stamped paragraphs.
 /// Machine transcript — context, not quote-safe record.
@@ -243,6 +266,11 @@ struct AmbientLogPetView: View {
     @ObservedObject var model: PetModel
     @StateObject private var logModel = AmbientLogModel()
     @State private var instructionText = ""
+    @State private var customActions: [LogCustomAction?] = Array(repeating: nil, count: 4)
+    @State private var editingCustomActions = false
+    @State private var editingActionIndex: Int?
+    @State private var draftCustomLabel = ""
+    @State private var draftCustomPrompt = ""
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -300,6 +328,7 @@ struct AmbientLogPetView: View {
                     }
                 }
                 actionBar
+                customActionBar
                 inputBar
             }
             .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
@@ -311,7 +340,10 @@ struct AmbientLogPetView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Self.panelBg)
-        .onAppear { logModel.start() }
+        .onAppear {
+            customActions = LogCustomActionStore.load()
+            logModel.start()
+        }
         .onDisappear { logModel.stop() }
     }
 
@@ -523,6 +555,31 @@ struct AmbientLogPetView: View {
         .padding(.top, 8)
     }
 
+    private var customActionBar: some View {
+        HStack(spacing: 6) {
+            ForEach(0..<4, id: \.self) { index in
+                customActionButton(index)
+                    .popover(isPresented: Binding(
+                        get: { editingActionIndex == index },
+                        set: { if !$0 { editingActionIndex = nil } }
+                    )) {
+                        customActionEditor(index)
+                    }
+            }
+            Button(editingCustomActions ? "✓" : "✎") {
+                editingCustomActions.toggle()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundColor(editingCustomActions ? Color(red: 0.55, green: 0.78, blue: 1.0) : .white.opacity(0.45))
+            .frame(width: 26)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+    }
+
     private var inputBar: some View {
         HStack(spacing: 8) {
             TextField("ちーに聞く", text: $instructionText)
@@ -554,6 +611,74 @@ struct AmbientLogPetView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 7)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
+    }
+
+    private func customActionButton(_ index: Int) -> some View {
+        let action = customActions.indices.contains(index) ? customActions[index] : nil
+        return Button(action?.label ?? "＋") {
+            if editingCustomActions || action == nil {
+                beginEditingCustomAction(index)
+            } else if let action {
+                sendInstruction(action.prompt)
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundColor(action == nil ? .white.opacity(0.45) : Color(red: 0.55, green: 0.78, blue: 1.0))
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white.opacity(action == nil ? 0.04 : 0.055))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(red: 0.55, green: 0.78, blue: 1.0).opacity(action == nil ? 0.16 : 0.35), lineWidth: 1)
+        )
+    }
+
+    private func customActionEditor(_ index: Int) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Custom Action")
+                .font(.system(size: 12, weight: .semibold))
+            TextField("Label", text: $draftCustomLabel)
+                .textFieldStyle(.roundedBorder)
+            TextEditor(text: $draftCustomPrompt)
+                .font(.system(size: 12))
+                .frame(width: 260, height: 110)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.black.opacity(0.12), lineWidth: 1))
+            HStack {
+                Button("削除") {
+                    customActions[index] = nil
+                    LogCustomActionStore.save(customActions)
+                    editingActionIndex = nil
+                }
+                .disabled(customActions[index] == nil)
+                Spacer()
+                Button("保存") {
+                    saveCustomAction(index)
+                }
+                .disabled(draftCustomPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(12)
+        .frame(width: 284)
+    }
+
+    private func beginEditingCustomAction(_ index: Int) {
+        let action = customActions.indices.contains(index) ? customActions[index] : nil
+        draftCustomLabel = action?.label ?? ""
+        draftCustomPrompt = action?.prompt ?? ""
+        editingActionIndex = index
+    }
+
+    private func saveCustomAction(_ index: Int) {
+        let prompt = draftCustomPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        let label = draftCustomLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        customActions[index] = LogCustomAction(label: label.isEmpty ? "Action \(index + 1)" : label, prompt: prompt)
+        LogCustomActionStore.save(customActions)
+        editingActionIndex = nil
     }
 
     private func sendInstruction(_ instruction: String) {
