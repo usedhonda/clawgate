@@ -113,6 +113,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var notificationHistory: [NotificationEntry] = []
     @Published var summonResults: [NotificationEntry] = []
     @Published var logReplies: [NotificationEntry] = []
+    @Published var logSceneNames: [String: String] = [:]  // scene id -> ちー命名 (memory only)
     @Published var logThreadPaneOpen: Bool = false
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
@@ -1360,6 +1361,7 @@ final class PetModel: NSObject, ObservableObject {
 
     private var pendingSummonSource: String?
     private var pendingOmakaseContext: OmakaseContext?
+    private var pendingSceneNamingIDs: [String] = []
 
     private static let messagingBundles: Set<String> = [
         "jp.naver.line.mac",
@@ -1412,6 +1414,45 @@ final class PetModel: NSObject, ObservableObject {
         sendSummon(prompt, source: "log")
     }
 
+    func requestSceneNaming(scenes: [(id: String, timeLabel: String, excerpt: String)]) {
+        guard !scenes.isEmpty else { return }
+        guard pendingSceneNamingIDs.isEmpty else { return }
+        pendingSceneNamingIDs = scenes.map { $0.id }
+        var prompt = "今日の会話ログは以下のシーンに分かれている。私のカレンダーの予定と照合して、各シーンに短い名前を付けて。出力は各行 \"番号: 名前\" のみ（説明文なし）。"
+        for (index, scene) in scenes.enumerated() {
+            let excerpt = String(scene.excerpt.prefix(200))
+            prompt += "\n\(index + 1). [\(scene.timeLabel)] 抜粋: \(excerpt)"
+        }
+        sendSummon(prompt, source: "log_scene_naming")
+    }
+
+    static func parseSceneNaming(_ text: String) -> [Int: String] {
+        var result: [Int: String] = [:]
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard let firstChar = line.first, firstChar.isNumber else { continue }
+            var digits = ""
+            var rest = Substring(line)
+            for char in line {
+                if char.isNumber {
+                    digits.append(char)
+                    rest = rest.dropFirst()
+                } else {
+                    break
+                }
+            }
+            guard let number = Int(digits) else { continue }
+            let separators: Set<Character> = [":", "：", ".", "、", ")", "）", " ", "\t", "-"]
+            while let head = rest.first, separators.contains(head) {
+                rest = rest.dropFirst()
+            }
+            let name = rest.trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty else { continue }
+            result[number] = name
+        }
+        return result
+    }
+
     func addSummonResult(text: String, source: String) {
         // Draft reply detection: if messaging app + <draft_reply> tag → place in input field
         if source == "omakase",
@@ -1445,6 +1486,16 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func appendSummonEntry(text: String, source: String) {
+        if source == "log_scene_naming" {
+            let names = Self.parseSceneNaming(text)
+            for (number, name) in names {
+                let index = number - 1
+                guard index >= 0, index < pendingSceneNamingIDs.count else { continue }
+                logSceneNames[pendingSceneNamingIDs[index]] = name
+            }
+            pendingSceneNamingIDs = []
+            return
+        }
         if source == "log" {
             let entry = NotificationEntry(
                 id: UUID().uuidString, text: text,
