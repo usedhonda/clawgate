@@ -115,6 +115,7 @@ private final class AmbientLogModel: ObservableObject {
     @Published var selectedSceneID: String?
     @Published var selectedDay: Date
     var sceneNames: [String: String] = [:]
+    private var requestedNamingDay: Date?
     private let timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
     private lazy var calendar: Calendar = {
         var cal = Calendar(identifier: .gregorian)
@@ -180,6 +181,19 @@ private final class AmbientLogModel: ObservableObject {
         fmt.timeZone = timeZone
         fmt.dateFormat = "M/d(E)"
         return fmt.string(from: selectedDay)
+    }
+
+    func sceneNamingRequestPayloadIfNeeded() -> [(id: String, timeLabel: String, excerpt: String)]? {
+        guard isTodaySelected, scenes.count >= 2 else { return nil }
+        guard requestedNamingDay != selectedDay else { return nil }
+        requestedNamingDay = selectedDay
+        return scenes.map { scene in
+            let excerpt = scene.segments.prefix(4)
+                .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            return (id: scene.id, timeLabel: scene.timeLabel, excerpt: excerpt)
+        }
     }
 
     func transcriptText() -> String {
@@ -343,6 +357,10 @@ struct AmbientLogPetView: View {
         .onAppear {
             customActions = LogCustomActionStore.load()
             logModel.start()
+            requestSceneNamesIfNeeded()
+        }
+        .onChange(of: logModel.scenes) { _ in
+            requestSceneNamesIfNeeded()
         }
         .onDisappear { logModel.stop() }
     }
@@ -384,7 +402,7 @@ struct AmbientLogPetView: View {
                         }
                         ForEach(logModel.scenes, id: \.id) { scene in
                             sceneChip(
-                                title: logModel.sceneNames[scene.id] ?? scene.timeLabel,
+                                title: model.logSceneNames[scene.id] ?? logModel.sceneNames[scene.id] ?? scene.timeLabel,
                                 selected: logModel.selectedSceneID == scene.id
                             ) {
                                 logModel.selectScene(scene.id)
@@ -679,6 +697,11 @@ struct AmbientLogPetView: View {
         customActions[index] = LogCustomAction(label: label.isEmpty ? "Action \(index + 1)" : label, prompt: prompt)
         LogCustomActionStore.save(customActions)
         editingActionIndex = nil
+    }
+
+    private func requestSceneNamesIfNeeded() {
+        guard let payload = logModel.sceneNamingRequestPayloadIfNeeded() else { return }
+        model.requestSceneNaming(scenes: payload)
     }
 
     private func sendInstruction(_ instruction: String) {
