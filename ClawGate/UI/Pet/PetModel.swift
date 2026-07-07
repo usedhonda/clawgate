@@ -113,6 +113,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var notificationHistory: [NotificationEntry] = []
     @Published var summonResults: [NotificationEntry] = []
     @Published var logReplies: [NotificationEntry] = []
+    @Published var logThreadPaneOpen: Bool = false
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
 

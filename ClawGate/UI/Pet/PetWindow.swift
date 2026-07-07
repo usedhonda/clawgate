@@ -147,8 +147,10 @@ private final class PetContentView: NSView {
     private var clipboardObservation: AnyCancellable?
     private var screenshotObservation: AnyCancellable?
     private var chatObservation: AnyCancellable?
+    private var logThreadObservation: AnyCancellable?
     private var summonObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
+    private var chatBaseWidth: CGFloat?
     private var summonMenuGlobalMonitor: Any?
     private var bubbleLocalMonitor: Any?
     private var bubbleGlobalMonitor: Any?
@@ -211,6 +213,12 @@ private final class PetContentView: NSView {
                 } else {
                     self.hideChatWindow()
                 }
+            }
+        }
+
+        logThreadObservation = model.$logThreadPaneOpen.sink { [weak self] open in
+            DispatchQueue.main.async {
+                self?.setLogThreadPaneOpen(open)
             }
         }
 
@@ -633,6 +641,22 @@ private final class PetContentView: NSView {
         refreshPetPanelDismissMonitor()
     }
 
+    private func setLogThreadPaneOpen(_ open: Bool) {
+        guard let cw = chatWindow, let parentWindow = window else { return }
+        if open {
+            let baseWidth = chatBaseWidth ?? cw.frame.width
+            chatBaseWidth = baseWidth
+            var frame = cw.frame
+            frame.size.width = baseWidth + 360
+            cw.setFrame(clampedChatFrame(frame, relativeTo: parentWindow), display: true)
+        } else if let baseWidth = chatBaseWidth {
+            var frame = cw.frame
+            frame.size.width = baseWidth
+            cw.setFrame(clampedChatFrame(frame, relativeTo: parentWindow), display: true)
+            chatBaseWidth = nil
+        }
+    }
+
     private func refreshPetPanelDismissMonitor() {
         let wantsMonitor = notificationWindow != nil || chatWindow != nil
         if wantsMonitor {
@@ -698,7 +722,16 @@ private final class PetContentView: NSView {
 
     private func hideChatWindow() {
         if let cw = chatWindow {
-            UserDefaults.standard.set(NSStringFromRect(cw.frame), forKey: petChatWindowFrameKey)
+            var frameToSave = cw.frame
+            if model.logThreadPaneOpen, let baseWidth = chatBaseWidth {
+                frameToSave.size.width = baseWidth
+                if let parentWindow = window {
+                    frameToSave = clampedChatFrame(frameToSave, relativeTo: parentWindow)
+                }
+            }
+            UserDefaults.standard.set(NSStringFromRect(frameToSave), forKey: petChatWindowFrameKey)
+            model.logThreadPaneOpen = false
+            chatBaseWidth = nil
             cw.orderOut(nil)
             chatWindow = nil
         }
