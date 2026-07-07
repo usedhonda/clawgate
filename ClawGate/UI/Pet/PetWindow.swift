@@ -2,6 +2,8 @@ import AppKit
 import Combine
 import SwiftUI
 
+private let petChatWindowFrameKey = "PetChatWindowFrame"
+
 /// Transparent always-on-top window for the pet character
 final class PetWindowController {
     private var window: NSWindow?
@@ -591,10 +593,10 @@ private final class PetContentView: NSView {
         guard chatWindow == nil, let parentWindow = window else { return }
         let chatView = PetChatContainerView(model: model)
         let hosting = NSHostingView(rootView: AnyView(chatView))
-        hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 480)
+        hosting.frame = NSRect(x: 0, y: 0, width: 480, height: 640)
 
         let bw = KeyableWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 480),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
             styleMask: [.resizable, .fullSizeContentView, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -608,13 +610,23 @@ private final class PetContentView: NSView {
         bw.isMovableByWindowBackground = true
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
-        bw.minSize = NSSize(width: 280, height: 300)
+        bw.minSize = NSSize(width: 360, height: 420)
 
         let parentFrame = parentWindow.frame
-        bw.setFrameOrigin(NSPoint(
-            x: parentFrame.midX - 180,
-            y: parentFrame.maxY + 8
-        ))
+        var restoredFrame = false
+        if let savedFrameString = UserDefaults.standard.string(forKey: petChatWindowFrameKey) {
+            let savedFrame = NSRectFromString(savedFrameString)
+            if savedFrame.width > 0, savedFrame.height > 0 {
+                bw.setFrame(clampedChatFrame(savedFrame, relativeTo: parentWindow), display: false)
+                restoredFrame = true
+            }
+        }
+        if !restoredFrame {
+            bw.setFrameOrigin(NSPoint(
+                x: parentFrame.midX - 240,
+                y: parentFrame.maxY + 8
+            ))
+        }
 
         bw.makeKeyAndOrderFront(nil)
         chatWindow = bw
@@ -673,9 +685,6 @@ private final class PetContentView: NSView {
         model.dismissNotification()
         model.pendingClipboardOffer = nil
         model.dismissScreenshotOffer()
-        if model.stateMachine.isChatOpen {
-            model.toggleChat()
-        }
     }
 
     private func hideNotificationBubble() {
@@ -689,10 +698,23 @@ private final class PetContentView: NSView {
 
     private func hideChatWindow() {
         if let cw = chatWindow {
+            UserDefaults.standard.set(NSStringFromRect(cw.frame), forKey: petChatWindowFrameKey)
             cw.orderOut(nil)
             chatWindow = nil
         }
         refreshPetPanelDismissMonitor()
+    }
+
+    private func clampedChatFrame(_ frame: NSRect, relativeTo parentWindow: NSWindow) -> NSRect {
+        guard let visibleFrame = (NSScreen.screens.first { $0.visibleFrame.intersects(frame) } ?? parentWindow.screen ?? NSScreen.main)?.visibleFrame else {
+            return frame
+        }
+        var clamped = frame
+        let maxX = max(visibleFrame.minX, visibleFrame.maxX - frame.width)
+        let maxY = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
+        clamped.origin.x = min(max(frame.minX, visibleFrame.minX), maxX)
+        clamped.origin.y = min(max(frame.minY, visibleFrame.minY), maxY)
+        return clamped
     }
 
     // MARK: - Whisper Window (Layer 1)
