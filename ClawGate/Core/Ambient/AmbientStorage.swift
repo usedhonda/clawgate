@@ -10,6 +10,17 @@ import Foundation
 //     bin/whisper-cli
 //     models/ggml-large-v3-turbo.bin
 enum AmbientStorage {
+    private struct LatestSessionSegmentsCache {
+        let rawPath: String
+        let limit: Int
+        let modificationDate: Date?
+        let fileSize: UInt64
+        let sessionID: String
+        let segments: [TranscriptSegment]
+    }
+
+    private static var latestSessionSegmentsCache: LatestSessionSegmentsCache?
+
     static var appSupportRoot: URL {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -98,6 +109,16 @@ enum AmbientStorage {
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
         guard let latest = sessionDirs.last else { return ("", []) }
         let raw = latest.appendingPathComponent("transcripts/raw.jsonl")
+        let attrs = try? fm.attributesOfItem(atPath: raw.path)
+        let fileSize = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+        let modDate = attrs?[.modificationDate] as? Date
+        if let cached = latestSessionSegmentsCache,
+           cached.rawPath == raw.path,
+           cached.limit == limit,
+           cached.modificationDate == modDate,
+           cached.fileSize == fileSize {
+            return (cached.sessionID, cached.segments)
+        }
         guard let data = try? Data(contentsOf: raw),
               let text = String(data: data, encoding: .utf8) else {
             return (latest.lastPathComponent, [])
@@ -111,6 +132,14 @@ enum AmbientStorage {
             }
         }
         if segs.count > limit { segs = Array(segs.suffix(limit)) }
+        latestSessionSegmentsCache = LatestSessionSegmentsCache(
+            rawPath: raw.path,
+            limit: limit,
+            modificationDate: modDate,
+            fileSize: fileSize,
+            sessionID: latest.lastPathComponent,
+            segments: segs
+        )
         return (latest.lastPathComponent, segs)
     }
 
