@@ -235,7 +235,7 @@ private final class AmbientLogModel: ObservableObject {
     @Published private(set) var cachedTranscript: AttributedString
     @Published private(set) var fontSize: CGFloat
     @Published var scenes: [AmbientLogGrouping.Scene] = []
-    @Published var selectedSceneID: String?
+    @Published var selectedSceneIDs: Set<String> = []
     @Published var selectedDay: Date
     var sceneNames: [String: String] = [:]
     private var requestedNamingDay: Date?
@@ -274,19 +274,32 @@ private final class AmbientLogModel: ObservableObject {
 
     func moveDay(by days: Int) {
         guard let day = calendar.date(byAdding: .day, value: days, to: selectedDay) else { return }
-        selectedSceneID = nil
+        selectedSceneIDs = []
         selectedDay = clampedDay(day)
         load()
     }
 
     func jumpToToday() {
-        selectedSceneID = nil
+        selectedSceneIDs = []
         selectedDay = today
         load()
     }
 
-    func selectScene(_ id: String?) {
-        selectedSceneID = id
+    func selectAllScenes() {
+        selectedSceneIDs = []
+        load()
+    }
+
+    func selectScene(_ id: String, toggling: Bool) {
+        if toggling {
+            if selectedSceneIDs.contains(id) {
+                selectedSceneIDs.remove(id)
+            } else {
+                selectedSceneIDs.insert(id)
+            }
+        } else {
+            selectedSceneIDs = [id]
+        }
         load()
     }
 
@@ -366,9 +379,10 @@ private final class AmbientLogModel: ObservableObject {
         }
         if newScenes != scenes { scenes = newScenes }
         let newBlocks: [AmbientLogGrouping.Block]
-        if let selectedSceneID,
-           let scene = newScenes.first(where: { $0.id == selectedSceneID }) {
-            newBlocks = AmbientLogGrouping.blocks(from: scene.segments, timeZone: timeZone)
+        let selectedScenes = newScenes.filter { selectedSceneIDs.contains($0.id) }
+        if !selectedSceneIDs.isEmpty, !selectedScenes.isEmpty {
+            let selectedSegments = selectedScenes.flatMap(\.segments)
+            newBlocks = AmbientLogGrouping.blocks(from: selectedSegments, timeZone: timeZone)
         } else {
             newBlocks = allBlocks
         }
@@ -563,15 +577,15 @@ struct AmbientLogPetView: View {
             if logModel.scenes.count > 1 {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        sceneChip(title: "全日", selected: logModel.selectedSceneID == nil) {
-                            logModel.selectScene(nil)
+                        sceneChip(title: "全日", selected: logModel.selectedSceneIDs.isEmpty) {
+                            logModel.selectAllScenes()
                         }
                         ForEach(logModel.scenes, id: \.id) { scene in
                             sceneChip(
                                 title: model.logSceneNames[scene.id] ?? logModel.sceneNames[scene.id] ?? scene.timeLabel,
-                                selected: logModel.selectedSceneID == scene.id
+                                selected: logModel.selectedSceneIDs.contains(scene.id)
                             ) {
-                                logModel.selectScene(scene.id)
+                                logModel.selectScene(scene.id, toggling: NSEvent.modifierFlags.contains(.command))
                             }
                         }
                     }
