@@ -26,6 +26,7 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(cfg.federationToken, "")
         XCTAssertEqual(cfg.federationReconnectMaxSeconds, 60)
         XCTAssertNil(cfg.ambientMicDeviceUID)
+        XCTAssertEqual(cfg.ambientLogFontSize, 16)
     }
 
     func testSaveLoadRoundTripForSupportedSettings() {
@@ -39,6 +40,7 @@ final class ConfigStoreTests: XCTestCase {
         cfg.openclawHost = "macmini.example.ts.net"
         cfg.openclawPort = 19000
         cfg.ambientMicDeviceUID = "test-mic-uid"
+        cfg.ambientLogFontSize = 18
 
         store.save(cfg)
         let loaded = store.load()
@@ -51,6 +53,7 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(loaded.openclawHost, "macmini.example.ts.net")
         XCTAssertEqual(loaded.openclawPort, 19000)
         XCTAssertEqual(loaded.ambientMicDeviceUID, "test-mic-uid")
+        XCTAssertEqual(loaded.ambientLogFontSize, 18)
     }
 
     func testSaveClearsLegacyRoleAndFederationKeys() {

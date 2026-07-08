@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 enum NodeRole: String, Codable, CaseIterable {
@@ -45,6 +46,7 @@ struct AppConfig: Codable {
 
     // Ambient
     var ambientMicDeviceUID: String?
+    var ambientLogFontSize: CGFloat
 
     /// Build a composite key for tmuxSessionModes: "cc:project" or "codex:project".
     static func modeKey(sessionType: String, project: String) -> String {
@@ -85,7 +87,8 @@ struct AppConfig: Codable {
         federationURL: "",
         federationToken: "",
         federationReconnectMaxSeconds: 60,
-        ambientMicDeviceUID: nil
+        ambientMicDeviceUID: nil,
+        ambientLogFontSize: 16
     )
 }
 
@@ -122,6 +125,7 @@ final class ConfigStore {
         static let federationReconnectMaxSeconds = "clawgate.federationReconnectMaxSeconds"
         // Ambient
         static let ambientMicDeviceUID = "clawgate.ambientMicDeviceUID"
+        static let ambientLogFontSize = "clawgate.ambientLogFontSize"
         // Legacy: removed token field (still cleaned up on save)
         static let legacyRemoteAccessToken = "clawgate.remoteAccessToken"
         // Legacy keys for migration
@@ -230,6 +234,9 @@ final class ConfigStore {
         if let uid = defaults.string(forKey: Keys.ambientMicDeviceUID), !uid.isEmpty {
             cfg.ambientMicDeviceUID = uid
         }
+        if defaults.object(forKey: Keys.ambientLogFontSize) != nil {
+            cfg.ambientLogFontSize = min(22, max(12, CGFloat(defaults.double(forKey: Keys.ambientLogFontSize))))
+        }
 
         return cfg
     }
@@ -271,6 +278,7 @@ final class ConfigStore {
         } else {
             defaults.removeObject(forKey: Keys.ambientMicDeviceUID)
         }
+        defaults.set(Double(min(22, max(12, cfg.ambientLogFontSize))), forKey: Keys.ambientLogFontSize)
         // Legacy token field — purge so it cannot resurface
         defaults.removeObject(forKey: Keys.legacyRemoteAccessToken)
     }

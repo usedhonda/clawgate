@@ -8,6 +8,8 @@ private let petLogThreadPaneMaxFraction: CGFloat = 0.6
 private let petLogThreadPaneMinPixelWidth: CGFloat = 240
 private let petLogThreadPaneLeftMinWidth: CGFloat = 360
 private let petLogThreadPaneHandleWidth: CGFloat = 8
+private let petLogMinFontSize: CGFloat = 12
+private let petLogMaxFontSize: CGFloat = 22
 
 private func clampedLogThreadPaneFraction(_ fraction: CGFloat) -> CGFloat {
     min(max(fraction, petLogThreadPaneMinFraction), petLogThreadPaneMaxFraction)
@@ -230,7 +232,8 @@ enum AmbientLogGrouping {
 
 private final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
-    @Published private(set) var cachedTranscript: AttributedString = AmbientLogPetView.attributedTranscript([])
+    @Published private(set) var cachedTranscript: AttributedString
+    @Published private(set) var fontSize: CGFloat
     @Published var scenes: [AmbientLogGrouping.Scene] = []
     @Published var selectedSceneID: String?
     @Published var selectedDay: Date
@@ -244,12 +247,17 @@ private final class AmbientLogModel: ObservableObject {
     }()
     private var cachedBlocksByDay: [Date: [AmbientLogGrouping.Block]] = [:]
     private var cachedScenesByDay: [Date: [AmbientLogGrouping.Scene]] = [:]
+    private var cachedTranscriptFontSize: CGFloat
     private var timer: Timer?
 
     init() {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
         selectedDay = cal.startOfDay(for: Date())
+        let size = min(max(ConfigStore().load().ambientLogFontSize, petLogMinFontSize), petLogMaxFontSize)
+        fontSize = size
+        cachedTranscriptFontSize = size
+        cachedTranscript = AmbientLogPetView.attributedTranscript([], fontSize: size)
     }
 
     func start() {
@@ -279,6 +287,16 @@ private final class AmbientLogModel: ObservableObject {
 
     func selectScene(_ id: String?) {
         selectedSceneID = id
+        load()
+    }
+
+    func adjustFontSize(by delta: CGFloat) {
+        let next = clampedFontSize(fontSize + delta)
+        guard next != fontSize else { return }
+        fontSize = next
+        var cfg = ConfigStore().load()
+        cfg.ambientLogFontSize = next
+        ConfigStore().save(cfg)
         load()
     }
 
@@ -354,9 +372,10 @@ private final class AmbientLogModel: ObservableObject {
         } else {
             newBlocks = allBlocks
         }
-        if newBlocks != blocks {
+        if newBlocks != blocks || cachedTranscriptFontSize != fontSize {
             blocks = newBlocks
-            cachedTranscript = AmbientLogPetView.attributedTranscript(newBlocks)
+            cachedTranscript = AmbientLogPetView.attributedTranscript(newBlocks, fontSize: fontSize)
+            cachedTranscriptFontSize = fontSize
         }
     }
 
@@ -371,6 +390,10 @@ private final class AmbientLogModel: ObservableObject {
     private func clampedDay(_ day: Date) -> Date {
         let start = calendar.startOfDay(for: day)
         return min(max(start, earliestDay), today)
+    }
+
+    private func clampedFontSize(_ size: CGFloat) -> CGFloat {
+        min(max(size, petLogMinFontSize), petLogMaxFontSize)
     }
 }
 
@@ -432,8 +455,9 @@ struct AmbientLogPetView: View {
     /// to a single Text view — per-block Texts made it impossible to select
     /// across utterances for copy-paste. Heads ("11:02 ご主人様") stay styled
     /// and are included in the copied text, which reads like a transcript.
-    static func attributedTranscript(_ blocks: [AmbientLogGrouping.Block]) -> AttributedString {
+    static func attributedTranscript(_ blocks: [AmbientLogGrouping.Block], fontSize: CGFloat = 16) -> AttributedString {
         var out = AttributedString()
+        let headerSize = fontSize * 0.75
         for (i, block) in blocks.enumerated() {
             if i > 0 { out += AttributedString("\n\n") }
             var headText = block.timeLabel ?? ""
@@ -442,12 +466,12 @@ struct AmbientLogPetView: View {
             }
             if !headText.isEmpty {
                 var head = AttributedString(headText + "\n")
-                head.font = .system(size: 10, weight: .bold).monospacedDigit()
+                head.font = .system(size: headerSize, weight: .bold).monospacedDigit()
                 head.foregroundColor = speakerColor(block.speaker)
                 out += head
             }
             var body = AttributedString(block.text)
-            body.font = .system(size: 13)
+            body.font = .system(size: fontSize)
             body.foregroundColor = .white.opacity(0.85)
             out += body
         }
@@ -519,6 +543,16 @@ struct AmbientLogPetView: View {
                 .foregroundColor(logModel.isTodaySelected ? .white.opacity(0.3) : Color(red: 0.55, green: 0.78, blue: 1.0))
                 .disabled(logModel.isTodaySelected)
             Spacer()
+            Button("A-") { logModel.adjustFontSize(by: -1) }
+                .buttonStyle(PetPressableButtonStyle())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(logModel.fontSize <= petLogMinFontSize ? .white.opacity(0.25) : .white.opacity(0.75))
+                .disabled(logModel.fontSize <= petLogMinFontSize)
+            Button("A+") { logModel.adjustFontSize(by: 1) }
+                .buttonStyle(PetPressableButtonStyle())
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(logModel.fontSize >= petLogMaxFontSize ? .white.opacity(0.25) : .white.opacity(0.75))
+                .disabled(logModel.fontSize >= petLogMaxFontSize)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
