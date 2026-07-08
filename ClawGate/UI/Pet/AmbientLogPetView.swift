@@ -200,6 +200,7 @@ enum AmbientLogGrouping {
 
 private final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
+    @Published private(set) var cachedTranscript: AttributedString = AmbientLogPetView.attributedTranscript([])
     @Published var scenes: [AmbientLogGrouping.Scene] = []
     @Published var selectedSceneID: String?
     @Published var selectedDay: Date
@@ -322,7 +323,10 @@ private final class AmbientLogModel: ObservableObject {
         } else {
             newBlocks = allBlocks
         }
-        if newBlocks != blocks { blocks = newBlocks }
+        if newBlocks != blocks {
+            blocks = newBlocks
+            cachedTranscript = AmbientLogPetView.attributedTranscript(newBlocks)
+        }
     }
 
     private var today: Date {
@@ -548,7 +552,7 @@ struct AmbientLogPetView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(Self.attributedTranscript(logModel.blocks))
+                    Text(logModel.cachedTranscript)
                         .lineSpacing(3)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
