@@ -10,16 +10,14 @@ import Foundation
 //     bin/whisper-cli
 //     models/ggml-large-v3-turbo.bin
 enum AmbientStorage {
-    private struct LatestSessionSegmentsCache {
+    private struct SessionSegmentsCache {
         let rawPath: String
-        let limit: Int
         let modificationDate: Date?
         let fileSize: UInt64
-        let sessionID: String
         let segments: [TranscriptSegment]
     }
 
-    private static var latestSessionSegmentsCache: LatestSessionSegmentsCache?
+    private static var sessionSegmentsCache: [String: SessionSegmentsCache] = [:]
 
     static var appSupportRoot: URL {
         FileManager.default
@@ -97,52 +95,6 @@ enum AmbientStorage {
         sessionsRoot.appendingPathComponent(sessionID, isDirectory: true)
     }
 
-    /// The most recent session's kept transcript segments (chronological), for
-    /// the Conversation Log UI. Returns (sessionID, segments capped at limit).
-    static func latestSessionSegments(limit: Int) -> (String, [TranscriptSegment]) {
-        let fm = FileManager.default
-        guard let dirs = try? fm.contentsOfDirectory(at: sessionsRoot, includingPropertiesForKeys: nil) else {
-            return ("", [])
-        }
-        let sessionDirs = dirs
-            .filter { $0.lastPathComponent.hasPrefix("ctx-") }
-            .sorted { $0.lastPathComponent < $1.lastPathComponent }
-        guard let latest = sessionDirs.last else { return ("", []) }
-        let raw = latest.appendingPathComponent("transcripts/raw.jsonl")
-        let attrs = try? fm.attributesOfItem(atPath: raw.path)
-        let fileSize = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
-        let modDate = attrs?[.modificationDate] as? Date
-        if let cached = latestSessionSegmentsCache,
-           cached.rawPath == raw.path,
-           cached.limit == limit,
-           cached.modificationDate == modDate,
-           cached.fileSize == fileSize {
-            return (cached.sessionID, cached.segments)
-        }
-        guard let data = try? Data(contentsOf: raw),
-              let text = String(data: data, encoding: .utf8) else {
-            return (latest.lastPathComponent, [])
-        }
-        let decoder = JSONDecoder()
-        var segs: [TranscriptSegment] = []
-        for line in text.split(separator: "\n") {
-            if let d = line.data(using: .utf8),
-               let seg = try? decoder.decode(TranscriptSegment.self, from: d) {
-                segs.append(seg)
-            }
-        }
-        if segs.count > limit { segs = Array(segs.suffix(limit)) }
-        latestSessionSegmentsCache = LatestSessionSegmentsCache(
-            rawPath: raw.path,
-            limit: limit,
-            modificationDate: modDate,
-            fileSize: fileSize,
-            sessionID: latest.lastPathComponent,
-            segments: segs
-        )
-        return (latest.lastPathComponent, segs)
-    }
-
     /// All kept transcript segments captured on the given local calendar day,
     /// merged across every session and sorted by capture time. Sessions live
     /// until app restart, so one session can straddle midnight — the day is
@@ -171,18 +123,38 @@ enum AmbientStorage {
         var out: [TranscriptSegment] = []
         for dir in dirs where dir.lastPathComponent.hasPrefix("ctx-") {
             let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
+            let attrs = try? fm.attributesOfItem(atPath: raw.path)
+            let fileSize = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+            let mod = attrs?[.modificationDate] as? Date
             // Skip sessions whose transcript was last written before this day
             // started: they cannot hold segments from it. A session that crossed
             // midnight keeps a newer mod time, so it is still read (safe side).
-            let mod = (try? raw.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate
             if let mod, mod < dayStart { continue }
-            guard let data = try? Data(contentsOf: raw),
-                  let text = String(data: data, encoding: .utf8) else { continue }
-            for line in text.split(separator: "\n") {
-                guard let d = line.data(using: .utf8),
-                      let seg = try? decoder.decode(TranscriptSegment.self, from: d),
-                      let at = seg.capturedAt else { continue }
+            let decoded: [TranscriptSegment]
+            if let cached = sessionSegmentsCache[raw.path],
+               cached.rawPath == raw.path,
+               cached.modificationDate == mod,
+               cached.fileSize == fileSize {
+                decoded = cached.segments
+            } else {
+                guard let data = try? Data(contentsOf: raw),
+                      let text = String(data: data, encoding: .utf8) else { continue }
+                var segs: [TranscriptSegment] = []
+                for line in text.split(separator: "\n") {
+                    guard let d = line.data(using: .utf8),
+                          let seg = try? decoder.decode(TranscriptSegment.self, from: d) else { continue }
+                    segs.append(seg)
+                }
+                sessionSegmentsCache[raw.path] = SessionSegmentsCache(
+                    rawPath: raw.path,
+                    modificationDate: mod,
+                    fileSize: fileSize,
+                    segments: segs
+                )
+                decoded = segs
+            }
+            for seg in decoded {
+                guard let at = seg.capturedAt else { continue }
                 if at >= startEpoch && at < endEpoch {
                     out.append(seg)
                 }

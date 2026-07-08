@@ -332,7 +332,8 @@ private final class AmbientLogModel: ObservableObject {
         let allBlocks: [AmbientLogGrouping.Block]
         let newScenes: [AmbientLogGrouping.Scene]
         if day == today {
-            let (_, segs) = AmbientStorage.latestSessionSegments(limit: 2000)
+            var segs = AmbientStorage.segments(forDay: day, timeZone: timeZone)
+            if segs.count > 2000 { segs = Array(segs.suffix(2000)) }
             newScenes = AmbientLogGrouping.scenes(from: segs, timeZone: timeZone)
             allBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
         } else if let cached = cachedBlocksByDay[day] {
