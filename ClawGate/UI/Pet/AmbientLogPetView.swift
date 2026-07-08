@@ -89,6 +89,36 @@ private final class PaneResizeHandleNSView: NSView {
     }
 }
 
+private struct ThreadPaneResizeHandleChrome: View {
+    var onDrag: (CGFloat) -> Void
+    var onEnd: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color.white.opacity(isHovering ? 0.08 : 0.001))
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            Rectangle()
+                .fill(Color.white.opacity(isHovering ? 0.28 : 0.12))
+                .frame(width: 1)
+                .frame(maxHeight: .infinity)
+            VStack(spacing: 3) {
+                ForEach(0..<3, id: \.self) { _ in
+                    Circle()
+                        .fill(Color.white.opacity(isHovering ? 0.55 : 0.35))
+                        .frame(width: 2, height: 2)
+                }
+            }
+            PaneResizeHandleView(onDrag: onDrag, onEnd: onEnd)
+                .frame(width: petLogThreadPaneHandleWidth)
+        }
+        .frame(width: petLogThreadPaneHandleWidth)
+        .frame(maxHeight: .infinity)
+        .onHover { isHovering = $0 }
+    }
+}
+
 /// Groups raw whisper segments into readable conversation blocks: segments
 /// whose absolute times are close (< gap) and share a speaker merge into one
 /// paragraph headed by the wall-clock time of its first utterance. A speaker
@@ -380,7 +410,6 @@ struct AmbientLogPetView: View {
     @State private var draftCustomPrompt = ""
     @State private var threadPaneFraction: CGFloat = petLogThreadPaneDefaultFraction
     @State private var threadPaneDragStartFraction: CGFloat?
-    @State private var threadPaneHandleHover = false
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -645,35 +674,15 @@ struct AmbientLogPetView: View {
     }
 
     private func threadPaneResizeHandle(totalWidth: CGFloat) -> some View {
-        ZStack {
-            Rectangle()
-                .fill(Color.white.opacity(threadPaneHandleHover ? 0.08 : 0.001))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Rectangle()
-                .fill(Color.white.opacity(threadPaneHandleHover ? 0.28 : 0.12))
-                .frame(width: 1)
-                .frame(maxHeight: .infinity)
-            VStack(spacing: 3) {
-                ForEach(0..<3, id: \.self) { _ in
-                    Circle()
-                        .fill(Color.white.opacity(threadPaneHandleHover ? 0.55 : 0.35))
-                        .frame(width: 2, height: 2)
-                }
+        ThreadPaneResizeHandleChrome(
+            onDrag: { translationX in
+                updateThreadPaneFraction(translationX: translationX, totalWidth: totalWidth)
+            },
+            onEnd: {
+                saveLogThreadPaneFraction(threadPaneFraction)
+                threadPaneDragStartFraction = nil
             }
-            PaneResizeHandleView(
-                onDrag: { translationX in
-                    updateThreadPaneFraction(translationX: translationX, totalWidth: totalWidth)
-                },
-                onEnd: {
-                    saveLogThreadPaneFraction(threadPaneFraction)
-                    threadPaneDragStartFraction = nil
-                }
-            )
-            .frame(width: petLogThreadPaneHandleWidth)
-        }
-        .frame(width: petLogThreadPaneHandleWidth)
-        .frame(maxHeight: .infinity)
-        .onHover { threadPaneHandleHover = $0 }
+        )
     }
 
     private func threadPaneWidth(totalWidth: CGFloat) -> CGFloat {
