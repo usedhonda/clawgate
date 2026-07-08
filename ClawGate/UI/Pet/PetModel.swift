@@ -1428,7 +1428,7 @@ final class PetModel: NSObject, ObservableObject {
         guard !scenes.isEmpty else { return }
         guard pendingSceneNamingIDs.isEmpty else { return }
         pendingSceneNamingIDs = scenes.map { $0.id }
-        var prompt = "今日の会話ログは以下のシーンに分かれている。私のカレンダーの予定と照合して、各シーンに短い名前を付けて。出力は各行 \"番号: 名前\" のみ（説明文なし）。"
+        var prompt = "今日の会話ログは以下のシーンに分かれている。私個人のカレンダーの予定だけを使って（他の人のカレンダーや共有カレンダーは参照しないで）、各シーンに短い名前を付けて。出力は各行 \"番号: 名前\" のみ（説明文なし）。"
         for (index, scene) in scenes.enumerated() {
             let excerpt = String(scene.excerpt.prefix(200))
             prompt += "\n\(index + 1). [\(scene.timeLabel)] 抜粋: \(excerpt)"
