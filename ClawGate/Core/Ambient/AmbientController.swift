@@ -83,6 +83,7 @@ final class AmbientController {
         self.capture.onChunkReady = { [weak self] url, rms, startedAt in
             self?.handleChunk(url, rms: rms, startedAt: startedAt)
         }
+        self.capture.setPreferredDevice(uid: configStore.load().ambientMicDeviceUID)
     }
 
     /// The feature exists only on the client (host that points at a remote Gateway).
@@ -174,6 +175,21 @@ final class AmbientController {
     /// "capturing") so the detect→recover loop can be verified on demand.
     func simulateWedge() {
         state.sync { self.capture.simulateWedge() }
+    }
+
+    func availableMicDevices() -> [MicrophoneDeviceService.MicrophoneDevice] {
+        MicrophoneDeviceService.listInputDevices()
+    }
+
+    var selectedMicDeviceUID: String? {
+        configStore.load().ambientMicDeviceUID
+    }
+
+    func selectMicDevice(uid: String?) {
+        var cfg = configStore.load()
+        cfg.ambientMicDeviceUID = uid
+        configStore.save(cfg)
+        capture.setPreferredDevice(uid: uid)
     }
 
     // MARK: - Auto-resume across restarts

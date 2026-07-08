@@ -43,6 +43,9 @@ struct AppConfig: Codable {
     var federationToken: String
     var federationReconnectMaxSeconds: Int
 
+    // Ambient
+    var ambientMicDeviceUID: String?
+
     /// Build a composite key for tmuxSessionModes: "cc:project" or "codex:project".
     static func modeKey(sessionType: String, project: String) -> String {
         let prefix = sessionType == "codex" ? "codex" : "cc"
@@ -81,7 +84,8 @@ struct AppConfig: Codable {
         federationEnabled: false,
         federationURL: "",
         federationToken: "",
-        federationReconnectMaxSeconds: 60
+        federationReconnectMaxSeconds: 60,
+        ambientMicDeviceUID: nil
     )
 }
 
@@ -116,6 +120,8 @@ final class ConfigStore {
         static let federationURL = "clawgate.federationURL"
         static let federationToken = "clawgate.federationToken"
         static let federationReconnectMaxSeconds = "clawgate.federationReconnectMaxSeconds"
+        // Ambient
+        static let ambientMicDeviceUID = "clawgate.ambientMicDeviceUID"
         // Legacy: removed token field (still cleaned up on save)
         static let legacyRemoteAccessToken = "clawgate.remoteAccessToken"
         // Legacy keys for migration
@@ -221,6 +227,10 @@ final class ConfigStore {
             cfg.federationReconnectMaxSeconds = min(300, max(5, defaults.integer(forKey: Keys.federationReconnectMaxSeconds)))
         }
 
+        if let uid = defaults.string(forKey: Keys.ambientMicDeviceUID), !uid.isEmpty {
+            cfg.ambientMicDeviceUID = uid
+        }
+
         return cfg
     }
 
@@ -256,6 +266,11 @@ final class ConfigStore {
         defaults.removeObject(forKey: Keys.federationURL)
         defaults.removeObject(forKey: Keys.federationToken)
         defaults.removeObject(forKey: Keys.federationReconnectMaxSeconds)
+        if let uid = cfg.ambientMicDeviceUID, !uid.isEmpty {
+            defaults.set(uid, forKey: Keys.ambientMicDeviceUID)
+        } else {
+            defaults.removeObject(forKey: Keys.ambientMicDeviceUID)
+        }
         // Legacy token field — purge so it cannot resurface
         defaults.removeObject(forKey: Keys.legacyRemoteAccessToken)
     }

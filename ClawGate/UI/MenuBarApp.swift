@@ -134,6 +134,23 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 menu.addItem(withTitle: "⚪️ Start Recording", action: #selector(ambientStartStream), keyEquivalent: "")
             }
             menu.addItem(NSMenuItem.separator())
+            let microphoneItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+            let microphoneMenu = NSMenu()
+            let selectedUID = ambient.selectedMicDeviceUID
+            let defaultItem = NSMenuItem(title: "System Default", action: #selector(ambientSelectMicrophone(_:)), keyEquivalent: "")
+            defaultItem.target = self
+            defaultItem.state = selectedUID == nil ? .on : .off
+            microphoneMenu.addItem(defaultItem)
+            for device in ambient.availableMicDevices() {
+                let item = NSMenuItem(title: device.name, action: #selector(ambientSelectMicrophone(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = device.uid
+                item.state = selectedUID == device.uid ? .on : .off
+                microphoneMenu.addItem(item)
+            }
+            microphoneItem.submenu = microphoneMenu
+            menu.addItem(microphoneItem)
+            menu.addItem(NSMenuItem.separator())
         }
 
         menu.addItem(withTitle: "Quit ClawGate", action: #selector(quit), keyEquivalent: "q")
@@ -156,6 +173,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc private func ambientStopStream() { runtime.ambient()?.stopStream() }
 
     @objc private func ambientPauseCapture() { runtime.ambient()?.pauseCapture() }
+
+    @objc private func ambientSelectMicrophone(_ sender: NSMenuItem) {
+        runtime.ambient()?.selectMicDevice(uid: sender.representedObject as? String)
+    }
 
     @objc private func ambientResumeCapture() {
         runtime.ambient()?.resumeCapture { [weak self] result in

@@ -25,6 +25,7 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(cfg.federationURL, "")
         XCTAssertEqual(cfg.federationToken, "")
         XCTAssertEqual(cfg.federationReconnectMaxSeconds, 60)
+        XCTAssertNil(cfg.ambientMicDeviceUID)
     }
 
     func testSaveLoadRoundTripForSupportedSettings() {
@@ -37,6 +38,7 @@ final class ConfigStoreTests: XCTestCase {
         cfg.tmuxSessionModes = ["cc:project-a": "autonomous", "cc:project-b": "observe"]
         cfg.openclawHost = "macmini.example.ts.net"
         cfg.openclawPort = 19000
+        cfg.ambientMicDeviceUID = "test-mic-uid"
 
         store.save(cfg)
         let loaded = store.load()
@@ -48,6 +50,7 @@ final class ConfigStoreTests: XCTestCase {
         XCTAssertEqual(loaded.tmuxSessionModes["cc:project-b"], "observe")
         XCTAssertEqual(loaded.openclawHost, "macmini.example.ts.net")
         XCTAssertEqual(loaded.openclawPort, 19000)
+        XCTAssertEqual(loaded.ambientMicDeviceUID, "test-mic-uid")
     }
 
     func testSaveClearsLegacyRoleAndFederationKeys() {

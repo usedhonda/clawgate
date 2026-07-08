@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AudioToolbox
 
 /// Captures microphone audio into rolling 16 kHz mono WAV chunks suitable for
 /// whisper.cpp. Capture is independently controllable (start/pause/resume/stop)
@@ -57,6 +58,8 @@ final class AmbientCaptureManager {
     private var _recoveryCount = 0
     private var _lastRecoveryAt: Date?
     private var _lastRecoveryReason: String?
+    private var preferredDeviceUID: String?
+    private let resolveAudioDeviceID: (String) -> AudioDeviceID?
 
     /// Snapshot of capture liveness for /v1/ambient/status, the doctor check,
     /// and the in-app health monitor.
@@ -112,10 +115,12 @@ final class AmbientCaptureManager {
     init(chunkSeconds: Int = 30,
          overlapSeconds: Int = 3,
          retentionSeconds: TimeInterval = 6 * 3600,
+         resolveAudioDeviceID: @escaping (String) -> AudioDeviceID? = MicrophoneDeviceService.resolveAudioDeviceID,
          log: @escaping (String) -> Void = { _ in }) {
         self.chunkSeconds = max(5, chunkSeconds)
         self.overlapFrames = max(0, overlapSeconds) * 16_000
         self.retentionSeconds = retentionSeconds
+        self.resolveAudioDeviceID = resolveAudioDeviceID
         self.log = log
         self.recordFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -210,6 +215,23 @@ final class AmbientCaptureManager {
         }
     }
 
+    func setPreferredDevice(uid: String?) {
+        lock.lock(); defer { lock.unlock() }
+        preferredDeviceUID = uid
+        guard state == .capturing else { return }
+        log("ambient capture mic device changed")
+        teardownEngineLocked(finalize: true)
+        engine = AVAudioEngine()
+        do {
+            try beginEngineLocked()
+            recordRecovery(reason: "device changed")
+            log("ambient capture mic device applied")
+        } catch {
+            recordRecovery(reason: "device changed (FAILED: \(error.localizedDescription))")
+            log("ambient capture mic device apply FAILED: \(error)")
+        }
+    }
+
     /// TEST ONLY: simulate the wedge by tearing down the engine/tap WITHOUT
     /// changing `state`, exactly reproducing the observed failure (taps stop,
     /// captureState still reports "capturing"). Lets the detect→recover loop be
@@ -234,6 +256,7 @@ final class AmbientCaptureManager {
 
     private func beginEngineLocked() throws {
         let input = engine.inputNode
+        applyPreferredDeviceLocked(to: input)
         let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0 else {
             throw NSError(domain: "AmbientCapture", code: 1,
@@ -251,6 +274,42 @@ final class AmbientCaptureManager {
         }
         engine.prepare()
         try engine.start()
+    }
+
+    static func resolvePreferredDeviceIDForCapture(
+        uid: String?,
+        resolver: (String) -> AudioDeviceID?,
+        log: (String) -> Void
+    ) -> AudioDeviceID? {
+        guard let uid, !uid.isEmpty else { return nil }
+        guard let deviceID = resolver(uid) else {
+            log("ambient capture selected mic not found; using system default")
+            return nil
+        }
+        return deviceID
+    }
+
+    private func applyPreferredDeviceLocked(to input: AVAudioInputNode) {
+        guard var deviceID = Self.resolvePreferredDeviceIDForCapture(
+            uid: preferredDeviceUID,
+            resolver: resolveAudioDeviceID,
+            log: log
+        ) else { return }
+        guard let audioUnit = input.audioUnit else {
+            log("ambient capture input audio unit unavailable; using system default")
+            return
+        }
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        if status != noErr {
+            log("ambient capture selected mic apply failed status=\(status); using system default")
+        }
     }
 
     private func teardownEngineLocked(finalize: Bool) {
