@@ -398,10 +398,10 @@ private final class AmbientLogModel: ObservableObject {
         return fmt.string(from: selectedDay)
     }
 
-    func sceneNamingRequestPayloadIfNeeded() -> [(id: String, timeLabel: String, excerpt: String)]? {
+    func sceneNamingRequestPayloadIfNeeded(markRequested: Bool = false) -> [(id: String, timeLabel: String, excerpt: String)]? {
         guard isTodaySelected, scenes.count >= 2 else { return nil }
         guard requestedNamingDay != selectedDay else { return nil }
-        requestedNamingDay = selectedDay
+        if markRequested { requestedNamingDay = selectedDay }
         return scenes.map { scene in
             let excerpt = scene.segments.prefix(4)
                 .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -518,6 +518,7 @@ struct AmbientLogPetView: View {
     @State private var draftCustomPrompt = ""
     @State private var threadPaneFraction: CGFloat = petLogThreadPaneDefaultFraction
     @State private var threadPaneDragStartFraction: CGFloat?
+    @State private var sceneNamingWorkItem: DispatchWorkItem?
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -598,20 +599,26 @@ struct AmbientLogPetView: View {
             customActions = LogCustomActionStore.load()
             threadPaneFraction = preferredLogThreadPaneFraction()
             logModel.start()
-            requestSceneNamesIfNeeded()
+            scheduleSceneNamesIfNeeded()
         }
         .onChange(of: logModel.scenes) { _ in
-            requestSceneNamesIfNeeded()
+            scheduleSceneNamesIfNeeded()
         }
         .onChange(of: model.logThreadPaneOpen) { open in
             if open { threadPaneFraction = preferredLogThreadPaneFraction() }
         }
-        .onDisappear { logModel.stop() }
+        .onDisappear {
+            cancelPendingSceneNaming()
+            logModel.stop()
+        }
     }
 
     private var dayNavBar: some View {
         HStack(spacing: 8) {
-            Button("‹") { logModel.moveDay(by: -1) }
+            Button("‹") {
+                cancelPendingSceneNaming()
+                logModel.moveDay(by: -1)
+            }
                 .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(logModel.canMovePrevious ? .white.opacity(0.75) : .white.opacity(0.22))
@@ -620,23 +627,35 @@ struct AmbientLogPetView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundColor(.white.opacity(0.75))
                 .frame(minWidth: 72)
-            Button("›") { logModel.moveDay(by: 1) }
+            Button("›") {
+                cancelPendingSceneNaming()
+                logModel.moveDay(by: 1)
+            }
                 .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundColor(logModel.canMoveNext ? .white.opacity(0.75) : .white.opacity(0.22))
                 .disabled(!logModel.canMoveNext)
-            Button("今日") { logModel.jumpToToday() }
+            Button("今日") {
+                cancelPendingSceneNaming()
+                logModel.jumpToToday()
+            }
                 .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(logModel.isTodaySelected ? .white.opacity(0.3) : Color(red: 0.55, green: 0.78, blue: 1.0))
                 .disabled(logModel.isTodaySelected)
             Spacer()
-            Button("A-") { logModel.adjustFontSize(by: -1) }
+            Button("A-") {
+                cancelPendingSceneNaming()
+                logModel.adjustFontSize(by: -1)
+            }
                 .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(logModel.fontSize <= petLogMinFontSize ? .white.opacity(0.25) : .white.opacity(0.75))
                 .disabled(logModel.fontSize <= petLogMinFontSize)
-            Button("A+") { logModel.adjustFontSize(by: 1) }
+            Button("A+") {
+                cancelPendingSceneNaming()
+                logModel.adjustFontSize(by: 1)
+            }
                 .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(logModel.fontSize >= petLogMaxFontSize ? .white.opacity(0.25) : .white.opacity(0.75))
@@ -652,6 +671,7 @@ struct AmbientLogPetView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         sceneChip(title: "全日", selected: logModel.selectedSceneIDs.isEmpty) {
+                            cancelPendingSceneNaming()
                             logModel.selectAllScenes()
                         }
                         ForEach(logModel.scenes, id: \.id) { scene in
@@ -659,6 +679,7 @@ struct AmbientLogPetView: View {
                                 title: model.logSceneNames[scene.id] ?? logModel.sceneNames[scene.id] ?? scene.timeLabel,
                                 selected: logModel.selectedSceneIDs.contains(scene.id)
                             ) {
+                                cancelPendingSceneNaming()
                                 logModel.selectScene(scene.id, toggling: NSEvent.modifierFlags.contains(.command))
                             }
                         }
@@ -1008,14 +1029,27 @@ struct AmbientLogPetView: View {
         editingActionIndex = nil
     }
 
-    private func requestSceneNamesIfNeeded() {
-        guard let payload = logModel.sceneNamingRequestPayloadIfNeeded() else { return }
-        model.requestSceneNaming(scenes: payload)
+    private func scheduleSceneNamesIfNeeded() {
+        cancelPendingSceneNaming()
+        guard logModel.sceneNamingRequestPayloadIfNeeded() != nil else { return }
+        let workItem = DispatchWorkItem {
+            guard !model.isSummonBusy else { return }
+            guard let payload = logModel.sceneNamingRequestPayloadIfNeeded(markRequested: true) else { return }
+            model.requestSceneNaming(scenes: payload)
+        }
+        sceneNamingWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: workItem)
+    }
+
+    private func cancelPendingSceneNaming() {
+        sceneNamingWorkItem?.cancel()
+        sceneNamingWorkItem = nil
     }
 
     private func sendInstruction(_ instruction: String) {
         let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        cancelPendingSceneNaming()
         model.sendLogInstruction(instruction: trimmed, transcript: logModel.transcriptText())
     }
 

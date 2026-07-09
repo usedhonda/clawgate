@@ -1361,6 +1361,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private var pendingSummonSource: String?
+    var isSummonBusy: Bool { pendingSummonSource != nil }
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
     private var logAwaitingReplyToken: UUID?
@@ -1426,6 +1427,7 @@ final class PetModel: NSObject, ObservableObject {
 
     func requestSceneNaming(scenes: [(id: String, timeLabel: String, excerpt: String)]) {
         guard !scenes.isEmpty else { return }
+        guard !isSummonBusy else { return }
         guard pendingSceneNamingIDs.isEmpty else { return }
         pendingSceneNamingIDs = scenes.map { $0.id }
         var prompt = "今日の会話ログは以下のシーンに分かれている。私個人のカレンダーの予定だけを使って（他の人のカレンダーや共有カレンダーは参照しないで）、各シーンに短い名前を付けて。個人カレンダーに一致する予定が見つからないシーンは、その番号の行を出力しないで（予定なし/不明/該当なし等のプレースホルダーも出力しない）。出力は各行 \"番号: 名前\" のみ（説明文なし）。"
