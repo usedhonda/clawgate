@@ -1428,7 +1428,7 @@ final class PetModel: NSObject, ObservableObject {
         guard !scenes.isEmpty else { return }
         guard pendingSceneNamingIDs.isEmpty else { return }
         pendingSceneNamingIDs = scenes.map { $0.id }
-        var prompt = "今日の会話ログは以下のシーンに分かれている。私個人のカレンダーの予定だけを使って（他の人のカレンダーや共有カレンダーは参照しないで）、各シーンに短い名前を付けて。出力は各行 \"番号: 名前\" のみ（説明文なし）。"
+        var prompt = "今日の会話ログは以下のシーンに分かれている。私個人のカレンダーの予定だけを使って（他の人のカレンダーや共有カレンダーは参照しないで）、各シーンに短い名前を付けて。個人カレンダーに一致する予定が見つからないシーンは、その番号の行を出力しないで（予定なし/不明/該当なし等のプレースホルダーも出力しない）。出力は各行 \"番号: 名前\" のみ（説明文なし）。"
         for (index, scene) in scenes.enumerated() {
             let excerpt = String(scene.excerpt.prefix(200))
             prompt += "\n\(index + 1). [\(scene.timeLabel)] 抜粋: \(excerpt)"
@@ -1457,10 +1457,25 @@ final class PetModel: NSObject, ObservableObject {
                 rest = rest.dropFirst()
             }
             let name = rest.trimmingCharacters(in: .whitespaces)
-            guard !name.isEmpty else { continue }
+            guard !name.isEmpty, !isNegativeSceneNamingPlaceholder(name) else { continue }
             result[number] = name
         }
         return result
+    }
+
+    private static func isNegativeSceneNamingPlaceholder(_ name: String) -> Bool {
+        let normalized = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "　", with: "")
+        let placeholders: Set<String> = [
+            "なし", "無し", "予定なし", "予定無し", "該当なし", "該当無し",
+            "該当予定なし", "該当予定無し", "予定該当なし", "予定該当無し",
+            "カレンダー予定なし", "カレンダー予定無し", "個人予定なし", "個人予定無し",
+            "不明", "未定", "n/a", "na", "none", "unknown", "-", "—", "–",
+        ]
+        return placeholders.contains(normalized)
     }
 
     func addSummonResult(text: String, source: String) {

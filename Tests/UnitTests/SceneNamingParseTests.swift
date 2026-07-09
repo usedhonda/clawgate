@@ -33,4 +33,9 @@ final class SceneNamingParseTests: XCTestCase {
     func testEmptyNameDropped() {
         XCTAssertEqual(PetModel.parseSceneNaming("1: "), [:])
     }
+
+    func testNegativePlaceholdersAreDropped() {
+        let text = "1: 朝会\n2: 予定なし\n3: 該当なし\n4: unknown\n5: —"
+        XCTAssertEqual(PetModel.parseSceneNaming(text), [1: "朝会"])
+    }
 }
