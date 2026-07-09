@@ -363,6 +363,28 @@ final class AppRuntime {
     }
 }
 
+private func installMainMenu() {
+    let mainMenu = NSMenu()
+
+    let appMenuItem = NSMenuItem()
+    let appMenu = NSMenu(title: "ClawGate")
+    appMenu.addItem(withTitle: "Quit ClawGate", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+    appMenuItem.submenu = appMenu
+    mainMenu.addItem(appMenuItem)
+
+    let editMenuItem = NSMenuItem()
+    let editMenu = NSMenu(title: "Edit")
+    editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    editMenu.addItem(NSMenuItem.separator())
+    editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editMenuItem.submenu = editMenu
+    mainMenu.addItem(editMenuItem)
+
+    NSApp.mainMenu = mainMenu
+}
+
 let app = NSApplication.shared
 
 // Singleton guard: use fcntl F_SETLK to ensure only one ClawGate runs at a time
@@ -401,5 +423,6 @@ let runtime = AppRuntime()
 let delegate = MenuBarAppDelegate(runtime: runtime, statsCollector: runtime.statsCollector, opsLogStore: runtime.opsLogStore)
 runtime.menuBarDelegate = delegate
 app.delegate = delegate
+installMainMenu()
 app.setActivationPolicy(.accessory)
 app.run()
