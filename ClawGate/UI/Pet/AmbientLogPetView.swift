@@ -297,6 +297,9 @@ private final class AmbientLogModel: ObservableObject {
     @Published private(set) var cachedTranscript: NSAttributedString
     @Published private(set) var transcriptRevision = 0
     @Published private(set) var transcriptScrollRevision = 0
+    @Published private(set) var threadTranscript: NSAttributedString
+    @Published private(set) var threadTranscriptRevision = 0
+    @Published private(set) var threadScrollRevision = 0
     @Published private(set) var fontSize: CGFloat
     @Published var scenes: [AmbientLogGrouping.Scene] = []
     @Published var selectedSceneIDs: Set<String> = []
@@ -312,6 +315,7 @@ private final class AmbientLogModel: ObservableObject {
     private var cachedBlocksByDay: [Date: [AmbientLogGrouping.Block]] = [:]
     private var cachedScenesByDay: [Date: [AmbientLogGrouping.Scene]] = [:]
     private var cachedTranscriptFontSize: CGFloat
+    private var cachedThreadSignature = ""
     private var timer: Timer?
 
     init() {
@@ -322,6 +326,7 @@ private final class AmbientLogModel: ObservableObject {
         fontSize = size
         cachedTranscriptFontSize = size
         cachedTranscript = AmbientLogPetView.nsAttributedTranscript([], fontSize: size)
+        threadTranscript = AmbientLogPetView.nsAttributedThreadTranscript([], fontSize: size)
     }
 
     func start() {
@@ -419,6 +424,15 @@ private final class AmbientLogModel: ObservableObject {
             }
             return headText.isEmpty ? block.text : "\(headText)\n\(block.text)"
         }.joined(separator: "\n\n")
+    }
+
+    func updateThreadTranscript(entries: [NotificationEntry]) {
+        let signature = entries.map { "\($0.id):\(Int($0.timestamp.timeIntervalSince1970))" }.joined(separator: "|") + "|\(fontSize)"
+        guard signature != cachedThreadSignature else { return }
+        cachedThreadSignature = signature
+        threadTranscript = AmbientLogPetView.nsAttributedThreadTranscript(entries, fontSize: fontSize)
+        threadTranscriptRevision += 1
+        threadScrollRevision += 1
     }
 
     private func load() {
@@ -589,6 +603,45 @@ struct AmbientLogPetView: View {
             : NSColor.white.withAlphaComponent(0.6)
     }
 
+    static func nsAttributedThreadTranscript(_ entries: [NotificationEntry], fontSize: CGFloat = 16) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let headerSize = fontSize * 0.75
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3
+        paragraph.paragraphSpacing = 10
+        for (i, entry) in entries.enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: "\n")) }
+            let header = "\(threadTimeString(entry.timestamp))  \(threadSpeakerName(entry.source))\n"
+            out.append(NSAttributedString(string: header, attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: headerSize, weight: .bold),
+                .foregroundColor: threadSpeakerNSColor(entry.source),
+                .paragraphStyle: paragraph,
+            ]))
+            out.append(NSAttributedString(string: entry.text, attributes: [
+                .font: NSFont.systemFont(ofSize: fontSize),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.86),
+                .paragraphStyle: paragraph,
+            ]))
+        }
+        return out
+    }
+
+    static func threadSpeakerName(_ source: String) -> String {
+        source == "log_user" ? "ご主人様" : "ちー"
+    }
+
+    static func threadTimeString(_ date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "HH:mm"
+        return fmt.string(from: date)
+    }
+
+    static func threadSpeakerNSColor(_ source: String) -> NSColor {
+        source == "log_user"
+            ? NSColor(calibratedRed: 0.55, green: 0.78, blue: 1.0, alpha: 1)
+            : NSColor(calibratedRed: 1.0, green: 0.82, blue: 0.46, alpha: 1)
+    }
+
     var body: some View {
         GeometryReader { geo in
             HStack(spacing: 0) {
@@ -621,7 +674,14 @@ struct AmbientLogPetView: View {
             customActions = LogCustomActionStore.load()
             threadPaneFraction = preferredLogThreadPaneFraction()
             logModel.start()
+            syncThreadTranscript()
             scheduleSceneNamesIfNeeded()
+        }
+        .onReceive(model.$logReplies) { _ in
+            syncThreadTranscript()
+        }
+        .onChange(of: logModel.fontSize) { _ in
+            syncThreadTranscript()
         }
         .onChange(of: logModel.scenes) { _ in
             scheduleSceneNamesIfNeeded()
@@ -759,6 +819,13 @@ struct AmbientLogPetView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.white.opacity(0.75))
                 Spacer()
+                Button("全文コピー") {
+                    copyThreadTranscript()
+                }
+                .buttonStyle(PetPressableButtonStyle())
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(model.logReplies.isEmpty ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
+                .disabled(model.logReplies.isEmpty)
                 Button {
                     model.logThreadPaneOpen = false
                 } label: {
@@ -786,32 +853,16 @@ struct AmbientLogPetView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 8) {
-                            ForEach(model.logReplies) { entry in
-                                threadBubble(entry)
-                                    .id(entry.id)
-                            }
-                            if model.logAwaitingReply {
-                                awaitingReplyBubble
-                                    .id("log-awaiting-reply")
-                            }
-                        }
-                        .padding(12)
-                    }
-                    .onChange(of: model.logReplies.count) { _ in
-                        scrollThreadToBottom(proxy)
-                    }
-                    .onChange(of: model.logAwaitingReply) { _ in
-                        scrollThreadToBottom(proxy)
-                    }
-                    .onAppear {
-                        DispatchQueue.main.async {
-                            scrollThreadToBottom(proxy)
-                        }
-                    }
-                }
+                AmbientTranscriptTextView(
+                    attributedTranscript: logModel.threadTranscript,
+                    textRevision: logModel.threadTranscriptRevision,
+                    scrollRevision: logModel.threadScrollRevision
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+
+            if model.logAwaitingReply {
+                awaitingReplyStatus
             }
         }
         .frame(width: threadPaneWidth(totalWidth: totalWidth))
@@ -846,55 +897,29 @@ struct AmbientLogPetView: View {
         threadPaneFraction = clampedLogThreadPaneFraction((startWidth - translationX) / totalWidth)
     }
 
-    private var awaitingReplyBubble: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("ちーが考え中…")
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.72))
-                ProgressView()
-                    .scaleEffect(0.55)
-            }
-            .padding(9)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.white.opacity(0.06))
-            )
-            Spacer(minLength: 36)
+    private var awaitingReplyStatus: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.55)
+            Text("ちーが考え中…")
+                .font(.system(size: 11))
+                .foregroundColor(.white.opacity(0.72))
+            Spacer()
         }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.04))
     }
 
-    private func scrollThreadToBottom(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
-            if model.logAwaitingReply {
-                proxy.scrollTo("log-awaiting-reply", anchor: .bottom)
-            } else if let last = model.logReplies.last {
-                proxy.scrollTo(last.id, anchor: .bottom)
-            }
-        }
+    private func syncThreadTranscript() {
+        logModel.updateThreadTranscript(entries: model.logReplies)
     }
 
-    private func threadBubble(_ entry: NotificationEntry) -> some View {
-        let isUser = entry.source == "log_user"
-        return HStack {
-            if isUser { Spacer(minLength: 36) }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(timeString(entry.timestamp))
-                    .font(.system(size: 9))
-                    .foregroundColor(.white.opacity(0.35))
-                Text(entry.text)
-                    .font(.system(size: 11))
-                    .foregroundColor(.white.opacity(0.84))
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(9)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isUser ? Color(red: 0.55, green: 0.78, blue: 1.0).opacity(0.20) : Color.white.opacity(0.06))
-            )
-            if !isUser { Spacer(minLength: 36) }
-        }
+    private func copyThreadTranscript() {
+        let text = logModel.threadTranscript.string
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private var actionBar: some View {
