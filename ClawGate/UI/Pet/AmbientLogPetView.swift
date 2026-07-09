@@ -91,6 +91,68 @@ private final class PaneResizeHandleNSView: NSView {
     }
 }
 
+
+private struct AmbientTranscriptTextView: NSViewRepresentable {
+    let attributedTranscript: AttributedString
+    let textRevision: Int
+    let scrollRevision: Int
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.backgroundColor = .clear
+        textView.textContainerInset = NSSize(width: 12, height: 12)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        if context.coordinator.lastTextRevision != textRevision {
+            textView.textStorage?.setAttributedString(NSAttributedString(attributedTranscript))
+            context.coordinator.lastTextRevision = textRevision
+        }
+        if context.coordinator.lastScrollRevision != scrollRevision {
+            context.coordinator.lastScrollRevision = scrollRevision
+            context.coordinator.scrollToBottom(textView)
+        }
+    }
+
+    final class Coordinator {
+        var lastTextRevision: Int?
+        var lastScrollRevision: Int?
+
+        func scrollToBottom(_ textView: NSTextView) {
+            DispatchQueue.main.async {
+                let location = textView.string.utf16.count
+                textView.scrollRangeToVisible(NSRange(location: location, length: 0))
+            }
+        }
+    }
+}
+
 private struct ThreadPaneResizeHandleChrome: View {
     var onDrag: (CGFloat) -> Void
     var onEnd: () -> Void
@@ -233,6 +295,8 @@ enum AmbientLogGrouping {
 private final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
     @Published private(set) var cachedTranscript: AttributedString
+    @Published private(set) var transcriptRevision = 0
+    @Published private(set) var transcriptScrollRevision = 0
     @Published private(set) var fontSize: CGFloat
     @Published var scenes: [AmbientLogGrouping.Scene] = []
     @Published var selectedSceneIDs: Set<String> = []
@@ -386,10 +450,16 @@ private final class AmbientLogModel: ObservableObject {
         } else {
             newBlocks = allBlocks
         }
-        if newBlocks != blocks || cachedTranscriptFontSize != fontSize {
+        let blocksChanged = newBlocks != blocks
+        let fontSizeChanged = cachedTranscriptFontSize != fontSize
+        if blocksChanged {
             blocks = newBlocks
+            transcriptScrollRevision += 1
+        }
+        if blocksChanged || fontSizeChanged {
             cachedTranscript = AmbientLogPetView.attributedTranscript(newBlocks, fontSize: fontSize)
             cachedTranscriptFontSize = fontSize
+            transcriptRevision += 1
         }
     }
 
@@ -472,6 +542,8 @@ struct AmbientLogPetView: View {
     static func attributedTranscript(_ blocks: [AmbientLogGrouping.Block], fontSize: CGFloat = 16) -> AttributedString {
         var out = AttributedString()
         let headerSize = fontSize * 0.75
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3
         for (i, block) in blocks.enumerated() {
             if i > 0 { out += AttributedString("\n\n") }
             var headText = block.timeLabel ?? ""
@@ -482,11 +554,13 @@ struct AmbientLogPetView: View {
                 var head = AttributedString(headText + "\n")
                 head.font = .system(size: headerSize, weight: .bold).monospacedDigit()
                 head.foregroundColor = speakerColor(block.speaker)
+                head.paragraphStyle = paragraph
                 out += head
             }
             var body = AttributedString(block.text)
             body.font = .system(size: fontSize)
             body.foregroundColor = .white.opacity(0.85)
+            body.paragraphStyle = paragraph
             out += body
         }
         return out
@@ -627,34 +701,12 @@ struct AmbientLogPetView: View {
     }
 
     private var logList: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(logModel.cachedTranscript)
-                        .lineSpacing(3)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Color.clear.frame(height: 1).id("ambient-log-bottom")
-                }
-                .padding(12)
-            }
-            // Follow ANY content change, not just new blocks: continuous talk
-            // appends to the tail block (count unchanged), and the viewport
-            // must still track it — this is what made the log look frozen
-            // during a long conversation.
-            .onChange(of: logModel.blocks) { _ in
-                proxy.scrollTo("ambient-log-bottom", anchor: .bottom)
-            }
-            // Land on the newest content when the tab opens, after the first
-            // layout pass (scrollTo inside onAppear itself is a no-op while
-            // the text has no size yet).
-            .onAppear {
-                DispatchQueue.main.async {
-                    proxy.scrollTo("ambient-log-bottom", anchor: .bottom)
-                }
-            }
-        }
+        AmbientTranscriptTextView(
+            attributedTranscript: logModel.cachedTranscript,
+            textRevision: logModel.transcriptRevision,
+            scrollRevision: logModel.transcriptScrollRevision
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func threadPane(totalWidth: CGFloat) -> some View {
