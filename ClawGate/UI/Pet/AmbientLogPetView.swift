@@ -704,7 +704,6 @@ struct AmbientLogPetView: View {
                             logList
                         }
                     }
-                    actionBar
                     customActionBar
                     inputBar
                 }
@@ -970,44 +969,13 @@ struct AmbientLogPetView: View {
         NSPasteboard.general.setString(text, forType: .string)
     }
 
-    private var actionBar: some View {
-        HStack(spacing: 6) {
-            actionButton("質問まとめ", instruction: """
-                この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
-                相手の発言を中心に読み、主張の根拠が弱い点、矛盾している点、まだ答えていない点、曖昧なまま進んでいる前提を洗い出して、相手に投げるべき鋭い確認質問を作って。
-                出力は優先度順に最大7件の箇条書き。各項目は「質問: ... / 狙い: ... / 根拠: 相手のどの発言からそう判断したか」の形にして。
-                ご主人様が既に明確に答えている内容は質問にしないで。
-                """)
-            actionButton("要点", instruction: """
-                この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
-                単なる要約ではなく、会話の構造を分析して、(1) ご主人様が求めていること、(2) 相手が実際に答えたこと、(3) まだ噛み合っていない点、(4) 次に判断すべき論点、を分けて整理して。
-                出力は3〜5個の箇条書き。各項目は短い見出し + 1文の説明にして、相手の発言に依存する要点は「相手曰く」と分かるように書いて。
-                """)
-            actionButton("TODO", instruction: """
-                この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
-                会話から実行すべきTODOを抽出し、担当を「ご主人様」「相手」「未確定」に分けて整理して。相手の発言に依存するTODOは、相手が本当に引き受けたのか、それともこちらが確認すべきなのかを区別して。
-                出力は箇条書きで、各項目を「担当 / TODO / 期限・条件 / 確認すべき不明点」の形にして。期限や担当が読めない場合は推測せず「未確定」と書いて。
-                """)
-            actionButton("区切り", instruction: "私のカレンダーの予定に照らして、この会話ログをどの時点で区切るのが自然か提案して。予定はあなたが把握しているものを使って。")
+    private var customActionBar: some View {
+        VStack(spacing: 6) {
+            customActionRow(0..<4)
+            customActionRow(4..<8)
         }
         .padding(.horizontal, 12)
         .padding(.top, 8)
-    }
-
-    private var customActionBar: some View {
-        HStack(spacing: 6) {
-            ForEach(4..<8, id: \.self) { index in
-                customActionButton(index)
-                    .popover(isPresented: Binding(
-                        get: { editingActionIndex == index },
-                        set: { if !$0 { editingActionIndex = nil } }
-                    )) {
-                        customActionEditor(index)
-                    }
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.top, 6)
     }
 
     private var inputBar: some View {
@@ -1040,20 +1008,6 @@ struct AmbientLogPetView: View {
         .padding(12)
     }
 
-    private func actionButton(_ title: String, instruction: String) -> some View {
-        Button(title) {
-            sendInstruction(instruction)
-        }
-        .buttonStyle(PetPressableButtonStyle())
-        .font(.system(size: 10, weight: .semibold))
-        .foregroundColor(Color(red: 0.55, green: 0.78, blue: 1.0))
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 7)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
-        .disabled(model.logAwaitingReply)
-        .opacity(model.logAwaitingReply ? 0.45 : 1)
-    }
-
     private func customActionButton(_ index: Int) -> some View {
         let action = customActions.indices.contains(index) ? customActions[index] : nil
         return Button(action?.label ?? "＋") {
@@ -1078,6 +1032,20 @@ struct AmbientLogPetView: View {
         )
         .disabled(model.logAwaitingReply)
         .opacity(model.logAwaitingReply ? 0.45 : 1)
+    }
+
+    private func customActionRow(_ range: Range<Int>) -> some View {
+        HStack(spacing: 6) {
+            ForEach(Array(range), id: \.self) { index in
+                customActionButton(index)
+                    .popover(isPresented: Binding(
+                        get: { editingActionIndex == index },
+                        set: { if !$0 { editingActionIndex = nil } }
+                    )) {
+                        customActionEditor(index)
+                    }
+            }
+        }
     }
 
     private func customActionEditor(_ index: Int) -> some View {
