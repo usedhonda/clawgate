@@ -4,9 +4,9 @@ import SwiftUI
 
 private let petChatWindowFrameKey = "PetChatWindowFrame"
 private let petLogThreadPaneFractionKey = "PetLogThreadPaneFraction"
-private let petLogThreadPaneDefaultFraction: CGFloat = 0.43
+private let petLogThreadPaneDefaultFraction: CGFloat = 0.65
 private let petLogThreadPaneMinFraction: CGFloat = 0.25
-private let petLogThreadPaneMaxFraction: CGFloat = 0.6
+private let petLogThreadPaneMaxFraction: CGFloat = 0.7
 
 private func clampedLogThreadPaneFraction(_ fraction: CGFloat) -> CGFloat {
     min(max(fraction, petLogThreadPaneMinFraction), petLogThreadPaneMaxFraction)
@@ -660,8 +660,11 @@ private final class PetContentView: NSView {
             ))
         }
 
-        bw.makeKeyAndOrderFront(nil)
         chatWindow = bw
+        if model.logThreadPaneOpen {
+            setLogThreadPaneOpen(true)
+        }
+        bw.makeKeyAndOrderFront(nil)
         refreshPetPanelDismissMonitor()
     }
 
