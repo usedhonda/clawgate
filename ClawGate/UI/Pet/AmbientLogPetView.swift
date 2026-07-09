@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 private let petLogThreadPaneFractionKey = "PetLogThreadPaneFraction"
-private let petLogThreadPaneDefaultFraction: CGFloat = 0.43
+private let petLogThreadPaneDefaultFraction: CGFloat = 0.65
 private let petLogThreadPaneMinFraction: CGFloat = 0.25
-private let petLogThreadPaneMaxFraction: CGFloat = 0.6
+private let petLogThreadPaneMaxFraction: CGFloat = 0.7
 private let petLogThreadPaneMinPixelWidth: CGFloat = 240
 private let petLogThreadPaneLeftMinWidth: CGFloat = 360
 private let petLogThreadPaneHandleWidth: CGFloat = 8

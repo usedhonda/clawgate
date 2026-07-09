@@ -114,7 +114,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published var summonResults: [NotificationEntry] = []
     @Published var logReplies: [NotificationEntry] = []
     @Published var logSceneNames: [String: String] = [:]  // scene id -> ちー命名 (memory only)
-    @Published var logThreadPaneOpen: Bool = false
+    @Published var logThreadPaneOpen: Bool = true
     @Published var logAwaitingReply: Bool = false
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
