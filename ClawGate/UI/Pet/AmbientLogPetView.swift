@@ -1010,25 +1010,36 @@ struct AmbientLogPetView: View {
 
     private func customActionButton(_ index: Int) -> some View {
         let action = customActions.indices.contains(index) ? customActions[index] : nil
-        return Button(action?.label ?? "＋") {
+        let isEditingExisting = editingCustomActions && action != nil
+        let activeColor = isEditingExisting ? Color(red: 1.0, green: 0.72, blue: 0.32) : Color(red: 0.55, green: 0.78, blue: 1.0)
+        return Button {
             if editingCustomActions || action == nil {
                 beginEditingCustomAction(index)
             } else if let action {
                 sendInstruction(action.prompt)
             }
+        } label: {
+            HStack(spacing: 4) {
+                if isEditingExisting {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                Text(action?.label ?? "＋")
+            }
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(PetPressableButtonStyle())
         .font(.system(size: 10, weight: .semibold))
-        .foregroundColor(action == nil ? .white.opacity(0.45) : Color(red: 0.55, green: 0.78, blue: 1.0))
+        .foregroundColor(action == nil ? .white.opacity(0.45) : activeColor)
         .frame(maxWidth: .infinity)
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color.white.opacity(action == nil ? 0.04 : 0.055))
+                .fill(isEditingExisting ? activeColor.opacity(0.14) : Color.white.opacity(action == nil ? 0.04 : 0.055))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(Color(red: 0.55, green: 0.78, blue: 1.0).opacity(action == nil ? 0.16 : 0.35), lineWidth: 1)
+                .stroke((action == nil ? Color(red: 0.55, green: 0.78, blue: 1.0) : activeColor).opacity(action == nil ? 0.16 : 0.55), lineWidth: 1)
         )
         .disabled(model.logAwaitingReply)
         .opacity(model.logAwaitingReply ? 0.45 : 1)
