@@ -5,6 +5,7 @@ import SwiftUI
 private let petChatWindowFrameKey = "PetChatWindowFrame"
 private let petLogThreadPaneExpansionWidth: CGFloat = 360
 private let petLogThreadPaneMaxAutoExpandedWidth: CGFloat = 960
+private let petLogThreadPaneMaxAutoBaseWidth = petLogThreadPaneMaxAutoExpandedWidth - petLogThreadPaneExpansionWidth
 
 private func logThreadPaneExpandedWidth(forBaseWidth baseWidth: CGFloat) -> CGFloat {
     max(baseWidth, min(baseWidth + petLogThreadPaneExpansionWidth, petLogThreadPaneMaxAutoExpandedWidth))
@@ -657,7 +658,8 @@ private final class PetContentView: NSView {
     private func setLogThreadPaneOpen(_ open: Bool) {
         guard let cw = chatWindow, let parentWindow = window else { return }
         if open {
-            let baseWidth = chatBaseWidth ?? cw.frame.width
+            let rawBaseWidth = chatBaseWidth ?? cw.frame.width
+            let baseWidth = min(rawBaseWidth, petLogThreadPaneMaxAutoBaseWidth)
             chatBaseWidth = baseWidth
             var frame = cw.frame
             frame.size.width = logThreadPaneExpandedWidth(forBaseWidth: baseWidth)
