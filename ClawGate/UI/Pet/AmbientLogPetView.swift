@@ -501,20 +501,68 @@ struct LogCustomAction: Codable, Equatable {
 }
 
 enum LogCustomActionStore {
-    private static let key = "pet.logCustomActions"
+    private static let key = "PetLogCustomActionsV2"
+    private static let legacyKey = "pet.logCustomActions"
+    private static let legacyAlternateKey = "PetLogCustomActions"
+    private static let slotCount = 8
+    private static let defaultActions: [LogCustomAction?] = [
+        LogCustomAction(label: "質問まとめ", prompt: """
+            この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
+            相手の発言を中心に読み、主張の根拠が弱い点、矛盾している点、まだ答えていない点、曖昧なまま進んでいる前提を洗い出して、相手に投げるべき鋭い確認質問を作って。
+            出力は優先度順に最大7件の箇条書き。各項目は「質問: ... / 狙い: ... / 根拠: 相手のどの発言からそう判断したか」の形にして。
+            ご主人様が既に明確に答えている内容は質問にしないで。
+            """),
+        LogCustomAction(label: "要点", prompt: """
+            この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
+            単なる要約ではなく、会話の構造を分析して、(1) ご主人様が求めていること、(2) 相手が実際に答えたこと、(3) まだ噛み合っていない点、(4) 次に判断すべき論点、を分けて整理して。
+            出力は3〜5個の箇条書き。各項目は短い見出し + 1文の説明にして、相手の発言に依存する要点は「相手曰く」と分かるように書いて。
+            """),
+        LogCustomAction(label: "TODO", prompt: """
+            この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
+            会話から実行すべきTODOを抽出し、担当を「ご主人様」「相手」「未確定」に分けて整理して。相手の発言に依存するTODOは、相手が本当に引き受けたのか、それともこちらが確認すべきなのかを区別して。
+            出力は箇条書きで、各項目を「担当 / TODO / 期限・条件 / 確認すべき不明点」の形にして。期限や担当が読めない場合は推測せず「未確定」と書いて。
+            """),
+        LogCustomAction(label: "区切り", prompt: "私のカレンダーの予定に照らして、この会話ログをどの時点で区切るのが自然か提案して。予定はあなたが把握しているものを使って。"),
+        nil,
+        nil,
+        nil,
+        nil,
+    ]
 
     static func load() -> [LogCustomAction?] {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let decoded = try? JSONDecoder().decode([LogCustomAction?].self, from: data) else {
-            return Array(repeating: nil, count: 4)
+        if let data = UserDefaults.standard.data(forKey: key),
+           let decoded = try? JSONDecoder().decode([LogCustomAction?].self, from: data) {
+            return normalized(decoded)
         }
-        return Array(decoded.prefix(4)) + Array(repeating: nil, count: max(0, 4 - decoded.count))
+        if let legacy = loadLegacyActions() {
+            var migrated = defaultActions
+            for (offset, action) in legacy.prefix(4).enumerated() {
+                migrated[offset + 4] = action
+            }
+            save(migrated)
+            return migrated
+        }
+        return defaultActions
     }
 
     static func save(_ actions: [LogCustomAction?]) {
-        let clamped = Array(actions.prefix(4)) + Array(repeating: nil, count: max(0, 4 - actions.count))
+        let clamped = normalized(actions)
         guard let data = try? JSONEncoder().encode(clamped) else { return }
         UserDefaults.standard.set(data, forKey: key)
+    }
+
+    private static func normalized(_ actions: [LogCustomAction?]) -> [LogCustomAction?] {
+        Array(actions.prefix(slotCount)) + Array(repeating: nil, count: max(0, slotCount - actions.count))
+    }
+
+    private static func loadLegacyActions() -> [LogCustomAction?]? {
+        for legacyKey in [legacyKey, legacyAlternateKey] {
+            if let data = UserDefaults.standard.data(forKey: legacyKey),
+               let decoded = try? JSONDecoder().decode([LogCustomAction?].self, from: data) {
+                return Array(decoded.prefix(4)) + Array(repeating: nil, count: max(0, 4 - decoded.count))
+            }
+        }
+        return nil
     }
 }
 
@@ -525,7 +573,7 @@ struct AmbientLogPetView: View {
     @ObservedObject var model: PetModel
     @StateObject private var logModel = AmbientLogModel()
     @State private var instructionText = ""
-    @State private var customActions: [LogCustomAction?] = Array(repeating: nil, count: 4)
+    @State private var customActions: [LogCustomAction?] = Array(repeating: nil, count: 8)
     @State private var editingCustomActions = false
     @State private var editingActionIndex: Int?
     @State private var draftCustomLabel = ""
@@ -948,7 +996,7 @@ struct AmbientLogPetView: View {
 
     private var customActionBar: some View {
         HStack(spacing: 6) {
-            ForEach(0..<4, id: \.self) { index in
+            ForEach(4..<8, id: \.self) { index in
                 customActionButton(index)
                     .popover(isPresented: Binding(
                         get: { editingActionIndex == index },
