@@ -93,7 +93,7 @@ private final class PaneResizeHandleNSView: NSView {
 
 
 private struct AmbientTranscriptTextView: NSViewRepresentable {
-    let attributedTranscript: AttributedString
+    let attributedTranscript: NSAttributedString
     let textRevision: Int
     let scrollRevision: Int
 
@@ -117,7 +117,7 @@ private struct AmbientTranscriptTextView: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 12, height: 12)
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
-        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isHorizontallyResizable = false
         textView.isVerticallyResizable = true
         textView.autoresizingMask = [.width]
@@ -131,7 +131,7 @@ private struct AmbientTranscriptTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         if context.coordinator.lastTextRevision != textRevision {
-            textView.textStorage?.setAttributedString(NSAttributedString(attributedTranscript))
+            textView.textStorage?.setAttributedString(attributedTranscript)
             context.coordinator.lastTextRevision = textRevision
         }
         if context.coordinator.lastScrollRevision != scrollRevision {
@@ -294,7 +294,7 @@ enum AmbientLogGrouping {
 
 private final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
-    @Published private(set) var cachedTranscript: AttributedString
+    @Published private(set) var cachedTranscript: NSAttributedString
     @Published private(set) var transcriptRevision = 0
     @Published private(set) var transcriptScrollRevision = 0
     @Published private(set) var fontSize: CGFloat
@@ -321,7 +321,7 @@ private final class AmbientLogModel: ObservableObject {
         let size = min(max(ConfigStore().load().ambientLogFontSize, petLogMinFontSize), petLogMaxFontSize)
         fontSize = size
         cachedTranscriptFontSize = size
-        cachedTranscript = AmbientLogPetView.attributedTranscript([], fontSize: size)
+        cachedTranscript = AmbientLogPetView.nsAttributedTranscript([], fontSize: size)
     }
 
     func start() {
@@ -457,7 +457,7 @@ private final class AmbientLogModel: ObservableObject {
             transcriptScrollRevision += 1
         }
         if blocksChanged || fontSizeChanged {
-            cachedTranscript = AmbientLogPetView.attributedTranscript(newBlocks, fontSize: fontSize)
+            cachedTranscript = AmbientLogPetView.nsAttributedTranscript(newBlocks, fontSize: fontSize)
             cachedTranscriptFontSize = fontSize
             transcriptRevision += 1
         }
@@ -542,9 +542,6 @@ struct AmbientLogPetView: View {
     /// and are included in the copied text, which reads like a transcript.
     static func attributedTranscript(_ blocks: [AmbientLogGrouping.Block], fontSize: CGFloat = 16) -> AttributedString {
         var out = AttributedString()
-        let headerSize = fontSize * 0.75
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 3
         for (i, block) in blocks.enumerated() {
             if i > 0 { out += AttributedString("\n\n") }
             var headText = block.timeLabel ?? ""
@@ -552,19 +549,44 @@ struct AmbientLogPetView: View {
                 headText += headText.isEmpty ? name : " " + name
             }
             if !headText.isEmpty {
-                var head = AttributedString(headText + "\n")
-                head.font = .system(size: headerSize, weight: .bold).monospacedDigit()
-                head.foregroundColor = speakerColor(block.speaker)
-                head.paragraphStyle = paragraph
-                out += head
+                out += AttributedString(headText + "\n")
             }
-            var body = AttributedString(block.text)
-            body.font = .system(size: fontSize)
-            body.foregroundColor = .white.opacity(0.85)
-            body.paragraphStyle = paragraph
-            out += body
+            out += AttributedString(block.text)
         }
         return out
+    }
+
+    static func nsAttributedTranscript(_ blocks: [AmbientLogGrouping.Block], fontSize: CGFloat = 16) -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let headerSize = fontSize * 0.75
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineSpacing = 3
+        for (i, block) in blocks.enumerated() {
+            if i > 0 { out.append(NSAttributedString(string: "\n\n")) }
+            var headText = block.timeLabel ?? ""
+            if let name = speakerName(block.speaker) {
+                headText += headText.isEmpty ? name : " " + name
+            }
+            if !headText.isEmpty {
+                out.append(NSAttributedString(string: headText + "\n", attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: headerSize, weight: .bold),
+                    .foregroundColor: speakerNSColor(block.speaker),
+                    .paragraphStyle: paragraph,
+                ]))
+            }
+            out.append(NSAttributedString(string: block.text, attributes: [
+                .font: NSFont.systemFont(ofSize: fontSize),
+                .foregroundColor: NSColor.white.withAlphaComponent(0.85),
+                .paragraphStyle: paragraph,
+            ]))
+        }
+        return out
+    }
+
+    static func speakerNSColor(_ speaker: String?) -> NSColor {
+        speaker == "self"
+            ? NSColor(calibratedRed: 0.55, green: 0.78, blue: 1.0, alpha: 1)
+            : NSColor.white.withAlphaComponent(0.6)
     }
 
     var body: some View {
