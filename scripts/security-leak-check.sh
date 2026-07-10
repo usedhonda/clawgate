@@ -153,6 +153,9 @@ run_self_test() {
   run_self_test_case "claude_local_blocked" "fail" "CLAUDE.local.md" "local override" || failures=$((failures + 1))
   run_self_test_case "dotlocal_blocked" "fail" ".local/secret.txt" "local file" || failures=$((failures + 1))
   run_self_test_case "codex_config_blocked" "fail" ".codex/config.toml" "codex config" || failures=$((failures + 1))
+  run_self_test_case "empty_claude_local_blocked" "fail" "CLAUDE.local.md" "" || failures=$((failures + 1))
+  run_self_test_case "empty_dotlocal_blocked" "fail" ".local/secret.txt" "" || failures=$((failures + 1))
+  run_self_test_case "empty_codex_config_blocked" "fail" ".codex/config.toml" "" || failures=$((failures + 1))
   run_self_test_case "personal_path_content_blocked" "fail" "notes.md" "$personal_path" || failures=$((failures + 1))
   run_self_test_case "secret_token_content_blocked" "fail" "notes.md" "$secret_token" || failures=$((failures + 1))
 
@@ -218,10 +221,6 @@ for file in "${FILES[@]}"; do
     content="$(cat "$file" 2>/dev/null || true)"
   else
     content="$(git show ":$file" 2>/dev/null || true)"
-  fi
-
-  if [[ -z "$content" ]]; then
-    continue
   fi
 
   if ! scan_file_for_violations "$file" "$content"; then
