@@ -1,7 +1,3 @@
-# >>> project-bootstrap managed >>>
-.cc-status-bar.voice.json
-# <<< project-bootstrap managed <<<
-
 .DS_Store
 /.build
 /Packages
@@ -23,8 +19,6 @@ line-current-state.png
 ClawGate.app/
 .playwright-mcp/
 
-AGENTS.md
-CLAUDE.md
 docs/ask/
 docs/log/
 # CC persona (auto-generated)
@@ -37,3 +31,10 @@ docs/log/
 extensions/openclaw-plugin/src/prompts-local.js
 extensions/openclaw-plugin/src/prompts-private.js
 extensions/clawgate-chrome/icons/_orig/
+
+# >>> project-bootstrap local-only >>>
+CLAUDE.local.md
+.codex/config.toml
+.local/
+.cc-status-bar.voice.json
+# <<< project-bootstrap local-only <<<
