@@ -225,10 +225,22 @@ enum TmuxShell {
 
     // MARK: - Private
 
+    /// Merges LC_ALL=en_US.UTF-8 into `base` without discarding any other
+    /// variable. GUI-launched processes on this Mac carry no locale vars at
+    /// all, which puts tmux's `-F` formatter in the POSIX/C locale — there it
+    /// treats the tab byte (0x09) as non-printable and substitutes `_`,
+    /// silently breaking every tab-delimited field split downstream.
+    static func processEnvironment(base: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var env = base
+        env["LC_ALL"] = "en_US.UTF-8"
+        return env
+    }
+
     private static func run(arguments: [String]) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tmuxPath)
         process.arguments = arguments
+        process.environment = processEnvironment()
 
         let stdout = Pipe()
         let stderr = Pipe()
