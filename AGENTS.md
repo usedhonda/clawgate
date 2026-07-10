@@ -2,8 +2,15 @@
 
 - After any successful build, do not stop at "build passed".
 - Always run restart up to a healthy state before reporting completion.
-- Minimum for local changes: `./scripts/restart-local-clawgate.sh`.
-- If Host A / remote server side is affected, restart the Host A stack as well (including gateway) with the project restart scripts.
+- Pick the entry point by what the change touches (these are not mutually exclusive — the narrower script is always a valid subset of the wider one):
+
+  | Change scope | Entry point |
+  |---|---|
+  | Local-only app change (no Host A / plugin / Gateway impact) | `./scripts/restart-local-clawgate.sh` |
+  | Change touching Host A, `extensions/openclaw-plugin/`, or the Gateway | `./scripts/post-task-restart.sh` |
+  | Release | `./scripts/release-usual.sh` |
+
+- `post-task-restart.sh` restarts both Host A and Host B and internally calls the narrower scripts, so it is always safe to use even for a local-only change — it is just not required.
 
 ## Mandatory Release Flow Rule
 
