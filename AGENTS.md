@@ -83,10 +83,10 @@
 - Before touching connection/configuration/bridge/manifest surfaces, verify the current architecture understanding against repo-tracked references and local architecture docs.
 - Confirm how settings and gateway paths are configured in the app before changing related files.
 - If a task touches one of these paths, also review impacted data flow and state paths:
-- `ClawGate/Core/Federation/`
-- `ClawGate/Core/BridgeServer/`
-- `ClawGate/Core/Config/`
-- `ClawGate/Core/OpenClaw/`
+  - `ClawGate/Core/Federation/`
+  - `ClawGate/Core/BridgeServer/`
+  - `ClawGate/Core/Config/`
+  - `ClawGate/Core/OpenClaw/`
   - `extensions/openclaw-plugin/`
   - `extensions/clawgate-chrome/manifest.json`
 - In completion reporting, include architecture drift status where applicable.
