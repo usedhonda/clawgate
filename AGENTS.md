@@ -25,7 +25,7 @@
 
 ## OpenClaw contract hub
 
-- OpenClaw ecosystem contracts are normative under `../openclaw/oc-general/docs/contracts/` (repo-relative root if available). In particular, review:
+- OpenClaw ecosystem contracts are normative in the `oc-general` repository under `docs/contracts/`. In particular, review:
   - `event-contract.md`
   - `runbooks/delivery-routing.md`
   - `runbooks/clawgate-channel-routing.md`
@@ -83,10 +83,10 @@
 - Before touching connection/configuration/bridge/manifest surfaces, verify the current architecture understanding against repo-tracked references and local architecture docs.
 - Confirm how settings and gateway paths are configured in the app before changing related files.
 - If a task touches one of these paths, also review impacted data flow and state paths:
-  - `Core/Federation/`
-  - `Core/BridgeServer/`
-  - `Core/Config/`
-  - `Core/OpenClaw/`
+- `ClawGate/Core/Federation/`
+- `ClawGate/Core/BridgeServer/`
+- `ClawGate/Core/Config/`
+- `ClawGate/Core/OpenClaw/`
   - `extensions/openclaw-plugin/`
   - `extensions/clawgate-chrome/manifest.json`
 - In completion reporting, include architecture drift status where applicable.
