@@ -249,7 +249,11 @@ final class PetModel: NSObject, ObservableObject {
 
     // MARK: - Event Handling
 
-    private func handleEvent(_ event: OpenClawEvent) {
+    /// Idle window after the last delta before an in-flight streaming reply is
+    /// finalized with whatever text has accumulated so far. Overridable for tests.
+    static var deltaIdleTimeoutNanos: UInt64 = 5_000_000_000
+
+    func handleEvent(_ event: OpenClawEvent) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             switch event {
@@ -330,7 +334,7 @@ final class PetModel: NSObject, ObservableObject {
                     // Reset idle timer on each delta — stop speak 5s after last delta
                     self.deltaIdleTask?.cancel()
                     self.deltaIdleTask = Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: 5_000_000_000)
+                        try? await Task.sleep(nanoseconds: Self.deltaIdleTimeoutNanos)
                         guard !Task.isCancelled, let self else { return }
                         if self.isStreaming {
                             self.isStreaming = false
@@ -370,6 +374,16 @@ final class PetModel: NSObject, ObservableObject {
                 if self.hasEverConnected && wasConnected {
                     self.showWhisper("link lost")
                 }
+                // A mid-stream disconnect must not let the delta-idle timer
+                // finalize the in-flight reply with whatever partial text has
+                // accumulated so far. Cancel it and leave pendingSummonSource
+                // intact so the real final — delivered via reconnect +
+                // resubscribe — still routes to its correct destination
+                // (log/summon) instead of falling through to plain chat.
+                self.deltaIdleTask?.cancel()
+                self.deltaIdleTask = nil
+                self.isStreaming = false
+                self.streamingMessageId = nil
             }
         }
     }
@@ -1360,7 +1374,7 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
-    private var pendingSummonSource: String?
+    var pendingSummonSource: String?
     var isSummonBusy: Bool { pendingSummonSource != nil }
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
