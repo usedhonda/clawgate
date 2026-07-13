@@ -137,7 +137,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             let microphoneItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
             let microphoneMenu = NSMenu()
             let selectedUID = ambient.selectedMicDeviceUID
-            let defaultItem = NSMenuItem(title: "System Default", action: #selector(ambientSelectMicrophone(_:)), keyEquivalent: "")
+            let defaultMicName = MicrophoneDeviceService.resolveSystemDefaultInputDeviceName()
+            let defaultItem = NSMenuItem(
+                title: MicrophoneDeviceService.systemDefaultMenuTitle(for: defaultMicName),
+                action: #selector(ambientSelectMicrophone(_:)),
+                keyEquivalent: ""
+            )
             defaultItem.target = self
             defaultItem.state = selectedUID == nil ? .on : .off
             microphoneMenu.addItem(defaultItem)

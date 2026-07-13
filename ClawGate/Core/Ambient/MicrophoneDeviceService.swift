@@ -83,4 +83,58 @@ enum MicrophoneDeviceService {
         }
         return nil
     }
+
+    static func resolveSystemDefaultInputDeviceName(
+        defaultInputDeviceID: @escaping () -> AudioDeviceID? = resolveSystemDefaultInputDeviceID,
+        resolveAudioDeviceName: @escaping (AudioDeviceID) -> String? = resolveAudioDeviceName
+    ) -> String? {
+        guard let deviceID = defaultInputDeviceID() else { return nil }
+        return resolveAudioDeviceName(deviceID)
+    }
+
+    static func resolveSystemDefaultInputDeviceID() -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID: AudioDeviceID = kAudioObjectUnknown
+        var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0,
+            nil,
+            &dataSize,
+            &deviceID
+        ) == noErr else { return nil }
+        guard deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
+    }
+
+    static func resolveAudioDeviceName(_ deviceID: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceNameCFString,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var nameValue: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size
+        )
+        guard AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0,
+            nil,
+            &nameSize,
+            &nameValue
+        ) == noErr else { return nil }
+        guard let raw = nameValue?.takeRetainedValue() else { return nil }
+        return raw as String
+    }
+
+    static func systemDefaultMenuTitle(for inputDeviceName: String?) -> String {
+        guard let inputDeviceName, !inputDeviceName.isEmpty else { return "System Default" }
+        return "System Default (\(inputDeviceName))"
+    }
 }
