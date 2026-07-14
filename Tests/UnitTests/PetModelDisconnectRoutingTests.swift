@@ -11,15 +11,26 @@ import XCTest
 /// generic chat path instead of the Log pane.
 final class PetModelDisconnectRoutingTests: XCTestCase {
     private var originalIdleTimeoutNanos: UInt64 = 0
+    private var originalLogStoreDir = ""
 
     override func setUp() {
         super.setUp()
         originalIdleTimeoutNanos = PetModel.deltaIdleTimeoutNanos
         PetModel.deltaIdleTimeoutNanos = 80_000_000 // 80ms, shrunk for fast/deterministic tests
+
+        // A bare PetModel() starts with empty in-memory logReplies (real disk
+        // load only happens in start(), which this test never calls). If a
+        // "log"-source completion below reaches PetLogStore.save(), it must
+        // never write through to the user's real ~/.clawgate/logs/log.json —
+        // redirect to a throwaway temp directory for the duration of the test.
+        originalLogStoreDir = PetLogStore.dir
+        PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
     }
 
     override func tearDown() {
         PetModel.deltaIdleTimeoutNanos = originalIdleTimeoutNanos
+        try? FileManager.default.removeItem(atPath: PetLogStore.dir)
+        PetLogStore.dir = originalLogStoreDir
         super.tearDown()
     }
 

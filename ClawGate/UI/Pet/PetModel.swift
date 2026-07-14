@@ -1759,7 +1759,12 @@ struct NotificationEntry: Identifiable, Codable {
 // MARK: - Local Persistence for Summon/Notification logs
 
 enum PetLogStore {
-    private static let dir = NSString("~/.clawgate/logs").expandingTildeInPath
+    /// internal (not private): test seam. XCTest must redirect this to a temp
+    /// directory before touching PetLogStore — a real PetModel() starts with
+    /// empty in-memory arrays (load only happens in start()), so any save()
+    /// during a test overwrites the user's real persisted history with test
+    /// fixtures. See feedback_test_data_isolation incident, 2026-07-14.
+    static var dir = NSString("~/.clawgate/logs").expandingTildeInPath
 
     private static func ensureDir() {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
