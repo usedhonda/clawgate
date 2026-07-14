@@ -1766,6 +1766,16 @@ enum PetLogStore {
     /// fixtures. See feedback_test_data_isolation incident, 2026-07-14.
     static var dir = NSString("~/.clawgate/logs").expandingTildeInPath
 
+    /// internal (not private): test seam. `dir` is a process-global static,
+    /// so parallel test execution across XCTestCase classes could otherwise
+    /// race and momentarily observe another test's override (or the
+    /// production default) mid-test. Any XCTestCase that overrides `dir`
+    /// must `wait()` in setUp and `signal()` in tearDown, holding it for the
+    /// entire test lifetime. DispatchSemaphore has no thread-affinity
+    /// requirement, so this is safe even if an async test body resumes on a
+    /// different thread than setUp/tearDown.
+    static let testIsolationSemaphore = DispatchSemaphore(value: 1)
+
     private static func ensureDir() {
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     }

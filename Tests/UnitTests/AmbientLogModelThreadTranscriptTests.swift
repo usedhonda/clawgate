@@ -15,7 +15,11 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         // Defensive isolation: these tests touch PetModel(), which must never
         // let an incidental PetLogStore.save() reach the user's real
         // ~/.clawgate/logs/log.json. See PetModelDisconnectRoutingTests.swift
-        // for the incident this guards against (2026-07-14).
+        // for the incident this guards against (2026-07-14). `dir` is a
+        // process-global static: hold the shared semaphore for the entire
+        // setUp...tearDown lifetime so a parallel test in another class
+        // can't race this override.
+        PetLogStore.testIsolationSemaphore.wait()
         originalLogStoreDir = PetLogStore.dir
         PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
     }
@@ -23,6 +27,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
     override func tearDown() {
         try? FileManager.default.removeItem(atPath: PetLogStore.dir)
         PetLogStore.dir = originalLogStoreDir
+        PetLogStore.testIsolationSemaphore.signal()
         super.tearDown()
     }
 

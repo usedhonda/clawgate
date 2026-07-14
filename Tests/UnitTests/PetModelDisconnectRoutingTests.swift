@@ -23,6 +23,10 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         // "log"-source completion below reaches PetLogStore.save(), it must
         // never write through to the user's real ~/.clawgate/logs/log.json —
         // redirect to a throwaway temp directory for the duration of the test.
+        // `dir` is a process-global static: hold the shared semaphore for the
+        // entire setUp...tearDown lifetime so a parallel test in another
+        // class can't race this override.
+        PetLogStore.testIsolationSemaphore.wait()
         originalLogStoreDir = PetLogStore.dir
         PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
     }
@@ -31,6 +35,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         PetModel.deltaIdleTimeoutNanos = originalIdleTimeoutNanos
         try? FileManager.default.removeItem(atPath: PetLogStore.dir)
         PetLogStore.dir = originalLogStoreDir
+        PetLogStore.testIsolationSemaphore.signal()
         super.tearDown()
     }
 
