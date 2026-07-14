@@ -292,7 +292,8 @@ enum AmbientLogGrouping {
     }
 }
 
-private final class AmbientLogModel: ObservableObject {
+// internal (not private): test seam for AmbientLogModelThreadTranscriptTests.
+final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
     @Published private(set) var cachedTranscript: NSAttributedString
     @Published private(set) var transcriptRevision = 0
@@ -724,8 +725,8 @@ struct AmbientLogPetView: View {
             syncThreadTranscript()
             scheduleSceneNamesIfNeeded()
         }
-        .onReceive(model.$logReplies) { _ in
-            syncThreadTranscript()
+        .onReceive(model.$logReplies) { entries in
+            logModel.updateThreadTranscript(entries: entries)
         }
         .onChange(of: logModel.fontSize) { _ in
             syncThreadTranscript()
