@@ -1441,6 +1441,17 @@ final class PetModel: NSObject, ObservableObject {
     /// never arrived") can be exercised deterministically without a
     /// live-or-failing socket racing the watchdog.
     var suppressLogSendForTesting = false
+    /// Test seam: establish the pending log request that a structured "log"
+    /// reply is validated against, without going through `sendLogInstruction`
+    /// (which also arms the reply-timeout watchdog). Mirrors what a real
+    /// in-flight Log summon leaves behind (`pendingLogRequest` is private).
+    func setPendingLogRequestForTesting(segmentIds: [String], completeBeforeAnchor: Bool) {
+        pendingLogRequest = PendingLogRequest(
+            requestId: UUID().uuidString,
+            segmentIds: segmentIds,
+            completeBeforeAnchor: completeBeforeAnchor
+        )
+    }
     #endif
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
@@ -1709,24 +1720,36 @@ final class PetModel: NSObject, ObservableObject {
             if parseAsStructured {
                 // Validate the model's segment claims against exactly what the
                 // originating request sent (ordered ids), and stamp the
-                // client's own completeness signal onto the metadata.
-                let pending = pendingLogRequest
-                switch PetLogResultParser.parse(text, allowedSegmentIds: pending?.segmentIds ?? []) {
-                case .success(let result):
-                    entry = NotificationEntry(
-                        id: UUID().uuidString, text: result.answer,
-                        source: source, timestamp: Date(),
-                        logMetadata: PetLogEntryMetadata(
-                            contextDecision: result.contextDecision,
-                            completeBeforeAnchor: pending?.completeBeforeAnchor ?? true
+                // client's own completeness signal onto the metadata. A pending
+                // request is REQUIRED — never fabricate an empty allowed-id set
+                // or a default completeness signal.
+                if let pending = pendingLogRequest {
+                    switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds) {
+                    case .success(let result):
+                        entry = NotificationEntry(
+                            id: UUID().uuidString, text: result.answer,
+                            source: source, timestamp: Date(),
+                            logMetadata: PetLogEntryMetadata(
+                                contextDecision: result.contextDecision,
+                                completeBeforeAnchor: pending.completeBeforeAnchor
+                            )
                         )
-                    )
-                case .failure:
-                    // Fail closed: never show a raw/garbled model reply as if it
-                    // were the answer.
+                    case .failure:
+                        // Fail closed: never show a raw/garbled model reply as if
+                        // it were the answer.
+                        entry = NotificationEntry(
+                            id: UUID().uuidString,
+                            text: "Error: model response did not match the expected structured format",
+                            source: source, timestamp: Date()
+                        )
+                    }
+                } else {
+                    // No pending request to validate the reply against — never
+                    // fabricate an empty allowed-id set or a default completeness
+                    // signal. Fail closed without even attempting to parse.
                     entry = NotificationEntry(
                         id: UUID().uuidString,
-                        text: "Error: model response did not match the expected structured format",
+                        text: "Error: no pending log request to validate the response against",
                         source: source, timestamp: Date()
                     )
                 }

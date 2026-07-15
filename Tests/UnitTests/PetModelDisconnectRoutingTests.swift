@@ -46,6 +46,10 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
     func testDisconnectMidStreamDoesNotTruncateOrDropPendingLogReply() async throws {
         let model = PetModel()
         model.pendingSummonSource = "log"
+        // A structured "log" reply is only parsed when there is a pending
+        // request to validate it against (fail-closed contract). Establish the
+        // one a real in-flight Log summon would have left behind.
+        model.setPendingLogRequestForTesting(segmentIds: [], completeBeforeAnchor: true)
 
         // Two deltas for the same messageId: the first starts the stream, the
         // second is what actually (re)schedules the delta-idle finalize timer.
@@ -83,7 +87,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
             "includedSegmentIds": [],
-            "includedRange": {"startSegmentId": null, "endSegmentId": null},
+            "includedRange": null,
             "excludedAdjacentRange": {"startSegmentId": null, "endSegmentId": null},
             "boundaryReasonCodes": [],
             "boundaryConfidence": "high",
@@ -170,6 +174,9 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         // fails fast without arming this path — that is covered separately).
         model.pendingSummonSource = "log"
         model.pendingSummonRunId = nil
+        // A pending request exists (this exercises the PARSE-failure path, not
+        // the no-pending-request path covered separately below).
+        model.setPendingLogRequestForTesting(segmentIds: [], completeBeforeAnchor: true)
 
         model.addSummonResult(text: "not valid json at all", source: "log", parseAsStructured: true)
 
@@ -179,6 +186,29 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                       "must surface the fail-closed marker, not the raw garbled reply")
         XCTAssertNil(logEntries.first?.logMetadata,
                      "a parse failure must not carry fabricated model metadata")
+    }
+
+    /// A structured "log" reply that arrives with NO pending request to
+    /// validate against must fail closed WITHOUT parsing — never fabricating an
+    /// empty allowed-id set or a default completeness signal that would let a
+    /// vacuously-valid reply (empty included + null range) get persisted with a
+    /// made-up `completeBeforeAnchor`.
+    func testStructuredReplyWithNoPendingRequestFailsClosed() {
+        let model = PetModel()
+        // Enter the "log" reply path but never establish a pending request
+        // (i.e. sendLogInstruction was never called for this reply).
+        model.pendingSummonSource = "log"
+        model.pendingSummonRunId = nil
+
+        let wellFormed = Self.structuredLogReplyJSON(answer: "fabricated answer text")
+        model.addSummonResult(text: wellFormed, source: "log", parseAsStructured: true)
+
+        let logEntries = model.logReplies.filter { $0.source == "log" }
+        XCTAssertEqual(logEntries.count, 1)
+        XCTAssertNil(logEntries.first?.logMetadata,
+                     "no pending request must not yield fabricated metadata")
+        XCTAssertNotEqual(logEntries.first?.text, "fabricated answer text",
+                          "the reply must not be parsed/shown when there is nothing to validate it against")
     }
 
     /// `logMetadata` round-trips through Codable, and an old log.json entry
