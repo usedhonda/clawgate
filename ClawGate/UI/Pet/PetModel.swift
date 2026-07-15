@@ -291,8 +291,10 @@ final class PetModel: NSObject, ObservableObject {
                 // Summon — checked first and unconditionally, independent of
                 // any pending summon's run correlation.
                 if msg.isProactive {
-                    self.isStreaming = false
-                    self.streamingText = ""
+                    if self.pendingSummonSource == nil {
+                        self.isStreaming = false
+                        self.streamingText = ""
+                    }
                     self.showNotification(msg)
                     self.stateMachine.handle(.assistantFinished)
                     break

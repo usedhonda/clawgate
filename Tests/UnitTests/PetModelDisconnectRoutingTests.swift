@@ -184,6 +184,27 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                        "mismatched completion must not emit a log reply")
     }
 
+    func testProactiveMessageDoesNotCorruptInFlightLogSummon() async throws {
+        let model = PetModel()
+        model.pendingSummonSource = "log"
+        model.pendingSummonRunId = "run-A"
+        model.handleEvent(.delta(messageId: "run-A", text: "partial real answer"))
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        let proactive = OpenClawChatMessage(
+            id: "proactive-1", role: .assistant,
+            text: "unrelated proactive ping", isProactive: true)
+        model.handleEvent(.message(proactive))
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        XCTAssertEqual(model.pendingSummonSource, "log")
+        XCTAssertEqual(model.pendingSummonRunId, "run-A")
+        XCTAssertTrue(model.isStreaming)
+        XCTAssertEqual(model.streamingText, "partial real answer")
+        XCTAssertEqual(model.notificationHistory.last?.source, "proactive")
+        XCTAssertEqual(model.notificationHistory.last?.text, "unrelated proactive ping")
+    }
+
     /// A model reply that does not parse as the expected structured JSON must
     /// fail closed: a visible error marker, never the raw garbled text, and
     /// with no fabricated metadata.
