@@ -134,6 +134,30 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         XCTAssertTrue(logEntries.first?.text.contains("no reply received") ?? false)
     }
 
+    /// Practical catch-seam test for Log dispatch: without a live WS connection,
+    /// `sendLogSummon` must fail closed with a fixed bounded marker and must not
+    /// leak the transport error into persisted UI text.
+    func testLogSummonDispatchFailureUsesBoundedErrorMarker() async throws {
+        let model = PetModel()
+        model.setSessionKeyForTesting("test-session")
+        let envelope = PetLogQueryEnvelope(
+            requestId: UUID().uuidString, actionId: "slot-1", instruction: "質問まとめ",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+        )
+        model.sendLogInstruction(envelope: envelope)
+
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let logEntries = model.logReplies.filter { $0.source == "log" }
+        XCTAssertEqual(logEntries.count, 1, "dispatch failure should persist exactly one log-sourced marker")
+        let entry = try XCTUnwrap(logEntries.first)
+        XCTAssertEqual(entry.text, "Error: Pet Log request could not be dispatched")
+        XCTAssertFalse(entry.text.contains("Not connected"), "do not leak transport/server error strings")
+        XCTAssertFalse(model.logAwaitingReply, "dispatch failure must clear awaiting-reply")
+        XCTAssertFalse(model.isSummonBusy, "dispatch failure must clear summon slot immediately")
+    }
+
     /// A late event from a DIFFERENT run must be dropped without touching any
     /// pending-summon state (source/runId/isStreaming/streamingText). This is
     /// the state-corruption regression: a run-B mismatch must not wipe the

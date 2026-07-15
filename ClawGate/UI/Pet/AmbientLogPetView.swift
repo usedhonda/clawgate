@@ -758,6 +758,16 @@ struct AmbientLogPetView: View {
                     .paragraphStyle: paragraph,
                 ]))
             }
+            if entry.logMetadata?.dispatch?.degraded == true {
+                let noticeSize = fontSize * 0.8
+                let noticeFont = NSFontManager.shared.convert(
+                    NSFont.systemFont(ofSize: noticeSize), toHaveTrait: .italicFontMask)
+                out.append(NSAttributedString(string: "\n⚠ Solを利用できずTerraで処理しました", attributes: [
+                    .font: noticeFont,
+                    .foregroundColor: NSColor.white.withAlphaComponent(0.5),
+                    .paragraphStyle: paragraph,
+                ]))
+            }
         }
         return out
     }

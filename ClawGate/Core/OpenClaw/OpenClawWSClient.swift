@@ -205,6 +205,24 @@ actor OpenClawWSClient {
         return runId
     }
 
+    /// Pet Log-only `chat.send` helper that validates the ACK payload and
+    /// returns the full bounded dispatch metadata. Ordinary `sendMessage` /
+    /// `sendMessageAwaitingRunId` behavior stays unchanged for all other
+    /// callers.
+    func sendMessageAwaitingPetLogDispatchAck(
+        _ text: String, sessionKey: String, idempotencyKey: String = UUID().uuidString
+    ) async throws -> PetLogDispatchAck {
+        let payload = try await request(
+            method: "chat.send",
+            params: ChatSendParams(
+                sessionKey: sessionKey,
+                message: text,
+                idempotencyKey: idempotencyKey
+            )
+        )
+        return try PetLogDispatchAck.validate(from: payload)
+    }
+
     func chatHistory(sessionKey: String, limit: Int = 50) async throws -> [[String: Any]] {
         let requestId = UUID().uuidString
         let request = GatewayRequest(

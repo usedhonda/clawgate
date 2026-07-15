@@ -256,6 +256,10 @@ struct IncomingPayload: Decodable {
     let sessionId: String?
     let sessionKey: String?
     let runId: String?
+    let resolvedModel: String?
+    let resolvedThinking: String?
+    let degraded: Bool?
+    let fallbackReason: String?
     let stream: String?
     let data: AgentDataPayload?
     let state: String?
@@ -268,6 +272,57 @@ struct IncomingPayload: Decodable {
     let stateAccepted: Bool?
     /// ambient.ingest response: per-event receipts (eventId/status/dedup).
     let events: [AmbientEventReceipt]?
+    let hasFallbackReason: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case `protocol`
+        case snapshot
+        case nonce
+        case sessionId
+        case sessionKey
+        case runId
+        case resolvedModel
+        case resolvedThinking
+        case degraded
+        case fallbackReason
+        case stream
+        case data
+        case state
+        case message
+        case messageId
+        case content
+        case delta
+        case messages
+        case stateAccepted
+        case events
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try container.decodeIfPresent(String.self, forKey: .type)
+        `protocol` = try container.decodeIfPresent(Int.self, forKey: .protocol)
+        snapshot = try container.decodeIfPresent(SnapshotPayload.self, forKey: .snapshot)
+        nonce = try container.decodeIfPresent(String.self, forKey: .nonce)
+        sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
+        sessionKey = try container.decodeIfPresent(String.self, forKey: .sessionKey)
+        runId = try container.decodeIfPresent(String.self, forKey: .runId)
+        resolvedModel = try container.decodeIfPresent(String.self, forKey: .resolvedModel)
+        resolvedThinking = try container.decodeIfPresent(String.self, forKey: .resolvedThinking)
+        degraded = try container.decodeIfPresent(Bool.self, forKey: .degraded)
+        fallbackReason = try container.decodeIfPresent(String.self, forKey: .fallbackReason)
+        stream = try container.decodeIfPresent(String.self, forKey: .stream)
+        data = try container.decodeIfPresent(AgentDataPayload.self, forKey: .data)
+        state = try container.decodeIfPresent(String.self, forKey: .state)
+        message = try container.decodeIfPresent(ChatMessagePayload.self, forKey: .message)
+        messageId = try container.decodeIfPresent(String.self, forKey: .messageId)
+        content = try container.decodeIfPresent(String.self, forKey: .content)
+        delta = try container.decodeIfPresent(String.self, forKey: .delta)
+        messages = try container.decodeIfPresent([HistoryMessage].self, forKey: .messages)
+        stateAccepted = try container.decodeIfPresent(Bool.self, forKey: .stateAccepted)
+        events = try container.decodeIfPresent([AmbientEventReceipt].self, forKey: .events)
+        hasFallbackReason = container.contains(.fallbackReason)
+    }
 }
 
 /// Per-event receipt in the ambient.ingest response payload.
@@ -312,4 +367,95 @@ struct SessionDefaultsPayload: Decodable {
 struct IncomingError: Decodable {
     let code: String
     let message: String
+}
+
+enum PetLogDispatchAckValidationError: Error, Equatable {
+    case missingField(String)
+    case invalidThinking(String)
+    case invalidModel(String)
+    case unexpectedFallback
+    case invalidFallbackReason(String)
+}
+
+/// Canonical validation result for `chat.send` ACK diagnostics for Pet Log.
+/// The model must include exact fields and bounded values; malformed
+/// dispatch metadata fails closed and surfaces through existing Log error path.
+struct PetLogDispatchAck: Equatable {
+    let runId: String
+    let resolvedModel: String
+    let resolvedThinking: String
+    let degraded: Bool
+    let fallbackReason: String?
+
+    private static let fallbackPattern = try! NSRegularExpression(pattern: "^[A-Za-z0-9._-]{1,128}$")
+
+    static func validate(from payload: IncomingPayload?) throws -> PetLogDispatchAck {
+        guard let payload else {
+            throw PetLogDispatchAckValidationError.missingField("payload")
+        }
+        guard let runId = payload.runId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !runId.isEmpty else {
+            throw PetLogDispatchAckValidationError.missingField("runId")
+        }
+
+        guard let model = payload.resolvedModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !model.isEmpty else {
+            throw PetLogDispatchAckValidationError.missingField("resolvedModel")
+        }
+        guard let thinking = payload.resolvedThinking?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !thinking.isEmpty else {
+            throw PetLogDispatchAckValidationError.missingField("resolvedThinking")
+        }
+        guard thinking == "max" else {
+            throw PetLogDispatchAckValidationError.invalidThinking(thinking)
+        }
+        guard let degraded = payload.degraded else {
+            throw PetLogDispatchAckValidationError.missingField("degraded")
+        }
+        let fallbackReason = payload.fallbackReason?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch model {
+        case "openai/gpt-5.6-sol":
+            guard !degraded else {
+                throw PetLogDispatchAckValidationError.invalidModel(model)
+            }
+            guard payload.hasFallbackReason else {
+                throw PetLogDispatchAckValidationError.missingField("fallbackReason")
+            }
+            guard fallbackReason == nil else {
+                throw PetLogDispatchAckValidationError.unexpectedFallback
+            }
+            return PetLogDispatchAck(
+                runId: runId,
+                resolvedModel: model,
+                resolvedThinking: thinking,
+                degraded: degraded,
+                fallbackReason: nil
+            )
+        case "openai/gpt-5.6-terra":
+            guard degraded else {
+                throw PetLogDispatchAckValidationError.invalidModel(model)
+            }
+            guard payload.hasFallbackReason else {
+                throw PetLogDispatchAckValidationError.missingField("fallbackReason")
+            }
+            guard let reason = fallbackReason else {
+                throw PetLogDispatchAckValidationError.invalidFallbackReason("nil")
+            }
+            guard !reason.isEmpty,
+                  reason.count <= 128,
+                  Self.fallbackPattern.firstMatch(in: reason, range: NSRange(reason.startIndex..., in: reason)) != nil else {
+                throw PetLogDispatchAckValidationError.invalidFallbackReason(reason)
+            }
+            return PetLogDispatchAck(
+                runId: runId,
+                resolvedModel: model,
+                resolvedThinking: thinking,
+                degraded: degraded,
+                fallbackReason: reason
+            )
+        default:
+            throw PetLogDispatchAckValidationError.invalidModel(model)
+        }
+    }
 }

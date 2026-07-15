@@ -1433,6 +1433,7 @@ final class PetModel: NSObject, ObservableObject {
         let requestId: String
         let segmentIds: [String]
         let completeBeforeAnchor: Bool
+        let dispatch: PetLogDispatchAck?
     }
     private var pendingLogRequest: PendingLogRequest?
 
@@ -1451,11 +1452,12 @@ final class PetModel: NSObject, ObservableObject {
     /// reply is validated against, without going through `sendLogInstruction`
     /// (which also arms the reply-timeout watchdog). Mirrors what a real
     /// in-flight Log summon leaves behind (`pendingLogRequest` is private).
-    func setPendingLogRequestForTesting(segmentIds: [String], completeBeforeAnchor: Bool) {
+    func setPendingLogRequestForTesting(segmentIds: [String], completeBeforeAnchor: Bool, dispatch: PetLogDispatchAck? = nil) {
         pendingLogRequest = PendingLogRequest(
             requestId: UUID().uuidString,
             segmentIds: segmentIds,
-            completeBeforeAnchor: completeBeforeAnchor
+            completeBeforeAnchor: completeBeforeAnchor,
+            dispatch: dispatch
         )
     }
     #endif
@@ -1512,25 +1514,33 @@ final class PetModel: NSObject, ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let runId = try await wsClient.sendMessageAwaitingRunId(
+                let ack = try await wsClient.sendMessageAwaitingPetLogDispatchAck(
                     prompt, sessionKey: sessionKey, idempotencyKey: requestId)
                 await MainActor.run {
                     // Only claim the runId if we're still the same in-flight
                     // summon — a fast completion (or a newer summon starting)
                     // could have already resolved/replaced this one.
-                    guard self.pendingSummonSource == "log" else { return }
-                    self.pendingSummonRunId = runId
+                    guard self.pendingSummonSource == "log",
+                          let pending = self.pendingLogRequest,
+                          pending.requestId == requestId else { return }
+                    self.pendingSummonRunId = ack.runId
+                    self.pendingLogRequest = PendingLogRequest(
+                        requestId: pending.requestId,
+                        segmentIds: pending.segmentIds,
+                        completeBeforeAnchor: pending.completeBeforeAnchor,
+                        dispatch: ack
+                    )
                 }
-            } catch {
-                await MainActor.run {
-                    self.pendingSummonSource = nil
-                    self.pendingSummonRunId = nil
-                    self.pendingLogRequest = nil
-                    self.addSummonResult(text: "Error: \(error)", source: "log")
+                } catch {
+                    await MainActor.run {
+                        self.pendingSummonSource = nil
+                        self.pendingSummonRunId = nil
+                        self.pendingLogRequest = nil
+                        self.addSummonResult(text: "Error: Pet Log request could not be dispatched", source: "log")
+                    }
                 }
             }
         }
-    }
 
     /// Single entry point for every Log action (preset/custom slot/free
     /// text). `envelope` carries the full query-time raw history (not the
@@ -1599,7 +1609,8 @@ final class PetModel: NSObject, ObservableObject {
         pendingLogRequest = PendingLogRequest(
             requestId: envelope.requestId,
             segmentIds: envelope.segments.map(\.id),
-            completeBeforeAnchor: envelope.completeBeforeAnchor
+            completeBeforeAnchor: envelope.completeBeforeAnchor,
+            dispatch: nil
         )
         sendLogSummon(message, requestId: envelope.requestId)
     }
@@ -1732,12 +1743,22 @@ final class PetModel: NSObject, ObservableObject {
                 if let pending = pendingLogRequest {
                     switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds) {
                     case .success(let result):
+                        let dispatch = pending.dispatch.map {
+                            PetLogDispatchMetadata(
+                                runId: $0.runId,
+                                resolvedModel: $0.resolvedModel,
+                                resolvedThinking: $0.resolvedThinking,
+                                degraded: $0.degraded,
+                                fallbackReason: $0.fallbackReason
+                            )
+                        }
                         entry = NotificationEntry(
                             id: UUID().uuidString, text: result.answer,
                             source: source, timestamp: Date(),
                             logMetadata: PetLogEntryMetadata(
                                 contextDecision: result.contextDecision,
-                                completeBeforeAnchor: pending.completeBeforeAnchor
+                                completeBeforeAnchor: pending.completeBeforeAnchor,
+                                dispatch: dispatch
                             )
                         )
                     case .failure:

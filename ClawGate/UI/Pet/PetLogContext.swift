@@ -288,9 +288,24 @@ struct PetLogModelResult: Codable, Equatable {
 /// `contextDecision` plus the client's own completeness signal from the
 /// originating request (`PetLogQueryEnvelope.completeBeforeAnchor`) — two
 /// independent "can this be trusted" signals from two different sources.
+struct PetLogDispatchMetadata: Codable, Equatable {
+    let runId: String
+    let resolvedModel: String
+    let resolvedThinking: String
+    let degraded: Bool
+    let fallbackReason: String?
+}
+
 struct PetLogEntryMetadata: Codable, Equatable {
     let contextDecision: PetLogContextDecision
     let completeBeforeAnchor: Bool
+    let dispatch: PetLogDispatchMetadata?
+
+    init(contextDecision: PetLogContextDecision, completeBeforeAnchor: Bool, dispatch: PetLogDispatchMetadata? = nil) {
+        self.contextDecision = contextDecision
+        self.completeBeforeAnchor = completeBeforeAnchor
+        self.dispatch = dispatch
+    }
 
     /// True when either signal suggests the answer's context may be
     /// incomplete or shaky — used to render a short uncertainty marker.
