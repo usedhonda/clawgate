@@ -226,6 +226,33 @@ struct ChatSendParams: Encodable {
     let idempotencyKey: String
 }
 
+/// Pet Log-only `chat.send` params: the canonical contract (oc-general
+/// b1f0719, Gateway 688b9e37+f60543e) requires `model`/`thinking` on the
+/// wire for the Gateway to route to Sol/max — a bare prefix marker in the
+/// message text is not sufficient (confirmed by a live E2E where the ACK
+/// came back `resolvedThinking: "medium"` because these were never sent).
+/// `model`/`thinking` are fixed canonical constants, never caller-supplied,
+/// so no other summon path can accidentally acquire them. Ordinary
+/// `ChatSendParams`/`sendMessage`/`sendMessageAwaitingRunId` are unchanged.
+struct PetLogChatSendParams: Encodable {
+    static let canonicalModel = "openai/gpt-5.6-sol"
+    static let canonicalThinking = "max"
+
+    let sessionKey: String
+    let message: String
+    let idempotencyKey: String
+    let model: String
+    let thinking: String
+
+    init(sessionKey: String, message: String, idempotencyKey: String) {
+        self.sessionKey = sessionKey
+        self.message = message
+        self.idempotencyKey = idempotencyKey
+        self.model = Self.canonicalModel
+        self.thinking = Self.canonicalThinking
+    }
+}
+
 struct SessionSubscribeParams: Encodable {
     let key: String
 }

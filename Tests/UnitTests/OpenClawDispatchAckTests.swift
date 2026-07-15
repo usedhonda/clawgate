@@ -80,6 +80,54 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertNil(decoded?["policyVersion"])
     }
 
+    /// 2026-07-16 live E2E incident: the Gateway ACK came back
+    /// `resolvedThinking: "medium"` because the outbound chat.send never
+    /// carried `model`/`thinking` — a bare prefix marker in the message text
+    /// was not sufficient for the Gateway to route to Sol/max. This is the
+    /// exact-key/canonical-value regression guard for the fix.
+    func testPetLogChatSendParamsEncodesExactFiveKeysWithCanonicalModelAndThinking() throws {
+        let params = PetLogChatSendParams(sessionKey: "session", message: "ping", idempotencyKey: "id")
+        let data = try JSONEncoder().encode(params)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: data, options: []) as? [String: Any])
+
+        XCTAssertEqual(Set(decoded.keys), Set(["sessionKey", "message", "idempotencyKey", "model", "thinking"]))
+        XCTAssertEqual(decoded["model"] as? String, "openai/gpt-5.6-sol")
+        XCTAssertEqual(decoded["thinking"] as? String, "max")
+        XCTAssertEqual(decoded["sessionKey"] as? String, "session")
+        XCTAssertEqual(decoded["message"] as? String, "ping")
+        XCTAssertEqual(decoded["idempotencyKey"] as? String, "id")
+    }
+
+    /// Static guard against the exact failure class this task fixes: an ACK
+    /// validator can be perfectly correct while the actual outbound request
+    /// never carries the fields the ACK is being validated against — this
+    /// asserts `sendMessageAwaitingPetLogDispatchAck`'s own source actually
+    /// constructs a `PetLogChatSendParams`, not a bare `ChatSendParams`, and
+    /// that every OTHER chat.send call site is unaffected.
+    func testSendMessageAwaitingPetLogDispatchAckWiresPetLogChatSendParams() throws {
+        let path = "\(sourceRoot())/ClawGate/Core/OpenClaw/OpenClawWSClient.swift"
+        let source = try String(contentsOfFile: path, encoding: .utf8)
+        guard let funcRange = source.range(of: "func sendMessageAwaitingPetLogDispatchAck"),
+              let funcEndRange = source.range(of: "\n    }", range: funcRange.upperBound..<source.endIndex) else {
+            XCTFail("could not locate sendMessageAwaitingPetLogDispatchAck in source")
+            return
+        }
+        let body = source[funcRange.upperBound..<funcEndRange.lowerBound]
+        XCTAssertTrue(body.contains("PetLogChatSendParams("),
+                       "sendMessageAwaitingPetLogDispatchAck must construct PetLogChatSendParams, not a bare ChatSendParams")
+
+        XCTAssertTrue(source.contains("func sendMessage(_ text: String, sessionKey: String) async throws {\n        let requestId = UUID().uuidString\n        let request = GatewayRequest(\n            type: \"req\", id: requestId, method: \"chat.send\",\n            params: ChatSendParams("),
+                       "ordinary sendMessage must keep using plain ChatSendParams (3 keys), unchanged")
+    }
+
+    private func sourceRoot() -> String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .path
+    }
+
     func testValidNormalSolDispatchAckPassesValidation() throws {
         let payload = try decodeIncomingPayload("""
         {

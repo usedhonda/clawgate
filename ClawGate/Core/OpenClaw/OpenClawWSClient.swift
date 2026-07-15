@@ -214,7 +214,7 @@ actor OpenClawWSClient {
     ) async throws -> PetLogDispatchAck {
         let payload = try await request(
             method: "chat.send",
-            params: ChatSendParams(
+            params: PetLogChatSendParams(
                 sessionKey: sessionKey,
                 message: text,
                 idempotencyKey: idempotencyKey
