@@ -282,24 +282,39 @@ final class PetModel: NSObject, ObservableObject {
                 NSLog("[Pet] message event: role=%@ proactive=%d text=%@",
                       msg.role == .assistant ? "assistant" : "user",
                       msg.isProactive ? 1 : 0, String(msg.text.prefix(50)))
-                self.isStreaming = false
-                self.streamingText = ""
 
-                // Proactive messages always go to Notifications, never Summon
+                // Proactive messages always go to Notifications, never
+                // Summon — checked first and unconditionally, independent of
+                // any pending summon's run correlation.
                 if msg.isProactive {
+                    self.isStreaming = false
+                    self.streamingText = ""
                     self.showNotification(msg)
                     self.stateMachine.handle(.assistantFinished)
                     break
                 }
 
-                // Route summon responses to Summon tab
+                // Route summon responses to Summon tab — but only if it's
+                // actually our run. A stale run's late final (e.g. a
+                // superseded/duplicate chat.send) must not touch ANY state
+                // belonging to a different, still-in-flight summon —
+                // including isStreaming/streamingText — so this check runs
+                // before any state mutation, not after.
                 if msg.role == .assistant, let source = self.pendingSummonSource {
+                    if let expectedRunId = self.pendingSummonRunId, expectedRunId != msg.id {
+                        break
+                    }
+                    self.isStreaming = false
+                    self.streamingText = ""
                     self.pendingSummonSource = nil
-                    self.addSummonResult(text: msg.text, source: source)
+                    self.pendingSummonRunId = nil
+                    self.addSummonResult(text: msg.text, source: source, parseAsStructured: source == "log")
                     self.stateMachine.handle(.assistantFinished)
                     break
                 }
 
+                self.isStreaming = false
+                self.streamingText = ""
                 let isNew: Bool
                 if let idx = self.messages.firstIndex(where: { $0.id == msg.id }) {
                     self.messages[idx].text = msg.text
@@ -316,6 +331,12 @@ final class PetModel: NSObject, ObservableObject {
                 }
 
             case .delta(let messageId, let text):
+                if let expectedRunId = self.pendingSummonRunId, expectedRunId != messageId {
+                    // Delta from a stale/different run — drop it rather than
+                    // let it pollute the pending summon's accumulation or
+                    // leak into the plain chat pane.
+                    break
+                }
                 let isSummon = self.pendingSummonSource != nil
                 if self.streamingMessageId != messageId {
                     self.streamingMessageId = messageId
@@ -1359,16 +1380,23 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Handle streaming message completion — route to summon or regular chat
     private func finishStreamingMessage(messageId: String?) {
-        // If this was a summon response, route to summon results
+        // If this was a summon response, route to summon results — but only
+        // if it's actually OUR run. A stale run's late completion (e.g. a
+        // superseded/duplicate chat.send) must not resolve a different,
+        // still-in-flight summon.
         if let source = pendingSummonSource {
+            if let expectedRunId = pendingSummonRunId, let messageId, expectedRunId != messageId {
+                return
+            }
             pendingSummonSource = nil
+            pendingSummonRunId = nil
             let text = streamingText.isEmpty ? "(empty response)" : streamingText
             streamingText = ""
             // Remove from messages if it leaked there
             if let messageId, let idx = messages.firstIndex(where: { $0.id == messageId }) {
                 messages.remove(at: idx)
             }
-            addSummonResult(text: text, source: source)
+            addSummonResult(text: text, source: source, parseAsStructured: source == "log")
             return
         }
 
@@ -1379,6 +1407,15 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     var pendingSummonSource: String?
+    /// The Gateway `runId` (from chat.send's ACK payload) for the in-flight
+    /// summon, once resolved. nil until the ACK returns, or if this summon
+    /// was started via a path that doesn't track it (kept nil = "any run
+    /// accepted", preserving prior best-effort routing for those callers).
+    var pendingSummonRunId: String?
+    /// `completeBeforeAnchor` from the envelope that started the current "log"
+    /// summon — carried through to the reply's persisted `logMetadata`. Reset
+    /// alongside `pendingSummonSource`/`pendingSummonRunId`.
+    private var pendingLogCompleteBeforeAnchor = true
     var isSummonBusy: Bool { pendingSummonSource != nil }
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
@@ -1413,9 +1450,48 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
-    func sendLogInstruction(instruction: String, transcript: String) {
+    /// Log-specific summon send. Threads `requestId` through as the
+    /// Gateway's `idempotencyKey` and captures the returned `runId` so
+    /// `.message`/`.delta`/`finishStreamingMessage` can correlate against it
+    /// — a stale/different run's late event can't resolve or corrupt this
+    /// in-flight Log request. Other summon sources (omakase, scene naming,
+    /// ask, draft_pr) keep using the plain `sendSummon` above, unchanged.
+    private func sendLogSummon(_ prompt: String, requestId: String) {
+        guard let sessionKey else { return }
+
+        pendingSummonSource = "log"
+        pendingSummonRunId = nil
+        showWhisper("Working on it...")
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let runId = try await wsClient.sendMessageAwaitingRunId(
+                    prompt, sessionKey: sessionKey, idempotencyKey: requestId)
+                await MainActor.run {
+                    // Only claim the runId if we're still the same in-flight
+                    // summon — a fast completion (or a newer summon starting)
+                    // could have already resolved/replaced this one.
+                    guard self.pendingSummonSource == "log" else { return }
+                    self.pendingSummonRunId = runId
+                }
+            } catch {
+                await MainActor.run {
+                    self.pendingSummonSource = nil
+                    self.pendingSummonRunId = nil
+                    self.addSummonResult(text: "Error: \(error)", source: "log")
+                }
+            }
+        }
+    }
+
+    /// Single entry point for every Log action (preset/custom slot/free
+    /// text). `envelope` carries the full query-time raw history (not the
+    /// display-capped transcript) plus anchor/scope metadata — see
+    /// PetLogContext.swift and AmbientLogModel.buildQueryEnvelope.
+    func sendLogInstruction(envelope: PetLogQueryEnvelope) {
         let userEntry = NotificationEntry(
-            id: UUID().uuidString, text: instruction,
+            id: UUID().uuidString, text: envelope.instruction,
             source: "log_user", timestamp: Date()
         )
         logReplies.append(userEntry)
@@ -1441,18 +1517,18 @@ final class PetModel: NSObject, ObservableObject {
             self.logAwaitingReplyToken = nil
             if self.pendingSummonSource == "log" {
                 self.pendingSummonSource = nil
+                self.pendingSummonRunId = nil
             }
             self.appendSummonEntry(text: "Error: no reply received within \(Int(Self.logAwaitingReplyTimeoutSeconds))s (connection may have been unstable)", source: "log")
         }
-        let maxTranscriptCharacters = 12_000
-        let trimmedTranscript = String(transcript.suffix(maxTranscriptCharacters))
-        let prompt: String
-        if trimmedTranscript.isEmpty {
-            prompt = instruction
-        } else {
-            prompt = "\(instruction)\n\n--- 会話ログ ---\n\(trimmedTranscript)"
+        guard let message = try? PetLogPromptBuilder.buildMessage(envelope: envelope) else {
+            logAwaitingReply = false
+            logAwaitingReplyToken = nil
+            appendSummonEntry(text: "Error: failed to build log query", source: "log")
+            return
         }
-        sendSummon(prompt, source: "log")
+        pendingLogCompleteBeforeAnchor = envelope.completeBeforeAnchor
+        sendLogSummon(message, requestId: envelope.requestId)
     }
 
     func requestSceneNaming(scenes: [(id: String, timeLabel: String, excerpt: String)]) {
@@ -1510,7 +1586,7 @@ final class PetModel: NSObject, ObservableObject {
         return placeholders.contains(normalized)
     }
 
-    func addSummonResult(text: String, source: String) {
+    func addSummonResult(text: String, source: String, parseAsStructured: Bool = false) {
         // Draft reply detection: if messaging app + <draft_reply> tag → place in input field
         if source == "omakase",
            let ctx = pendingOmakaseContext,
@@ -1526,7 +1602,7 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         pendingOmakaseContext = nil
-        appendSummonEntry(text: text, source: source)
+        appendSummonEntry(text: text, source: source, parseAsStructured: parseAsStructured)
     }
 
     private func handleDraftResult(
@@ -1542,7 +1618,7 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
-    private func appendSummonEntry(text: String, source: String) {
+    private func appendSummonEntry(text: String, source: String, parseAsStructured: Bool = false) {
         if source == "log_scene_naming" {
             let names = Self.parseSceneNaming(text)
             for (number, name) in names {
@@ -1556,10 +1632,33 @@ final class PetModel: NSObject, ObservableObject {
         if source == "log" {
             logAwaitingReply = false
             logAwaitingReplyToken = nil
-            let entry = NotificationEntry(
-                id: UUID().uuidString, text: text,
-                source: source, timestamp: Date()
-            )
+            let entry: NotificationEntry
+            if parseAsStructured {
+                switch PetLogResultParser.parse(text) {
+                case .success(let result):
+                    entry = NotificationEntry(
+                        id: UUID().uuidString, text: result.answer,
+                        source: source, timestamp: Date(),
+                        logMetadata: PetLogEntryMetadata(
+                            contextDecision: result.contextDecision,
+                            completeBeforeAnchor: pendingLogCompleteBeforeAnchor
+                        )
+                    )
+                case .failure:
+                    // Fail closed: never show a raw/garbled model reply as if it
+                    // were the answer.
+                    entry = NotificationEntry(
+                        id: UUID().uuidString,
+                        text: "Error: model response did not match the expected structured format",
+                        source: source, timestamp: Date()
+                    )
+                }
+            } else {
+                entry = NotificationEntry(
+                    id: UUID().uuidString, text: text,
+                    source: source, timestamp: Date()
+                )
+            }
             logReplies.append(entry)
             if logReplies.count > 100 {
                 logReplies.removeFirst(logReplies.count - 100)
@@ -1770,6 +1869,19 @@ struct NotificationEntry: Identifiable, Codable {
     let text: String
     let source: String  // "omakase", "ask", "draft_pr", "proactive", "gateway"
     let timestamp: Date
+    /// Structured context-selection metadata — populated only for "log"
+    /// source entries whose model reply parsed as the expected structured
+    /// JSON. nil for every other source, for pre-Phase-A log entries, and
+    /// for fail-closed synthetic error markers (parse/policy/timeout/send
+    /// failures never carry model-reported metadata).
+    ///
+    /// `var` (not `let`) with a default: Swift only threads a defaulted
+    /// stored property through the synthesized memberwise init AND through
+    /// `Decodable`'s `decodeIfPresent` when it is a `var`. A `let ... = nil`
+    /// is treated as a fixed constant — omitted from the memberwise init and
+    /// never decoded (always nil) — which would defeat both backward-compat
+    /// decode of new entries and the `logMetadata:` init parameter.
+    var logMetadata: PetLogEntryMetadata? = nil
 }
 
 // MARK: - Local Persistence for Summon/Notification logs

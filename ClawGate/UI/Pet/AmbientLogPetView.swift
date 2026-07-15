@@ -417,14 +417,91 @@ final class AmbientLogModel: ObservableObject {
         }
     }
 
-    func transcriptText() -> String {
-        blocks.map { block in
-            var headText = block.timeLabel ?? ""
-            if let name = AmbientLogPetView.speakerName(block.speaker) {
-                headText += headText.isEmpty ? name : " " + name
+    /// Builds the query-time context envelope for a Log action (preset,
+    /// custom slot, or free text). Unlike `blocks`/`cachedTranscript`, this
+    /// reads the full raw history for `selectedDay` straight from
+    /// `AmbientStorage` — no 2000-segment or fixed-character display cut.
+    /// Anchor is "now" for today, or that day's own coverage tail for a past
+    /// day, so a past-day query never leaks content beyond that day and a
+    /// same-day query never leaks content at/after the moment it was sent.
+    /// An explicit scene selection is a hard scope override: only that
+    /// scene's segments are included, anchor-filtered the same way.
+    func buildQueryEnvelope(actionId: String, instruction: String, now: Date = Date(),
+                            sessionsRoot: URL = AmbientStorage.sessionsRoot) -> PetLogQueryEnvelope {
+        let day = selectedDay
+        let daySegments = AmbientStorage.segments(forDay: day, timeZone: timeZone, sessionsRoot: sessionsRoot)
+
+        let anchor: Date
+        if day == today {
+            anchor = now
+        } else if let lastEpoch = daySegments.last?.capturedAt {
+            anchor = Date(timeIntervalSince1970: lastEpoch).addingTimeInterval(1)
+        } else if let dayEnd = calendar.date(byAdding: .day, value: 1, to: day) {
+            anchor = dayEnd
+        } else {
+            anchor = now
+        }
+        let anchorEpoch = anchor.timeIntervalSince1970
+
+        let daysScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: timeZone)
+        let selectedScenes = daysScenes.filter { selectedSceneIDs.contains($0.id) }
+        let candidateSegments: [TranscriptSegment]
+        let scopeOverride: [String]?
+        if !selectedSceneIDs.isEmpty {
+            // Explicit scope is a hard filter: even when none of the
+            // selected scene ids match a current scene (stale selection),
+            // this does NOT fall back to the full day. `segments` stays
+            // empty and `scopeOverride` still reflects the explicit
+            // selection, so the model (or a Phase-A caller) can see the
+            // scope was honored rather than silently widened.
+            candidateSegments = selectedScenes.flatMap(\.segments)
+            scopeOverride = selectedSceneIDs.sorted()
+        } else {
+            candidateSegments = daySegments
+            scopeOverride = nil
+        }
+
+        // Every segment here is expected to already carry a capturedAt
+        // (AmbientStorage.segments only returns timestamped segments). If
+        // one somehow doesn't, we can't verify it's before the anchor, so it
+        // is excluded rather than optimistically included — and the query
+        // is marked incomplete rather than silently guaranteeing a coverage
+        // cutoff it didn't actually enforce for every segment.
+        var completeBeforeAnchor = true
+        let anchorFiltered = candidateSegments.filter { seg in
+            guard let at = seg.capturedAt else {
+                completeBeforeAnchor = false
+                return false
             }
-            return headText.isEmpty ? block.text : "\(headText)\n\(block.text)"
-        }.joined(separator: "\n\n")
+            return at < anchorEpoch
+        }
+        let reduced = PetLogSegmentReducer.reduce(anchorFiltered)
+        let rawSegments = reduced.map { seg in
+            PetLogRawSegment(
+                id: PetLogSegmentID.make(for: seg),
+                capturedAt: seg.capturedAt,
+                startSeconds: seg.startSeconds,
+                endSeconds: seg.endSeconds,
+                speaker: seg.speaker,
+                text: seg.text
+            )
+        }
+        let coverageEpochs = reduced.compactMap(\.capturedAt)
+        let coverageStart = coverageEpochs.min().map { Date(timeIntervalSince1970: $0) }
+        let coverageEnd = coverageEpochs.max().map { Date(timeIntervalSince1970: $0) }
+
+        return PetLogQueryEnvelope(
+            requestId: UUID().uuidString,
+            actionId: actionId,
+            instruction: instruction,
+            queryTimestamp: now,
+            anchorTimestamp: anchor,
+            scopeOverride: scopeOverride,
+            coverageStart: coverageStart,
+            coverageEnd: coverageEnd,
+            completeBeforeAnchor: completeBeforeAnchor,
+            segments: rawSegments
+        )
     }
 
     func updateThreadTranscript(entries: [NotificationEntry]) {
@@ -671,6 +748,16 @@ struct AmbientLogPetView: View {
                 .foregroundColor: NSColor.white.withAlphaComponent(0.86),
                 .paragraphStyle: paragraph,
             ]))
+            if entry.logMetadata?.isUncertain == true {
+                let noticeSize = fontSize * 0.8
+                let noticeFont = NSFontManager.shared.convert(
+                    NSFont.systemFont(ofSize: noticeSize), toHaveTrait: .italicFontMask)
+                out.append(NSAttributedString(string: "\n⚠ 文脈の判定に確信が持てません", attributes: [
+                    .font: noticeFont,
+                    .foregroundColor: NSColor.white.withAlphaComponent(0.5),
+                    .paragraphStyle: paragraph,
+                ]))
+            }
         }
         return out
     }
@@ -989,7 +1076,7 @@ struct AmbientLogPetView: View {
                 .padding(.vertical, 7)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
             Button("送信") {
-                sendInstruction(instructionText)
+                sendInstruction(instructionText, actionId: "free")
                 instructionText = ""
             }
             .buttonStyle(PetPressableButtonStyle())
@@ -1017,7 +1104,7 @@ struct AmbientLogPetView: View {
             if editingCustomActions || action == nil {
                 beginEditingCustomAction(index)
             } else if let action {
-                sendInstruction(action.prompt)
+                sendInstruction(action.prompt, actionId: "slot-\(index)")
             }
         } label: {
             HStack(spacing: 4) {
@@ -1121,11 +1208,12 @@ struct AmbientLogPetView: View {
         sceneNamingWorkItem = nil
     }
 
-    private func sendInstruction(_ instruction: String) {
+    private func sendInstruction(_ instruction: String, actionId: String) {
         let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         cancelPendingSceneNaming()
-        model.sendLogInstruction(instruction: trimmed, transcript: logModel.transcriptText())
+        let envelope = logModel.buildQueryEnvelope(actionId: actionId, instruction: trimmed)
+        model.sendLogInstruction(envelope: envelope)
     }
 
     private func timeString(_ date: Date) -> String {
