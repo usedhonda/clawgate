@@ -57,8 +57,11 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         // idle timer does not fire and truncate the pending reply.
         try await Task.sleep(nanoseconds: 300_000_000)
 
-        // Reconnect + resubscribe delivers the real, complete final.
-        let fullMessage = OpenClawChatMessage(role: .assistant, text: "complete answer text")
+        // Reconnect + resubscribe delivers the real, complete final. Under
+        // Phase A a "log" final is the structured JSON envelope, whose parsed
+        // `answer` is what reaches the pane.
+        let fullMessage = OpenClawChatMessage(
+            role: .assistant, text: Self.structuredLogReplyJSON(answer: "complete answer text"))
         model.handleEvent(.message(fullMessage))
         try await Task.sleep(nanoseconds: 50_000_000)
 
@@ -70,6 +73,27 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                        "the final must not fall through to the plain chat pane")
     }
 
+    /// A minimal well-formed structured Log reply whose parsed `answer` is
+    /// `answer` — the wire shape a real "log" final now carries under Phase A.
+    static func structuredLogReplyJSON(answer: String) -> String {
+        let escaped = String(data: try! JSONEncoder().encode(answer), encoding: .utf8)!
+        return """
+        {
+          "answer": \(escaped),
+          "contextDecision": {
+            "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
+            "includedSegmentIds": [],
+            "includedRange": {"startSegmentId": null, "endSegmentId": null},
+            "excludedAdjacentRange": {"startSegmentId": null, "endSegmentId": null},
+            "boundaryReasonCodes": [],
+            "boundaryConfidence": "high",
+            "historyComplete": true,
+            "correctionCounts": {}
+          }
+        }
+        """
+    }
+
     /// 2026-07-15 16:58 JST incident: the WS connection was stuck in a
     /// sustained ping-timeout/reconnect loop (OpenClawWSClient.handlePingTimeout)
     /// for 20+ minutes. Reconnect + resubscribe never replays events missed
@@ -79,7 +103,12 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
     /// wedged forever with no visible sign anything had gone wrong.
     func testLogAwaitingReplyTimeoutReleasesStuckSummonSlotWithVisibleMarker() async throws {
         let model = PetModel()
-        model.sendLogInstruction(instruction: "質問まとめ", transcript: "")
+        let envelope = PetLogQueryEnvelope(
+            requestId: UUID().uuidString, actionId: "slot-0", instruction: "質問まとめ",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+        )
+        model.sendLogInstruction(envelope: envelope)
         // sendSummon only sets pendingSummonSource once a real sessionKey
         // exists; simulate the in-flight state a connected session would have.
         model.pendingSummonSource = "log"
@@ -96,5 +125,94 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         XCTAssertEqual(logEntries.count, 1,
                         "a visible marker must be recorded so the user isn't left with silent nothing")
         XCTAssertTrue(logEntries.first?.text.contains("no reply received") ?? false)
+    }
+
+    /// A late event from a DIFFERENT run must be dropped without touching any
+    /// pending-summon state (source/runId/isStreaming/streamingText). This is
+    /// the state-corruption regression: a run-B mismatch must not wipe the
+    /// run-A stream that is still in flight.
+    func testMismatchedRunEventDoesNotCorruptInFlightLogSummon() async throws {
+        let model = PetModel()
+        model.pendingSummonSource = "log"
+        model.pendingSummonRunId = "run-A"
+
+        // Real partial from OUR run accumulates into the stream. A single delta
+        // starts the stream without arming the delta-idle finalize timer (only
+        // a same-id follow-up delta does), so nothing here finalizes on its own.
+        model.handleEvent(.delta(messageId: "run-A", text: "partial real answer"))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(model.streamingText, "partial real answer")
+        XCTAssertTrue(model.isStreaming)
+
+        // A final from a DIFFERENT run arrives — it must be dropped, leaving
+        // every piece of pending state untouched.
+        model.handleEvent(.message(OpenClawChatMessage(id: "run-B", role: .assistant, text: "wrong run")))
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(model.pendingSummonSource, "log", "mismatched run must not clear the summon slot")
+        XCTAssertEqual(model.pendingSummonRunId, "run-A", "mismatched run must not overwrite the tracked runId")
+        XCTAssertEqual(model.streamingText, "partial real answer",
+                       "mismatched run must not wipe the in-flight accumulated text")
+        XCTAssertTrue(model.isStreaming, "mismatched run must not clear isStreaming")
+        XCTAssertEqual(model.logReplies.filter { $0.source == "log" }.count, 0,
+                       "no log reply may be recorded from a mismatched run")
+    }
+
+    /// A model reply that does not parse as the expected structured JSON must
+    /// fail closed: a visible error marker, never the raw garbled text, and
+    /// with no fabricated metadata.
+    func testStructuredParseFailsClosedOnNonJSONReply() {
+        let model = PetModel()
+        let envelope = PetLogQueryEnvelope(
+            requestId: UUID().uuidString, actionId: "free", instruction: "まとめて",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+        )
+        model.sendLogInstruction(envelope: envelope)
+        model.pendingSummonSource = "log"
+        model.pendingSummonRunId = nil
+
+        model.addSummonResult(text: "not valid json at all", source: "log", parseAsStructured: true)
+
+        let logEntries = model.logReplies.filter { $0.source == "log" }
+        XCTAssertEqual(logEntries.count, 1)
+        XCTAssertTrue(logEntries.first?.text.contains("did not match") ?? false,
+                      "must surface the fail-closed marker, not the raw garbled reply")
+        XCTAssertNil(logEntries.first?.logMetadata,
+                     "a parse failure must not carry fabricated model metadata")
+    }
+
+    /// `logMetadata` round-trips through Codable, and an old log.json entry
+    /// with no `logMetadata` key still decodes (backward-compatible).
+    func testNotificationEntryLogMetadataCodableRoundTripAndBackwardCompat() throws {
+        let decision = PetLogContextDecision(
+            policyVersion: PetLogPromptBuilder.policyVersion,
+            includedSegmentIds: ["a", "b"],
+            includedRange: PetLogSegmentRange(startSegmentId: "a", endSegmentId: "b"),
+            excludedAdjacentRange: nil,
+            boundaryReasonCodes: ["scene-continuous"],
+            boundaryConfidence: .low,
+            historyComplete: false,
+            correctionCounts: ["proper-noun": 1]
+        )
+        let entry = NotificationEntry(
+            id: "e1", text: "answer", source: "log", timestamp: Date(timeIntervalSince1970: 1_700_000_000),
+            logMetadata: PetLogEntryMetadata(contextDecision: decision, completeBeforeAnchor: false)
+        )
+        let data = try JSONEncoder().encode(entry)
+        let decoded = try JSONDecoder().decode(NotificationEntry.self, from: data)
+        XCTAssertEqual(decoded.id, entry.id)
+        XCTAssertEqual(decoded.text, entry.text)
+        XCTAssertEqual(decoded.source, entry.source)
+        XCTAssertEqual(decoded.logMetadata, entry.logMetadata, "metadata must survive an encode/decode round-trip")
+        XCTAssertEqual(decoded.logMetadata?.isUncertain, true)
+
+        // An entry written before Phase A has no `logMetadata` key at all.
+        let legacyJSON = """
+        {"id":"old1","text":"legacy answer","source":"log","timestamp":700000000}
+        """
+        let legacy = try JSONDecoder().decode(NotificationEntry.self, from: Data(legacyJSON.utf8))
+        XCTAssertNil(legacy.logMetadata, "old entries without the key must decode with logMetadata == nil")
+        XCTAssertEqual(legacy.text, "legacy answer")
     }
 }

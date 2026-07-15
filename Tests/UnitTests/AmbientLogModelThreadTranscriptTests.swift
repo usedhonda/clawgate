@@ -88,4 +88,112 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             .deletingLastPathComponent()
             .path
     }
+
+    // MARK: - buildQueryEnvelope: full-day history, hard scope, anchor cutoff
+
+    private let jst = TimeZone(identifier: "Asia/Tokyo")!
+
+    private func makeTempSessionsRoot() -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clawgate-envelope-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func writeSession(_ id: String, _ segs: [TranscriptSegment], under root: URL) throws {
+        let dir = root
+            .appendingPathComponent(id, isDirectory: true)
+            .appendingPathComponent("transcripts", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let enc = JSONEncoder()
+        let lines = try segs.map { String(data: try enc.encode($0), encoding: .utf8)! }
+        try Data((lines.joined(separator: "\n") + "\n").utf8)
+            .write(to: dir.appendingPathComponent("raw.jsonl"))
+    }
+
+    private func seg(_ text: String, at capturedAt: Double, speaker: String? = nil) -> TranscriptSegment {
+        var s = TranscriptSegment(startSeconds: 0, endSeconds: 1, text: text)
+        s.capturedAt = capturedAt
+        s.speaker = speaker
+        return s
+    }
+
+    private func startOfDayJST(_ date: Date) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = jst
+        return cal.startOfDay(for: date)
+    }
+
+    /// The query envelope reads the FULL raw day — it must not inherit the
+    /// display path's 2000-segment (or any fixed) cap.
+    func testBuildQueryEnvelopeIsNotCappedAt2000Segments() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // A fixed past day so the anchor is that day's coverage tail (not "now").
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 10; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+
+        let count = 2001
+        let segs = (1...count).map { seg("utterance \($0)", at: dayStart + Double($0)) }
+        try writeSession("ctx-big", segs, under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        let envelope = model.buildQueryEnvelope(actionId: "free", instruction: "全部まとめて",
+                                                now: Date(), sessionsRoot: root)
+        XCTAssertGreaterThan(envelope.segments.count, 2000)
+        XCTAssertEqual(envelope.segments.count, count,
+                       "the envelope must carry the true full-day count, not a clamped 2000")
+    }
+
+    /// A stale/non-matching explicit scene selection is a HARD scope: no silent
+    /// fallback to the full day — segments stays empty, scopeOverride reflects
+    /// the (unmatched) selection.
+    func testBuildQueryEnvelopeStaleSceneSelectionYieldsEmptyNotFullDay() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 11; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        try writeSession("ctx-day", [
+            seg("real content A", at: dayStart + 10),
+            seg("real content B", at: dayStart + 20),
+        ], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        model.selectedSceneIDs = ["stale-scene-id-that-does-not-exist"]
+        let envelope = model.buildQueryEnvelope(actionId: "slot-0", instruction: "このシーンだけ",
+                                                now: Date(), sessionsRoot: root)
+        XCTAssertTrue(envelope.segments.isEmpty,
+                      "no scene matched the explicit selection — must not fall back to the full day")
+        XCTAssertEqual(envelope.scopeOverride, ["stale-scene-id-that-does-not-exist"],
+                       "the honored (unmatched) scope must still be reported")
+    }
+
+    /// Same-day query: a segment at/after the anchor instant is excluded.
+    func testBuildQueryEnvelopeExcludesSegmentsAtOrAfterAnchor() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let todayStart = startOfDayJST(Date())
+        let now = todayStart.addingTimeInterval(12 * 3600) // noon today JST
+        let nowEpoch = now.timeIntervalSince1970
+        try writeSession("ctx-today", [
+            seg("before anchor", at: nowEpoch - 3600),
+            seg("at anchor", at: nowEpoch),
+            seg("after anchor", at: nowEpoch + 3600),
+        ], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = todayStart
+        let envelope = model.buildQueryEnvelope(actionId: "free", instruction: "今の状況",
+                                                now: now, sessionsRoot: root)
+        let texts = envelope.segments.map(\.text)
+        XCTAssertEqual(texts, ["before anchor"],
+                       "only segments strictly before the anchor survive the same-day cutoff")
+    }
 }
