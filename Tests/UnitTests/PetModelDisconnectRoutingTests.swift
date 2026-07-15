@@ -165,6 +165,25 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                        "no log reply may be recorded from a mismatched run")
     }
 
+    /// A late messageComplete from a DIFFERENT run must be dropped before it can
+    /// clear tracked summon state or streaming state.
+    func testMismatchedRunCompleteDoesNotCorruptInFlightLogSummon() async {
+        let model = PetModel()
+        model.pendingSummonSource = "log"
+        model.pendingSummonRunId = "run-A"
+        model.handleEvent(.delta(messageId: "run-A", text: "partial real answer"))
+
+        model.handleEvent(.messageComplete(messageId: "run-B"))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(model.pendingSummonSource, "log", "mismatched completion must not clear summon source")
+        XCTAssertEqual(model.pendingSummonRunId, "run-A", "mismatched completion must not clear summon run id")
+        XCTAssertTrue(model.isStreaming, "mismatched completion must not clear streaming flag")
+        XCTAssertEqual(model.streamingText, "partial real answer", "mismatched completion must not clear streaming text")
+        XCTAssertEqual(model.logReplies.filter { $0.source == "log" }.count, 0,
+                       "mismatched completion must not emit a log reply")
+    }
+
     /// A model reply that does not parse as the expected structured JSON must
     /// fail closed: a visible error marker, never the raw garbled text, and
     /// with no fabricated metadata.

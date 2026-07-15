@@ -224,11 +224,11 @@ enum PetLogPromptBuilder {
           "answer": "string — ユーザーへの回答本文",
           "contextDecision": {
             "policyVersion": "\(policyVersion)",
-            "includedSegmentIds": ["string", ...],
-            "includedRange": "null（空の場合）または {\\"startSegmentId\\": \\"<最初>\\", \\"endSegmentId\\": \\"<最後>\\"}",
-            "excludedAdjacentRange": "null または {\\"startSegmentId\\": \\"string\\", \\"endSegmentId\\": \\"string\\"}（includedRange 開始直前のみ）",
-            "boundaryReasonCodes": ["string", ...],
-            "boundaryConfidence": "high|medium|low",
+            "includedSegmentIds": ["seg-11", "seg-34"],
+            "includedRange": {"startSegmentId": "seg-11", "endSegmentId": "seg-34"},
+            "excludedAdjacentRange": {"startSegmentId": "seg-08", "endSegmentId": "seg-10"},
+            "boundaryReasonCodes": ["reason-a", "reason-b"],
+            "boundaryConfidence": "high",
             "historyComplete": true,
             "correctionCounts": {"category": 0}
           }
@@ -312,6 +312,7 @@ enum PetLogParseError: Error, Equatable {
     case reversedRange
     case rangeEndpointMismatch
     case emptyIncludedWithNonNullRange
+    case subsetRequiresHighBoundaryConfidence
     case invalidExcludedRange
 }
 
@@ -383,6 +384,9 @@ enum PetLogResultParser {
         let expectedOrder = allowedSegmentIds.filter { includedSet.contains($0) }
         guard expectedOrder == included else {
             return .failure(.segmentIdsOutOfOrder)
+        }
+        if included != allowedSegmentIds && decision.boundaryConfidence != .high {
+            return .failure(.subsetRequiresHighBoundaryConfidence)
         }
 
         // Included range must exactly describe the included set. Empty

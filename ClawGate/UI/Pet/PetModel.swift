@@ -377,6 +377,10 @@ final class PetModel: NSObject, ObservableObject {
 
             case .messageComplete(let messageId):
                 NSLog("[Pet] messageComplete: %@", messageId)
+                if let expectedRunId = self.pendingSummonRunId,
+                   expectedRunId != messageId {
+                    break
+                }
                 self.isStreaming = false
                 self.streamingMessageId = nil
                 self.finishStreamingMessage(messageId: messageId)

@@ -719,9 +719,12 @@ final class AmbientTests: XCTestCase {
         included: [String],
         includedRange: (String?, String?)? = nil,
         excludedRange: (String?, String?)? = nil,
+        includedRangeIsNull: Bool = false,
+        boundaryConfidence: String = "high",
         correctionCounts: [String: Int] = ["proper-noun": 0]
     ) -> String {
         func rangeJSON(_ r: (String?, String?)?) -> String {
+            guard !includedRangeIsNull else { return "null" }
             let (s, e) = r ?? (nil, nil)
             func q(_ v: String?) -> String { v.map { "\"\($0)\"" } ?? "null" }
             return "{\"startSegmentId\": \(q(s)), \"endSegmentId\": \(q(e))}"
@@ -738,7 +741,7 @@ final class AmbientTests: XCTestCase {
             "includedRange": \(rangeJSON(includedRange)),
             "excludedAdjacentRange": \(rangeJSON(excludedRange)),
             "boundaryReasonCodes": [],
-            "boundaryConfidence": "high",
+            "boundaryConfidence": "\(boundaryConfidence)",
             "historyComplete": true,
             "correctionCounts": \(countsJSON)
           }
@@ -1032,6 +1035,47 @@ final class AmbientTests: XCTestCase {
                        .failure(.emptyIncludedWithNonNullRange))
     }
 
+    func testResultParserRejectsSubsetWithMediumOrLowBoundaryConfidence() {
+        let medium = resultJSON(included: ["b", "c"], includedRange: ("b", "c"), boundaryConfidence: "medium")
+        XCTAssertEqual(PetLogResultParser.parse(medium, allowedSegmentIds: ["a", "b", "c", "d"]),
+                       .failure(.subsetRequiresHighBoundaryConfidence))
+
+        let low = resultJSON(included: [], includedRangeIsNull: true, boundaryConfidence: "low")
+        XCTAssertEqual(PetLogResultParser.parse(low, allowedSegmentIds: ["a", "b", "c"]),
+                       .failure(.subsetRequiresHighBoundaryConfidence))
+    }
+
+    func testResultParserAllowsSubsetWithHighBoundaryConfidence() {
+        let subset = resultJSON(included: ["b", "c"], includedRange: ("b", "c"), boundaryConfidence: "high")
+        switch PetLogResultParser.parse(subset, allowedSegmentIds: ["a", "b", "c", "d"]) {
+        case .success(let result):
+            XCTAssertEqual(result.contextDecision.includedSegmentIds, ["b", "c"])
+        case .failure(let err):
+            XCTFail("subset inclusion with high confidence should pass, got \(err)")
+        }
+    }
+
+    func testResultParserAllowsFullRetentionWithMediumOrLowBoundaryConfidence() {
+        let full = ["a", "b", "c"]
+        let medium = resultJSON(included: full, includedRange: ("a", "c"), boundaryConfidence: "medium")
+        switch PetLogResultParser.parse(medium, allowedSegmentIds: full) {
+        case .success(let result):
+            XCTAssertEqual(result.contextDecision.boundaryConfidence, .medium)
+            XCTAssertEqual(result.contextDecision.includedSegmentIds, full)
+        case .failure(let err):
+            XCTFail("full retention with medium confidence should pass, got \(err)")
+        }
+
+        let low = resultJSON(included: full, includedRange: ("a", "c"), boundaryConfidence: "low")
+        switch PetLogResultParser.parse(low, allowedSegmentIds: full) {
+        case .success(let result):
+            XCTAssertEqual(result.contextDecision.boundaryConfidence, .low)
+            XCTAssertEqual(result.contextDecision.includedSegmentIds, full)
+        case .failure(let err):
+            XCTFail("full retention with low confidence should pass, got \(err)")
+        }
+    }
+
     // MARK: - Fix 4: excludedAdjacentRange is before-only
 
     /// An excluded range positioned immediately AFTER the included end (not
@@ -1059,5 +1103,47 @@ final class AmbientTests: XCTestCase {
                       "prefix must state excludedAdjacentRange is the range immediately before the start")
         XCTAssertTrue(prefix.contains("excludedAdjacentRange"),
                       "prefix must name the excludedAdjacentRange field in its conditional rule")
+    }
+
+    func testUniversalPrefixParseableJSONExampleHasExpectedKeys() throws {
+        let prefix = PetLogPromptBuilder.universalPrefix()
+        let answerMarker = "\"answer\": \"string — ユーザーへの回答本文\","
+        guard let answerPos = prefix.range(of: answerMarker) else {
+            return XCTFail("universal prefix should contain a JSON example in output schema section")
+        }
+        guard let open = prefix[..<answerPos.lowerBound].lastIndex(of: "{") else {
+            return XCTFail("could not locate schema example start brace")
+        }
+
+        var depth = 0
+        var end = open
+        var cursor = open
+        while cursor < prefix.endIndex {
+            let ch = prefix[cursor]
+            if ch == "{" { depth += 1 }
+            if ch == "}" {
+                depth -= 1
+                if depth == 0 {
+                    end = cursor
+                    break
+                }
+            }
+            cursor = prefix.index(after: cursor)
+        }
+        guard depth == 0, end != open else {
+            return XCTFail("schema example JSON must close correctly")
+        }
+
+        let schemaJSONText = String(prefix[open...end])
+        let parsed = try JSONSerialization.jsonObject(with: Data(schemaJSONText.utf8))
+        let top = try XCTUnwrap(parsed as? [String: Any])
+        XCTAssertEqual(Set(top.keys), ["answer", "contextDecision"], "top-level keys must be exact")
+
+        let decision = try XCTUnwrap(top["contextDecision"] as? [String: Any])
+        XCTAssertEqual(
+            Set(decision.keys),
+            ["policyVersion", "includedSegmentIds", "includedRange", "excludedAdjacentRange",
+             "boundaryReasonCodes", "boundaryConfidence", "historyComplete", "correctionCounts"],
+            "contextDecision keys must be exact")
     }
 }
