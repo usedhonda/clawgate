@@ -300,17 +300,20 @@ final class AmbientController {
             self.state.sync { self.pendingChunks += 1 }
             defer { self.state.sync { self.pendingChunks = max(0, self.pendingChunks - 1) } }
             do {
-                // Energy gate: whisper hallucinates ("Thank you." etc.) on silence,
-                // which would pollute always-on ambient context. Skip near-silent
-                // chunks before transcription. RMS is measured during capture
-                // (see AmbientCaptureManager) — re-reading the file here raced
-                // the writer's header flush and silently disabled the gate.
-                if rms < Self.silenceFloorRMS {
-                    self.log(String(format: "ambient chunk gated rms=%.4f < %.4f (silent)", rms, Self.silenceFloorRMS))
+                // Zero-capture gate: skip only chunks with no signal at all
+                // (e.g. a muted/disconnected input). Actual speech-vs-silence
+                // judgment belongs to Whisper + Silero VAD (see
+                // AmbientTranscriber.preset.vad), not a whole-chunk RMS
+                // threshold — real conversational audio can measure well
+                // below what "sounds loud" in RMS terms (2026-07-15
+                // incident: 18 real-speech chunks at rms 0.005803–0.014562
+                // were wrongly pre-gated as silence and never transcribed).
+                if Self.isZeroCapture(rms: rms) {
+                    self.log(String(format: "ambient chunk skipped rms=%.6f (zero_audio)", rms))
                     self.appendSkipped([SkippedSegment(
-                        reason: "low_confidence_no_speech",
+                        reason: "zero_audio",
                         segment: TranscriptSegment(startSeconds: 0, endSeconds: 0,
-                                                   text: String(format: "(gated silent chunk rms=%.4f)", rms)))])
+                                                   text: String(format: "(zero_audio chunk rms=%.6f)", rms)))])
                     self.state.sync { self.skippedTotal += 1 }
                     return
                 }
@@ -429,15 +432,20 @@ final class AmbientController {
 
     // MARK: - Helpers
 
-    /// RMS below which a chunk is treated as silence and not transcribed.
-    /// Calibrated 2026-06-09 against 61 real chunks: whisper hallucinations
-    /// ("Thank you." / "ご視聴ありがとうございました") clustered in the 0.005–0.015
-    /// near-silence band (noise floor, peak < 0.5), while genuine speech sat at
-    /// rms ≥ 0.017 with peak ≈ 1.0. 0.005 let the whole hallucination band through.
-    /// The level itself is measured during capture (AmbientCaptureManager) —
-    /// the old approach of reading the level back from the file raced the
-    /// header flush, returned nil, and fail-opened the gate on every chunk.
-    private static let silenceFloorRMS: Float = 0.015
+    /// RMS at or below this is treated as truly empty capture (no signal
+    /// whatsoever — e.g. a muted/disconnected input), not as "quiet speech".
+    /// This is deliberately far below any real audio level; genuine speech
+    /// and background conversation can both sit well under naive "loudness"
+    /// expectations, so speech-vs-silence judgment is delegated entirely to
+    /// Whisper + Silero VAD (AmbientTranscriber.preset.vad) rather than a
+    /// whole-chunk RMS threshold. The level itself is measured during
+    /// capture (AmbientCaptureManager) — re-reading it from the file here
+    /// raced the writer's header flush and silently disabled the gate.
+    private static let zeroCaptureRMSEpsilon: Float = 1e-6
+
+    static func isZeroCapture(rms: Float) -> Bool {
+        rms <= zeroCaptureRMSEpsilon
+    }
 
     private static func newSessionID() -> String {
         let fmt = ISO8601DateFormatter()

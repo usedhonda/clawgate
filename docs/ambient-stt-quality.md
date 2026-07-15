@@ -30,7 +30,7 @@ max_context: 0
 beam_size: 5
 no_speech_threshold: 0.30
 entropy_threshold: 2.80
-vad: off by default
+vad: on by default when the silero-v5.1.2 model is provisioned, otherwise off (degrades gracefully)
 greedy_decoding: off by default
 duplicate_filter: on
 internal_repetition_filter: on
@@ -117,8 +117,17 @@ Recommended skip reasons:
 - `rolling_duplicate`
 - `immediate_duplicate`
 - `internal_repetition`
-- `low_confidence_no_speech`
+- `zero_audio`
 - `manual_redaction`
+
+`zero_audio` is a pre-transcription skip for chunks with no signal at all
+(e.g. a muted/disconnected input), based on a whole-chunk RMS check against
+an epsilon far below any real audio level. It is not a speech/silence
+judgment — that is delegated to Whisper + Silero VAD (`vad` below). A
+2026-07-15 incident found real conversation audio measuring
+rms 0.005803–0.014562, below what an earlier, more aggressive whole-chunk
+RMS threshold (0.015) treated as silence; that threshold silently dropped
+real meeting audio before it ever reached VAD and has been removed.
 
 ## Quality Evaluation
 

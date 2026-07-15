@@ -529,4 +529,23 @@ final class AmbientTests: XCTestCase {
         // Thresholds are ordered sanely.
         XCTAssertLessThan(stale, wedged)
     }
+
+    // MARK: - Zero-capture pre-skip (2026-07-15 incident regression)
+
+    /// 2026-07-07 incident: a whole-chunk RMS threshold (0.015) pre-gated
+    /// real conversation audio as "silence" before it ever reached
+    /// Whisper/Silero VAD. Only true zero-signal capture (muted/disconnected
+    /// input) should be pre-skipped; everything else — including these
+    /// incident RMS values — must reach the transcriber so VAD makes the
+    /// speech/silence call.
+    func testZeroCaptureOnlySkipsTrulyEmptyChunks() {
+        XCTAssertTrue(AmbientController.isZeroCapture(rms: 0))
+        XCTAssertTrue(AmbientController.isZeroCapture(rms: 1e-7))
+
+        XCTAssertFalse(AmbientController.isZeroCapture(rms: 0.005803))
+        XCTAssertFalse(AmbientController.isZeroCapture(rms: 0.010333))
+        XCTAssertFalse(AmbientController.isZeroCapture(rms: 0.014562))
+        XCTAssertFalse(AmbientController.isZeroCapture(rms: 0.015))
+        XCTAssertFalse(AmbientController.isZeroCapture(rms: 0.017))
+    }
 }
