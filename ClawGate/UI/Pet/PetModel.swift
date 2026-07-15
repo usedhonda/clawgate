@@ -253,6 +253,10 @@ final class PetModel: NSObject, ObservableObject {
     /// finalized with whatever text has accumulated so far. Overridable for tests.
     static var deltaIdleTimeoutNanos: UInt64 = 5_000_000_000
 
+    /// How long to wait for a "質問まとめ" (Log summarize) reply before giving up.
+    /// Overridable for tests.
+    static var logAwaitingReplyTimeoutSeconds: TimeInterval = 180
+
     func handleEvent(_ event: OpenClawEvent) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1423,10 +1427,22 @@ final class PetModel: NSObject, ObservableObject {
         let token = UUID()
         logAwaitingReplyToken = token
         logAwaitingReply = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 180) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.logAwaitingReplyTimeoutSeconds) { [weak self] in
             guard let self, self.logAwaitingReplyToken == token, self.logAwaitingReply else { return }
+            // No terminal WS event (message/messageComplete/idle-finalize) ever
+            // arrived for this request — e.g. a sustained ping-timeout/reconnect
+            // loop (OpenClawWSClient) can tear the connection down before the
+            // server's response is received, with no replay-on-reconnect to
+            // recover it (2026-07-15 incident: log_user prompt with no matching
+            // reply in log.json). Release the summon slot and leave a visible
+            // marker instead of leaving pendingSummonSource wedged forever with
+            // no user-facing signal.
             self.logAwaitingReply = false
             self.logAwaitingReplyToken = nil
+            if self.pendingSummonSource == "log" {
+                self.pendingSummonSource = nil
+            }
+            self.appendSummonEntry(text: "Error: no reply received within \(Int(Self.logAwaitingReplyTimeoutSeconds))s (connection may have been unstable)", source: "log")
         }
         let maxTranscriptCharacters = 12_000
         let trimmedTranscript = String(transcript.suffix(maxTranscriptCharacters))

@@ -11,12 +11,15 @@ import XCTest
 /// generic chat path instead of the Log pane.
 final class PetModelDisconnectRoutingTests: XCTestCase {
     private var originalIdleTimeoutNanos: UInt64 = 0
+    private var originalLogAwaitingReplyTimeoutSeconds: TimeInterval = 0
     private var originalLogStoreDir = ""
 
     override func setUp() {
         super.setUp()
         originalIdleTimeoutNanos = PetModel.deltaIdleTimeoutNanos
         PetModel.deltaIdleTimeoutNanos = 80_000_000 // 80ms, shrunk for fast/deterministic tests
+        originalLogAwaitingReplyTimeoutSeconds = PetModel.logAwaitingReplyTimeoutSeconds
+        PetModel.logAwaitingReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
 
         // A bare PetModel() starts with empty in-memory logReplies (real disk
         // load only happens in start(), which this test never calls). If a
@@ -33,6 +36,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
 
     override func tearDown() {
         PetModel.deltaIdleTimeoutNanos = originalIdleTimeoutNanos
+        PetModel.logAwaitingReplyTimeoutSeconds = originalLogAwaitingReplyTimeoutSeconds
         try? FileManager.default.removeItem(atPath: PetLogStore.dir)
         PetLogStore.dir = originalLogStoreDir
         PetLogStore.testIsolationSemaphore.signal()
@@ -64,5 +68,33 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                         "the full final text must reach the Log pane, not a mid-stream fragment")
         XCTAssertTrue(model.messages.isEmpty,
                        "the final must not fall through to the plain chat pane")
+    }
+
+    /// 2026-07-15 16:58 JST incident: the WS connection was stuck in a
+    /// sustained ping-timeout/reconnect loop (OpenClawWSClient.handlePingTimeout)
+    /// for 20+ minutes. Reconnect + resubscribe never replays events missed
+    /// while the connection was down, so a "質問まとめ" reply emitted during a
+    /// down window is lost permanently — no terminal WS event ever arrives to
+    /// clear `pendingSummonSource`. Before this fix that left the summon slot
+    /// wedged forever with no visible sign anything had gone wrong.
+    func testLogAwaitingReplyTimeoutReleasesStuckSummonSlotWithVisibleMarker() async throws {
+        let model = PetModel()
+        model.sendLogInstruction(instruction: "質問まとめ", transcript: "")
+        // sendSummon only sets pendingSummonSource once a real sessionKey
+        // exists; simulate the in-flight state a connected session would have.
+        model.pendingSummonSource = "log"
+        XCTAssertTrue(model.logAwaitingReply)
+        XCTAssertTrue(model.isSummonBusy)
+
+        // No terminal WS event (message/messageComplete/idle-finalize) ever
+        // arrives — let the (shortened) awaiting-reply watchdog fire.
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertFalse(model.logAwaitingReply, "the awaiting-reply flag must clear")
+        XCTAssertFalse(model.isSummonBusy, "pendingSummonSource must not stay wedged forever")
+        let logEntries = model.logReplies.filter { $0.source == "log" }
+        XCTAssertEqual(logEntries.count, 1,
+                        "a visible marker must be recorded so the user isn't left with silent nothing")
+        XCTAssertTrue(logEntries.first?.text.contains("no reply received") ?? false)
     }
 }
