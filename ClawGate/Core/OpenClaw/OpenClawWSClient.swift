@@ -180,6 +180,31 @@ actor OpenClawWSClient {
         try await sendAndAwaitAck(request, requestId: requestId)
     }
 
+    /// Like `sendMessage`, but returns the Gateway-assigned `runId` from the
+    /// chat.send ACK payload (existing contract field — no new wire fields)
+    /// so the caller can correlate later delta/final events to this specific
+    /// request instead of assuming any in-flight event belongs to it.
+    /// `idempotencyKey` defaults to a fresh UUID for ordinary callers; a
+    /// caller with its own client-side correlation id (e.g. a Pet Log
+    /// query's `requestId`) can pass it through so the same id threads all
+    /// the way from the request into the returned `runId`.
+    func sendMessageAwaitingRunId(
+        _ text: String, sessionKey: String, idempotencyKey: String = UUID().uuidString
+    ) async throws -> String {
+        let payload = try await request(
+            method: "chat.send",
+            params: ChatSendParams(
+                sessionKey: sessionKey,
+                message: text,
+                idempotencyKey: idempotencyKey
+            )
+        )
+        guard let runId = payload?.runId else {
+            throw OpenClawError.unknown("chat.send response missing runId")
+        }
+        return runId
+    }
+
     func chatHistory(sessionKey: String, limit: Int = 50) async throws -> [[String: Any]] {
         let requestId = UUID().uuidString
         let request = GatewayRequest(
