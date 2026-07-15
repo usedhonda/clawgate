@@ -107,6 +107,13 @@ final class PetWindowController {
         sizeObservation = nil
     }
 
+    /// Forwards to the full chat window, if one is currently open, so the
+    /// menu bar left-click path can bring it back in front alongside the
+    /// settings panel. No-op when chat is closed.
+    func bringChatToFrontIfVisible() {
+        (window?.contentView as? PetContentView)?.bringChatWindowToFrontIfVisible()
+    }
+
     private func updateSpriteForCurrentState() {
         guard let sprite = spriteView else { return }
         let stateName = model.stateMachine.resolvedAnimationName
@@ -623,7 +630,12 @@ private final class PetContentView: NSView {
         bw.standardWindowButton(.zoomButton)?.isHidden = true
         bw.isOpaque = false
         bw.backgroundColor = .clear
-        bw.level = .floating
+        // Normal level (not .floating): the chat window should behave like a
+        // regular window and drop behind other apps when they're activated,
+        // instead of staying pinned above everything. It's brought back to
+        // front explicitly via bringChatWindowToFrontIfVisible() when the
+        // user reopens the menu bar panel — see MenuBarApp.toggleMainPanel().
+        bw.level = .normal
         bw.hasShadow = true
         bw.isMovable = true
         bw.isMovableByWindowBackground = true
@@ -733,6 +745,14 @@ private final class PetContentView: NSView {
             notificationWindow = nil
         }
         refreshPetPanelDismissMonitor()
+    }
+
+    /// Brings the full chat window back in front of other apps if it's
+    /// currently open. No-op if chat is closed/not yet created — called
+    /// unconditionally from the menu bar left-click path (MenuBarApp).
+    func bringChatWindowToFrontIfVisible() {
+        guard let cw = chatWindow, cw.isVisible else { return }
+        cw.makeKeyAndOrderFront(nil)
     }
 
     private func hideChatWindow() {

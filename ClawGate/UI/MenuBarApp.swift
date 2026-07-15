@@ -383,6 +383,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         updateGhosttyFollowInterval()
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         panel.makeKeyAndOrderFront(nil)
+        petWindowController?.bringChatToFrontIfVisible()
     }
 
     private func prepareExpandedPanelForOpen(_ panel: NSPanel) {
