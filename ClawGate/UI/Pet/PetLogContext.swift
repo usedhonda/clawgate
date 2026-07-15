@@ -228,26 +228,118 @@ struct PetLogEntryMetadata: Codable, Equatable {
 enum PetLogParseError: Error, Equatable {
     case invalidJSON
     case policyVersionMismatch(expected: String, got: String)
+    case blankAnswer
+    case negativeCorrectionCount
+    case unknownSegmentId
+    case segmentIdsOutOfOrder
+    case reversedRange
+    case rangeEndpointMismatch
+    case emptyIncludedWithNonNullRange
+    case invalidExcludedRange
 }
 
 enum PetLogResultParser {
     /// Strict parse: the model's reply must match the exact JSON schema
-    /// instructed by `PetLogPromptBuilder`. Any deviation fails closed —
-    /// callers must not fall back to showing the raw/garbled text. Tolerates
-    /// a single wrapping ```/```json markdown code fence (common LLM
-    /// formatting habit) but nothing more lenient than that.
-    static func parse(_ text: String) -> Result<PetLogModelResult, PetLogParseError> {
+    /// instructed by `PetLogPromptBuilder`, AND its context-selection claims
+    /// must be self-consistent against the exact segment ids that were sent in
+    /// the request (`allowedSegmentIds`, the envelope's own ordered
+    /// `segments.map(\.id)`). Any deviation fails closed — callers must not
+    /// fall back to showing the raw/garbled text. Tolerates a single wrapping
+    /// ```/```json markdown code fence (common LLM formatting habit) but
+    /// nothing more lenient than that.
+    ///
+    /// The model can only ever legitimately *subset* the sent segments in
+    /// their original order; anything else (invented ids, reordering, reversed
+    /// or unbounded ranges, an excluded range that doesn't border the included
+    /// set, a blank answer, a negative correction count) is a sign the reply
+    /// can't be trusted and is rejected.
+    static func parse(_ text: String, allowedSegmentIds: [String]) -> Result<PetLogModelResult, PetLogParseError> {
         let stripped = stripCodeFence(text)
         guard let data = stripped.data(using: .utf8) else { return .failure(.invalidJSON) }
         let decoder = JSONDecoder()
         guard let result = try? decoder.decode(PetLogModelResult.self, from: data) else {
             return .failure(.invalidJSON)
         }
-        guard result.contextDecision.policyVersion == PetLogPromptBuilder.policyVersion else {
+        let decision = result.contextDecision
+        guard decision.policyVersion == PetLogPromptBuilder.policyVersion else {
             return .failure(.policyVersionMismatch(
                 expected: PetLogPromptBuilder.policyVersion,
-                got: result.contextDecision.policyVersion))
+                got: decision.policyVersion))
         }
+
+        // Answer must be real content, not empty/whitespace.
+        guard !result.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure(.blankAnswer)
+        }
+
+        // Correction tallies can't be negative. (Non-integer/boolean values
+        // already fail at the strict `Int` JSONDecoder step above.)
+        if decision.correctionCounts.values.contains(where: { $0 < 0 }) {
+            return .failure(.negativeCorrectionCount)
+        }
+
+        // Position of each sent id, for order/membership checks. Segment ids
+        // are content-hash unique in practice, so a positional map is exact.
+        var position: [String: Int] = [:]
+        for (i, id) in allowedSegmentIds.enumerated() { position[id] = i }
+
+        let included = decision.includedSegmentIds
+        // Every included id must be one the client actually sent.
+        for id in included where position[id] == nil {
+            return .failure(.unknownSegmentId)
+        }
+        // Included ids must appear in the SAME relative order as the request
+        // (a subsequence is fine — that is exactly what excluding a scene looks
+        // like — but no reordering or duplication).
+        let includedSet = Set(included)
+        let expectedOrder = allowedSegmentIds.filter { includedSet.contains($0) }
+        guard expectedOrder == included else {
+            return .failure(.segmentIdsOutOfOrder)
+        }
+
+        // Included range must be a well-formed, non-reversed bound that
+        // actually describes the included set.
+        if let range = decision.includedRange {
+            if let s = range.startSegmentId, position[s] == nil { return .failure(.unknownSegmentId) }
+            if let e = range.endSegmentId, position[e] == nil { return .failure(.unknownSegmentId) }
+            if let s = range.startSegmentId, let e = range.endSegmentId,
+               let ps = position[s], let pe = position[e] {
+                guard ps <= pe else { return .failure(.reversedRange) }
+            }
+            if included.isEmpty {
+                // An empty inclusion cannot carry a non-null range.
+                if range.startSegmentId != nil || range.endSegmentId != nil {
+                    return .failure(.emptyIncludedWithNonNullRange)
+                }
+            } else if let s = range.startSegmentId, let e = range.endSegmentId {
+                guard s == included.first, e == included.last else {
+                    return .failure(.rangeEndpointMismatch)
+                }
+            }
+        }
+
+        // Excluded-adjacent range (when a real range is given) must be a
+        // well-formed bound that immediately borders the included range — this
+        // field describes what was trimmed right at the boundary, not an
+        // arbitrary far-away exclusion.
+        if let ex = decision.excludedAdjacentRange,
+           ex.startSegmentId != nil || ex.endSegmentId != nil {
+            guard let s = ex.startSegmentId, let e = ex.endSegmentId,
+                  let ps = position[s], let pe = position[e], ps <= pe else {
+                return .failure(.invalidExcludedRange)
+            }
+            guard let incStart = decision.includedRange?.startSegmentId,
+                  let incEnd = decision.includedRange?.endSegmentId,
+                  let pIncStart = position[incStart], let pIncEnd = position[incEnd] else {
+                return .failure(.invalidExcludedRange)
+            }
+            let bordersBefore = (pe == pIncStart - 1)
+            let bordersAfter = (ps == pIncEnd + 1)
+            guard bordersBefore || bordersAfter else {
+                return .failure(.invalidExcludedRange)
+            }
+        }
+
         return .success(result)
     }
 

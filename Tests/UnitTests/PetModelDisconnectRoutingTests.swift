@@ -103,15 +103,18 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
     /// wedged forever with no visible sign anything had gone wrong.
     func testLogAwaitingReplyTimeoutReleasesStuckSummonSlotWithVisibleMarker() async throws {
         let model = PetModel()
+        // Reach the connected path (arm the watchdog + claim the summon slot),
+        // but suppress the real WS send so the reply-timeout watchdog is the
+        // sole release mechanism — deterministically reproducing "send
+        // succeeded, reply never arrived" without a socket racing the watchdog.
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
         let envelope = PetLogQueryEnvelope(
             requestId: UUID().uuidString, actionId: "slot-0", instruction: "質問まとめ",
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
             coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
         )
         model.sendLogInstruction(envelope: envelope)
-        // sendSummon only sets pendingSummonSource once a real sessionKey
-        // exists; simulate the in-flight state a connected session would have.
-        model.pendingSummonSource = "log"
         XCTAssertTrue(model.logAwaitingReply)
         XCTAssertTrue(model.isSummonBusy)
 
@@ -163,12 +166,8 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
     /// with no fabricated metadata.
     func testStructuredParseFailsClosedOnNonJSONReply() {
         let model = PetModel()
-        let envelope = PetLogQueryEnvelope(
-            requestId: UUID().uuidString, actionId: "free", instruction: "まとめて",
-            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
-            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
-        )
-        model.sendLogInstruction(envelope: envelope)
+        // Drive the reply path directly (a disconnected sendLogInstruction now
+        // fails fast without arming this path — that is covered separately).
         model.pendingSummonSource = "log"
         model.pendingSummonRunId = nil
 
@@ -214,5 +213,57 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         let legacy = try JSONDecoder().decode(NotificationEntry.self, from: Data(legacyJSON.utf8))
         XCTAssertNil(legacy.logMetadata, "old entries without the key must decode with logMetadata == nil")
         XCTAssertEqual(legacy.text, "legacy answer")
+    }
+
+    private func logEnvelope() -> PetLogQueryEnvelope {
+        PetLogQueryEnvelope(
+            requestId: UUID().uuidString, actionId: "slot-0", instruction: "質問まとめ",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+        )
+    }
+
+    /// A Log action fired while disconnected must surface a bounded, immediate,
+    /// visible error — NOT a saved `log_user` prompt plus a fake multi-second
+    /// watchdog wait before any error appears.
+    func testDisconnectedLogInstructionSurfacesImmediateErrorWithoutLogUserOrWatchdog() async throws {
+        let model = PetModel()  // fresh: no sessionKey, not busy
+
+        model.sendLogInstruction(envelope: logEnvelope())
+
+        // The error is present synchronously, with no summon slot claimed and
+        // no awaiting-reply state entered.
+        let logEntries = model.logReplies.filter { $0.source == "log" }
+        XCTAssertEqual(logEntries.count, 1, "exactly one bounded error entry")
+        XCTAssertTrue(logEntries.first?.text.contains("not connected") ?? false)
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
+                       "no log_user prompt may be saved when the send can't happen")
+        XCTAssertNil(logEntries.first?.logMetadata)
+        XCTAssertFalse(model.isSummonBusy)
+        XCTAssertFalse(model.logAwaitingReply)
+
+        // No watchdog was armed, so nothing fires to add a second entry.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(model.logReplies.filter { $0.source == "log" }.count, 1,
+                       "no delayed watchdog entry may appear")
+    }
+
+    /// A Log action fired while another Chi summon (here scene naming) is in
+    /// flight must not stomp it: no overwrite of pendingSummonSource, no
+    /// log_user prompt — just a bounded, visible busy marker.
+    func testBusyLogInstructionDoesNotStompInFlightSummon() {
+        let model = PetModel()
+        // Simulate an in-flight scene-naming summon.
+        model.pendingSummonSource = "log_scene_naming"
+
+        model.sendLogInstruction(envelope: logEnvelope())
+
+        XCTAssertEqual(model.pendingSummonSource, "log_scene_naming",
+                       "an in-flight summon must not be overwritten to \"log\"")
+        let logEntries = model.logReplies.filter { $0.source == "log" }
+        XCTAssertEqual(logEntries.count, 1, "exactly one bounded busy-error entry")
+        XCTAssertTrue(logEntries.first?.text.contains("busy") ?? false)
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
+                       "no log_user prompt may be saved when refused for busy")
     }
 }

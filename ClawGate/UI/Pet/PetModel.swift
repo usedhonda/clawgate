@@ -1412,11 +1412,32 @@ final class PetModel: NSObject, ObservableObject {
     /// was started via a path that doesn't track it (kept nil = "any run
     /// accepted", preserving prior best-effort routing for those callers).
     var pendingSummonRunId: String?
-    /// `completeBeforeAnchor` from the envelope that started the current "log"
-    /// summon — carried through to the reply's persisted `logMetadata`. Reset
-    /// alongside `pendingSummonSource`/`pendingSummonRunId`.
-    private var pendingLogCompleteBeforeAnchor = true
+
+    /// Per-request state for the in-flight "log" summon, carried from
+    /// `sendLogInstruction` through to the reply so the parser can validate the
+    /// model's segment claims against exactly what was sent, and the persisted
+    /// `logMetadata` can record the client's own completeness signal. Tracks
+    /// 1:1 with whether a Log summon is actually in flight — set when the
+    /// summon starts, cleared everywhere the summon terminates.
+    private struct PendingLogRequest {
+        let requestId: String
+        let segmentIds: [String]
+        let completeBeforeAnchor: Bool
+    }
+    private var pendingLogRequest: PendingLogRequest?
+
     var isSummonBusy: Bool { pendingSummonSource != nil }
+
+    #if DEBUG
+    /// Test seam: inject a session key so the connected-path Log summon logic
+    /// runs without a live Gateway handshake (`sessionKey` is otherwise private).
+    func setSessionKeyForTesting(_ key: String?) { sessionKey = key }
+    /// Test seam: when true, `sendLogSummon` claims the summon slot but skips
+    /// the real WS send, so the reply-timeout watchdog ("send succeeded, reply
+    /// never arrived") can be exercised deterministically without a
+    /// live-or-failing socket racing the watchdog.
+    var suppressLogSendForTesting = false
+    #endif
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
     private var logAwaitingReplyToken: UUID?
@@ -1463,6 +1484,10 @@ final class PetModel: NSObject, ObservableObject {
         pendingSummonRunId = nil
         showWhisper("Working on it...")
 
+        #if DEBUG
+        if suppressLogSendForTesting { return }
+        #endif
+
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -1479,6 +1504,7 @@ final class PetModel: NSObject, ObservableObject {
                 await MainActor.run {
                     self.pendingSummonSource = nil
                     self.pendingSummonRunId = nil
+                    self.pendingLogRequest = nil
                     self.addSummonResult(text: "Error: \(error)", source: "log")
                 }
             }
@@ -1490,6 +1516,27 @@ final class PetModel: NSObject, ObservableObject {
     /// display-capped transcript) plus anchor/scope metadata — see
     /// PetLogContext.swift and AmbientLogModel.buildQueryEnvelope.
     func sendLogInstruction(envelope: PetLogQueryEnvelope) {
+        // Admission control comes first, before any user-visible entry, save,
+        // or watchdog timer is created:
+        //  - Busy: a previous Chi summon (scene naming or anything else) is
+        //    still in flight. Starting a Log summon here would silently
+        //    overwrite pendingSummonSource/RunId/pendingLogRequest out from
+        //    under it, so refuse with a bounded, immediate marker instead.
+        //  - Not connected: sendLogSummon silently no-ops without a sessionKey,
+        //    which previously left a saved log_user entry and a fake
+        //    180s watchdog wait before any error surfaced. Surface the error
+        //    immediately instead.
+        guard !isSummonBusy else {
+            logThreadPaneOpen = true
+            appendLogErrorEntry("Error: busy — a previous Chi request is still in progress")
+            return
+        }
+        guard sessionKey != nil else {
+            logThreadPaneOpen = true
+            appendLogErrorEntry("Error: not connected")
+            return
+        }
+
         let userEntry = NotificationEntry(
             id: UUID().uuidString, text: envelope.instruction,
             source: "log_user", timestamp: Date()
@@ -1518,6 +1565,7 @@ final class PetModel: NSObject, ObservableObject {
             if self.pendingSummonSource == "log" {
                 self.pendingSummonSource = nil
                 self.pendingSummonRunId = nil
+                self.pendingLogRequest = nil
             }
             self.appendSummonEntry(text: "Error: no reply received within \(Int(Self.logAwaitingReplyTimeoutSeconds))s (connection may have been unstable)", source: "log")
         }
@@ -1527,8 +1575,29 @@ final class PetModel: NSObject, ObservableObject {
             appendSummonEntry(text: "Error: failed to build log query", source: "log")
             return
         }
-        pendingLogCompleteBeforeAnchor = envelope.completeBeforeAnchor
+        pendingLogRequest = PendingLogRequest(
+            requestId: envelope.requestId,
+            segmentIds: envelope.segments.map(\.id),
+            completeBeforeAnchor: envelope.completeBeforeAnchor
+        )
         sendLogSummon(message, requestId: envelope.requestId)
+    }
+
+    /// Appends a bounded, immediate, persisted "log"-sourced error/status
+    /// marker straight into the Log pane, bypassing the structured-parse and
+    /// awaiting-reply machinery. Used for admission-control refusals (busy /
+    /// not connected) that must be visible without ever creating a `log_user`
+    /// entry or arming the reply watchdog.
+    private func appendLogErrorEntry(_ text: String) {
+        let entry = NotificationEntry(
+            id: UUID().uuidString, text: text,
+            source: "log", timestamp: Date()
+        )
+        logReplies.append(entry)
+        if logReplies.count > 100 {
+            logReplies.removeFirst(logReplies.count - 100)
+        }
+        PetLogStore.save(logReplies, file: "log.json")
     }
 
     func requestSceneNaming(scenes: [(id: String, timeLabel: String, excerpt: String)]) {
@@ -1634,14 +1703,18 @@ final class PetModel: NSObject, ObservableObject {
             logAwaitingReplyToken = nil
             let entry: NotificationEntry
             if parseAsStructured {
-                switch PetLogResultParser.parse(text) {
+                // Validate the model's segment claims against exactly what the
+                // originating request sent (ordered ids), and stamp the
+                // client's own completeness signal onto the metadata.
+                let pending = pendingLogRequest
+                switch PetLogResultParser.parse(text, allowedSegmentIds: pending?.segmentIds ?? []) {
                 case .success(let result):
                     entry = NotificationEntry(
                         id: UUID().uuidString, text: result.answer,
                         source: source, timestamp: Date(),
                         logMetadata: PetLogEntryMetadata(
                             contextDecision: result.contextDecision,
-                            completeBeforeAnchor: pendingLogCompleteBeforeAnchor
+                            completeBeforeAnchor: pending?.completeBeforeAnchor ?? true
                         )
                     )
                 case .failure:
@@ -1659,6 +1732,10 @@ final class PetModel: NSObject, ObservableObject {
                     source: source, timestamp: Date()
                 )
             }
+            // This log summon is terminal (success, parse failure, timeout,
+            // send error, or build failure all route here) — drop the pending
+            // request so it always tracks 1:1 with an in-flight Log summon.
+            pendingLogRequest = nil
             logReplies.append(entry)
             if logReplies.count > 100 {
                 logReplies.removeFirst(logReplies.count - 100)
