@@ -845,4 +845,219 @@ final class AmbientTests: XCTestCase {
         XCTAssertEqual(decoded, envelope, "envelope must round-trip; hostile text stays inside the data section")
         XCTAssertEqual(decoded.segments.first?.text, hostile)
     }
+
+    // MARK: - Fix 1: exact key set with explicit JSON null (never omitted keys)
+
+    /// The envelope and its segments must emit the EXACT contract key set with
+    /// explicit JSON `null` for optional fields — never an omitted key. Swift's
+    /// synthesized encode would drop a nil optional's key; the custom encoder
+    /// must not.
+    func testEnvelopeEncodesExactKeySetWithExplicitJSONNulls() throws {
+        let ts = Date(timeIntervalSince1970: 1_700_000_000)
+        let envelope = PetLogQueryEnvelope(
+            requestId: "req-null", actionId: "free", instruction: "まとめて",
+            queryTimestamp: ts, anchorTimestamp: ts,
+            scopeOverride: nil, coverageStart: nil, coverageEnd: nil,
+            completeBeforeAnchor: true,
+            segments: [
+                PetLogRawSegment(id: "s1", capturedAt: nil,
+                                 startSeconds: 0, endSeconds: 2, speaker: nil, text: "hi"),
+            ]
+        )
+        let message = try PetLogPromptBuilder.buildMessage(envelope: envelope)
+        let prefix = PetLogPromptBuilder.universalPrefix()
+        let jsonPart = String(message.dropFirst(prefix.count + 2))
+        let obj = try JSONSerialization.jsonObject(with: Data(jsonPart.utf8), options: [])
+        let dict = try XCTUnwrap(obj as? [String: Any])
+
+        XCTAssertEqual(Set(dict.keys), [
+            "requestId", "actionId", "instruction", "queryTimestamp", "anchorTimestamp",
+            "scopeOverride", "coverageStart", "coverageEnd", "completeBeforeAnchor", "segments",
+        ], "envelope must carry exactly the contract key set, no more, no fewer")
+        XCTAssertTrue(dict["scopeOverride"] is NSNull, "nil scopeOverride must serialize as explicit JSON null")
+        XCTAssertTrue(dict["coverageStart"] is NSNull, "nil coverageStart must serialize as explicit JSON null")
+        XCTAssertTrue(dict["coverageEnd"] is NSNull, "nil coverageEnd must serialize as explicit JSON null")
+
+        let segments = try XCTUnwrap(dict["segments"] as? [[String: Any]])
+        let seg = try XCTUnwrap(segments.first)
+        XCTAssertEqual(Set(seg.keys), [
+            "id", "capturedAt", "startSeconds", "endSeconds", "speaker", "text",
+        ], "segment must carry exactly the contract key set")
+        XCTAssertTrue(seg["capturedAt"] is NSNull, "nil capturedAt must serialize as explicit JSON null")
+        XCTAssertTrue(seg["speaker"] is NSNull, "nil speaker must serialize as explicit JSON null")
+    }
+
+    // MARK: - Fix 2: exact-key-set rejection of extra/missing JSON keys
+
+    /// A response body with all-correct value types but an EXTRA unexpected
+    /// top-level key must be rejected (JSONDecoder silently ignores it).
+    func testResultParserRejectsExtraTopLevelKey() {
+        let json = """
+        {
+          "answer": "回答本文です",
+          "debug": "x",
+          "contextDecision": {
+            "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
+            "includedSegmentIds": [],
+            "includedRange": null,
+            "excludedAdjacentRange": null,
+            "boundaryReasonCodes": [],
+            "boundaryConfidence": "high",
+            "historyComplete": true,
+            "correctionCounts": {}
+          }
+        }
+        """
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: []),
+                       .failure(.schemaKeySetMismatch))
+    }
+
+    /// A response missing the entire `contextDecision` object must be rejected.
+    func testResultParserRejectsMissingContextDecision() {
+        let json = """
+        { "answer": "回答本文です" }
+        """
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: []),
+                       .failure(.schemaKeySetMismatch))
+    }
+
+    /// An `includedRange` object present but missing `endSegmentId` (a partial
+    /// range object) must be rejected at the key-set level.
+    func testResultParserRejectsPartialIncludedRangeObject() {
+        let json = """
+        {
+          "answer": "回答本文です",
+          "contextDecision": {
+            "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
+            "includedSegmentIds": ["a"],
+            "includedRange": {"startSegmentId": "a"},
+            "excludedAdjacentRange": null,
+            "boundaryReasonCodes": [],
+            "boundaryConfidence": "high",
+            "historyComplete": true,
+            "correctionCounts": {}
+          }
+        }
+        """
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a"]),
+                       .failure(.schemaKeySetMismatch))
+    }
+
+    /// An EXTRA key inside `contextDecision` must be rejected.
+    func testResultParserRejectsExtraContextDecisionKey() {
+        let json = """
+        {
+          "answer": "回答本文です",
+          "contextDecision": {
+            "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
+            "includedSegmentIds": [],
+            "includedRange": null,
+            "excludedAdjacentRange": null,
+            "boundaryReasonCodes": [],
+            "boundaryConfidence": "high",
+            "historyComplete": true,
+            "correctionCounts": {},
+            "extra": true
+          }
+        }
+        """
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: []),
+                       .failure(.schemaKeySetMismatch))
+    }
+
+    // MARK: - Fix 3: includedRange null-vs-object semantics
+
+    /// Non-empty inclusion with `includedRange` as JSON null must fail closed.
+    func testResultParserRejectsNonEmptyIncludedWithNullRange() {
+        let json = """
+        {
+          "answer": "回答本文です",
+          "contextDecision": {
+            "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
+            "includedSegmentIds": ["a", "b"],
+            "includedRange": null,
+            "excludedAdjacentRange": null,
+            "boundaryReasonCodes": [],
+            "boundaryConfidence": "high",
+            "historyComplete": true,
+            "correctionCounts": {}
+          }
+        }
+        """
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+                       .failure(.rangeEndpointMismatch))
+    }
+
+    /// Non-empty inclusion whose range has only `startSegmentId` (endSegmentId
+    /// null) must fail closed.
+    func testResultParserRejectsNonEmptyIncludedWithHalfNullRange() {
+        let json = """
+        {
+          "answer": "回答本文です",
+          "contextDecision": {
+            "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
+            "includedSegmentIds": ["a", "b"],
+            "includedRange": {"startSegmentId": "a", "endSegmentId": null},
+            "excludedAdjacentRange": null,
+            "boundaryReasonCodes": [],
+            "boundaryConfidence": "high",
+            "historyComplete": true,
+            "correctionCounts": {}
+          }
+        }
+        """
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+                       .failure(.rangeEndpointMismatch))
+    }
+
+    /// Empty inclusion whose `includedRange` is a present object with both
+    /// members null (NOT a JSON null for the field) must fail closed.
+    func testResultParserRejectsEmptyIncludedWithNullMemberRangeObject() {
+        let json = """
+        {
+          "answer": "回答本文です",
+          "contextDecision": {
+            "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
+            "includedSegmentIds": [],
+            "includedRange": {"startSegmentId": null, "endSegmentId": null},
+            "excludedAdjacentRange": null,
+            "boundaryReasonCodes": [],
+            "boundaryConfidence": "high",
+            "historyComplete": true,
+            "correctionCounts": {}
+          }
+        }
+        """
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+                       .failure(.emptyIncludedWithNonNullRange))
+    }
+
+    // MARK: - Fix 4: excludedAdjacentRange is before-only
+
+    /// An excluded range positioned immediately AFTER the included end (not
+    /// before the included start) must now be rejected — the "after" case that
+    /// was wrongly accepted before this fix.
+    func testResultParserRejectsExcludedRangeAfterIncluded() {
+        let json = resultJSON(included: ["b", "c"], includedRange: ("b", "c"),
+                              excludedRange: ("d", "d"))
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"]),
+                       .failure(.invalidExcludedRange))
+    }
+
+    // MARK: - Fix 5: prefix schema prose states the null-vs-object conditionals
+
+    /// Policy-text regression guard: the prefix must state (a) the
+    /// empty-included-means-null-range rule and (b) the before-only
+    /// excludedAdjacentRange rule. Loose substring checks, not NLP evaluation.
+    func testUniversalPrefixStatesRangeConditionals() {
+        let prefix = PetLogPromptBuilder.universalPrefix()
+        XCTAssertTrue(prefix.contains("空の場合"),
+                      "prefix must state the empty-included case for includedRange")
+        XCTAssertTrue(prefix.contains("includedRange"),
+                      "prefix must name the includedRange field in its conditional rule")
+        XCTAssertTrue(prefix.contains("開始直前"),
+                      "prefix must state excludedAdjacentRange is the range immediately before the start")
+        XCTAssertTrue(prefix.contains("excludedAdjacentRange"),
+                      "prefix must name the excludedAdjacentRange field in its conditional rule")
+    }
 }

@@ -18,6 +18,34 @@ struct PetLogRawSegment: Codable, Equatable {
     let text: String
 }
 
+extension PetLogRawSegment {
+    enum CodingKeys: String, CodingKey {
+        case id, capturedAt, startSeconds, endSeconds, speaker, text
+    }
+
+    /// The contract requires the exact key set to always be present, with an
+    /// explicit JSON `null` (never an omitted key) for the optional fields.
+    /// Swift's synthesized `Encodable` would omit a nil optional's key, so the
+    /// encode side is hand-written; automatic `Decodable` synthesis is kept.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        if let capturedAt {
+            try container.encode(capturedAt, forKey: .capturedAt)
+        } else {
+            try container.encodeNil(forKey: .capturedAt)
+        }
+        try container.encode(startSeconds, forKey: .startSeconds)
+        try container.encode(endSeconds, forKey: .endSeconds)
+        if let speaker {
+            try container.encode(speaker, forKey: .speaker)
+        } else {
+            try container.encodeNil(forKey: .speaker)
+        }
+        try container.encode(text, forKey: .text)
+    }
+}
+
 enum PetLogSegmentID {
     /// Deterministic id derived from the segment's own immutable fields —
     /// the same segment always yields the same id, independent of its
@@ -108,6 +136,44 @@ struct PetLogQueryEnvelope: Codable, Equatable {
     let segments: [PetLogRawSegment]
 }
 
+extension PetLogQueryEnvelope {
+    enum CodingKeys: String, CodingKey {
+        case requestId, actionId, instruction, queryTimestamp, anchorTimestamp
+        case scopeOverride, coverageStart, coverageEnd, completeBeforeAnchor, segments
+    }
+
+    /// Emit the exact key set always, with explicit JSON `null` for the
+    /// optional fields (Swift's synthesized encode would omit a nil optional's
+    /// key). `Date` values are encoded via `container.encode(_:forKey:)`, which
+    /// automatically respects the encoder's `dateEncodingStrategy`. Automatic
+    /// `Decodable` synthesis is kept.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(requestId, forKey: .requestId)
+        try container.encode(actionId, forKey: .actionId)
+        try container.encode(instruction, forKey: .instruction)
+        try container.encode(queryTimestamp, forKey: .queryTimestamp)
+        try container.encode(anchorTimestamp, forKey: .anchorTimestamp)
+        if let scopeOverride {
+            try container.encode(scopeOverride, forKey: .scopeOverride)
+        } else {
+            try container.encodeNil(forKey: .scopeOverride)
+        }
+        if let coverageStart {
+            try container.encode(coverageStart, forKey: .coverageStart)
+        } else {
+            try container.encodeNil(forKey: .coverageStart)
+        }
+        if let coverageEnd {
+            try container.encode(coverageEnd, forKey: .coverageEnd)
+        } else {
+            try container.encodeNil(forKey: .coverageEnd)
+        }
+        try container.encode(completeBeforeAnchor, forKey: .completeBeforeAnchor)
+        try container.encode(segments, forKey: .segments)
+    }
+}
+
 // MARK: - Universal hidden prefix (pure builder)
 
 enum PetLogPromptBuilder {
@@ -143,14 +209,24 @@ enum PetLogPromptBuilder {
             ない限り変更しないでください。
         (c) instruction の実行: 上記で選別・補正したセグメントに対してのみ `instruction` を実行してください。
             除外した範囲の内容を回答に混入させないでください。
-        (d) 出力: 次のJSONスキーマに厳密に従ってください（他のテキストを含めないでください）:
+        (d) 出力: 次のJSONスキーマに厳密に従ってください（他のテキストを含めないでください）。
+            `includedRange` / `excludedAdjacentRange` の扱いは以下の条件を厳密に守ってください:
+            - `includedSegmentIds` が空の場合、`includedRange` は必ず JSON の `null` にすること
+              （`{"startSegmentId": null, "endSegmentId": null}` のようなオブジェクトにはしない）。
+            - `includedSegmentIds` が空でない場合、`includedRange` は必ずオブジェクトで、
+              `startSegmentId`/`endSegmentId` の両方を null にせず、それぞれ `includedSegmentIds` の
+              最初/最後の要素と一致させること。
+            - `excludedAdjacentRange` は、除外がない場合は `null` または
+              `{"startSegmentId": null, "endSegmentId": null}`。除外がある場合は、`includedRange` の
+              開始直前に隣接する範囲だけを示すオブジェクトにすること（開始直前ではない範囲や、
+              終了直後の範囲は指定しないこと）。
         {
           "answer": "string — ユーザーへの回答本文",
           "contextDecision": {
             "policyVersion": "\(policyVersion)",
             "includedSegmentIds": ["string", ...],
-            "includedRange": {"startSegmentId": "string|null", "endSegmentId": "string|null"},
-            "excludedAdjacentRange": {"startSegmentId": "string|null", "endSegmentId": "string|null"},
+            "includedRange": "null（空の場合）または {\\"startSegmentId\\": \\"<最初>\\", \\"endSegmentId\\": \\"<最後>\\"}",
+            "excludedAdjacentRange": "null または {\\"startSegmentId\\": \\"string\\", \\"endSegmentId\\": \\"string\\"}（includedRange 開始直前のみ）",
             "boundaryReasonCodes": ["string", ...],
             "boundaryConfidence": "high|medium|low",
             "historyComplete": true,
@@ -227,6 +303,7 @@ struct PetLogEntryMetadata: Codable, Equatable {
 
 enum PetLogParseError: Error, Equatable {
     case invalidJSON
+    case schemaKeySetMismatch
     case policyVersionMismatch(expected: String, got: String)
     case blankAnswer
     case negativeCorrectionCount
@@ -256,6 +333,17 @@ enum PetLogResultParser {
     static func parse(_ text: String, allowedSegmentIds: [String]) -> Result<PetLogModelResult, PetLogParseError> {
         let stripped = stripCodeFence(text)
         guard let data = stripped.data(using: .utf8) else { return .failure(.invalidJSON) }
+
+        // Exact-key-set check first (JSONDecoder silently ignores unknown keys
+        // and treats a missing key for an Optional as nil — too permissive for
+        // a strict contract). Reject any extra or missing key before decoding.
+        guard let rawObject = try? JSONSerialization.jsonObject(with: data, options: []) else {
+            return .failure(.invalidJSON)
+        }
+        guard hasExactKeySets(rawObject) else {
+            return .failure(.schemaKeySetMismatch)
+        }
+
         let decoder = JSONDecoder()
         guard let result = try? decoder.decode(PetLogModelResult.self, from: data) else {
             return .failure(.invalidJSON)
@@ -297,31 +385,36 @@ enum PetLogResultParser {
             return .failure(.segmentIdsOutOfOrder)
         }
 
-        // Included range must be a well-formed, non-reversed bound that
-        // actually describes the included set.
-        if let range = decision.includedRange {
-            if let s = range.startSegmentId, position[s] == nil { return .failure(.unknownSegmentId) }
-            if let e = range.endSegmentId, position[e] == nil { return .failure(.unknownSegmentId) }
-            if let s = range.startSegmentId, let e = range.endSegmentId,
-               let ps = position[s], let pe = position[e] {
-                guard ps <= pe else { return .failure(.reversedRange) }
+        // Included range must exactly describe the included set. Empty
+        // inclusion requires the includedRange FIELD ITSELF to be JSON null (an
+        // object with both members null is rejected); non-empty inclusion
+        // requires a present object with both endpoints matching first/last.
+        if included.isEmpty {
+            // Empty inclusion: the includedRange FIELD ITSELF must be JSON null —
+            // not merely an object whose two endpoints happen to both be null.
+            guard decision.includedRange == nil else {
+                return .failure(.emptyIncludedWithNonNullRange)
             }
-            if included.isEmpty {
-                // An empty inclusion cannot carry a non-null range.
-                if range.startSegmentId != nil || range.endSegmentId != nil {
-                    return .failure(.emptyIncludedWithNonNullRange)
-                }
-            } else if let s = range.startSegmentId, let e = range.endSegmentId {
-                guard s == included.first, e == included.last else {
-                    return .failure(.rangeEndpointMismatch)
-                }
+        } else {
+            guard let range = decision.includedRange,
+                  let s = range.startSegmentId, let e = range.endSegmentId else {
+                return .failure(.rangeEndpointMismatch)
+            }
+            guard let ps = position[s], let pe = position[e] else {
+                return .failure(.unknownSegmentId)
+            }
+            guard ps <= pe else {
+                return .failure(.reversedRange)
+            }
+            guard s == included.first, e == included.last else {
+                return .failure(.rangeEndpointMismatch)
             }
         }
 
-        // Excluded-adjacent range (when a real range is given) must be a
-        // well-formed bound that immediately borders the included range — this
-        // field describes what was trimmed right at the boundary, not an
-        // arbitrary far-away exclusion.
+        // Excluded-adjacent range (when a real range is given) may ONLY describe
+        // the range immediately BEFORE the included range's start — segments
+        // trimmed right at that leading boundary. A range positioned after the
+        // included end is not a valid use of this field.
         if let ex = decision.excludedAdjacentRange,
            ex.startSegmentId != nil || ex.endSegmentId != nil {
             guard let s = ex.startSegmentId, let e = ex.endSegmentId,
@@ -329,18 +422,39 @@ enum PetLogResultParser {
                 return .failure(.invalidExcludedRange)
             }
             guard let incStart = decision.includedRange?.startSegmentId,
-                  let incEnd = decision.includedRange?.endSegmentId,
-                  let pIncStart = position[incStart], let pIncEnd = position[incEnd] else {
+                  let pIncStart = position[incStart] else {
                 return .failure(.invalidExcludedRange)
             }
-            let bordersBefore = (pe == pIncStart - 1)
-            let bordersAfter = (ps == pIncEnd + 1)
-            guard bordersBefore || bordersAfter else {
+            guard pe == pIncStart - 1 else {
                 return .failure(.invalidExcludedRange)
             }
         }
 
         return .success(result)
+    }
+
+    private static let topLevelKeys: Set<String> = ["answer", "contextDecision"]
+    private static let contextDecisionKeys: Set<String> = [
+        "policyVersion", "includedSegmentIds", "includedRange", "excludedAdjacentRange",
+        "boundaryReasonCodes", "boundaryConfidence", "historyComplete", "correctionCounts",
+    ]
+    private static let rangeKeys: Set<String> = ["startSegmentId", "endSegmentId"]
+
+    /// True only if every JSON object at every checked nesting level has EXACTLY
+    /// the expected key set — no extra keys, no missing keys. A `null` value for
+    /// includedRange/excludedAdjacentRange is valid and skips the nested check
+    /// (there's no object to check keys on); an object value must match
+    /// `rangeKeys` exactly.
+    private static func hasExactKeySets(_ raw: Any) -> Bool {
+        guard let top = raw as? [String: Any], Set(top.keys) == topLevelKeys else { return false }
+        guard let decision = top["contextDecision"] as? [String: Any],
+              Set(decision.keys) == contextDecisionKeys else { return false }
+        for key in ["includedRange", "excludedAdjacentRange"] {
+            guard let value = decision[key] else { return false }  // key itself must be present
+            if value is NSNull { continue }
+            guard let rangeDict = value as? [String: Any], Set(rangeDict.keys) == rangeKeys else { return false }
+        }
+        return true
     }
 
     private static func stripCodeFence(_ text: String) -> String {
