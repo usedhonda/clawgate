@@ -235,6 +235,8 @@ struct ChatHistoryParams: Encodable {
     let limit: Int
 }
 
+struct HealthParams: Encodable {}
+
 // MARK: - Gateway Protocol Types (Incoming)
 
 struct IncomingMessage: Decodable {

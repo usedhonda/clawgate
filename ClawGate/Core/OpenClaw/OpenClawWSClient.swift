@@ -11,13 +11,25 @@ actor OpenClawWSClient {
     private var session: URLSession?
     private var continuation: AsyncStream<OpenClawEvent>.Continuation?
     private var isConnected = false
-    private var pingTask: Task<Void, Never>?
-    private var pingDeadline: Task<Void, Error>?
-    private var pingInFlight = false
+    /// Bumped on every connect()/teardown(). In-flight closures captured with a
+    /// stale generation early-return instead of acting on a superseded connection.
+    /// Mirrors VibeTerm OpenClawWebSocketClient.swift (untouchable-map U4).
+    /// internal (not private): test seam for OpenClawWSClientHealthLivenessTests.
+    var connectionGeneration: UInt64 = 0
+    private var healthDeadlineTask: Task<Void, Never>?
+    private var healthLoopTask: Task<Void, Never>?
+    /// internal (not private): test seam for OpenClawWSClientHealthLivenessTests.
+    var consecutiveHealthTimeouts = 0
+    /// Last time any WS frame arrived. Used to veto health-timeout kills: frames
+    /// flowing = the socket is provably alive, the health ack is just queued
+    /// behind inbound load. internal (not private): test seam.
+    var lastFrameReceivedAt = Date.distantPast
     private var inFlightAcks: [String: CheckedContinuation<Void, Error>] = [:]
     /// Requests that need the response payload back (e.g. ambient.ingest's
     /// stateAccepted), not just an ok/err ACK.
     private var inFlightResponses: [String: CheckedContinuation<IncomingPayload?, Error>] = [:]
+    /// internal (not private): test seam for OpenClawWSClientHealthLivenessTests.
+    var inFlightHealthAcks: [String: CheckedContinuation<Void, Error>] = [:]
 
     private var authToken: String?
     private var pendingRequestId: String?
@@ -30,6 +42,9 @@ actor OpenClawWSClient {
         guard !isConnected else {
             throw OpenClawError.connectionFailed("Already connected")
         }
+
+        connectionGeneration &+= 1
+        let gen = connectionGeneration
 
         authToken = token
         let config = URLSessionConfiguration.ephemeral
@@ -60,15 +75,15 @@ actor OpenClawWSClient {
         webSocketTask?.resume()
         isConnected = true
 
-        Task { await receiveLoop() }
-        startPingTask()
+        Task { await receiveLoop(generation: gen) }
+        startHealthCheckTask(generation: gen)
 
         // Handshake timeout
         let ws = webSocketTask
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 10_000_000_000)
             guard let self else { return }
-            let stuck = await self.isHandshakeStuck()
+            let stuck = await self.isHandshakeStuck(generation: gen)
             guard stuck else { return }
             logger.warning("Handshake timeout — no challenge in 10s")
             ws?.cancel(with: .abnormalClosure, reason: "handshake timeout".data(using: .utf8))
@@ -127,13 +142,14 @@ actor OpenClawWSClient {
     }
 
     private func teardown() {
+        connectionGeneration &+= 1
         isConnected = false
         handshakeComplete = false
-        pingTask?.cancel()
-        pingTask = nil
-        pingDeadline?.cancel()
-        pingDeadline = nil
-        pingInFlight = false
+        consecutiveHealthTimeouts = 0
+        healthLoopTask?.cancel()
+        healthLoopTask = nil
+        healthDeadlineTask?.cancel()
+        healthDeadlineTask = nil
         authToken = nil
         pendingRequestId = nil
         failAllAcks(error: OpenClawError.connectionFailed("Disconnected"))
@@ -294,12 +310,13 @@ actor OpenClawWSClient {
 
     // MARK: - Receive
 
-    private func receiveLoop() async {
-        guard let task = webSocketTask else { return }
+    private func receiveLoop(generation gen: UInt64) async {
+        guard connectionGeneration == gen, let task = webSocketTask else { return }
 
-        while isConnected {
+        while isConnected && connectionGeneration == gen {
             do {
                 let message = try await task.receive()
+                guard connectionGeneration == gen else { return }
                 switch message {
                 case .data(let data):
                     await handleData(data)
@@ -311,6 +328,7 @@ actor OpenClawWSClient {
                     break
                 }
             } catch {
+                guard connectionGeneration == gen else { return }
                 if isConnected {
                     teardown()
                 }
@@ -320,6 +338,7 @@ actor OpenClawWSClient {
     }
 
     private func handleData(_ data: Data) async {
+        lastFrameReceivedAt = Date()
         // Try standard decode first
         if let msg = try? JSONDecoder().decode(IncomingMessage.self, from: data) {
             switch msg.type {
@@ -459,6 +478,12 @@ actor OpenClawWSClient {
             return
         }
 
+        // Health round-trip liveness check
+        if !responseId.isEmpty, inFlightHealthAcks[responseId] != nil {
+            resumeHealthAckIfPending(requestId: responseId, ok: ok, error: msg.error)
+            return
+        }
+
         // Chat history response
         if ok, let historyMsgs = msg.payload?.messages {
             let isoFormatter = ISO8601DateFormatter()
@@ -508,62 +533,140 @@ actor OpenClawWSClient {
         let pendingResponses = inFlightResponses
         inFlightResponses.removeAll()
         for (_, cont) in pendingResponses { cont.resume(throwing: error) }
+        let pendingHealth = inFlightHealthAcks
+        inFlightHealthAcks.removeAll()
+        for (_, cont) in pendingHealth { cont.resume(throwing: error) }
     }
 
-    // MARK: - Ping
+    // MARK: - Keep-Alive
+    //
+    // Mirrors VibeTerm OpenClawWebSocketClient.swift (untouchable-map U4):
+    // raw protocol-level WS ping/pong is ignored by the Gateway per contract
+    // (oc-general docs/contracts/ws-event-contract.md:60-69) — its completion
+    // callback never fires with success, so a raw-ping deadline is a
+    // guaranteed, self-inflicted disconnect. Liveness is a `health` req/res
+    // round-trip instead, generation-guarded so a stale timeout/success from a
+    // superseded connection can't act on the current one.
 
-    private func startPingTask() {
-        pingTask = Task { [weak self] in
-            while await self?.isConnected == true {
+    private func isCurrentGeneration(_ generation: UInt64) -> Bool {
+        connectionGeneration == generation
+    }
+
+    private func shouldKeepHealthChecking(generation gen: UInt64) -> Bool {
+        connectionGeneration == gen && isConnected
+    }
+
+    private func startHealthCheckTask(generation gen: UInt64) {
+        healthLoopTask?.cancel()
+        healthLoopTask = Task { [weak self] in
+            while await self?.shouldKeepHealthChecking(generation: gen) == true {
                 do {
-                    try await Task.sleep(nanoseconds: 15_000_000_000)
-                    await self?.sendPing()
+                    // 8s interval, matching VibeTerm's foreground cadence.
+                    try await Task.sleep(nanoseconds: 8_000_000_000)
+                    guard await self?.isCurrentGeneration(gen) == true else { return }
+                    await self?.sendHealthCheck(generation: gen)
                 } catch { break }
             }
         }
     }
 
-    private func sendPing() {
-        guard let task = webSocketTask, !pingInFlight else { return }
-        pingInFlight = true
+    private func sendHealthCheck(generation gen: UInt64) async {
+        guard connectionGeneration == gen else { return }
+        // A health req sent before hello-ok races the connect request on slow
+        // handshakes. Stuck handshakes are already covered by the 10s
+        // handshake-timeout task, so skipping here is safe.
+        guard handshakeComplete else { return }
 
-        pingDeadline?.cancel()
-        pingDeadline = Task { [weak self] in
-            try await Task.sleep(nanoseconds: 10_000_000_000)
-            await self?.handlePingTimeout()
-        }
-
-        task.sendPing { [weak self] error in
-            Task { [weak self] in
-                await self?.handlePingComplete(error: error)
+        let requestId = UUID().uuidString
+        let request = GatewayRequest(
+            type: "req", id: requestId, method: "health", params: HealthParams()
+        )
+        // 10s health deadline, matching VibeTerm cadence.
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                inFlightHealthAcks[requestId] = continuation
+                healthDeadlineTask?.cancel()
+                healthDeadlineTask = Task { [weak self] in
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    await self?.handleHealthTimeout(generation: gen, requestId: requestId)
+                }
+                Task {
+                    do {
+                        try await self.sendJSON(request)
+                    } catch {
+                        self.failHealthAckIfPending(requestId: requestId, error: error)
+                    }
+                }
             }
-        }
-    }
-
-    private func handlePingComplete(error: Error?) {
-        pingInFlight = false
-        pingDeadline?.cancel()
-        pingDeadline = nil
-        if let error {
-            // Immediate ping error means the socket is no longer viable.
+            handleHealthSuccess(generation: gen)
+        } catch {
+            guard connectionGeneration == gen else { return }
+            if case .timeout = error as? OpenClawError { return }
+            // Immediate send error means the socket is no longer viable.
             // Without teardown here, receiveLoop stays blocked on task.receive()
             // and the connection sits in a false-.connected state forever
             // (observed: 10h silent drop with CLOSED socket, no reconnect).
-            logger.warning("Ping failed: \(error.localizedDescription, privacy: .public) — tearing down")
+            logger.warning("Health check failed: \(error.localizedDescription, privacy: .public) — tearing down")
             teardown()
         }
     }
 
-    private func handlePingTimeout() {
-        guard pingInFlight else { return }
-        logger.warning("Ping timeout — tearing down connection")
-        pingInFlight = false
-        pingDeadline = nil
+    // internal (not private): test seam for OpenClawWSClientHealthLivenessTests.
+    func handleHealthTimeout(generation gen: UInt64, requestId: String) {
+        guard connectionGeneration == gen else { return }
+        guard inFlightHealthAcks[requestId] != nil else { return }
+        // Frames arriving within the last 5s prove the socket is alive — the
+        // health ack is stuck behind inbound load, not a dead connection.
+        let sinceLastFrameMs = Int(Date().timeIntervalSince(lastFrameReceivedAt) * 1000)
+        if sinceLastFrameMs < 5000 {
+            failHealthAckIfPending(requestId: requestId, error: OpenClawError.timeout)
+            return
+        }
+        consecutiveHealthTimeouts += 1
+        // Require 2 consecutive timeouts before killing: one slow ack must not
+        // execute a live connection. Truly dead sockets are still detected in
+        // ~2 health cycles (~28s worst case matching VibeTerm).
+        guard consecutiveHealthTimeouts >= 2 else {
+            failHealthAckIfPending(requestId: requestId, error: OpenClawError.timeout)
+            return
+        }
+        logger.warning("Health timeout — tearing down connection")
+        failHealthAckIfPending(requestId: requestId, error: OpenClawError.timeout)
         teardown()
+    }
+
+    // internal (not private): test seam for OpenClawWSClientHealthLivenessTests.
+    func handleHealthSuccess(generation gen: UInt64) {
+        guard connectionGeneration == gen else { return }
+        consecutiveHealthTimeouts = 0
+    }
+
+    private func failHealthAckIfPending(requestId: String, error: Error) {
+        guard let continuation = inFlightHealthAcks.removeValue(forKey: requestId) else { return }
+        healthDeadlineTask?.cancel()
+        healthDeadlineTask = nil
+        continuation.resume(throwing: error)
+    }
+
+    private func resumeHealthAckIfPending(requestId: String, ok: Bool, error: IncomingError?) {
+        guard let continuation = inFlightHealthAcks.removeValue(forKey: requestId) else { return }
+        healthDeadlineTask?.cancel()
+        healthDeadlineTask = nil
+        if ok {
+            continuation.resume()
+        } else if let error {
+            continuation.resume(throwing: OpenClawError.serverError(code: error.code, message: error.message))
+        } else {
+            continuation.resume(throwing: OpenClawError.unknown("health request failed"))
+        }
     }
 
     func isHandshakeStuck() -> Bool {
         isConnected && !handshakeComplete
+    }
+
+    private func isHandshakeStuck(generation gen: UInt64) -> Bool {
+        connectionGeneration == gen && isConnected && !handshakeComplete
     }
 }
 
