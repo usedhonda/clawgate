@@ -384,7 +384,12 @@ actor OpenClawWSClient {
               let ok = json["ok"] as? Bool, ok,
               let payload = json["payload"] as? [String: Any],
               let rawMessages = payload["messages"] as? [[String: Any]] else {
-            NSLog("[Pet] Failed to decode message: %@", String(data: data.prefix(200), encoding: .utf8) ?? "?")
+            // Bounded structural fact only — never the raw body. This is the
+            // shared inbound decode path for ALL frames, including Pet Log
+            // chat.send responses, which can carry private
+            // ambient-transcript-derived content that must not leak into the
+            // unified system log on a decode failure.
+            NSLog("[Pet] Failed to decode message (%d bytes)", data.count)
             return
         }
 

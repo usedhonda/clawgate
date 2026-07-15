@@ -215,6 +215,34 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         XCTAssertEqual(legacy.text, "legacy answer")
     }
 
+    /// Static guard: message/instruction/answer bodies must never be written
+    /// to NSLog. NSLog output isn't interceptable in a unit test, so this scans
+    /// the source for the content-bearing log patterns that were removed and
+    /// asserts they are not reintroduced. Mirrors the source-scan pattern used
+    /// by AmbientLogModelThreadTranscriptTests.
+    func testNoMessageBodyIsLoggedToNSLog() throws {
+        let root = sourceRoot()
+        let petModel = try String(
+            contentsOfFile: "\(root)/ClawGate/UI/Pet/PetModel.swift", encoding: .utf8)
+        XCTAssertFalse(petModel.contains("msg.text.prefix"),
+                       "message-body prefixes must not be passed to NSLog")
+        XCTAssertFalse(petModel.contains("bubble_notify received: %@"),
+                       "bubble_notify must not log the message body")
+
+        let wsClient = try String(
+            contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)
+        XCTAssertFalse(wsClient.contains("data.prefix(200)"),
+                       "decode-failure log must not include raw body bytes")
+    }
+
+    private func sourceRoot() -> String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .path
+    }
+
     private func logEnvelope() -> PetLogQueryEnvelope {
         PetLogQueryEnvelope(
             requestId: UUID().uuidString, actionId: "slot-0", instruction: "質問まとめ",

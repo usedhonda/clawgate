@@ -279,9 +279,13 @@ final class PetModel: NSObject, ObservableObject {
                 }
 
             case .message(let msg):
-                NSLog("[Pet] message event: role=%@ proactive=%d text=%@",
+                // Bounded, non-content metadata only — never the message body,
+                // which for Pet Log answers can contain private
+                // ambient-transcript-derived content (leaks into the unified
+                // system log otherwise).
+                NSLog("[Pet] message event: role=%@ proactive=%d id=%@",
                       msg.role == .assistant ? "assistant" : "user",
-                      msg.isProactive ? 1 : 0, String(msg.text.prefix(50)))
+                      msg.isProactive ? 1 : 0, msg.id)
 
                 // Proactive messages always go to Notifications, never
                 // Summon — checked first and unconditionally, independent of
@@ -426,7 +430,7 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Notification (independent of state machine)
 
     func showNotification(_ msg: OpenClawChatMessage) {
-        NSLog("[Pet] showNotification: bubbleEnabled=%d chatOpen=%d text=%@", isBubbleEnabled ? 1 : 0, stateMachine.isChatOpen ? 1 : 0, String(msg.text.prefix(30)))
+        NSLog("[Pet] showNotification: bubbleEnabled=%d chatOpen=%d id=%@", isBubbleEnabled ? 1 : 0, stateMachine.isChatOpen ? 1 : 0, msg.id)
 
         // Always save to history
         addNotificationEntry(text: msg.text, source: msg.isProactive ? "proactive" : "gateway")
@@ -938,7 +942,7 @@ final class PetModel: NSObject, ObservableObject {
                 NSLog("[Pet] bubble_notify: missing text")
                 return
             }
-            NSLog("[Pet] bubble_notify received: %@", String(text.prefix(50)))
+            NSLog("[Pet] bubble_notify received (%d chars)", text.count)
             let source = notif.userInfo?["source"] as? String ?? "bridge"
             let msg = OpenClawChatMessage(role: .assistant, text: text)
             self.messages.append(msg)
