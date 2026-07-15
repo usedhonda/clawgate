@@ -532,7 +532,7 @@ final class AmbientTests: XCTestCase {
 
     // MARK: - Zero-capture pre-skip (2026-07-15 incident regression)
 
-    /// 2026-07-07 incident: a whole-chunk RMS threshold (0.015) pre-gated
+    /// 2026-07-15 incident: a whole-chunk RMS threshold (0.015) pre-gated
     /// real conversation audio as "silence" before it ever reached
     /// Whisper/Silero VAD. Only true zero-signal capture (muted/disconnected
     /// input) should be pre-skipped; everything else — including these
