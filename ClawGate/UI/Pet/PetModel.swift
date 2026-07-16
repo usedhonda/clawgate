@@ -1446,6 +1446,32 @@ final class PetModel: NSObject, ObservableObject {
     }
     private var pendingLogRequest: PendingLogRequest?
 
+    private enum PetLogAdmissionEvent {
+        case actionReceived(requestId: String, actionId: String, segmentCount: Int)
+        case busyRefused(requestId: String)
+        case disconnectedRefused(requestId: String)
+        case envelopeAccepted(requestId: String)
+        case dispatchAttempted(requestId: String)
+        case persistenceFailure(file: String)
+    }
+
+    private func recordPetLogAdmissionEvent(_ event: PetLogAdmissionEvent) {
+        switch event {
+        case let .actionReceived(requestId, actionId, segmentCount):
+            NSLog("[PetLog] actionReceived request=%@ action=%@ segments=%d", requestId, actionId, segmentCount)
+        case let .busyRefused(requestId):
+            NSLog("[PetLog] actionBusyRefused request=%@", requestId)
+        case let .disconnectedRefused(requestId):
+            NSLog("[PetLog] actionDisconnectedRefused request=%@", requestId)
+        case let .envelopeAccepted(requestId):
+            NSLog("[PetLog] envelopeAccepted request=%@", requestId)
+        case let .dispatchAttempted(requestId):
+            NSLog("[PetLog] dispatchAttempted request=%@", requestId)
+        case let .persistenceFailure(file):
+            NSLog("[PetLog] persistenceFailure file=%@", file)
+        }
+    }
+
     var isSummonBusy: Bool { pendingSummonSource != nil }
 
     #if DEBUG
@@ -1512,6 +1538,7 @@ final class PetModel: NSObject, ObservableObject {
     private func sendLogSummon(_ prompt: String, requestId: String) {
         guard let sessionKey else { return }
 
+        recordPetLogAdmissionEvent(.dispatchAttempted(requestId: requestId))
         pendingSummonSource = "log"
         pendingSummonRunId = nil
         showWhisper("Working on it...")
@@ -1540,7 +1567,7 @@ final class PetModel: NSObject, ObservableObject {
                         dispatch: ack
                     )
                 }
-                } catch {
+            } catch {
                     await MainActor.run {
                         self.pendingSummonSource = nil
                         self.pendingSummonRunId = nil
@@ -1556,6 +1583,13 @@ final class PetModel: NSObject, ObservableObject {
     /// display-capped transcript) plus anchor/scope metadata — see
     /// PetLogContext.swift and AmbientLogModel.buildQueryEnvelope.
     func sendLogInstruction(envelope: PetLogQueryEnvelope) {
+        recordPetLogAdmissionEvent(
+            .actionReceived(
+                requestId: envelope.requestId,
+                actionId: envelope.actionId,
+                segmentCount: envelope.segments.count
+            )
+        )
         // Admission control comes first, before any user-visible entry, save,
         // or watchdog timer is created:
         //  - Busy: a previous Chi summon (scene naming or anything else) is
@@ -1568,29 +1602,29 @@ final class PetModel: NSObject, ObservableObject {
         //    immediately instead.
         guard !isSummonBusy else {
             logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(.busyRefused(requestId: envelope.requestId))
             appendLogErrorEntry("Error: busy — a previous Chi request is still in progress")
             return
         }
         guard connectionState == .connected else {
             logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: envelope.requestId))
             appendLogErrorEntry("Error: not connected")
             return
         }
         guard sessionKey != nil else {
             logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: envelope.requestId))
             appendLogErrorEntry("Error: not connected")
             return
         }
+        recordPetLogAdmissionEvent(.envelopeAccepted(requestId: envelope.requestId))
 
         let userEntry = NotificationEntry(
             id: UUID().uuidString, text: envelope.instruction,
             source: "log_user", timestamp: Date()
         )
-        logReplies.append(userEntry)
-        if logReplies.count > 100 {
-            logReplies.removeFirst(logReplies.count - 100)
-        }
-        PetLogStore.save(logReplies, file: "log.json")
+        appendPersistentLogReplyEntry(userEntry)
         logThreadPaneOpen = true
         let token = UUID()
         logAwaitingReplyToken = token
@@ -1635,15 +1669,34 @@ final class PetModel: NSObject, ObservableObject {
     /// not connected) that must be visible without ever creating a `log_user`
     /// entry or arming the reply watchdog.
     private func appendLogErrorEntry(_ text: String) {
-        let entry = NotificationEntry(
-            id: UUID().uuidString, text: text,
-            source: "log", timestamp: Date()
+        appendPersistentLogReplyEntry(
+            NotificationEntry(id: UUID().uuidString, text: text, source: "log", timestamp: Date())
         )
+    }
+
+    private func appendPersistentLogReplyEntry(_ entry: NotificationEntry) {
         logReplies.append(entry)
         if logReplies.count > 100 {
             logReplies.removeFirst(logReplies.count - 100)
         }
-        PetLogStore.save(logReplies, file: "log.json")
+        guard PetLogStore.save(logReplies, file: "log.json") else {
+            appendLogPersistenceFailureMarker()
+            return
+        }
+    }
+
+    private func appendLogPersistenceFailureMarker() {
+        let marker = NotificationEntry(
+            id: UUID().uuidString,
+            text: "Error: failed to persist log entry to disk",
+            source: "log",
+            timestamp: Date()
+        )
+        logReplies.append(marker)
+        if logReplies.count > 100 {
+            logReplies.removeFirst(logReplies.count - 100)
+        }
+        recordPetLogAdmissionEvent(.persistenceFailure(file: "log.json"))
     }
 
     func requestSceneNaming(scenes: [(id: String, timeLabel: String, excerpt: String)]) {
@@ -1804,11 +1857,7 @@ final class PetModel: NSObject, ObservableObject {
             // send error, or build failure all route here) — drop the pending
             // request so it always tracks 1:1 with an in-flight Log summon.
             pendingLogRequest = nil
-            logReplies.append(entry)
-            if logReplies.count > 100 {
-                logReplies.removeFirst(logReplies.count - 100)
-            }
-            PetLogStore.save(logReplies, file: "log.json")
+            appendPersistentLogReplyEntry(entry)
             return
         }
         if Self.isLocalSource(source) {
@@ -2049,17 +2098,23 @@ enum PetLogStore {
     /// different thread than setUp/tearDown.
     static let testIsolationSemaphore = DispatchSemaphore(value: 1)
 
-    private static func ensureDir() {
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-    }
-
-    static func save(_ entries: [NotificationEntry], file: String) {
-        ensureDir()
+    @discardableResult
+    static func save(_ entries: [NotificationEntry], file: String) -> Bool {
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        } catch {
+            return false
+        }
         let path = (dir as NSString).appendingPathComponent(file)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(entries) else { return }
-        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        guard let data = try? encoder.encode(entries) else { return false }
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        } catch {
+            return false
+        }
+        return true
     }
 
     static func load(file: String) -> [NotificationEntry] {

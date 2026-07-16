@@ -324,6 +324,13 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                        "message-body prefixes must not be passed to NSLog")
         XCTAssertFalse(petModel.contains("bubble_notify received: %@"),
                        "bubble_notify must not log the message body")
+        let telemetryLogLines = petModel
+            .components(separatedBy: "\n")
+            .filter { $0.contains("[PetLog]") && $0.contains("NSLog(") }
+        for line in telemetryLogLines {
+            XCTAssertFalse(line.contains("instruction"),
+                           "PetLog admission telemetry must not log instruction/prompt body")
+        }
 
         let wsClient = try String(
             contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)
@@ -339,9 +346,9 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
             .path
     }
 
-    private func logEnvelope() -> PetLogQueryEnvelope {
+    private func logEnvelope(instruction: String = "質問まとめ") -> PetLogQueryEnvelope {
         PetLogQueryEnvelope(
-            requestId: UUID().uuidString, actionId: "slot-0", instruction: "質問まとめ",
+            requestId: UUID().uuidString, actionId: "slot-0", instruction: instruction,
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
             coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
         )
@@ -389,5 +396,63 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         XCTAssertTrue(logEntries.first?.text.contains("busy") ?? false)
         XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
                        "no log_user prompt may be saved when refused for busy")
+    }
+
+    func testBusyLogInstructionErrorMarkerPersistsInIsolatedLogStore() {
+        let model = PetModel()
+        model.pendingSummonSource = "log_scene_naming"
+
+        model.sendLogInstruction(envelope: logEnvelope())
+
+        let persisted = PetLogStore.load(file: "log.json")
+        let persistedLogMarkers = persisted.filter { $0.source == "log" }
+        XCTAssertEqual(persistedLogMarkers.count, 1)
+        XCTAssertTrue(persistedLogMarkers.first?.text.contains("busy") ?? false)
+        XCTAssertFalse(persisted.contains { $0.source == "log_user" })
+    }
+
+    func testDisconnectedLogInstructionErrorMarkerPersistsInIsolatedLogStore() {
+        let model = PetModel()
+        let secretInstruction = "秘密の指示: この文字列は保存ログに残してはいけない"
+
+        model.sendLogInstruction(envelope: logEnvelope(instruction: secretInstruction))
+
+        let persisted = PetLogStore.load(file: "log.json")
+        let persistedLogMarkers = persisted.filter { $0.source == "log" }
+        XCTAssertEqual(persistedLogMarkers.count, 1)
+        XCTAssertTrue(persistedLogMarkers.first?.text.contains("not connected") ?? false)
+        guard let markerText = persistedLogMarkers.first?.text else {
+            XCTFail("expected persisted disconnected marker")
+            return
+        }
+        XCTAssertFalse(markerText.contains(secretInstruction))
+    }
+
+    /// Injected persistence failure for log.json must be surfaced as a visible
+    /// in-memory marker and must not make the action look "durably" saved.
+    func testLogPersistenceFailureInMemoryMarkersAreVisible() async throws {
+        let originalDir = PetLogStore.dir
+        PetLogStore.dir = "/dev/null"
+        defer { PetLogStore.dir = originalDir }
+
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let secretInstruction = "秘密の指示: this must not leak into persistence-failure markers"
+        model.sendLogInstruction(envelope: logEnvelope(instruction: secretInstruction))
+
+        let persisted = PetLogStore.load(file: "log.json")
+        XCTAssertTrue(persisted.isEmpty)
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let logEntries = model.logReplies.filter { $0.source == "log" }
+        XCTAssertTrue(
+            logEntries.contains(where: { $0.text == "Error: failed to persist log entry to disk" }),
+            "persistence failure must be surfaced in-memory"
+        )
+        XCTAssertFalse(logEntries.contains(where: { $0.text.contains(secretInstruction) }),
+                       "no raw instruction body may be logged in persistence-failure markers")
     }
 }
