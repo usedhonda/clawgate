@@ -411,14 +411,23 @@ final class PetModel: NSObject, ObservableObject {
                 }
                 // A mid-stream disconnect must not let the delta-idle timer
                 // finalize the in-flight reply with whatever partial text has
-                // accumulated so far. Cancel it and leave pendingSummonSource
+                // accumulated so far. Cancel it and keep log in-flight state
                 // intact so the real final — delivered via reconnect +
-                // resubscribe — still routes to its correct destination
-                // (log/summon) instead of falling through to plain chat.
+                // resubscribe — can still route correctly.
+                // For non-log summons (scene naming / omakase / draft), clear
+                // the slot on disconnect to prevent a stale pending state from
+                // permanently blocking new Log actions.
                 self.deltaIdleTask?.cancel()
                 self.deltaIdleTask = nil
                 self.isStreaming = false
                 self.streamingMessageId = nil
+                self.streamingText = ""
+                if self.pendingSummonSource != "log" {
+                    self.pendingSummonSource = nil
+                    self.pendingSummonRunId = nil
+                    self.pendingLogRequest = nil
+                    self.pendingSceneNamingIDs = []
+                }
             }
         }
     }
@@ -1560,6 +1569,11 @@ final class PetModel: NSObject, ObservableObject {
         guard !isSummonBusy else {
             logThreadPaneOpen = true
             appendLogErrorEntry("Error: busy — a previous Chi request is still in progress")
+            return
+        }
+        guard connectionState == .connected else {
+            logThreadPaneOpen = true
+            appendLogErrorEntry("Error: not connected")
             return
         }
         guard sessionKey != nil else {

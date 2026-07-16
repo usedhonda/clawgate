@@ -111,6 +111,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         // but suppress the real WS send so the reply-timeout watchdog is the
         // sole release mechanism — deterministically reproducing "send
         // succeeded, reply never arrived" without a socket racing the watchdog.
+        model.connectionState = .connected
         model.setSessionKeyForTesting("test-session")
         model.suppressLogSendForTesting = true
         let envelope = PetLogQueryEnvelope(
@@ -139,6 +140,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
     /// leak the transport error into persisted UI text.
     func testLogSummonDispatchFailureUsesBoundedErrorMarker() async throws {
         let model = PetModel()
+        model.connectionState = .connected
         model.setSessionKeyForTesting("test-session")
         let envelope = PetLogQueryEnvelope(
             requestId: UUID().uuidString, actionId: "slot-1", instruction: "質問まとめ",
