@@ -257,6 +257,10 @@ final class PetModel: NSObject, ObservableObject {
     /// Overridable for tests.
     static var logAwaitingReplyTimeoutSeconds: TimeInterval = 180
 
+    /// How long a shared-path summon (scene naming / omakase / ask / draft_pr)
+    /// may wait for a reply before its slot is reclaimed. Overridable for tests.
+    static var summonReplyTimeoutSeconds: TimeInterval = 180
+
     func handleEvent(_ event: OpenClawEvent) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -312,6 +316,7 @@ final class PetModel: NSObject, ObservableObject {
                     }
                     self.isStreaming = false
                     self.streamingText = ""
+                    self.summonWatchdogToken = nil
                     self.pendingSummonSource = nil
                     self.pendingSummonRunId = nil
                     self.addSummonResult(text: msg.text, source: source, parseAsStructured: source == "log")
@@ -423,6 +428,7 @@ final class PetModel: NSObject, ObservableObject {
                 self.streamingMessageId = nil
                 self.streamingText = ""
                 if self.pendingSummonSource != "log" {
+                    self.summonWatchdogToken = nil
                     self.pendingSummonSource = nil
                     self.pendingSummonRunId = nil
                     self.pendingLogRequest = nil
@@ -1407,6 +1413,7 @@ final class PetModel: NSObject, ObservableObject {
             if let expectedRunId = pendingSummonRunId, let messageId, expectedRunId != messageId {
                 return
             }
+            summonWatchdogToken = nil
             pendingSummonSource = nil
             pendingSummonRunId = nil
             let text = streamingText.isEmpty ? "(empty response)" : streamingText
@@ -1478,11 +1485,21 @@ final class PetModel: NSObject, ObservableObject {
     /// Test seam: inject a session key so the connected-path Log summon logic
     /// runs without a live Gateway handshake (`sessionKey` is otherwise private).
     func setSessionKeyForTesting(_ key: String?) { sessionKey = key }
-    /// Test seam: when true, `sendLogSummon` claims the summon slot but skips
-    /// the real WS send, so the reply-timeout watchdog ("send succeeded, reply
-    /// never arrived") can be exercised deterministically without a
-    /// live-or-failing socket racing the watchdog.
+    /// Test seam: when true, `sendLogSummon` and the shared `sendSummon` both
+    /// claim the summon slot but skip the real WS send, so their reply-timeout
+    /// watchdogs ("send succeeded, reply never arrived") can be exercised
+    /// deterministically without a live-or-failing socket racing the watchdog.
     var suppressLogSendForTesting = false
+    /// Test seam: drive the shared-path summon claim (`sendSummon`) with an
+    /// arbitrary source, exercising the real slot-claim + watchdog-arming path
+    /// (`sendSummon` is otherwise private). Pair with `suppressLogSendForTesting`
+    /// and a session key to make the shared watchdog the sole release mechanism.
+    func claimSharedSummonForTesting(source: String) {
+        sendSummon("test prompt", source: source)
+    }
+    /// Test seam: read-only view of the scene-naming in-flight ids (private), so
+    /// a test can assert a wedged naming request's ids were reclaimed on timeout.
+    var pendingSceneNamingIDsForTesting: [String] { pendingSceneNamingIDs }
     /// Test seam: establish the pending log request that a structured "log"
     /// reply is validated against, without going through `sendLogInstruction`
     /// (which also arms the reply-timeout watchdog). Mirrors what a real
@@ -1499,6 +1516,10 @@ final class PetModel: NSObject, ObservableObject {
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
     private var logAwaitingReplyToken: UUID?
+    /// Identity of the CURRENT shared-path summon's watchdog. Regenerated on
+    /// every claim and invalidated (nil) at every normal termination, so a
+    /// stale watchdog firing late can never release a newer summon's slot.
+    private var summonWatchdogToken: UUID?
 
     private static let messagingBundles: Set<String> = [
         "jp.naver.line.mac",
@@ -1516,12 +1537,50 @@ final class PetModel: NSObject, ObservableObject {
         pendingSummonSource = source
         showWhisper("Working on it...")
 
+        // Arm a self-release watchdog: if the send succeeds but no terminal WS
+        // event ever arrives (e.g. the reply was emitted during a connection-down
+        // window and reconnect never replays missed events), this slot would
+        // otherwise stay claimed forever and refuse every subsequent Log action.
+        // The token+source double match below guarantees a stale watchdog can
+        // never release a newer summon that reused the slot.
+        let token = UUID()
+        summonWatchdogToken = token
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.summonReplyTimeoutSeconds) { [weak self] in
+            guard let self else { return }
+            guard self.summonWatchdogToken == token,
+                  let currentSource = self.pendingSummonSource, currentSource == source else { return }
+            self.summonWatchdogToken = nil
+            self.pendingSummonSource = nil
+            self.pendingSummonRunId = nil
+            if source == "log_scene_naming" {
+                // Scene naming also gates on pendingSceneNamingIDs — a wedged
+                // naming request must not block tomorrow's auto-naming. It is a
+                // background nicety, so its failure gets telemetry only and never
+                // surfaces into the Log conversation pane.
+                self.pendingSceneNamingIDs = []
+                NSLog("[PetLog] summonReplyTimeout source=%@ (slot reclaimed)", source)
+            } else {
+                NSLog("[PetLog] summonReplyTimeout source=%@ (slot reclaimed)", source)
+                self.addSummonResult(
+                    text: "Error: no reply received within \(Int(Self.summonReplyTimeoutSeconds))s",
+                    source: source)
+            }
+        }
+
+        #if DEBUG
+        // Test seam: claim the slot + arm the watchdog but skip the real WS send,
+        // so the reply-timeout watchdog ("send succeeded, reply never arrived")
+        // can be exercised deterministically without a socket racing it.
+        if suppressLogSendForTesting { return }
+        #endif
+
         Task { [weak self] in
             guard let self else { return }
             do {
                 try await wsClient.sendMessage(prompt, sessionKey: sessionKey)
             } catch {
                 await MainActor.run {
+                    self.summonWatchdogToken = nil
                     self.pendingSummonSource = nil
                     self.addSummonResult(text: "Error: \(error)", source: source)
                 }
@@ -1569,6 +1628,7 @@ final class PetModel: NSObject, ObservableObject {
                 }
             } catch {
                     await MainActor.run {
+                        self.summonWatchdogToken = nil
                         self.pendingSummonSource = nil
                         self.pendingSummonRunId = nil
                         self.pendingLogRequest = nil
@@ -1642,6 +1702,7 @@ final class PetModel: NSObject, ObservableObject {
             self.logAwaitingReply = false
             self.logAwaitingReplyToken = nil
             if self.pendingSummonSource == "log" {
+                self.summonWatchdogToken = nil
                 self.pendingSummonSource = nil
                 self.pendingSummonRunId = nil
                 self.pendingLogRequest = nil
