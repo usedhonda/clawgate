@@ -184,4 +184,77 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
         XCTAssertEqual(logEntries.count, 1, "exactly the Log watchdog's marker, no shared-path marker")
         XCTAssertTrue(logEntries.first?.text.contains("no reply received") ?? false)
     }
+
+    private enum SummonTestError: Error { case deadSocket }
+
+    /// The send-failure race: a first summon's slot is released and re-claimed by
+    /// a NEWER summon before the first send's late throw lands. The stale send's
+    /// cleanup must not touch the newer summon's token/source, nor append an error
+    /// marker for the superseded request. Token+source match is the guard.
+    func testStaleSummonSendFailureDoesNotTouchNewerSummon() async throws {
+        // Pin the watchdog well past this synchronous test so it can't race the
+        // assertions and release a slot out from under us.
+        PetModel.summonReplyTimeoutSeconds = 5.0
+
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        // Summon A claims the slot; capture its (soon-to-be stale) token.
+        model.claimSharedSummonForTesting(source: "ask")
+        let staleToken = try XCTUnwrap(model.summonWatchdogTokenForTesting)
+
+        // A resolves/releases (a normal termination nils its token) — modelling
+        // the disconnect-then-reclaim window the fix guards against.
+        model.handleEvent(.message(OpenClawChatMessage(role: .assistant, text: "answer")))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertFalse(model.isSummonBusy, "summon A must release before B claims")
+
+        // Summon B claims the slot with a DIFFERENT source and a fresh token.
+        model.claimSharedSummonForTesting(source: "omakase")
+        let currentToken = try XCTUnwrap(model.summonWatchdogTokenForTesting)
+        XCTAssertEqual(model.pendingSummonSource, "omakase")
+        XCTAssertNotEqual(staleToken, currentToken)
+
+        // A's late send-throw lands NOW. It must no-op: B's slot and token are
+        // untouched, and no "ask"-sourced error marker is appended.
+        model.invokeSummonSendFailureForTesting(
+            token: staleToken, source: "ask", error: SummonTestError.deadSocket)
+
+        XCTAssertTrue(model.isSummonBusy, "the newer summon's slot must still be held")
+        XCTAssertEqual(model.pendingSummonSource, "omakase",
+                       "a superseded send-failure must not release a newer summon's slot")
+        XCTAssertEqual(model.summonWatchdogTokenForTesting, currentToken,
+                       "the newer summon's watchdog token must be intact")
+        XCTAssertEqual(
+            model.summonResults.filter { $0.source == "ask" && $0.text.contains("Error:") }.count, 0,
+            "no error marker for the superseded summon (its normal reply may remain)")
+    }
+
+    /// Positive case: when the failing send STILL owns the slot (token+source
+    /// match), its cleanup releases the slot and surfaces the bounded error.
+    func testCurrentSummonSendFailureClearsSlotAndAppendsError() async throws {
+        PetModel.summonReplyTimeoutSeconds = 5.0
+
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        model.claimSharedSummonForTesting(source: "ask")
+        let token = try XCTUnwrap(model.summonWatchdogTokenForTesting)
+        XCTAssertTrue(model.isSummonBusy)
+
+        model.invokeSummonSendFailureForTesting(
+            token: token, source: "ask", error: SummonTestError.deadSocket)
+
+        XCTAssertFalse(model.isSummonBusy, "the owning send-failure clears the slot")
+        XCTAssertNil(model.summonWatchdogTokenForTesting,
+                     "the owning send-failure nils the watchdog token")
+        let askEntries = model.summonResults.filter { $0.source == "ask" }
+        XCTAssertEqual(askEntries.count, 1, "exactly one error marker for the owning summon")
+        XCTAssertTrue(askEntries.first?.text.contains("Error:") ?? false,
+                      "the surfaced marker carries the error text")
+    }
 }

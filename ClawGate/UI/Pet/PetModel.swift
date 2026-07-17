@@ -1512,6 +1512,17 @@ final class PetModel: NSObject, ObservableObject {
             dispatch: dispatch
         )
     }
+    /// Test seam: the CURRENT shared-path watchdog token (private), so a test can
+    /// drive `invokeSummonSendFailureForTesting` with a matching (current) token
+    /// vs a stale one.
+    var summonWatchdogTokenForTesting: UUID? { summonWatchdogToken }
+    /// Test seam: drive the shared summon send-failure cleanup directly. The real
+    /// catch body is otherwise unreachable without a live socket throw racing the
+    /// test, so this exposes the same `handleSummonSendFailure` the catch calls —
+    /// letting the token+source guard be exercised deterministically.
+    func invokeSummonSendFailureForTesting(token: UUID, source: String, error: Error) {
+        handleSummonSendFailure(token: token, source: source, error: error)
+    }
     #endif
     private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
@@ -1580,12 +1591,24 @@ final class PetModel: NSObject, ObservableObject {
                 try await wsClient.sendMessage(prompt, sessionKey: sessionKey)
             } catch {
                 await MainActor.run {
-                    self.summonWatchdogToken = nil
-                    self.pendingSummonSource = nil
-                    self.addSummonResult(text: "Error: \(error)", source: source)
+                    self.handleSummonSendFailure(token: token, source: source, error: error)
                 }
             }
         }
+    }
+
+    /// Clean up after a shared-path summon's async send throws. A late throw
+    /// from a SUPERSEDED send — its slot already released by a disconnect and
+    /// possibly re-claimed by a newer summon — must not touch the current
+    /// summon's state. The token+source double match mirrors the watchdog's
+    /// invariant: only when this send still owns the slot do we release it and
+    /// surface the error.
+    private func handleSummonSendFailure(token: UUID, source: String, error: Error) {
+        guard summonWatchdogToken == token,
+              pendingSummonSource == source else { return }
+        summonWatchdogToken = nil
+        pendingSummonSource = nil
+        addSummonResult(text: "Error: \(error)", source: source)
     }
 
     /// Log-specific summon send. Threads `requestId` through as the
