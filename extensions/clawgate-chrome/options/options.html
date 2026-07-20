@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClawGate — 送信ドメイン設定</title>
+    <link rel="stylesheet" href="options.css">
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="hero">
+        <img class="hero-icon" src="../icons/icon48.png" alt="ClawGate">
+        <h1 class="hero-title">ClawGate — 送信ドメイン設定</h1>
+      </header>
+
+      <section class="card">
+        <h2 class="card-title">除外中のドメイン</h2>
+        <p class="card-hint">除外したドメインは自動送信（パッシブ収集）の対象から外れます。右クリックの「Send to Chi」には影響しません。</p>
+        <form id="add-form" class="add-row">
+          <input id="add-input" type="text" placeholder="example.com" autocomplete="off" spellcheck="false">
+          <button id="add-button" class="primary-button" type="submit">追加</button>
+        </form>
+        <p id="add-error" class="inline-error" hidden></p>
+        <ul id="excluded-list" class="chip-list"></ul>
+        <p id="excluded-empty" class="empty-state" hidden>除外中のドメインはありません</p>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">最近送信したドメイン</h2>
+        <ul id="domain-list" class="domain-list"></ul>
+        <p id="domain-empty" class="empty-state" hidden>まだ送信履歴がありません</p>
+      </section>
+
+      <section class="card">
+        <details id="recent-details">
+          <summary class="card-title summary-title">最近の送信ページ</summary>
+          <ul id="recent-list" class="recent-list"></ul>
+          <p id="recent-empty" class="empty-state" hidden>まだ送信履歴がありません</p>
+        </details>
+      </section>
+    </main>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

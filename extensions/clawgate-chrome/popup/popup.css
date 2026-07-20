@@ -122,6 +122,20 @@ input {
   font: inherit;
 }
 
+.options-link {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  padding: 4px 0 12px;
+  font-weight: 500;
+  text-align: left;
+}
+
+.options-link:hover {
+  filter: brightness(1.1);
+}
+
 .actions {
   display: flex;
   flex-direction: column;

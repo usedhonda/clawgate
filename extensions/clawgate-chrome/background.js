@@ -3,6 +3,7 @@ const DEFAULT_SETTINGS = {
   gatewayURL: '',
   gatewayToken: '',
   passiveTracking: true,
+  excludedDomains: [],
 };
 
 const CONTEXT_MENU_ID = 'clawgate-send-to-chi';
@@ -16,6 +17,7 @@ const PASSIVE_DEDUP_WINDOW_MS = 30 * 60 * 1000;
 const PASSIVE_QUEUE_LIMIT = 50;
 const PASSIVE_FLUSH_ALARM = 'clawgate-passive-flush';
 const PASSIVE_FLUSH_PERIOD_MINUTES = 1.5;
+const PASSIVE_SEND_LOG_LIMIT = 200;
 
 let cursor = '';
 let pollTimer = null;
@@ -134,6 +136,16 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
       passiveQueue.length = 0;
     }
   }
+  if (changes.excludedDomains) {
+    const excludedDomains = normalizeExcludedDomains(changes.excludedDomains.newValue);
+    if (excludedDomains.length) {
+      for (let i = passiveQueue.length - 1; i >= 0; i -= 1) {
+        if (isExcludedHostname(passiveQueue[i]?.domain, excludedDomains)) {
+          passiveQueue.splice(i, 1);
+        }
+      }
+    }
+  }
 });
 
 async function ensureDefaults() {
@@ -143,6 +155,7 @@ async function ensureDefaults() {
     gatewayURL: typeof current.gatewayURL === 'string' ? current.gatewayURL : DEFAULT_SETTINGS.gatewayURL,
     gatewayToken: typeof current.gatewayToken === 'string' ? current.gatewayToken : DEFAULT_SETTINGS.gatewayToken,
     passiveTracking: typeof current.passiveTracking === 'boolean' ? current.passiveTracking : DEFAULT_SETTINGS.passiveTracking,
+    excludedDomains: normalizeExcludedDomains(current.excludedDomains),
   };
   await chrome.storage.local.set(next);
 }
@@ -178,12 +191,46 @@ async function getSettings() {
     gatewayURL: typeof settings.gatewayURL === 'string' ? settings.gatewayURL : '',
     gatewayToken: typeof settings.gatewayToken === 'string' ? settings.gatewayToken : '',
     passiveTracking: typeof settings.passiveTracking === 'boolean' ? settings.passiveTracking : DEFAULT_SETTINGS.passiveTracking,
+    excludedDomains: normalizeExcludedDomains(settings.excludedDomains),
   };
 }
 
 function normalizePort(value) {
   const port = Number(value);
   return Number.isFinite(port) && port >= 1 && port <= 65535 ? port : DEFAULT_SETTINGS.bridgePort;
+}
+
+function normalizeExcludedDomains(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set();
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      continue;
+    }
+    const domain = item.trim().toLowerCase();
+    if (domain) {
+      seen.add(domain);
+    }
+  }
+  return Array.from(seen);
+}
+
+function hostnameMatchesDomain(hostname, domain) {
+  const host = (hostname || '').toLowerCase();
+  const target = (domain || '').toLowerCase();
+  if (!host || !target) {
+    return false;
+  }
+  return host === target || host.endsWith(`.${target}`);
+}
+
+function isExcludedHostname(hostname, excludedDomains) {
+  if (!Array.isArray(excludedDomains) || !excludedDomains.length) {
+    return false;
+  }
+  return excludedDomains.some((domain) => hostnameMatchesDomain(hostname, domain));
 }
 
 async function notifySettingsUpdated(extra = {}) {
@@ -331,6 +378,14 @@ async function captureAndSend(tab, options = {}) {
 
   await postWebHistoryEntries(entries, { gatewayURL, gatewayToken });
 
+  await appendPassiveSendLog([{
+    domain: domain || '',
+    title: title || '',
+    url: url || '',
+    sentAt: new Date().toISOString(),
+    manual: true,
+  }]);
+
   await chrome.action.setBadgeText({ text: '✓' });
   setTimeout(() => {
     chrome.action.setBadgeText({ text: '' }).catch(() => undefined);
@@ -347,7 +402,7 @@ async function startPassiveVisit(tab) {
   resetPassiveVisit();
 
   const settings = await getSettings();
-  if (!settings.passiveTracking || !isPassiveEligibleURL(tab?.url, settings.gatewayURL)) {
+  if (!settings.passiveTracking || !isPassiveEligibleURL(tab?.url, settings.gatewayURL, settings.excludedDomains)) {
     return;
   }
 
@@ -388,7 +443,7 @@ async function handlePassiveDwell(visit) {
     return;
   }
 
-  if (!tab?.active || tab.url !== visit.url || !isPassiveEligibleURL(tab.url, settings.gatewayURL)) {
+  if (!tab?.active || tab.url !== visit.url || !isPassiveEligibleURL(tab.url, settings.gatewayURL, settings.excludedDomains)) {
     return;
   }
   if (isPassiveDuplicate(tab.url)) {
@@ -468,6 +523,27 @@ async function flushPassiveQueue() {
   const entries = passiveQueue.slice();
   await postWebHistoryEntries(entries, settings);
   passiveQueue.splice(0, entries.length);
+
+  const sentAt = new Date().toISOString();
+  await appendPassiveSendLog(entries.map((entry) => ({
+    domain: entry.domain || '',
+    title: entry.title || '',
+    url: entry.url || '',
+    sentAt,
+  })));
+}
+
+async function appendPassiveSendLog(records) {
+  if (!Array.isArray(records) || !records.length) {
+    return;
+  }
+  const stored = await chrome.storage.local.get({ passiveSendLog: [] });
+  const log = Array.isArray(stored.passiveSendLog) ? stored.passiveSendLog : [];
+  log.push(...records);
+  const capped = log.length > PASSIVE_SEND_LOG_LIMIT
+    ? log.slice(log.length - PASSIVE_SEND_LOG_LIMIT)
+    : log;
+  await chrome.storage.local.set({ passiveSendLog: capped });
 }
 
 async function postWebHistoryEntries(entries, settings) {
@@ -492,7 +568,7 @@ function isPassiveDuplicate(url) {
   return previous != null && Date.now() - previous < PASSIVE_DEDUP_WINDOW_MS;
 }
 
-function isPassiveEligibleURL(value, gatewayURL) {
+function isPassiveEligibleURL(value, gatewayURL, excludedDomains) {
   let url;
   try {
     url = new URL(value || '');
@@ -503,6 +579,9 @@ function isPassiveEligibleURL(value, gatewayURL) {
     return false;
   }
   if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') {
+    return false;
+  }
+  if (isExcludedHostname(url.hostname, excludedDomains)) {
     return false;
   }
   const gatewayHost = safeHostname(gatewayURL);

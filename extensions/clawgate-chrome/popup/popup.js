@@ -12,6 +12,7 @@ const gatewayTokenInput = document.getElementById('gateway-token');
 const connectButton = document.getElementById('connect-button');
 const testButton = document.getElementById('test-button');
 const passiveToggle = document.getElementById('passive-toggle');
+const optionsLink = document.getElementById('options-link');
 
 init().catch((error) => {
   setStatus(false, error?.message || 'Disconnected');
@@ -23,6 +24,9 @@ async function init() {
   testButton.addEventListener('click', testConnection);
   passiveToggle.addEventListener('change', () => {
     chrome.storage.local.set({ passiveTracking: passiveToggle.checked });
+  });
+  optionsLink.addEventListener('click', () => {
+    chrome.runtime.openOptionsPage();
   });
 
   chrome.runtime.onMessage.addListener((message) => {
