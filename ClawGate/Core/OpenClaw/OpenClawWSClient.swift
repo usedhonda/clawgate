@@ -35,6 +35,16 @@ actor OpenClawWSClient {
     private var pendingRequestId: String?
     private var handshakeComplete = false
 
+    /// Optional broadcast-HUD hook: invoked with the round-trip latency (ms) of
+    /// each successful health check. Purely additive — never consulted by the
+    /// liveness/timeout logic.
+    private var onHealthLatency: ((Int) -> Void)?
+
+    /// Install the health-latency observer (see onHealthLatency).
+    func setOnHealthLatency(_ callback: @escaping (Int) -> Void) {
+        onHealthLatency = callback
+    }
+
     // MARK: - Connection
 
     /// Connect to local OpenClaw Gateway
@@ -630,6 +640,7 @@ actor OpenClawWSClient {
             type: "req", id: requestId, method: "health", params: HealthParams()
         )
         // 10s health deadline, matching VibeTerm cadence.
+        let sentAt = DispatchTime.now()
         do {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 inFlightHealthAcks[requestId] = continuation
@@ -647,6 +658,9 @@ actor OpenClawWSClient {
                 }
             }
             handleHealthSuccess(generation: gen)
+            // Additive-only: report round-trip latency for the broadcast HUD.
+            let rttMs = Int(Double(DispatchTime.now().uptimeNanoseconds &- sentAt.uptimeNanoseconds) / 1_000_000)
+            onHealthLatency?(rttMs)
         } catch {
             guard connectionGeneration == gen else { return }
             if case .timeout = error as? OpenClawError { return }

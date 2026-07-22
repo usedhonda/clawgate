@@ -57,6 +57,10 @@ final class AmbientController {
     private var ingestSent = 0
     private var ingestLastError: String?
 
+    /// Optional per-buffer level meter for the broadcast HUD, forwarded from the
+    /// capture manager. 0 is emitted when capture stops.
+    var onLevel: ((Float) -> Void)?
+
     /// Gateway delivery (ambient.ingest). Starts/stops with the stream; send
     /// failures never disturb capture/transcription (log + retry next window).
     private lazy var ingest = AmbientIngestProducer(
@@ -82,6 +86,9 @@ final class AmbientController {
         self.diarizer = AmbientDiarizer(log: log)
         self.capture.onChunkReady = { [weak self] url, rms, startedAt in
             self?.handleChunk(url, rms: rms, startedAt: startedAt)
+        }
+        self.capture.onLevel = { [weak self] level in
+            self?.onLevel?(level)
         }
         self.capture.setPreferredDevice(uid: configStore.load().ambientMicDeviceUID)
     }
@@ -162,6 +169,9 @@ final class AmbientController {
             self.healthMonitor.stop()
             Task { await self.ingest.stop() }
             self.capture.stop()
+            // Capture is off — the meter would otherwise freeze at its last
+            // value; report silence so the HUD greys out.
+            self.onLevel?(0)
         }
     }
 
