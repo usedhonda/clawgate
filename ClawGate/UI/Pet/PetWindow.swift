@@ -157,6 +157,7 @@ private final class PetContentView: NSView {
     private var notificationWindow: NSWindow?
     private var chatWindow: NSWindow?
     private var whisperWindow: NSWindow?
+    private var streamHUDWindow: NSWindow?
     private var bubbleObservation: AnyCancellable?
     private var clipboardObservation: AnyCancellable?
     private var screenshotObservation: AnyCancellable?
@@ -164,6 +165,7 @@ private final class PetContentView: NSView {
     private var logThreadObservation: AnyCancellable?
     private var summonObservation: AnyCancellable?
     private var whisperObservation: AnyCancellable?
+    private var broadcastObservation: AnyCancellable?
     private var chatBaseWidth: CGFloat?
     private var summonMenuGlobalMonitor: Any?
     private var bubbleLocalMonitor: Any?
@@ -255,6 +257,17 @@ private final class PetContentView: NSView {
                     self?.showWhisper(text)
                 } else {
                     self?.hideWhisper()
+                }
+            }
+        }
+
+        // Observe broadcast mode: show/hide the streaming HUD.
+        broadcastObservation = model.$broadcastMode.sink { [weak self] on in
+            DispatchQueue.main.async {
+                if on {
+                    self?.showStreamHUD()
+                } else {
+                    self?.hideStreamHUD()
                 }
             }
         }
@@ -730,6 +743,7 @@ private final class PetContentView: NSView {
             || w === askWindow
             || w === whisperWindow
             || w === summonMenuWindow
+            || w === streamHUDWindow
     }
 
     private func dismissPetPanelsFromClickOut() {
@@ -886,6 +900,52 @@ private final class PetContentView: NSView {
             window?.removeChildWindow(ww)
             ww.orderOut(nil)
             whisperWindow = nil
+        }
+    }
+
+    // MARK: - Broadcast HUD Window
+
+    private func showStreamHUD() {
+        guard streamHUDWindow == nil, let parentWindow = window else { return }
+
+        let hudView = PetStreamHUDView(model: model)
+        let hosting = NSHostingView(rootView: AnyView(hudView))
+        let w: CGFloat = 180
+        let h = max(hosting.intrinsicContentSize.height, 28)
+        hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
+
+        let hw = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: w, height: h),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        hw.isOpaque = false
+        hw.backgroundColor = .clear
+        hw.level = .floating
+        hw.hasShadow = false
+        hw.contentView = hosting
+        hw.isReleasedWhenClosed = false
+        hw.ignoresMouseEvents = true
+
+        // Sit just below the pet so it never overlaps the head-area whisper.
+        let parentFrame = parentWindow.frame
+        let screenFrame = parentWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? parentFrame
+        var originX = parentFrame.midX - w / 2
+        var originY = parentFrame.minY - h - 4
+        originX = min(max(originX, screenFrame.minX), screenFrame.maxX - w)
+        originY = min(max(originY, screenFrame.minY), screenFrame.maxY - h)
+        hw.setFrameOrigin(NSPoint(x: originX, y: originY))
+
+        parentWindow.addChildWindow(hw, ordered: .above)
+        streamHUDWindow = hw
+    }
+
+    private func hideStreamHUD() {
+        if let hw = streamHUDWindow {
+            window?.removeChildWindow(hw)
+            hw.orderOut(nil)
+            streamHUDWindow = nil
         }
     }
 }
