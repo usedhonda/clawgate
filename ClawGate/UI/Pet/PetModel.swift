@@ -73,16 +73,6 @@ final class PetModel: NSObject, ObservableObject {
     @Published var streamingText: String = ""
     @Published var whisperText: String?       // Layer 1: brief reaction text
     @Published var notificationMessage: OpenClawChatMessage?  // Independent notification
-    /// Broadcast (streaming) mode: when true, message bodies are never
-    /// auto-displayed in the bubble/whisper; a connection+audio HUD is shown
-    /// instead. Persisted via ConfigStore (see setBroadcastMode).
-    @Published var broadcastMode: Bool = ConfigStore().load().broadcastMode
-    /// Round-trip latency (ms) of the last successful Gateway health check.
-    /// Surfaced in the broadcast HUD. nil until the first health ack.
-    @Published var healthLatencyMs: Int?
-    /// Most recent ambient capture level (per-buffer RMS, ~0…1). 0 when capture
-    /// is stopped/paused. Surfaced as the broadcast HUD volume meter.
-    @Published var ambientLevel: Float = 0
     @Published var pendingScreenshotOffer: ScreenshotOffer?
     @Published var petMode: PetMode = .secretary
     private var hasEverConnected = false
@@ -466,15 +456,6 @@ final class PetModel: NSObject, ObservableObject {
         // Always save to history
         addNotificationEntry(text: msg.text, source: msg.isProactive ? "proactive" : "gateway")
 
-        // Broadcast mode: never surface the message body. Show a fixed,
-        // content-free indicator instead so the streamer knows a message
-        // arrived without leaking sender/body on screen. History above is
-        // still written so it can be read later.
-        if broadcastMode {
-            showWhisper("💬 メッセージ受信", allowInBroadcast: true)
-            return
-        }
-
         guard isBubbleEnabled, !stateMachine.isChatOpen else {
             NSLog("[Pet] showNotification suppressed")
             return
@@ -520,11 +501,8 @@ final class PetModel: NSObject, ObservableObject {
 
     // MARK: - Layer 1: Whisper (brief reaction)
 
-    func showWhisper(_ text: String, duration: TimeInterval = 3.0, allowInBroadcast: Bool = false) {
+    func showWhisper(_ text: String, duration: TimeInterval = 3.0) {
         guard petMode != .quiet, isWhisperEnabled else { return }
-        // Broadcast mode suppresses all auto-display reactions except the
-        // explicit content-free indicator (allowInBroadcast).
-        if broadcastMode && !allowInBroadcast { return }
         whisperText = text
         whisperDismissTask?.cancel()
         whisperDismissTask = Task { @MainActor [weak self] in
@@ -537,17 +515,6 @@ final class PetModel: NSObject, ObservableObject {
     func dismissWhisper() {
         whisperDismissTask?.cancel()
         whisperText = nil
-    }
-
-    // MARK: - Broadcast Mode
-
-    /// Toggle broadcast (streaming) mode and persist it. When on, message
-    /// bodies are never auto-displayed; the HUD is shown instead.
-    func setBroadcastMode(_ on: Bool) {
-        broadcastMode = on
-        var cfg = ConfigStore().load()
-        cfg.broadcastMode = on
-        ConfigStore().save(cfg)
     }
 
     // MARK: - Idle Variation Timer
@@ -982,16 +949,6 @@ final class PetModel: NSObject, ObservableObject {
 
         characterManager.scan()
         _ = try? OpenClawDeviceIdentity.loadOrCreate()
-
-        // Surface Gateway health round-trip latency into the broadcast HUD.
-        Task { [weak self] in
-            await self?.wsClient.setOnHealthLatency { ms in
-                DispatchQueue.main.async { [weak self] in
-                    self?.healthLatencyMs = ms
-                }
-            }
-        }
-
         connect()
         startIdleTimer()
         startReconnectTimer()

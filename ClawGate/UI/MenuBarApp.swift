@@ -90,11 +90,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // toggling the avatar back on works without a restart.
         petWindowController = PetWindowController(model: petModel)
         petModel.start()
-
-        // Feed the ambient capture level into the pet's broadcast HUD meter.
-        runtime.ambient()?.onLevel = { [weak self] level in
-            DispatchQueue.main.async { self?.petModel.ambientLevel = level }
-        }
         if petModel.isVisible {
             petWindowController?.show()
         }
@@ -163,18 +158,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             menu.addItem(NSMenuItem.separator())
         }
 
-        // Broadcast mode toggle — always available (independent of ambient), so
-        // the streamer can hide message bodies at any moment.
-        let broadcastItem = NSMenuItem(
-            title: "Broadcast Mode",
-            action: #selector(toggleBroadcastMode),
-            keyEquivalent: ""
-        )
-        broadcastItem.target = self
-        broadcastItem.state = petModel.broadcastMode ? .on : .off
-        menu.addItem(broadcastItem)
-        menu.addItem(NSMenuItem.separator())
-
         menu.addItem(withTitle: "Quit ClawGate", action: #selector(quit), keyEquivalent: "q")
         statusItem?.menu = menu
         statusItem?.button?.performClick(nil)
@@ -190,10 +173,6 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 DispatchQueue.main.async { self?.presentAmbientError("\(err)") }
             }
         }
-    }
-
-    @objc private func toggleBroadcastMode() {
-        petModel.setBroadcastMode(!petModel.broadcastMode)
     }
 
     @objc private func ambientStopStream() { runtime.ambient()?.stopStream() }

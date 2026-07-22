@@ -110,14 +110,6 @@ final class AmbientCaptureManager {
     /// Arguments: file URL, RMS level (0…1, measured during capture so the
     /// silence gate never re-reads the file), and the chunk's wall-clock start.
     var onChunkReady: ((URL, Float, Date) -> Void)?
-
-    /// Optional per-buffer level meter (broadcast HUD). Invoked off the main
-    /// thread with a throttled per-buffer RMS (~0…1). Entirely separate from the
-    /// chunk RMS used by the silence gate — it never touches chunk state.
-    var onLevel: ((Float) -> Void)?
-    private let levelLock = NSLock()
-    private var _lastLevelEmitAt = Date.distantPast
-
     private let log: (String) -> Void
 
     init(chunkSeconds: Int = 30,
@@ -389,8 +381,6 @@ final class AmbientCaptureManager {
             return
         }
 
-        emitLevelIfNeeded(outBuf)
-
         lock.lock(); defer { lock.unlock() }
         guard currentFile != nil else { return }
         writeBufferLocked(outBuf)
@@ -413,24 +403,6 @@ final class AmbientCaptureManager {
         } catch {
             log("ambient capture write error: \(error)")
         }
-    }
-
-    /// Compute a throttled (~10 Hz) per-buffer RMS and hand it to the level
-    /// meter. Independent of the chunk RMS accumulation.
-    private func emitLevelIfNeeded(_ buf: AVAudioPCMBuffer) {
-        guard let onLevel else { return }
-        let now = Date()
-        levelLock.lock()
-        let due = now.timeIntervalSince(_lastLevelEmitAt) >= 0.1
-        if due { _lastLevelEmitAt = now }
-        levelLock.unlock()
-        guard due, let ch = buf.floatChannelData else { return }
-        let n = Int(buf.frameLength)
-        guard n > 0 else { return }
-        var sum = 0.0
-        for i in 0..<n { let v = Double(ch[0][i]); sum += v * v }
-        let rms = Float((sum / Double(n)).squareRoot())
-        onLevel(rms)
     }
 
     /// Accumulate squared sample energy for the current chunk's RMS.
