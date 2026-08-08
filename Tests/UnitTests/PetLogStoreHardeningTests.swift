@@ -265,6 +265,25 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertTrue(temps.isEmpty, "no pending temp files may linger")
     }
 
+    /// F2 rollback, no-prior-backup branch: a first-ever save that fails at the
+    /// primary must REMOVE the freshly created .bak (never leave it orphaned
+    /// ahead of an absent primary) and leave the primary absent.
+    func testPrimaryFailureRemovesFreshlyCreatedBackup() throws {
+        // No prior log.json / .bak at all.
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+        XCTAssertFalse(PetLogStore.save([entry("new")], file: "log.json"))
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path("log.json.bak")),
+                       "a .bak created during a failed first save must be removed on rollback")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: primary),
+                       "the primary must remain absent")
+        let temps = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .filter { $0.contains(".tmp-") }
+        XCTAssertTrue(temps.isEmpty, "no pending temp files may linger")
+    }
+
     /// D9 gap 3: primary, `.bak`, and quarantine are all owner-only (0600).
     func testAllPersistedFilesAreOwnerOnly() throws {
         XCTAssertTrue(PetLogStore.save([entry("a")], file: "log.json"))

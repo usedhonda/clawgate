@@ -1045,13 +1045,19 @@ final class PetModel: NSObject, ObservableObject {
     /// Acknowledges a SINGLE issue independently (identity = file + kind), so
     /// e.g. a resolved permission problem can be dismissed without dropping a
     /// still-open partial-drop warning on the same file. Same commit discipline.
-    func acknowledgeLogRecoveryWarning(file: String, kind: String) {
+    /// Refuses (returns false) to clear a warning for a still-write-blocked
+    /// (poisoned) store — that would recreate the silent write-disabled state
+    /// D99 exists to prevent; only resolveLogStoreCorruption recovers it.
+    @discardableResult
+    func acknowledgeLogRecoveryWarning(file: String, kind: String) -> Bool {
+        if PetLogStore.isPoisoned(file) { return false }
         let remaining = logRecoveryWarnings.filter { !($0.file == file && $0.kind == kind) }
         if PetLogStore.saveRecoveryWarnings(remaining) {
             logRecoveryWarnings = remaining
-        } else {
-            recoveryWarningPersistenceDegraded = true
+            return true
         }
+        recoveryWarningPersistenceDegraded = true
+        return false
     }
 
     /// Warning identity is (file, kind): distinct failure kinds for the same

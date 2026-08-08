@@ -482,6 +482,21 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "store stays fail-closed")
     }
 
+    /// Per-issue acknowledge must ALSO refuse to clear a poisoned store's
+    /// warning — otherwise the single-issue API reintroduces the silent
+    /// write-disabled state the bulk ack guards against (D99).
+    func testPerIssueAcknowledgeRefusesPoisonedStore() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
+
+        XCTAssertFalse(model.acknowledgeLogRecoveryWarning(file: "log.json", kind: "corrupt"),
+                       "per-issue ack must refuse a poisoned store")
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" && $0.kind == "corrupt" },
+                      "the blocked-status warning must remain visible")
+    }
+
     // MARK: - Warnings-store permission failure surfaced (D100)
 
     /// A chmod failure on the warnings store itself is no longer discarded: it
