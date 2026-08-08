@@ -551,6 +551,76 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertTrue(kinds.contains("insecurePermissions"), "an unrelated kind on the same file remains")
     }
 
+    /// L: resolve is transactional — if the writeBlocked clear can't be
+    /// persisted (warnings-store save fails), resolve returns false and flags
+    /// degraded, even though the store itself recovered; the stale writeBlocked
+    /// then durably reconciles on the next (healthy) restart. No dead-end.
+    func testResolveWarningCommitFailureReconcilesOnRestart() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
+
+        // Fail the warnings-store persist during the resolve's warning clear.
+        let warningsPath = path("recovery-warnings.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == warningsPath ? false : true }
+        XCTAssertFalse(model.resolveLogStoreCorruption(file: "log.json"),
+                       "a failed warning-clear commit must make resolve return false")
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        // ...but the store itself recovered (fresh log.json committed).
+        XCTAssertFalse(PetLogStore.isPoisoned("log.json"), "the store recovered despite the warning-clear failure")
+        XCTAssertTrue(model.recoveryWarningPersistenceDegraded, "and degraded is flagged")
+
+        // Next restart: log.json is healthy, so the stale writeBlocked derive-clears.
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertFalse(restarted.logRecoveryWarnings.contains {
+            $0.file == "log.json" && $0.kind == "writeBlocked" },
+            "the stale writeBlocked must durably reconcile on a healthy restart — no dead-end")
+    }
+
+    /// L: a stale writeBlocked on a file fixed out-of-band (healthy on next
+    /// launch) is derive-cleared under commit discipline.
+    func testStaleWriteBlockedClearsWhenFileHealthyOnRestart() throws {
+        // Persist a warnings store holding a writeBlocked for a file that is NOT
+        // corrupt on disk (simulating an out-of-band repair).
+        try Data("[]".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let stale = PetLogRecoveryWarning(file: "log.json", kind: "writeBlocked",
+                                          droppedCount: 0, quarantine: nil, detectedAt: Date())
+        let data = try JSONEncoder.iso.encode([stale])
+        try data.write(to: URL(fileURLWithPath: path("recovery-warnings.json")))
+        try data.write(to: URL(fileURLWithPath: path("recovery-warnings.json.bak")))
+
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertFalse(PetLogStore.isPoisoned("log.json"))
+        XCTAssertFalse(model.logRecoveryWarnings.contains {
+            $0.file == "log.json" && $0.kind == "writeBlocked" },
+            "a stale writeBlocked on a healthy file must be reconciled away")
+    }
+
+    /// L point 4: a fresh-store backup promote failure during resolve surfaces a
+    /// typed backupDegraded warning (not collapsed into the Bool).
+    func testResolveFreshStoreBackupDegradedSurfaces() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
+
+        // Block log.json.bak so the resolve's fresh save promotes-fails.
+        try FileManager.default.createDirectory(atPath: path("log.json.bak"), withIntermediateDirectories: true)
+        XCTAssertTrue(model.resolveLogStoreCorruption(file: "log.json"),
+                      "resolve still succeeds (primary durable) on a backup-degraded fresh save")
+        XCTAssertFalse(PetLogStore.isPoisoned("log.json"))
+        XCTAssertTrue(model.logRecoveryWarnings.contains {
+            $0.file == "log.json" && $0.kind == "backupDegraded" },
+            "a fresh-store promote failure must surface a typed backupDegraded warning")
+        XCTAssertFalse(model.logRecoveryWarnings.contains {
+            $0.file == "log.json" && $0.kind == "writeBlocked" },
+            "the writeBlocked is cleared by the successful resolve")
+    }
+
     /// H: resolve of a healthy (never-poisoned) store is refused — a stray old
     /// quarantine must not authorize wiping a live store.
     func testResolveRefusedOnHealthyStore() throws {

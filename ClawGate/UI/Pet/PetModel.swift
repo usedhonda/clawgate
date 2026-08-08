@@ -1044,6 +1044,12 @@ final class PetModel: NSObject, ObservableObject {
         // the warning visible and flags degraded.
         var candidate = logRecoveryWarnings
         candidate.removeAll { $0.kind == "insecurePermissions" && restoreConvergedPermissions.contains($0.file) }
+        // Derived reconcile of writeBlocked (L): an ACTIVE block is exactly a
+        // current poison incident. A stale writeBlocked on a now-healthy file
+        // (e.g. a resolve whose warning-clear commit failed, or the store fixed
+        // out-of-band) is cleared under commit discipline so it can't become an
+        // unresolvable dead-end.
+        candidate.removeAll { $0.kind == "writeBlocked" && !PetLogStore.isPoisoned($0.file) }
         commitRecoveryWarnings(candidate)
     }
 
@@ -1074,13 +1080,21 @@ final class PetModel: NSObject, ObservableObject {
     /// clear. Returns whether recovery succeeded.
     @discardableResult
     func resolveLogStoreCorruption(file: String) -> Bool {
-        guard PetLogStore.resolveLogStoreCorruption(file: file) else { return false }
+        let outcome = PetLogStore.resolveLogStoreCorruption(file: file)
+        guard outcome != .failed else { return false }
+        // The store is recovered; surface a stale fresh-store backup as its own
+        // durable warning (L point 4) rather than collapsing it into the Bool.
+        if outcome == .committedBackupDegraded {
+            upsertRecoveryWarning(file: file, kind: "backupDegraded", droppedCount: 0, quarantine: nil)
+        }
         // Resolve clears ONLY the writeBlocked warning for this file (H); other
-        // kinds on the same file (partialDrop, insecurePermissions) are
-        // independent and remain for separate acknowledgement.
+        // kinds coexist. TRANSACTIONAL (L): the clear is only durable on a
+        // successful warnings-store commit — if it fails, return false and flag
+        // degraded so the caller knows the visible warning didn't clear. The
+        // stale writeBlocked is then reconciled on the next restore (the store is
+        // healthy, so it derive-clears) — no ack/resolve dead-end.
         let remaining = logRecoveryWarnings.filter { !($0.file == file && $0.kind == "writeBlocked") }
-        commitRecoveryWarnings(remaining)
-        return true
+        return commitRecoveryWarnings(remaining)
     }
 
     /// Acknowledges a SINGLE issue independently (identity = file + kind), so
@@ -2571,26 +2585,29 @@ enum PetLogStore {
     /// from an OLD incident can't authorize overwriting the CURRENT corrupt
     /// bytes). On success clears the poison and commits a fresh empty store so
     /// saves resume; a failed fresh write re-arms the same incident.
-    @discardableResult
-    static func resolveLogStoreCorruption(file: String) -> Bool {
-        if productionAccessBlocked() { return false }
+    /// Returns the fresh-store commit outcome: `.failed` means resolve was
+    /// refused or the fresh write failed (stays poisoned); `.committed` /
+    /// `.committedBackupDegraded` mean the store is recovered (the latter with a
+    /// stale backup the caller surfaces).
+    static func resolveLogStoreCorruption(file: String) -> CommitOutcome {
+        if productionAccessBlocked() { return .failed }
         guard let incident = poisonedIncidents[file],
               let name = incident.quarantineName,
-              let expectedHash = incident.quarantineSHA256 else { return false }
+              let expectedHash = incident.quarantineSHA256 else { return .failed }
         // The current incident's exact quarantine must exist and match — not
         // merely some same-prefix debris from a prior incident.
         guard let bytes = try? Data(contentsOf: URL(fileURLWithPath: (dir as NSString).appendingPathComponent(name))) else {
-            return false
+            return .failed
         }
         let actualHash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-        guard actualHash == expectedHash else { return false }
+        guard actualHash == expectedHash else { return .failed }
 
         poisonedIncidents[file] = nil
-        guard save([], file: file) else {
+        let outcome = saveOutcome([], file: file)
+        if outcome == .failed {
             poisonedIncidents[file] = incident  // fresh write failed — stay fail-closed
-            return false
         }
-        return true
+        return outcome
     }
 
     /// Owner-only (0600): every persisted file is a copy of conversation text.
