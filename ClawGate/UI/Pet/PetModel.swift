@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CryptoKit
 import Foundation
 import os
 
@@ -118,11 +119,11 @@ final class PetModel: NSObject, ObservableObject {
     @Published var logThreadPaneOpen: Bool = true
     @Published var logAwaitingReply: Bool = false
     /// Log-store filenames whose persisted history was unreadable at load and
-    /// could not be recovered from a last-known-good backup. Surfaced as a
-    /// visible status (see the corrupt banner) — NEVER injected into the
-    /// conversation as a "ちー" (source == "log") entry. While a file is here,
-    /// its writes are held fail-closed by PetLogStore so the quarantined
-    /// original is preserved.
+    /// could not be recovered from a last-known-good backup. Exposed as a
+    /// Published status so a future UI (corrupt-status rendering is Wave C) can
+    /// bind to it — NEVER injected into the conversation as a "ちー"
+    /// (source == "log") entry. While a file is here, its writes are held
+    /// fail-closed by PetLogStore so the quarantined original is preserved.
     @Published var corruptLogStoreFiles: Set<String> = []
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
@@ -2390,7 +2391,10 @@ enum PetLogStore {
         // Try to recover from the last-known-good backup.
         if let bakData = try? Data(contentsOf: URL(fileURLWithPath: path + ".bak")),
            let (entries, _) = decodeEntries(bakData) {
-            logger.error("PetLogStore recovered \(entries.count, privacy: .public) entries from backup for \(file, privacy: .public) after corrupt load")
+            // Body-free provenance: entry count + a hash of the recovered bytes
+            // (never any conversation text) so a recovery is auditable.
+            let hash = SHA256.hash(data: bakData).map { String(format: "%02x", $0) }.joined()
+            logger.error("PetLogStore recovered \(entries.count, privacy: .public) entries from backup for \(file, privacy: .public) after corrupt load, sha256=\(hash, privacy: .public)")
             return .corrupt(entries: entries, recovered: true)
         }
         // Unrecoverable: empty start, and hold writes fail-closed so the

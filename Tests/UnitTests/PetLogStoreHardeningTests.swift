@@ -65,6 +65,9 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertEqual(quarantines.count, 1, "exactly one quarantine copy expected")
         let qData = try Data(contentsOf: URL(fileURLWithPath: path(quarantines[0])))
         XCTAssertEqual(qData, original, "quarantine copy must hold the original corrupt bytes")
+        let perms = try FileManager.default
+            .attributesOfItem(atPath: path(quarantines[0]))[.posixPermissions] as? NSNumber
+        XCTAssertEqual(perms?.int16Value, 0o600, "quarantine copy must be owner-only (0600)")
     }
 
     func testMissingFileReportsMissing() {
