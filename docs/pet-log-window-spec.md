@@ -49,8 +49,9 @@ The universal prefix instructs the model as follows:
   model must NOT re-resolve or re-narrow the scope, and a scene id (epoch
   integer) in scopeOverride is NOT a segment id (`segments[].id`).
 - **Evidence boundary (D6)**: the only factual basis is this envelope's
-  `segments`; prior-session conversation or memory must not be used as evidence
-  unless the `instruction` explicitly asks for it.
+  `segments` — UNCONDITIONALLY. Prior-session conversation or memory must never
+  be used as evidence, even if the `instruction` asks for it; if the needed
+  context isn't in `segments`, return insufficient rather than reaching outside.
 - **Selection**: with scopeOverride (explicit), return ALL ids in the given
   order — no additional boundary selection. Without it (automatic), select a
   contiguous backward suffix that always includes the newest segment; only a

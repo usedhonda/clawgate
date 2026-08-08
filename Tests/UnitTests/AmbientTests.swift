@@ -570,6 +570,10 @@ final class AmbientTests: XCTestCase {
         XCTAssertTrue(prefix.contains("再解決"), "scope re-resolution ban clause")
         XCTAssertTrue(prefix.contains("シーンID") && prefix.contains("epoch"), "scene-id type note")
         XCTAssertTrue(prefix.contains("既往の会話") && prefix.contains("記憶"), "session-contamination boundary")
+        // D143: unconditional — no "unless the instruction asks" exception.
+        XCTAssertFalse(prefix.contains("明示的に要求しない限り") || prefix.contains("明示要求"),
+                       "the evidence boundary must be unconditional (no instruction exception)")
+        XCTAssertTrue(prefix.contains("求めていても"), "must explicitly deny even an instruction request")
         XCTAssertTrue(prefix.contains("contiguous suffix") || prefix.contains("連続した末尾区間"), "contiguous backward suffix rule")
         XCTAssertTrue(prefix.contains("飛び石"), "no gapped exclusion")
         XCTAssertTrue(prefix.contains("根拠となるログが不足"), "insufficient-evidence instruction")

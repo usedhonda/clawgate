@@ -11,13 +11,38 @@ final class PetLogWindowSpecTests: XCTestCase {
             .appendingPathComponent("docs/pet-log-window-spec.md").path
     }
 
-    func testSpecExistsAndMatchesPolicyVersion() throws {
+    /// Extracts the "## Normative (shipped)" section body (up to the next
+    /// "## " heading) so version checks can't be satisfied by a Target-section
+    /// mention (D144).
+    private func normativeSection(_ spec: String) -> String {
+        guard let start = spec.range(of: "## Normative") else { return "" }
+        let rest = spec[start.upperBound...]
+        if let next = rest.range(of: "\n## ") {
+            return String(rest[..<next.lowerBound])
+        }
+        return String(rest)
+    }
+
+    func testSpecExistsAndNormativeSectionMatchesPolicyVersion() throws {
         let spec = try String(contentsOfFile: specPath(), encoding: .utf8)
         XCTAssertTrue(spec.contains("Pet Log"), "spec must be the Pet Log window contract")
         XCTAssertTrue(spec.contains("Operating rule"), "spec must carry the same-commit update rule")
-        // The current code policyVersion must appear in the Normative section.
-        XCTAssertTrue(spec.contains(PetLogPromptBuilder.policyVersion),
-                      "spec must quote the current code policyVersion (\(PetLogPromptBuilder.policyVersion))")
+
+        // D144: the CURRENT policyVersion must appear in the NORMATIVE section
+        // exactly once, and no older version string may appear there — a version
+        // bump that leaves Normative on the old version must fail (a Target-section
+        // mention can't rescue it).
+        let normative = normativeSection(spec)
+        let current = PetLogPromptBuilder.policyVersion
+        let occurrences = normative.components(separatedBy: current).count - 1
+        XCTAssertEqual(occurrences, 1,
+                       "the current policyVersion must appear exactly once in the Normative section")
+        // Any pet-log-context-vN other than the current must be absent from Normative.
+        for old in ["pet-log-context-v0", "pet-log-context-v1", "pet-log-context-v2", "pet-log-context-v3"]
+        where old != current {
+            XCTAssertFalse(normative.contains(old),
+                           "a stale version (\(old)) must not appear in the Normative section")
+        }
     }
 
     /// Public-repo safety: the spec must not leak obvious PII/infra markers.
