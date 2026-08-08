@@ -17,9 +17,11 @@ final class PetLogStoreHardeningTests: XCTestCase {
         PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
         try? FileManager.default.createDirectory(atPath: PetLogStore.dir, withIntermediateDirectories: true)
         PetLogStore.resetPoisonedForTesting()
+        PetLogStore.applyPermissionsHookForTesting = nil
     }
 
     override func tearDown() {
+        PetLogStore.applyPermissionsHookForTesting = nil
         try? FileManager.default.removeItem(atPath: PetLogStore.dir)
         PetLogStore.resetPoisonedForTesting()
         PetLogStore.dir = originalDir
@@ -228,5 +230,49 @@ final class PetLogStoreHardeningTests: XCTestCase {
         try? FileManager.default.removeItem(atPath: path("log.json.bak"))
         XCTAssertTrue(PetLogStore.save([entry("b")], file: "log.json"))
         XCTAssertEqual(try mode("log.json"), 0o600, "primary must be 0600")
+    }
+
+    // MARK: - D54 + chmod failure surfacing
+
+    private func dirMode() throws -> Int16? {
+        (try FileManager.default.attributesOfItem(atPath: PetLogStore.dir)[.posixPermissions] as? NSNumber)?.int16Value
+    }
+
+    /// D54: a freshly created store dir is owner-only (0700).
+    func testFreshStoreDirectoryIsOwnerOnly() throws {
+        // setUp created the dir; remove it so save() re-creates it fresh.
+        try FileManager.default.removeItem(atPath: PetLogStore.dir)
+        XCTAssertTrue(PetLogStore.save([entry("a")], file: "log.json"))
+        XCTAssertEqual(try dirMode(), 0o700, "a fresh store dir must be 0700")
+    }
+
+    /// D54: an existing umask-0755 dir converges to 0700 on save.
+    func testExistingLooseDirectoryConvergesToOwnerOnly() throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: PetLogStore.dir)
+        XCTAssertTrue(PetLogStore.save([entry("a")], file: "log.json"))
+        XCTAssertEqual(try dirMode(), 0o700, "an existing 0755 dir must converge to 0700")
+    }
+
+    /// A chmod failure at the directory surfaces as a save failure.
+    func testDirectoryPermissionFailureIsSaveFailure() {
+        PetLogStore.applyPermissionsHookForTesting = { $0 == PetLogStore.dir ? false : true }
+        XCTAssertFalse(PetLogStore.save([entry("a")], file: "log.json"),
+                       "a dir chmod failure must surface as save failure")
+    }
+
+    /// A chmod failure at the primary file surfaces as a save failure.
+    func testPrimaryPermissionFailureIsSaveFailure() {
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+        XCTAssertFalse(PetLogStore.save([entry("a")], file: "log.json"),
+                       "a primary chmod failure must surface as save failure")
+    }
+
+    /// A chmod failure at the .bak file surfaces as a save failure.
+    func testBackupPermissionFailureIsSaveFailure() {
+        let bak = path("log.json.bak")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == bak ? false : true }
+        XCTAssertFalse(PetLogStore.save([entry("a")], file: "log.json"),
+                       "a .bak chmod failure must surface as save failure")
     }
 }

@@ -2358,6 +2358,27 @@ enum PetLogStore {
 
     /// Owner-only (0600): every persisted file is a copy of conversation text.
     private static let ownerOnly: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
+    /// Owner-only (0700) for the store directory, so quarantine/backup file
+    /// names aren't enumerable by other local users (D54).
+    private static let ownerOnlyDir: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+
+    /// internal (not private): test seam. When set, permission application is
+    /// simulated by this hook (keyed on path, returns success) instead of a real
+    /// `setAttributes`, so a test can inject a chmod failure at a specific path.
+    /// Process-global — reset it in setUp/tearDown under `testIsolationSemaphore`.
+    static var applyPermissionsHookForTesting: ((String) -> Bool)?
+
+    /// Applies POSIX permissions, honoring the test hook. Returns whether the
+    /// permission was set — a failure is surfaced (fail-visible), never swallowed.
+    private static func applyPermissions(_ attrs: [FileAttributeKey: Any], path: String) -> Bool {
+        if let hook = applyPermissionsHookForTesting { return hook(path) }
+        do {
+            try FileManager.default.setAttributes(attrs, ofItemAtPath: path)
+            return true
+        } catch {
+            return false
+        }
+    }
 
     /// The three ways a load can end. `success` carries `dropped` — the count of
     /// individual entries that failed to decode (unknown/legacy shapes) and were
@@ -2380,6 +2401,12 @@ enum PetLogStore {
         } catch {
             return false
         }
+        // Store dir is owner-only (0700), converging an existing umask-0755 dir
+        // too. A chmod failure is surfaced as a save failure, not swallowed.
+        guard applyPermissions(ownerOnlyDir, path: dir) else {
+            logger.error("PetLogStore dir permission set failed for \(file, privacy: .public); reporting save failure")
+            return false
+        }
         let path = (dir as NSString).appendingPathComponent(file)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -2389,7 +2416,10 @@ enum PetLogStore {
         } catch {
             return false
         }
-        try? FileManager.default.setAttributes(ownerOnly, ofItemAtPath: path)
+        guard applyPermissions(ownerOnly, path: path) else {
+            logger.error("PetLogStore primary permission set failed for \(file, privacy: .public); reporting save failure")
+            return false
+        }
         // Maintain a last-known-good backup: what we just wrote came from live
         // in-memory state, so it is by definition decodable and good. A backup
         // write failure is NOT swallowed — the safety net is gone, so the save
@@ -2401,7 +2431,10 @@ enum PetLogStore {
             logger.error("PetLogStore backup write failed for \(file, privacy: .public); reporting save failure (primary written)")
             return false
         }
-        try? FileManager.default.setAttributes(ownerOnly, ofItemAtPath: bakPath)
+        guard applyPermissions(ownerOnly, path: bakPath) else {
+            logger.error("PetLogStore backup permission set failed for \(file, privacy: .public); reporting save failure")
+            return false
+        }
         return true
     }
 
