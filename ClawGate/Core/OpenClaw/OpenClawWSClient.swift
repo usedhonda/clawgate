@@ -3,6 +3,46 @@ import os
 
 private let logger = Logger(subsystem: "com.clawgate", category: "OpenClawWS")
 
+/// D59 transport privacy: builds a BOUNDED, body-free structural log line for a
+/// transport response. Wire-controlled strings (server error message, and even
+/// the response id / payload type / error code) are never echoed raw — they are
+/// reduced to lengths, a short prefix for OUR OWN in-flight ids, or an
+/// allowlisted verbatim token. Pure and testable so the runtime guard can prove
+/// no sentinel content reaches the log.
+enum TransportLog {
+    /// Fixed protocol tokens safe to log verbatim.
+    static let knownPayloadTypes: Set<String> = [
+        "hello-ok", "chat.history", "chat.send", "connect", "connect.challenge", "health",
+    ]
+
+    /// A short structural token: <=32 chars of [A-Za-z0-9._-] only.
+    static func isBoundedToken(_ s: String) -> Bool {
+        s.count <= 32 && s.allSatisfy { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" }
+    }
+
+    static func responseLine(ok: Bool, responseId: String, known: Bool,
+                             payloadType: String?, error: IncomingError?) -> String {
+        // Known ids are our own generated request ids (not wire content) — a
+        // short prefix is safe; unknown ids get length only.
+        let idField = known ? "id=\(responseId.prefix(8))/\(responseId.utf8.count)"
+                            : "idLen=\(responseId.utf8.count)"
+        let typeField: String
+        switch payloadType {
+        case .none: typeField = "type=none"
+        case .some(let t) where knownPayloadTypes.contains(t): typeField = "type=\(t)"
+        case .some(let t): typeField = "typeLen=\(t.utf8.count)"
+        }
+        let errField: String
+        if let e = error {
+            let code = isBoundedToken(e.code) ? e.code : "len\(e.code.utf8.count)"
+            errField = "errCode=\(code) errMsgLen=\(e.message.utf8.count)"
+        } else {
+            errField = "err=none"
+        }
+        return "ok=\(ok ? 1 : 0) \(idField) \(typeField) \(errField)"
+    }
+}
+
 /// WebSocket client for OpenClaw Gateway v3 protocol (macOS port of VibeTerm client)
 actor OpenClawWSClient {
     private static let chatSendAckTimeout: UInt64 = 15_000_000_000
@@ -500,13 +540,16 @@ actor OpenClawWSClient {
     private func handleResponse(_ msg: IncomingMessage) {
         let ok = msg.ok ?? false
         let responseId = msg.id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        // D59 transport privacy: log only BOUNDED STRUCTURAL metadata. The
-        // server-controlled `error.message` is unbounded and can echo input
-        // fragments (hidden prefix / STT / instruction), so it must never reach
-        // the unified log — surface the error CODE and its byte LENGTH instead.
-        NSLog("[Pet] handleResponse: ok=%d id=%@ type=%@ errCode=%@ errLen=%d",
-              ok ? 1 : 0, responseId, msg.payload?.type ?? "nil",
-              msg.error?.code ?? "none", msg.error.map { $0.message.utf8.count } ?? 0)
+        // D59 transport privacy: route through the bounded formatter — no
+        // wire-controlled content (error message, or raw response id / payload
+        // type / error code) reaches the unified log.
+        let knownResponseId = inFlightResponses[responseId] != nil
+            || inFlightAcks[responseId] != nil
+            || inFlightHealthAcks[responseId] != nil
+            || (pendingRequestId.map { $0 == responseId } ?? false)
+        NSLog("[Pet] handleResponse: %@",
+              TransportLog.responseLine(ok: ok, responseId: responseId, known: knownResponseId,
+                                        payloadType: msg.payload?.type, error: msg.error))
 
         // Payload-returning requests (ambient.ingest etc.)
         if !responseId.isEmpty, let cont = inFlightResponses.removeValue(forKey: responseId) {

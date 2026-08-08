@@ -337,12 +337,21 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         XCTAssertFalse(wsClient.contains("data.prefix(200)"),
                        "decode-failure log must not include raw body bytes")
 
-        // D59 transport privacy: no NSLog line in OpenClawWSClient may emit the
-        // server-controlled error MESSAGE body (unbounded, can echo input). Only
-        // bounded structural metadata (code, length) is allowed.
-        for line in wsClient.components(separatedBy: "\n") where line.contains("NSLog(") {
-            XCTAssertFalse(line.contains("error?.message") || line.contains(".message ?"),
-                           "transport NSLog must not log the server error message body: \(line.trimmingCharacters(in: .whitespaces))")
+        // D59 AUXILIARY (the primary guard is the runtime TransportLogPrivacyTests):
+        // multiline-aware — collapse newlines so a body arg split across lines
+        // can't slip past — and scan only NSLog(...) windows (logging), NOT the
+        // typed-error propagation via serverError(message:). A bare `.message`
+        // value inside an NSLog call is forbidden; `.message.utf8.count` (a
+        // length) is allowed.
+        let collapsed = wsClient.replacingOccurrences(of: "\n", with: " ")
+        let bare = try NSRegularExpression(pattern: #"\.message(?![.\w])"#)
+        var searchStart = collapsed.startIndex
+        while let r = collapsed.range(of: "NSLog(", range: searchStart..<collapsed.endIndex) {
+            let windowEnd = collapsed.index(r.upperBound, offsetBy: 300, limitedBy: collapsed.endIndex) ?? collapsed.endIndex
+            let arg = String(collapsed[r.upperBound..<windowEnd]).components(separatedBy: ");").first ?? ""
+            XCTAssertEqual(bare.numberOfMatches(in: arg, range: NSRange(arg.startIndex..., in: arg)), 0,
+                           "an NSLog call must not log a bare server error message: \(arg.prefix(80))")
+            searchStart = r.upperBound
         }
     }
 
