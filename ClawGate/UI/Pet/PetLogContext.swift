@@ -413,6 +413,31 @@ struct PetLogEntryMetadata: Codable, Equatable {
     }
 }
 
+/// How the parser must validate the model's inclusion claims against the sent
+/// segments (D2). Required — the caller always states the scope it dispatched
+/// under, so an omission can't silently fall back to a permissive default.
+enum PetLogSelectionMode: Equatable {
+    /// scopeOverride was set: the client sent an exact hard scope, so the model
+    /// must include EVERY sent id in order — no subsetting.
+    case explicitExact
+    /// No scopeOverride: the model may only keep a contiguous backward suffix
+    /// that includes the newest sent segment; a strict subset needs high
+    /// boundary confidence.
+    case automaticBackward
+}
+
+/// Bounded limits for a model reply (D52). A reply exceeding any of these is a
+/// dedicated parse failure — never truncated — so a buggy/hostile model can't
+/// bloat the UI or persistence.
+enum PetLogResponseBounds {
+    static let maxAnswerChars = 20_000
+    static let maxReasonCodes = 16
+    static let maxReasonCodeChars = 64
+    static let maxCorrectionKeys = 32
+    static let maxCorrectionKeyChars = 64
+    static let maxCorrectionValue = 10_000
+}
+
 enum PetLogParseError: Error, Equatable {
     case invalidJSON
     case schemaKeySetMismatch
@@ -426,6 +451,19 @@ enum PetLogParseError: Error, Equatable {
     case emptyIncludedWithNonNullRange
     case subsetRequiresHighBoundaryConfidence
     case invalidExcludedRange
+    // D41 — duplicate ids can't be validated positionally.
+    case duplicateAllowedIds
+    case duplicateIncludedIds
+    // D2 — scope-mode violations.
+    case explicitScopeRequiresExactInclusion
+    case notContiguousBackwardSuffix
+    // D52 — response bounds.
+    case answerTooLong
+    case tooManyReasonCodes
+    case reasonCodeTooLong
+    case tooManyCorrectionKeys
+    case correctionKeyTooLong
+    case correctionValueOutOfRange
 }
 
 enum PetLogResultParser {
@@ -443,7 +481,13 @@ enum PetLogResultParser {
     /// or unbounded ranges, an excluded range that doesn't border the included
     /// set, a blank answer, a negative correction count) is a sign the reply
     /// can't be trusted and is rejected.
-    static func parse(_ text: String, allowedSegmentIds: [String]) -> Result<PetLogModelResult, PetLogParseError> {
+    static func parse(_ text: String, allowedSegmentIds: [String],
+                      selectionMode: PetLogSelectionMode) -> Result<PetLogModelResult, PetLogParseError> {
+        // D41: duplicate sent ids make positional validation ambiguous — the
+        // builder must send unique ids, so a duplicate is a hard failure.
+        guard Set(allowedSegmentIds).count == allowedSegmentIds.count else {
+            return .failure(.duplicateAllowedIds)
+        }
         let stripped = stripCodeFence(text)
         guard let data = stripped.data(using: .utf8) else { return .failure(.invalidJSON) }
 
@@ -473,10 +517,30 @@ enum PetLogResultParser {
             return .failure(.blankAnswer)
         }
 
-        // Correction tallies can't be negative. (Non-integer/boolean values
-        // already fail at the strict `Int` JSONDecoder step above.)
+        // D52 bounds — reject (never truncate) an over-large reply.
+        guard result.answer.count <= PetLogResponseBounds.maxAnswerChars else {
+            return .failure(.answerTooLong)
+        }
+        guard decision.boundaryReasonCodes.count <= PetLogResponseBounds.maxReasonCodes else {
+            return .failure(.tooManyReasonCodes)
+        }
+        guard decision.boundaryReasonCodes.allSatisfy({ $0.count <= PetLogResponseBounds.maxReasonCodeChars }) else {
+            return .failure(.reasonCodeTooLong)
+        }
+        guard decision.correctionCounts.count <= PetLogResponseBounds.maxCorrectionKeys else {
+            return .failure(.tooManyCorrectionKeys)
+        }
+        guard decision.correctionCounts.keys.allSatisfy({ $0.count <= PetLogResponseBounds.maxCorrectionKeyChars }) else {
+            return .failure(.correctionKeyTooLong)
+        }
+
+        // Correction tallies can't be negative, and are bounded above. (Non-integer/
+        // boolean values already fail at the strict `Int` JSONDecoder step above.)
         if decision.correctionCounts.values.contains(where: { $0 < 0 }) {
             return .failure(.negativeCorrectionCount)
+        }
+        if decision.correctionCounts.values.contains(where: { $0 > PetLogResponseBounds.maxCorrectionValue }) {
+            return .failure(.correctionValueOutOfRange)
         }
 
         // Position of each sent id, for order/membership checks. Segment ids
@@ -485,20 +549,21 @@ enum PetLogResultParser {
         for (i, id) in allowedSegmentIds.enumerated() { position[id] = i }
 
         let included = decision.includedSegmentIds
+        // D41: included ids must be unique too — a positional check can't
+        // validate duplicates.
+        guard Set(included).count == included.count else {
+            return .failure(.duplicateIncludedIds)
+        }
         // Every included id must be one the client actually sent.
         for id in included where position[id] == nil {
             return .failure(.unknownSegmentId)
         }
         // Included ids must appear in the SAME relative order as the request
-        // (a subsequence is fine — that is exactly what excluding a scene looks
-        // like — but no reordering or duplication).
+        // (a subsequence is fine structurally — but no reordering).
         let includedSet = Set(included)
         let expectedOrder = allowedSegmentIds.filter { includedSet.contains($0) }
         guard expectedOrder == included else {
             return .failure(.segmentIdsOutOfOrder)
-        }
-        if included != allowedSegmentIds && decision.boundaryConfidence != .high {
-            return .failure(.subsetRequiresHighBoundaryConfidence)
         }
 
         // Included range must exactly describe the included set. Empty
@@ -543,6 +608,29 @@ enum PetLogResultParser {
             }
             guard pe == pIncStart - 1 else {
                 return .failure(.invalidExcludedRange)
+            }
+        }
+
+        // D2 scope-mode gate (after all structural checks). The generic
+        // "any high-confidence subset is fine" rule is abolished.
+        switch selectionMode {
+        case .explicitExact:
+            // The client sent an exact hard scope — the model must include every
+            // sent id in order. Any subset (including an empty one when segments
+            // were sent) is a scope violation.
+            guard included == allowedSegmentIds else {
+                return .failure(.explicitScopeRequiresExactInclusion)
+            }
+        case .automaticBackward:
+            // A strict subset needs high confidence...
+            if included != allowedSegmentIds && decision.boundaryConfidence != .high {
+                return .failure(.subsetRequiresHighBoundaryConfidence)
+            }
+            // ...and a non-empty inclusion must be a contiguous suffix that
+            // includes the newest sent segment (only a leading contiguous run
+            // may be dropped — no gapped or newest-side exclusion).
+            if !included.isEmpty && included != Array(allowedSegmentIds.suffix(included.count)) {
+                return .failure(.notContiguousBackwardSuffix)
             }
         }
 

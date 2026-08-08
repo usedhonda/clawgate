@@ -693,7 +693,7 @@ final class AmbientTests: XCTestCase {
     }
 
     func testResultParserSucceedsOnWellFormedJSON() {
-        switch PetLogResultParser.parse(wellFormedResultJSON(), allowedSegmentIds: ["abc", "def"]) {
+        switch PetLogResultParser.parse(wellFormedResultJSON(), allowedSegmentIds: ["abc", "def"], selectionMode: .automaticBackward) {
         case .success(let result):
             XCTAssertEqual(result.answer, "回答本文です")
             XCTAssertEqual(result.contextDecision.policyVersion, PetLogPromptBuilder.policyVersion)
@@ -705,20 +705,20 @@ final class AmbientTests: XCTestCase {
     }
 
     func testResultParserFailsClosedOnGarbage() {
-        XCTAssertEqual(PetLogResultParser.parse("this is not json at all", allowedSegmentIds: []),
+        XCTAssertEqual(PetLogResultParser.parse("this is not json at all", allowedSegmentIds: [], selectionMode: .automaticBackward),
                        .failure(.invalidJSON))
     }
 
     func testResultParserRejectsWrongPolicyVersion() {
         let result = PetLogResultParser.parse(
-            wellFormedResultJSON(policyVersion: "pet-log-context-v0"), allowedSegmentIds: ["abc", "def"])
+            wellFormedResultJSON(policyVersion: "pet-log-context-v0"), allowedSegmentIds: ["abc", "def"], selectionMode: .automaticBackward)
         XCTAssertEqual(result, .failure(.policyVersionMismatch(
             expected: PetLogPromptBuilder.policyVersion, got: "pet-log-context-v0")))
     }
 
     func testResultParserToleratesJSONCodeFence() {
         let fenced = "```json\n" + wellFormedResultJSON() + "\n```"
-        switch PetLogResultParser.parse(fenced, allowedSegmentIds: ["abc", "def"]) {
+        switch PetLogResultParser.parse(fenced, allowedSegmentIds: ["abc", "def"], selectionMode: .automaticBackward) {
         case .success(let result):
             XCTAssertEqual(result.answer, "回答本文です")
         case .failure(let err):
@@ -763,36 +763,43 @@ final class AmbientTests: XCTestCase {
         """
     }
 
-    func testResultParserSucceedsOnOrderedSubsetWithConsistentRange() {
-        let json = resultJSON(included: ["b", "c"], includedRange: ("b", "c"))
-        switch PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"]) {
-        case .success(let r): XCTAssertEqual(r.contextDecision.includedSegmentIds, ["b", "c"])
-        case .failure(let e): XCTFail("expected success, got \(e)")
+    func testResultParserAutomaticAcceptsBackwardSuffixRejectsMiddleSubset() {
+        // D2: automatic scope keeps only a contiguous backward suffix including
+        // the newest segment. [c,d] (a valid suffix, high) is accepted...
+        let suffix = resultJSON(included: ["c", "d"], includedRange: ("c", "d"), boundaryConfidence: "high")
+        switch PetLogResultParser.parse(suffix, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward) {
+        case .success(let r): XCTAssertEqual(r.contextDecision.includedSegmentIds, ["c", "d"])
+        case .failure(let e): XCTFail("a valid backward suffix must be accepted, got \(e)")
         }
+        // ...but [b,c] excludes the newest 'd' — a middle subset — and rejects
+        // (the old "any ordered subset is fine" behavior is abolished).
+        let middle = resultJSON(included: ["b", "c"], includedRange: ("b", "c"), boundaryConfidence: "high")
+        XCTAssertEqual(PetLogResultParser.parse(middle, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
+                       .failure(.notContiguousBackwardSuffix))
     }
 
     func testResultParserRejectsUnknownSegmentId() {
         let json = resultJSON(included: ["a", "zzz"])
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
                        .failure(.unknownSegmentId))
     }
 
     func testResultParserRejectsReorderedSegmentIds() {
         let json = resultJSON(included: ["c", "a"])
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
                        .failure(.segmentIdsOutOfOrder))
     }
 
     func testResultParserRejectsReversedRange() {
         let json = resultJSON(included: ["b", "c"], includedRange: ("c", "b"))
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
                        .failure(.reversedRange))
     }
 
     func testResultParserRejectsRangeEndpointMismatch() {
         // range says [a,d] but the included set it should bound is [b,c]
         let json = resultJSON(included: ["b", "c"], includedRange: ("a", "d"))
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
                        .failure(.rangeEndpointMismatch))
     }
 
@@ -800,14 +807,17 @@ final class AmbientTests: XCTestCase {
         // included [c], excluded [a] — a is not immediately before b(=incStart-1)
         // nor immediately after c; it is disjoint from the boundary.
         let json = resultJSON(included: ["c"], includedRange: ("c", "c"), excludedRange: ("a", "a"))
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d", "e"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d", "e"], selectionMode: .automaticBackward),
                        .failure(.invalidExcludedRange))
     }
 
     func testResultParserAcceptsAdjacentExcludedRange() {
-        // included [c,d], excluded [b] immediately borders incStart(c) at pos-1.
-        let json = resultJSON(included: ["c", "d"], includedRange: ("c", "d"), excludedRange: ("b", "b"))
-        switch PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d", "e"]) {
+        // included [d,e] (a valid backward suffix of [a..e]), excluded [c]
+        // immediately borders incStart(d) at pos-1. (Fixture uses a suffix so it
+        // is valid under the D2 automaticBackward contract.)
+        let json = resultJSON(included: ["d", "e"], includedRange: ("d", "e"), excludedRange: ("c", "c"),
+                              boundaryConfidence: "high")
+        switch PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d", "e"], selectionMode: .automaticBackward) {
         case .success: break
         case .failure(let e): XCTFail("adjacent excluded range must be accepted, got \(e)")
         }
@@ -815,20 +825,20 @@ final class AmbientTests: XCTestCase {
 
     func testResultParserRejectsEmptyIncludedWithNonNullRange() {
         let json = resultJSON(included: [], includedRange: ("a", "b"))
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
                        .failure(.emptyIncludedWithNonNullRange))
     }
 
     func testResultParserRejectsBlankAnswer() {
         let json = resultJSON(answer: "   \n\t ", included: ["a"], includedRange: ("a", "a"))
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b"], selectionMode: .automaticBackward),
                        .failure(.blankAnswer))
     }
 
     func testResultParserRejectsNegativeCorrectionCount() {
         let json = resultJSON(included: ["a"], includedRange: ("a", "a"),
                               correctionCounts: ["proper-noun": -1])
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b"], selectionMode: .automaticBackward),
                        .failure(.negativeCorrectionCount))
     }
 
@@ -925,7 +935,7 @@ final class AmbientTests: XCTestCase {
           }
         }
         """
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: []),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: [], selectionMode: .automaticBackward),
                        .failure(.schemaKeySetMismatch))
     }
 
@@ -934,7 +944,7 @@ final class AmbientTests: XCTestCase {
         let json = """
         { "answer": "回答本文です" }
         """
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: []),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: [], selectionMode: .automaticBackward),
                        .failure(.schemaKeySetMismatch))
     }
 
@@ -956,7 +966,7 @@ final class AmbientTests: XCTestCase {
           }
         }
         """
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a"], selectionMode: .automaticBackward),
                        .failure(.schemaKeySetMismatch))
     }
 
@@ -978,7 +988,7 @@ final class AmbientTests: XCTestCase {
           }
         }
         """
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: []),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: [], selectionMode: .automaticBackward),
                        .failure(.schemaKeySetMismatch))
     }
 
@@ -1001,7 +1011,7 @@ final class AmbientTests: XCTestCase {
           }
         }
         """
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
                        .failure(.rangeEndpointMismatch))
     }
 
@@ -1023,7 +1033,7 @@ final class AmbientTests: XCTestCase {
           }
         }
         """
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
                        .failure(.rangeEndpointMismatch))
     }
 
@@ -1045,34 +1055,33 @@ final class AmbientTests: XCTestCase {
           }
         }
         """
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
                        .failure(.emptyIncludedWithNonNullRange))
     }
 
     func testResultParserRejectsSubsetWithMediumOrLowBoundaryConfidence() {
         let medium = resultJSON(included: ["b", "c"], includedRange: ("b", "c"), boundaryConfidence: "medium")
-        XCTAssertEqual(PetLogResultParser.parse(medium, allowedSegmentIds: ["a", "b", "c", "d"]),
+        XCTAssertEqual(PetLogResultParser.parse(medium, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
                        .failure(.subsetRequiresHighBoundaryConfidence))
 
         let low = resultJSON(included: [], includedRangeIsNull: true, boundaryConfidence: "low")
-        XCTAssertEqual(PetLogResultParser.parse(low, allowedSegmentIds: ["a", "b", "c"]),
+        XCTAssertEqual(PetLogResultParser.parse(low, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
                        .failure(.subsetRequiresHighBoundaryConfidence))
     }
 
-    func testResultParserAllowsSubsetWithHighBoundaryConfidence() {
+    func testResultParserRejectsMiddleSubsetEvenWithHighBoundaryConfidence() {
+        // D2 old-fail flip: a high-confidence MIDDLE subset [b,c] (excludes the
+        // newest 'd') is no longer accepted — the generic high-subset gate is
+        // abolished; automatic scope requires a contiguous backward suffix.
         let subset = resultJSON(included: ["b", "c"], includedRange: ("b", "c"), boundaryConfidence: "high")
-        switch PetLogResultParser.parse(subset, allowedSegmentIds: ["a", "b", "c", "d"]) {
-        case .success(let result):
-            XCTAssertEqual(result.contextDecision.includedSegmentIds, ["b", "c"])
-        case .failure(let err):
-            XCTFail("subset inclusion with high confidence should pass, got \(err)")
-        }
+        XCTAssertEqual(PetLogResultParser.parse(subset, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
+                       .failure(.notContiguousBackwardSuffix))
     }
 
     func testResultParserAllowsFullRetentionWithMediumOrLowBoundaryConfidence() {
         let full = ["a", "b", "c"]
         let medium = resultJSON(included: full, includedRange: ("a", "c"), boundaryConfidence: "medium")
-        switch PetLogResultParser.parse(medium, allowedSegmentIds: full) {
+        switch PetLogResultParser.parse(medium, allowedSegmentIds: full, selectionMode: .automaticBackward) {
         case .success(let result):
             XCTAssertEqual(result.contextDecision.boundaryConfidence, .medium)
             XCTAssertEqual(result.contextDecision.includedSegmentIds, full)
@@ -1081,7 +1090,7 @@ final class AmbientTests: XCTestCase {
         }
 
         let low = resultJSON(included: full, includedRange: ("a", "c"), boundaryConfidence: "low")
-        switch PetLogResultParser.parse(low, allowedSegmentIds: full) {
+        switch PetLogResultParser.parse(low, allowedSegmentIds: full, selectionMode: .automaticBackward) {
         case .success(let result):
             XCTAssertEqual(result.contextDecision.boundaryConfidence, .low)
             XCTAssertEqual(result.contextDecision.includedSegmentIds, full)
@@ -1098,7 +1107,7 @@ final class AmbientTests: XCTestCase {
     func testResultParserRejectsExcludedRangeAfterIncluded() {
         let json = resultJSON(included: ["b", "c"], includedRange: ("b", "c"),
                               excludedRange: ("d", "d"))
-        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"]),
+        XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
                        .failure(.invalidExcludedRange))
     }
 

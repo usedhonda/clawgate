@@ -2217,7 +2217,8 @@ final class PetModel: NSObject, ObservableObject {
                 // request is REQUIRED — never fabricate an empty allowed-id set
                 // or a default completeness signal.
                 if let pending = pendingLogRequest {
-                    switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds) {
+                    let mode: PetLogSelectionMode = pending.selectionMode == "explicit" ? .explicitExact : .automaticBackward
+                    switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds, selectionMode: mode) {
                     case .success(let result):
                         let dispatch = pending.dispatch.map {
                             PetLogDispatchMetadata(

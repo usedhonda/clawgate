@@ -60,6 +60,25 @@ The universal prefix instructs the model as follows:
   do not invent items — return an empty `includedSegmentIds` and an `answer`
   that only states the log is insufficient.
 
+### Parser acceptance (D2/D41/D52)
+
+The parser validates a reply against the exact ids sent, under a REQUIRED
+`selectionMode` (no default — the caller always states its scope):
+
+- **explicitExact** (scopeOverride was set): `includedSegmentIds` must equal the
+  sent ids exactly, in order. Any subset — including an empty one when segments
+  were sent — is a scope violation (`explicitScopeRequiresExactInclusion`).
+- **automaticBackward** (no scopeOverride): a strict subset needs high boundary
+  confidence, and a non-empty inclusion must be a contiguous backward suffix
+  that includes the newest sent segment. A gapped or newest-skipping subset is
+  `notContiguousBackwardSuffix`. The generic "any high-confidence subset is
+  fine" rule is abolished.
+- **Duplicate ids (D41)**: duplicate sent ids or duplicate included ids are
+  rejected (positional validation can't disambiguate them).
+- **Bounds (D52)**: answer ≤ 20000 chars; ≤ 16 reason codes, each ≤ 64 chars;
+  ≤ 32 correction keys, each ≤ 64 chars, values 0…10000. An over-limit reply is
+  a dedicated parse failure, never truncated.
+
 ### Transport privacy (D59)
 
 The WebSocket transport logs only BOUNDED, body-free structural metadata about a
@@ -95,12 +114,10 @@ The following are planned for the remaining Wave A2 commits and are NOT yet the
 enforced contract. Each will be promoted into the Normative section in the
 commit that ships it.
 
-- **parser acceptance (D2/D41/D52/D72)**: a required `selectionMode`
-  (explicitExact = included equals the sent ids exactly; automaticBackward =
-  a contiguous backward suffix including the newest, high-confidence for a
-  strict subset); duplicate allowed/included id rejection; response bounds
-  (answer / reason-code / correction-count limits); parser-failure metadata
-  retention (correlation kept, contextDecision nil).
 - **insufficient-evidence outcome (D3)**: parser returns a typed
   insufficientEvidence outcome (structural, no text compare); the client maps it
   to a fixed "ログ不足" status and never persists the model body as a reply.
+- **parser-failure metadata retention (D72)**: a malformed reply keeps the
+  request correlation metadata (contextDecision nil) instead of dropping it.
+- **client fail-fast (D3)**: an empty-segments envelope is refused before
+  dispatch as a typed status, never a conversation entry.
