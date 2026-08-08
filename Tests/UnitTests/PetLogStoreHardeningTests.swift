@@ -195,20 +195,30 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "no usable backup means fail-closed")
     }
 
-    /// Two-copy ordering (F): the backup is written FIRST and the primary is the
-    /// commit point, so a `.bak` failure leaves the PRIMARY untouched (old
-    /// state), not half-committed. The save is reported failed.
-    func testBackupWriteFailureLeavesPrimaryUntouched() throws {
-        // Seed an existing "old" primary directly (no .bak).
+    /// F2 (pending-temp): the backup is staged to a pending temp and only
+    /// PROMOTED after the primary commits, so a promote failure (here: a
+    /// directory blocking the .bak name) leaves the primary DURABLE (new) with a
+    /// stale backup — reported as `.committedBackupDegraded`, never a failed
+    /// save. (Under the earlier F ordering this same fixture failed BEFORE the
+    /// primary; pending-temp moves the failure to promote, after commit.)
+    func testBackupPromoteFailureLeavesPrimaryDurableWithDegradedBackup() throws {
+        // Seed an existing "old" primary directly (no .bak file).
         try JSONEncoder.iso.encode([entry("old")]).write(to: URL(fileURLWithPath: path("log.json")))
-        let before = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
-        // Make the .bak target a directory so the backup rename fails first.
+        // Block the .bak name with a directory so the promote rename fails.
         try FileManager.default.createDirectory(atPath: path("log.json.bak"), withIntermediateDirectories: true)
 
-        XCTAssertFalse(PetLogStore.save([entry("fresh")], file: "log.json"),
-                       "a backup write failure must surface as save failure")
-        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path("log.json"))), before,
-                       "the primary must be left untouched (old state) when the backup fails first")
+        XCTAssertEqual(PetLogStore.saveOutcome([entry("fresh")], file: "log.json"), .committedBackupDegraded,
+                       "primary durable, backup redundancy degraded")
+
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let primary = try decoder.decode([NotificationEntry].self, from: Data(contentsOf: URL(fileURLWithPath: path("log.json"))))
+        XCTAssertEqual(primary.map(\.text), ["fresh"], "the primary commit landed")
+        var isDir: ObjCBool = false
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path("log.json.bak"), isDirectory: &isDir) && isDir.boolValue,
+                      "the committed .bak name was never overwritten (still the blocking directory)")
+        let temps = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .filter { $0.contains(".pending-") || $0.contains(".tmp-") }
+        XCTAssertTrue(temps.isEmpty, "no pending/temp files may linger")
     }
 
     /// Two-copy ordering (F): a primary chmod/rename failure (after the backup
@@ -234,10 +244,11 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertEqual(entries.map(\.text), ["old"], "reload must return the old primary state")
     }
 
-    /// F2: a primary-write failure must ROLL BACK the backup to its prior
-    /// committed state — so a later corrupt-primary recovery adopts the old
-    /// content, never the half-committed new data. Also: no orphan temp files.
-    func testPrimaryFailureRollsBackBackupSoRecoveryAdoptsOld() throws {
+    /// F2 (pending-temp): a primary-write failure never touches the committed
+    /// `.bak` (the new data was only staged to a pending temp), so a later
+    /// corrupt-primary recovery adopts the OLD content, never un-committed data.
+    /// No orphan temp files remain.
+    func testPrimaryFailureLeavesBackupOldSoRecoveryAdoptsOld() throws {
         XCTAssertTrue(PetLogStore.save([entry("old")], file: "log.json"))  // primary+.bak = old
 
         let primary = path("log.json")
@@ -245,13 +256,14 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertFalse(PetLogStore.save([entry("new")], file: "log.json"))
         PetLogStore.applyPermissionsHookForTesting = nil
 
-        // The backup must have been rolled back to "old", not left at "new".
+        // The committed backup was never touched — it stays "old" (the new data
+        // only ever reached a pending temp, which was discarded).
         let bak = try Data(contentsOf: URL(fileURLWithPath: path("log.json.bak")))
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         XCTAssertEqual(try decoder.decode([NotificationEntry].self, from: bak).map(\.text), ["old"],
-                       "backup must be rolled back to the committed 'old', not the un-committed 'new'")
+                       "backup stays committed 'old', never the un-committed 'new'")
 
-        // Corrupt the primary; recovery must adopt the rolled-back OLD backup.
+        // Corrupt the primary; recovery must adopt the untouched OLD backup.
         try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
         guard case let .corrupt(entries, recovered, _) = PetLogStore.loadOutcome(file: "log.json") else {
             return XCTFail("expected corrupt")
@@ -259,16 +271,40 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertTrue(recovered)
         XCTAssertEqual(entries.map(\.text), ["old"], "recovery must adopt old, never the un-committed new")
 
-        // No orphan temp files left behind.
         let temps = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
-            .filter { $0.contains(".tmp-") }
-        XCTAssertTrue(temps.isEmpty, "no pending temp files may linger")
+            .filter { $0.contains(".pending-") || $0.contains(".tmp-") }
+        XCTAssertTrue(temps.isEmpty, "no pending/temp files may linger")
     }
 
-    /// F2 rollback, no-prior-backup branch: a first-ever save that fails at the
-    /// primary must REMOVE the freshly created .bak (never leave it orphaned
-    /// ahead of an absent primary) and leave the primary absent.
-    func testPrimaryFailureRemovesFreshlyCreatedBackup() throws {
+    /// F2 equivalence for the post-double-failure world: a planted, orphaned
+    /// `.bak.pending-<uuid>` (what a crash between stage and promote could leave)
+    /// must be ignored by every load path — loadOutcome, recovery, and the
+    /// quarantine scan never read it.
+    func testPlantedPendingBackupIsIgnoredByAllLoadPaths() throws {
+        XCTAssertTrue(PetLogStore.save([entry("real")], file: "log.json"))
+        // Plant an orphan pending file with different content.
+        try JSONEncoder.iso.encode([entry("orphan-uncommitted")])
+            .write(to: URL(fileURLWithPath: path("log.json.bak.pending-DEADBEEF")))
+
+        // loadOutcome reads only the committed primary.
+        guard case let .success(entries, _, _) = PetLogStore.loadOutcome(file: "log.json") else {
+            return XCTFail("expected success")
+        }
+        XCTAssertEqual(entries.map(\.text), ["real"], "planted pending must not be read as the primary")
+
+        // Recovery from a corrupt primary uses the committed .bak, not the pending.
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        guard case let .corrupt(recovered, didRecover, _) = PetLogStore.loadOutcome(file: "log.json") else {
+            return XCTFail("expected corrupt")
+        }
+        XCTAssertTrue(didRecover)
+        XCTAssertEqual(recovered.map(\.text), ["real"], "recovery must use the committed backup, not the pending")
+    }
+
+    /// F2, no-prior-backup branch: a first-ever save that fails at the primary
+    /// leaves NO `.bak` (the new data only reached a discarded pending temp) and
+    /// the primary absent.
+    func testPrimaryFailureLeavesNoBackupWhenNonePriorExisted() throws {
         // No prior log.json / .bak at all.
         let primary = path("log.json")
         PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
@@ -276,12 +312,12 @@ final class PetLogStoreHardeningTests: XCTestCase {
         PetLogStore.applyPermissionsHookForTesting = nil
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: path("log.json.bak")),
-                       "a .bak created during a failed first save must be removed on rollback")
+                       "no .bak may be left when the primary commit failed and none existed before")
         XCTAssertFalse(FileManager.default.fileExists(atPath: primary),
                        "the primary must remain absent")
         let temps = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
-            .filter { $0.contains(".tmp-") }
-        XCTAssertTrue(temps.isEmpty, "no pending temp files may linger")
+            .filter { $0.contains(".pending-") || $0.contains(".tmp-") }
+        XCTAssertTrue(temps.isEmpty, "no pending/temp files may linger")
     }
 
     /// D9 gap 3: primary, `.bak`, and quarantine are all owner-only (0600).

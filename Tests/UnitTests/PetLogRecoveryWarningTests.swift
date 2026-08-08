@@ -225,11 +225,32 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertTrue(warnings.isEmpty)
         XCTAssertTrue(degraded, "both copies unreadable must report durability degraded, not a silent empty")
 
-        // The degraded load must also propagate to the model's Published status.
+        // The model surfaces the loss as a durable warningStoreCorrupt entry.
+        // (The Published degraded FLAG reflects CURRENT persistence health, which
+        // becomes healthy again once the store is rewritten — K — so the
+        // evidence lives in the warning entry, not the transient flag.)
         let restarted = PetModel()
         restarted.restorePersistedLogsForTesting()
-        XCTAssertTrue(restarted.recoveryWarningPersistenceDegraded,
-                      "a degraded warnings-store load must raise the model's Published flag")
+        XCTAssertTrue(restarted.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "warningStoreCorrupt" },
+            "a degraded warnings-store load must surface a durable warningStoreCorrupt entry")
+    }
+
+    /// F2: a promote failure on a main-store append surfaces a durable
+    /// backupDegraded warning (primary durable, redundancy lost) rather than a
+    /// swallowed/failed save.
+    func testMainStorePromoteFailureSurfacesBackupDegradedWarning() throws {
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        // Block the log.json.bak name so the append's backup promote fails.
+        try FileManager.default.createDirectory(atPath: path("log.json.bak"), withIntermediateDirectories: true)
+
+        // A log append (real persist path) — primary commits, promote fails.
+        model.addSummonResult(text: "landed", source: "log", parseAsStructured: false)
+        XCTAssertTrue(model.logReplies.contains { $0.text == "landed" }, "the primary append must land")
+        XCTAssertTrue(model.logRecoveryWarnings.contains {
+            $0.file == "log.json" && $0.kind == "backupDegraded" },
+            "a promote failure must surface a durable backupDegraded warning")
     }
 
     // MARK: - Concurrent issues on one file (D39/D54 interaction)

@@ -969,6 +969,45 @@ final class PetModel: NSObject, ObservableObject {
     /// `start()` calls this; a ForTesting wrapper exercises the same path (the
     /// full `start()` isn't unit-testable — it opens a WS connection and arms
     /// timers).
+    /// Uniform outcome->state rule for every warnings-store persist (F2/K).
+    /// `.committed` publishes the set and marks persistence healthy;
+    /// `.committedBackupDegraded` publishes (the primary IS durable) but flags
+    /// degraded redundancy; `.failed` does not publish and flags degraded.
+    /// Returns whether the primary is durable.
+    @discardableResult
+    private func commitRecoveryWarnings(_ set: [PetLogRecoveryWarning]) -> Bool {
+        switch PetLogStore.saveRecoveryWarnings(set) {
+        case .committed:
+            logRecoveryWarnings = set
+            recoveryWarningPersistenceDegraded = false
+            return true
+        case .committedBackupDegraded:
+            logRecoveryWarnings = set
+            recoveryWarningPersistenceDegraded = true
+            return true
+        case .failed:
+            recoveryWarningPersistenceDegraded = true
+            return false
+        }
+    }
+
+    /// Persists a main store, surfacing a promote failure as a durable
+    /// `backupDegraded` warning rather than swallowing it. Returns whether the
+    /// primary is durable (the append landed).
+    @discardableResult
+    private func persistStore(_ entries: [NotificationEntry], file: String) -> Bool {
+        switch PetLogStore.saveOutcome(entries, file: file) {
+        case .committed:
+            return true
+        case .committedBackupDegraded:
+            upsertRecoveryWarning(file: file, kind: "backupDegraded", droppedCount: 0, quarantine: nil)
+            commitRecoveryWarnings(logRecoveryWarnings)
+            return true
+        case .failed:
+            return false
+        }
+    }
+
     private func restorePersistedLogs() {
         // Carry forward warnings persisted from a prior launch (durable until
         // the user acknowledges), then layer on anything this load detects.
@@ -994,13 +1033,11 @@ final class PetModel: NSObject, ObservableObject {
         summonResults = restorePersistedLog(file: "summon.json")
         logReplies = restorePersistedLog(file: "log.json")
         localResults = restorePersistedLog(file: "local.json")
-        // Commit the (possibly augmented) warning set. Only a successful write
-        // makes it durable; a failure must be visible, not silently assumed
-        // persisted — otherwise an append that cleans the source primary would
-        // erase the only record of the loss on the next launch.
-        if !PetLogStore.saveRecoveryWarnings(logRecoveryWarnings) {
-            recoveryWarningPersistenceDegraded = true
-        }
+        // Commit the (possibly augmented) warning set through the uniform rule:
+        // a failure stays visible, never silently assumed persisted — otherwise
+        // an append that cleans the source primary would erase the only record
+        // of the loss on the next launch.
+        commitRecoveryWarnings(logRecoveryWarnings)
     }
 
     /// Test seam: run the real restore path without the rest of `start()`.
@@ -1017,12 +1054,7 @@ final class PetModel: NSObject, ObservableObject {
         // resolveLogStoreCorruption() actually recovers such a store. Non-blocked
         // warnings (recovered partial-drop, resolved permission issues) clear.
         let remaining = logRecoveryWarnings.filter { PetLogStore.isPoisoned($0.file) }
-        if PetLogStore.saveRecoveryWarnings(remaining) {
-            logRecoveryWarnings = remaining
-            recoveryWarningPersistenceDegraded = false
-        } else {
-            recoveryWarningPersistenceDegraded = true
-        }
+        commitRecoveryWarnings(remaining)
     }
 
     /// Explicit recover/start-fresh for a write-blocked (poisoned) store — the
@@ -1034,11 +1066,7 @@ final class PetModel: NSObject, ObservableObject {
     func resolveLogStoreCorruption(file: String) -> Bool {
         guard PetLogStore.resolveLogStoreCorruption(file: file) else { return false }
         let remaining = logRecoveryWarnings.filter { $0.file != file }
-        if PetLogStore.saveRecoveryWarnings(remaining) {
-            logRecoveryWarnings = remaining
-        } else {
-            recoveryWarningPersistenceDegraded = true
-        }
+        commitRecoveryWarnings(remaining)
         return true
     }
 
@@ -1052,12 +1080,7 @@ final class PetModel: NSObject, ObservableObject {
     func acknowledgeLogRecoveryWarning(file: String, kind: String) -> Bool {
         if PetLogStore.isPoisoned(file) { return false }
         let remaining = logRecoveryWarnings.filter { !($0.file == file && $0.kind == kind) }
-        if PetLogStore.saveRecoveryWarnings(remaining) {
-            logRecoveryWarnings = remaining
-            return true
-        }
-        recoveryWarningPersistenceDegraded = true
-        return false
+        return commitRecoveryWarnings(remaining)
     }
 
     /// Warning identity is (file, kind): distinct failure kinds for the same
@@ -2016,7 +2039,7 @@ final class PetModel: NSObject, ObservableObject {
         if logReplies.count > 100 {
             logReplies.removeFirst(logReplies.count - 100)
         }
-        guard PetLogStore.save(logReplies, file: "log.json") else {
+        guard persistStore(logReplies, file: "log.json") else {
             appendLogPersistenceFailureMarker()
             return
         }
@@ -2209,7 +2232,7 @@ final class PetModel: NSObject, ObservableObject {
         if summonResults.count > 100 {
             summonResults.removeFirst(summonResults.count - 100)
         }
-        PetLogStore.save(summonResults, file: "summon.json")
+        persistStore(summonResults, file: "summon.json")
         showSummonTab = true
     }
 
@@ -2368,7 +2391,7 @@ final class PetModel: NSObject, ObservableObject {
         if notificationHistory.count > 200 {
             notificationHistory.removeFirst(notificationHistory.count - 200)
         }
-        PetLogStore.save(notificationHistory, file: "notifications.json")
+        persistStore(notificationHistory, file: "notifications.json")
     }
 
     func addLocalEntry(text: String, source: String) {
@@ -2380,7 +2403,7 @@ final class PetModel: NSObject, ObservableObject {
         if localResults.count > 100 {
             localResults.removeFirst(localResults.count - 100)
         }
-        PetLogStore.save(localResults, file: "local.json")
+        persistStore(localResults, file: "local.json")
     }
 }
 
@@ -2590,61 +2613,78 @@ enum PetLogStore {
         case corrupt(entries: [NotificationEntry], recovered: Bool, quarantine: String?)
     }
 
-    @discardableResult
-    static func save(_ entries: [NotificationEntry], file: String) -> Bool {
-        // D37 runtime guard: never write real data from a test, however `dir`
-        // was overridden.
-        if productionAccessBlocked() { return false }
-        // Fail-closed: never overwrite a file whose original bytes we could not
-        // read and did not recover — the quarantined copy is the only survivor.
-        if poisonedFiles.contains(file) { return false }
+    /// The result of a two-copy commit. `committed` = both primary and backup
+    /// durable. `committedBackupDegraded` = primary is durable but the backup
+    /// couldn't be refreshed (redundancy lost, NOT a failed save — the append
+    /// landed). `failed` = primary not committed; both copies remain at their
+    /// prior state.
+    enum CommitOutcome: Equatable { case committed, committedBackupDegraded, failed }
+
+    /// Canonical durable save. Prefer this where the backup-degraded state must
+    /// surface; `save` is the Bool-returning compatibility wrapper.
+    static func saveOutcome(_ entries: [NotificationEntry], file: String) -> CommitOutcome {
+        if productionAccessBlocked() { return .failed }
+        if poisonedFiles.contains(file) { return .failed }
         do {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         } catch {
-            return false
+            return .failed
         }
-        // Store dir is owner-only (0700), converging an existing umask-0755 dir
-        // too. A chmod failure is surfaced as a save failure, not swallowed.
         guard applyPermissions(ownerOnlyDir, path: dir) else {
             logger.error("PetLogStore dir permission set failed for \(file, privacy: .public); reporting save failure")
-            return false
+            return .failed
         }
         let path = (dir as NSString).appendingPathComponent(file)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(entries) else { return false }
+        guard let data = try? encoder.encode(entries) else { return .failed }
         return commitTwoCopy(data, primaryPath: path)
     }
 
-    /// Two-copy durable commit with backup rollback (F/F2). Writes the backup
-    /// first and makes the primary rename the single commit point; but the
-    /// committed backup is never left ahead of an un-committed primary — if the
-    /// primary write fails, the backup is rolled back byte-for-byte to its prior
-    /// committed state (or removed if it didn't exist). So a later
-    /// corrupt-primary recovery can never adopt a half-committed snapshot: a
-    /// failed save leaves BOTH copies at their previous committed state.
-    private static func commitTwoCopy(_ data: Data, primaryPath path: String) -> Bool {
-        let bakPath = path + ".bak"
-        let bakURL = URL(fileURLWithPath: bakPath)
-        let priorBak = try? Data(contentsOf: bakURL)
-        let bakExisted = FileManager.default.fileExists(atPath: bakPath)
+    /// Bool-returning compatibility wrapper (test-facing): true unless the
+    /// primary commit itself failed. A `committedBackupDegraded` outcome still
+    /// returns true because the primary IS durable — production callers use
+    /// `saveOutcome` to also surface the degraded redundancy.
+    @discardableResult
+    static func save(_ entries: [NotificationEntry], file: String) -> Bool {
+        saveOutcome(entries, file: file) != .failed
+    }
 
-        guard atomicWrite(data, to: bakPath, hookKey: bakPath) else {
-            logger.error("PetLogStore backup write failed for \(path, privacy: .public); primary left untouched, reporting save failure")
-            return false
+    /// Two-copy durable commit via pending-temp promotion (F2). The committed
+    /// `.bak` is NEVER touched until the primary commit succeeds:
+    ///  1. stage the new data to a loader-ignored pending temp (0600),
+    ///  2. atomically commit the PRIMARY,
+    ///  3. only then promote the pending temp onto `.bak`.
+    /// A primary failure leaves BOTH committed copies structurally untouched (we
+    /// only ever cleaned up the pending temp). A promote failure means the
+    /// primary is durable but the backup is stale — reported as
+    /// `committedBackupDegraded`, never disguised as a failed save. So a later
+    /// corrupt-primary recovery can never adopt an un-committed snapshot.
+    private static func commitTwoCopy(_ data: Data, primaryPath path: String) -> CommitOutcome {
+        let bakPath = path + ".bak"
+        let pendingPath = bakPath + ".pending-\(UUID().uuidString)"
+
+        // 1. Stage to pending (hookKey = bakPath so the existing bak-chmod test
+        //    still injects here). A stage failure touches nothing committed.
+        guard atomicWrite(data, to: pendingPath, hookKey: bakPath) else {
+            logger.error("PetLogStore backup staging failed for \(path, privacy: .public); nothing committed, reporting save failure")
+            return .failed
         }
+        // 2. Commit the primary. On failure the committed .bak is untouched
+        //    (we never wrote it) — just clean up the pending temp.
         guard atomicWrite(data, to: path, hookKey: path) else {
-            logger.error("PetLogStore primary write failed for \(path, privacy: .public); rolling back backup, reporting save failure")
-            // Roll the backup back to its committed state so it is never left
-            // ahead of the un-committed primary (best-effort on double failure).
-            if bakExisted, let priorBak {
-                _ = atomicWrite(priorBak, to: bakPath, hookKey: bakPath)
-            } else {
-                try? FileManager.default.removeItem(atPath: bakPath)
-            }
-            return false
+            logger.error("PetLogStore primary write failed for \(path, privacy: .public); discarding pending backup, reporting save failure")
+            try? FileManager.default.removeItem(atPath: pendingPath)
+            return .failed
         }
-        return true
+        // 3. Promote pending -> .bak (bare rename; mode travels with the file).
+        let promoted = bakPath.withCString { cBak in pendingPath.withCString { cPending in rename(cPending, cBak) } }
+        if promoted != 0 {
+            logger.error("PetLogStore backup promote failed for \(path, privacy: .public); primary committed, backup redundancy degraded")
+            try? FileManager.default.removeItem(atPath: pendingPath)
+            return .committedBackupDegraded
+        }
+        return .committed
     }
 
     /// Converges EXISTING on-disk permissions to owner-only at load time — the
@@ -2822,26 +2862,21 @@ enum PetLogStore {
         return try? decoder.decode([PetLogRecoveryWarning].self, from: data)
     }
 
-    /// Persists the warning set as a commit: primary + last-known-good `.bak`,
-    /// both 0600 in a 0700 dir. Returns false if ANY step fails, so the caller
-    /// treats the write as not-yet-durable rather than confirming it.
-    @discardableResult
-    static func saveRecoveryWarnings(_ warnings: [PetLogRecoveryWarning]) -> Bool {
-        if productionAccessBlocked() { return false }
+    /// Persists the warning set via the same two-copy pending-temp commit as the
+    /// main store, returning the full outcome so the model can distinguish a
+    /// durable-but-redundancy-degraded write from a failure.
+    static func saveRecoveryWarnings(_ warnings: [PetLogRecoveryWarning]) -> CommitOutcome {
+        if productionAccessBlocked() { return .failed }
         do {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         } catch {
-            return false
+            return .failed
         }
-        guard applyPermissions(ownerOnlyDir, path: dir) else { return false }
+        guard applyPermissions(ownerOnlyDir, path: dir) else { return .failed }
         let path = (dir as NSString).appendingPathComponent(recoveryWarningsFile)
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(warnings) else { return false }
-        // Same two-copy commit + backup rollback as the main store: an ack whose
-        // primary write fails rolls the backup back to the prior warnings, so a
-        // later corrupt-primary recovery can't adopt the un-committed [] and
-        // silently drop an un-acknowledged warning (durable-until-ack holds).
+        guard let data = try? encoder.encode(warnings) else { return .failed }
         return commitTwoCopy(data, primaryPath: path)
     }
 }
