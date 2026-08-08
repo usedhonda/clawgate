@@ -550,26 +550,24 @@ actor OpenClawWSClient {
         }
     }
 
-    /// internal (not private): test seam. When set, transport response log
-    /// lines are captured here INSTEAD of being written to NSLog — so the
-    /// primary D59 guard can drive `handleResponse` and inspect exactly what
-    /// this callsite emits (any future raw log added to the emit path is caught
-    /// too). Reset to nil in tearDown.
-    static var transportLogSinkForTesting: ((String) -> Void)?
-
-    private func emitTransportLog(_ line: String) {
-        if let sink = Self.transportLogSinkForTesting {
-            sink(line)
-        } else {
-            NSLog("[Pet] handleResponse: %@", line)
-        }
-    }
-
     #if DEBUG
-    /// Test seam: drive the real `handleResponse` callsite with a crafted
-    /// message so the primary D59 guard captures the actually-emitted log line.
+    /// INSTANCE, actor-owned test sink (D59): captures this client's transport
+    /// response log lines instead of writing to NSLog. Instance-scoped so
+    /// parallel clients never race a process-global or steal each other's lines;
+    /// cleared per instance in tearDown.
+    private var responseLogSinkForTesting: ((String) -> Void)?
+    func setResponseLogSinkForTesting(_ sink: ((String) -> Void)?) { responseLogSinkForTesting = sink }
+    /// Drive the real `handleResponse` callsite with a crafted message so the
+    /// primary D59 guard captures exactly the line this instance emits.
     func handleResponseForTesting(_ msg: IncomingMessage) { handleResponse(msg) }
     #endif
+
+    private func emitTransportLog(_ line: String) {
+        #if DEBUG
+        if let sink = responseLogSinkForTesting { sink(line); return }
+        #endif
+        NSLog("[Pet] handleResponse: %@", line)
+    }
 
     private func handleResponse(_ msg: IncomingMessage) {
         let ok = msg.ok ?? false

@@ -7,32 +7,54 @@ import XCTest
 /// caught, not just the pure formatter. The pure-function and source-scan checks
 /// are AUXILIARY.
 final class TransportLogPrivacyTests: XCTestCase {
-    override func tearDown() {
-        OpenClawWSClient.transportLogSinkForTesting = nil
-        super.tearDown()
-    }
-
     private final class LineBox: @unchecked Sendable { var lines: [String] = [] }
+
+    private func sentinelMessage(tag: String) -> IncomingMessage {
+        let json = """
+        {"type":"resp","id":"SENTINELID\(tag)-\(String(repeating: "x", count: 200))","ok":false,
+         "payload":{"type":"evil.SENTINELTYPE\(tag).injected"},
+         "error":{"code":"SENTINELCODE\(tag) 秘密","message":"SENTINELMSG\(tag) hidden 機密"}}
+        """
+        return try! JSONDecoder().decode(IncomingMessage.self, from: Data(json.utf8))
+    }
 
     /// PRIMARY: a sentinel-laden response driven through the actual
     /// handleResponse callsite must emit a line with zero wire content.
     func testHandleResponseCallsiteEmitsOnlyBoundedMetadata() async {
         let box = LineBox()
-        OpenClawWSClient.transportLogSinkForTesting = { box.lines.append($0) }
-
-        let json = """
-        {"type":"resp","id":"SENTINELID-\(String(repeating: "x", count: 200))","ok":false,
-         "payload":{"type":"evil.SENTINELTYPE.injected"},
-         "error":{"code":"SENTINELCODE with spaces 秘密","message":"SENTINELMSG hidden instruction 機密"}}
-        """
-        let msg = try! JSONDecoder().decode(IncomingMessage.self, from: Data(json.utf8))
         let client = OpenClawWSClient()
-        await client.handleResponseForTesting(msg)
+        await client.setResponseLogSinkForTesting { box.lines.append($0) }
+        await client.handleResponseForTesting(sentinelMessage(tag: "A"))
+        await client.setResponseLogSinkForTesting(nil)
 
         XCTAssertEqual(box.lines.count, 1, "the callsite must emit exactly one response log line")
         let line = box.lines.first ?? ""
         for sentinel in ["SENTINELID", "SENTINELTYPE", "SENTINELCODE", "SENTINELMSG", "秘密", "機密"] {
             XCTAssertFalse(line.contains(sentinel), "wire content '\(sentinel)' leaked from the callsite: \(line)")
+        }
+    }
+
+    /// Two clients running concurrently must not cross-contaminate: each
+    /// instance-owned sink only ever sees its own client's lines.
+    func testParallelClientsDoNotCrossContaminate() async {
+        let boxA = LineBox(), boxB = LineBox()
+        let a = OpenClawWSClient(), b = OpenClawWSClient()
+        await a.setResponseLogSinkForTesting { boxA.lines.append($0) }
+        await b.setResponseLogSinkForTesting { boxB.lines.append($0) }
+        async let ra: Void = a.handleResponseForTesting(sentinelMessage(tag: "A"))
+        async let rb: Void = b.handleResponseForTesting(sentinelMessage(tag: "B"))
+        _ = await (ra, rb)
+        await a.setResponseLogSinkForTesting(nil)
+        await b.setResponseLogSinkForTesting(nil)
+
+        XCTAssertEqual(boxA.lines.count, 1)
+        XCTAssertEqual(boxB.lines.count, 1)
+        // Neither box may see the other's tag (the ids are hashed, but the hash
+        // of A's id differs from B's — assert exact-one-line + no raw sentinel).
+        for line in boxA.lines + boxB.lines {
+            for s in ["SENTINELIDA", "SENTINELIDB", "秘密", "機密"] {
+                XCTAssertFalse(line.contains(s), "no client's wire content may appear anywhere: \(line)")
+            }
         }
     }
 
