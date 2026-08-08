@@ -125,4 +125,106 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path("log.json"))), before,
                        "bytes must be untouched by the failed permission convergence")
     }
+
+    // MARK: - Warning persistence as a commit (D39 completion blocker)
+
+    private func partialDropFixture() throws {
+        let json = """
+        [{"id":"g1","text":"good","source":"log","timestamp":"2026-08-09T00:00:00Z"},
+         {"unexpected":"shape"}]
+        """
+        try Data(json.utf8).write(to: URL(fileURLWithPath: path("log.json")))
+    }
+
+    /// If the warning set can't be persisted at restore, the warning stays
+    /// visible in memory AND the durability-degraded flag is raised — the loss
+    /// is fail-visible, never silently assumed persisted.
+    func testWarningPersistFailureIsFailVisible() throws {
+        try partialDropFixture()
+        // Fail the chmod of the warnings file so saveRecoveryWarnings returns false.
+        let warningsPath = path("recovery-warnings.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == warningsPath ? false : true }
+
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" },
+                      "the warning must remain visible in memory")
+        XCTAssertTrue(model.recoveryWarningPersistenceDegraded,
+                      "a failed warning persist must raise the durability-degraded flag")
+    }
+
+    /// Acknowledge is a commit: if the empty set can't be persisted, the
+    /// warnings are NOT cleared and durability-degraded is raised.
+    func testAcknowledgeFailureKeepsWarningsVisible() throws {
+        try partialDropFixture()
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertFalse(model.logRecoveryWarnings.isEmpty)
+
+        let warningsPath = path("recovery-warnings.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == warningsPath ? false : true }
+        model.acknowledgeLogRecoveryWarnings()
+
+        XCTAssertFalse(model.logRecoveryWarnings.isEmpty,
+                       "a failed acknowledge must not clear the warnings ahead of disk")
+        XCTAssertTrue(model.recoveryWarningPersistenceDegraded)
+
+        // A successful acknowledge clears it durably.
+        PetLogStore.applyPermissionsHookForTesting = nil
+        model.acknowledgeLogRecoveryWarnings()
+        XCTAssertTrue(model.logRecoveryWarnings.isEmpty)
+        XCTAssertFalse(model.recoveryWarningPersistenceDegraded)
+    }
+
+    /// The warnings store has last-known-good backup resilience: after the
+    /// source log is cleaned by an append (so the drop can NO LONGER be
+    /// re-derived), a corrupt warnings primary must still recover the warning
+    /// from its .bak across a restart.
+    func testWarningsStoreRecoversFromBackupOnCorruptPrimary() throws {
+        try partialDropFixture()
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path("recovery-warnings.json.bak")),
+                      "the warnings store must maintain a .bak")
+
+        // Append cleans log.json (rewrites without the bad entry) — a restart
+        // load of log.json is now dropped==0, so the warning can ONLY come from
+        // the warnings backup, not from re-detection.
+        model.addSummonResult(text: "clean arrival", source: "log", parseAsStructured: false)
+
+        // Corrupt the warnings primary; a restart must recover from the backup.
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json")))
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+
+        let logWarnings = restarted.logRecoveryWarnings.filter { $0.file == "log.json" }
+        XCTAssertEqual(logWarnings.count, 1, "exactly the backed-up warning, not a re-derived one")
+        XCTAssertEqual(logWarnings.first?.droppedCount, 1,
+                       "the recovered warning must carry the original drop count")
+        XCTAssertFalse(restarted.logReplies.contains { $0.text.contains("shape") },
+                       "log.json was cleaned by the append — the drop is no longer re-derivable")
+    }
+
+    /// Both copies of the warnings store corrupt -> visible durability failure,
+    /// not a silent empty.
+    func testWarningsStoreBothCopiesCorruptIsVisibleFailure() throws {
+        // Seed a valid warnings store, then corrupt both copies.
+        try partialDropFixture()
+        let seed = PetModel()
+        seed.restorePersistedLogsForTesting()
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json")))
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json.bak")))
+
+        let (warnings, degraded) = PetLogStore.loadRecoveryWarnings()
+        XCTAssertTrue(warnings.isEmpty)
+        XCTAssertTrue(degraded, "both copies unreadable must report durability degraded, not a silent empty")
+
+        // The degraded load must also propagate to the model's Published status.
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertTrue(restarted.recoveryWarningPersistenceDegraded,
+                      "a degraded warnings-store load must raise the model's Published flag")
+    }
 }

@@ -126,6 +126,11 @@ final class PetModel: NSObject, ObservableObject {
     /// (rendering is Wave C) can bind to — NEVER injected into the conversation
     /// as a "ちー" (source == "log") entry.
     @Published var logRecoveryWarnings: [PetLogRecoveryWarning] = []
+    /// True when the durable warning store itself could not be trusted — either
+    /// its persisted state was unreadable at load (both primary and backup) or a
+    /// write/acknowledge could not be committed. A fail-visible signal that the
+    /// "warnings survive until acknowledged" guarantee is currently degraded.
+    @Published var recoveryWarningPersistenceDegraded: Bool = false
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
 
@@ -967,21 +972,37 @@ final class PetModel: NSObject, ObservableObject {
     private func restorePersistedLogs() {
         // Carry forward warnings persisted from a prior launch (durable until
         // the user acknowledges), then layer on anything this load detects.
-        logRecoveryWarnings = PetLogStore.loadRecoveryWarnings()
+        let loaded = PetLogStore.loadRecoveryWarnings()
+        logRecoveryWarnings = loaded.warnings
+        recoveryWarningPersistenceDegraded = loaded.degraded
         notificationHistory = restorePersistedLog(file: "notifications.json")
         summonResults = restorePersistedLog(file: "summon.json")
         logReplies = restorePersistedLog(file: "log.json")
         localResults = restorePersistedLog(file: "local.json")
-        PetLogStore.saveRecoveryWarnings(logRecoveryWarnings)
+        // Commit the (possibly augmented) warning set. Only a successful write
+        // makes it durable; a failure must be visible, not silently assumed
+        // persisted — otherwise an append that cleans the source primary would
+        // erase the only record of the loss on the next launch.
+        if !PetLogStore.saveRecoveryWarnings(logRecoveryWarnings) {
+            recoveryWarningPersistenceDegraded = true
+        }
     }
 
     /// Test seam: run the real restore path without the rest of `start()`.
     func restorePersistedLogsForTesting() { restorePersistedLogs() }
 
-    /// Clears the durable recovery warnings once the user has seen them.
+    /// Clears the durable recovery warnings once the user has seen them —
+    /// treated as a commit: the in-memory/published state is only cleared after
+    /// the empty set is persisted. On failure the warnings are kept visible and
+    /// the durability-degraded flag is raised, so acknowledgement can't silently
+    /// drop state ahead of disk.
     func acknowledgeLogRecoveryWarnings() {
-        logRecoveryWarnings = []
-        PetLogStore.saveRecoveryWarnings([])
+        if PetLogStore.saveRecoveryWarnings([]) {
+            logRecoveryWarnings = []
+            recoveryWarningPersistenceDegraded = false
+        } else {
+            recoveryWarningPersistenceDegraded = true
+        }
     }
 
     private func upsertRecoveryWarning(file: String, kind: String, droppedCount: Int, quarantine: String?) {
@@ -2605,22 +2626,41 @@ enum PetLogStore {
 
     private static let recoveryWarningsFile = "recovery-warnings.json"
 
-    /// Loads the durable recovery warnings persisted from prior launches.
-    /// Tolerant: an unreadable warnings file yields an empty list (this file is
+    /// Loads the durable recovery warnings persisted from prior launches, with
+    /// the same last-known-good `.bak` resilience as the main store. `degraded`
+    /// is true only when something WAS persisted but neither the primary nor the
+    /// backup can be decoded — a genuine loss of durable warning state that the
+    /// caller must surface (never silently swallowed to []). This file is
     /// bookkeeping, never conversation data — it must not recurse the
-    /// poison/quarantine machinery onto itself).
-    static func loadRecoveryWarnings() -> [PetLogRecoveryWarning] {
+    /// poison/quarantine machinery onto itself.
+    static func loadRecoveryWarnings() -> (warnings: [PetLogRecoveryWarning], degraded: Bool) {
         let path = (dir as NSString).appendingPathComponent(recoveryWarningsFile)
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let warnings = try? decoder.decode([PetLogRecoveryWarning].self, from: data) else {
-            logger.error("PetLogStore recovery-warnings file unreadable; starting with none")
-            return []
+        let bakPath = path + ".bak"
+        if let warnings = decodeRecoveryWarnings(path) { return (warnings, false) }
+        let primaryExisted = FileManager.default.fileExists(atPath: path)
+        if let warnings = decodeRecoveryWarnings(bakPath) {
+            if primaryExisted {
+                logger.error("PetLogStore recovery-warnings primary corrupt; recovered from backup")
+            }
+            return (warnings, false)
         }
-        return warnings
+        if primaryExisted || FileManager.default.fileExists(atPath: bakPath) {
+            logger.error("PetLogStore recovery-warnings primary+backup both unreadable; durable warning state lost")
+            return ([], true)
+        }
+        return ([], false)  // fresh — nothing persisted yet
     }
 
+    private static func decodeRecoveryWarnings(_ path: String) -> [PetLogRecoveryWarning]? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode([PetLogRecoveryWarning].self, from: data)
+    }
+
+    /// Persists the warning set as a commit: primary + last-known-good `.bak`,
+    /// both 0600 in a 0700 dir. Returns false if ANY step fails, so the caller
+    /// treats the write as not-yet-durable rather than confirming it.
     @discardableResult
     static func saveRecoveryWarnings(_ warnings: [PetLogRecoveryWarning]) -> Bool {
         do {
@@ -2638,7 +2678,14 @@ enum PetLogStore {
         } catch {
             return false
         }
-        return applyPermissions(ownerOnly, path: path)
+        guard applyPermissions(ownerOnly, path: path) else { return false }
+        let bakPath = path + ".bak"
+        do {
+            try data.write(to: URL(fileURLWithPath: bakPath), options: .atomic)
+        } catch {
+            return false
+        }
+        return applyPermissions(ownerOnly, path: bakPath)
     }
 }
 
