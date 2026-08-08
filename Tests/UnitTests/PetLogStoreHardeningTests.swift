@@ -136,4 +136,97 @@ final class PetLogStoreHardeningTests: XCTestCase {
         // ...but writes are NOT held fail-closed (recovery succeeded).
         XCTAssertTrue(PetLogStore.save(entries, file: "log.json"))
     }
+
+    // MARK: - D9 follow-up: preservation-before-continue hardening
+
+    /// Guard (a): if the quarantine copy cannot be created, the store must fail
+    /// closed rather than let a later save overwrite the un-preserved original.
+    func testQuarantineCreationFailurePoisonsAndPreservesOriginal() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let original = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+
+        // Make the store dir read+traverse only so reading the original works
+        // but creating the quarantine file fails.
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: PetLogStore.dir)
+        let outcome = PetLogStore.loadOutcome(file: "log.json")
+        // Restore perms so the assertions below aren't themselves blocked.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: PetLogStore.dir)
+
+        guard case let .corrupt(entries, recovered) = outcome else {
+            return XCTFail("expected corrupt, got \(outcome)")
+        }
+        XCTAssertTrue(entries.isEmpty)
+        XCTAssertFalse(recovered)
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "quarantine failure must poison the file")
+
+        XCTAssertFalse(PetLogStore.save([entry("new")], file: "log.json"),
+                       "a poisoned file must refuse writes even though quarantine failed")
+        let after = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+        XCTAssertEqual(after, original, "the un-preserved original must never be overwritten")
+        // No quarantine copy was created.
+        let quarantines = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .filter { $0.hasPrefix("log.json.corrupt-") }
+        XCTAssertTrue(quarantines.isEmpty)
+    }
+
+    /// Guard (b): a partially-corrupt backup is not a trustworthy last-known-good
+    /// and must be rejected — no salvaging its decodable subset.
+    func testPartiallyCorruptBackupIsNotAdoptedForRecovery() throws {
+        // `.bak` has one good + one undecodable entry (dropped == 1).
+        let bakJSON = """
+        [{"id":"g","text":"good","source":"log","timestamp":"2026-08-09T00:00:00Z"},
+         {"unexpected":"shape"}]
+        """
+        try Data(bakJSON.utf8).write(to: URL(fileURLWithPath: path("log.json.bak")))
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+
+        let outcome = PetLogStore.loadOutcome(file: "log.json")
+        guard case let .corrupt(entries, recovered) = outcome else {
+            return XCTFail("expected corrupt, got \(outcome)")
+        }
+        XCTAssertFalse(recovered, "a partially-corrupt backup must not be adopted")
+        XCTAssertTrue(entries.isEmpty, "no partial salvage — empty start")
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "no usable backup means fail-closed")
+    }
+
+    /// D9 gap 3: a `.bak` write failure is not swallowed — the save is reported
+    /// failed (fail-visible), while the primary write still lands.
+    func testBackupWriteFailureIsReportedAsSaveFailure() throws {
+        // Pre-create a DIRECTORY where the `.bak` file would go: the primary
+        // atomic write succeeds, the backup atomic rename onto a directory fails.
+        try FileManager.default.createDirectory(atPath: path("log.json.bak"), withIntermediateDirectories: true)
+
+        let saved = PetLogStore.save([entry("fresh")], file: "log.json")
+        XCTAssertFalse(saved, "a backup write failure must surface as save failure")
+
+        // ...but the primary is on disk with the new content.
+        let primary = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode([NotificationEntry].self, from: primary)
+        XCTAssertEqual(decoded.map(\.text), ["fresh"], "the primary write must still have landed")
+    }
+
+    /// D9 gap 3: primary, `.bak`, and quarantine are all owner-only (0600).
+    func testAllPersistedFilesAreOwnerOnly() throws {
+        XCTAssertTrue(PetLogStore.save([entry("a")], file: "log.json"))
+        // Corrupt the primary and reload to force a quarantine copy.
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        _ = PetLogStore.loadOutcome(file: "log.json")
+
+        func mode(_ file: String) throws -> Int16? {
+            (try FileManager.default.attributesOfItem(atPath: path(file))[.posixPermissions] as? NSNumber)?.int16Value
+        }
+        let quarantine = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .first { $0.hasPrefix("log.json.corrupt-") }
+        XCTAssertEqual(try mode("log.json.bak"), 0o600, ".bak must be 0600")
+        XCTAssertNotNil(quarantine)
+        XCTAssertEqual(try mode(quarantine!), 0o600, "quarantine must be 0600")
+
+        // A fresh clean save gives a primary at 0600 too.
+        PetLogStore.resetPoisonedForTesting()
+        try? FileManager.default.removeItem(atPath: path("log.json"))
+        try? FileManager.default.removeItem(atPath: path("log.json.bak"))
+        XCTAssertTrue(PetLogStore.save([entry("b")], file: "log.json"))
+        XCTAssertEqual(try mode("log.json"), 0o600, "primary must be 0600")
+    }
 }

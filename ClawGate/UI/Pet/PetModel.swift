@@ -959,7 +959,12 @@ final class PetModel: NSObject, ObservableObject {
     /// outcome onto the visible corrupt status. Corruption is reported as a
     /// Published status flag ONLY — never as a conversation entry.
     private func restorePersistedLog(file: String) -> [NotificationEntry] {
-        switch PetLogStore.loadOutcome(file: file) {
+        let outcome = PetLogStore.loadOutcome(file: file)
+        // Poisoning can be raised on a `.success` path too (partial decode whose
+        // quarantine failed), so surface the visible status from the poison flag
+        // in addition to the `.corrupt` case.
+        if PetLogStore.isPoisoned(file) { corruptLogStoreFiles.insert(file) }
+        switch outcome {
         case .missing:
             return []
         case let .success(entries, _):
@@ -2319,6 +2324,15 @@ enum PetLogStore {
     /// callers must already hold `testIsolationSemaphore` (see setUp/tearDown).
     static func resetPoisonedForTesting() { poisonedFiles = [] }
 
+    /// True while `file` is held fail-closed (its original bytes were unreadable
+    /// or could not be preserved). Poisoning can be raised on a `.success` path
+    /// too (partial decode whose quarantine failed), so callers surface the
+    /// visible status from this, not only from a `.corrupt` outcome.
+    static func isPoisoned(_ file: String) -> Bool { poisonedFiles.contains(file) }
+
+    /// Owner-only (0600): every persisted file is a copy of conversation text.
+    private static let ownerOnly: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
+
     /// The three ways a load can end. `success` carries `dropped` — the count of
     /// individual entries that failed to decode (unknown/legacy shapes) and were
     /// skipped, so a single bad entry never sinks the whole array yet the loss is
@@ -2349,9 +2363,19 @@ enum PetLogStore {
         } catch {
             return false
         }
+        try? FileManager.default.setAttributes(ownerOnly, ofItemAtPath: path)
         // Maintain a last-known-good backup: what we just wrote came from live
-        // in-memory state, so it is by definition decodable and good.
-        try? data.write(to: URL(fileURLWithPath: path + ".bak"), options: .atomic)
+        // in-memory state, so it is by definition decodable and good. A backup
+        // write failure is NOT swallowed — the safety net is gone, so the save
+        // is reported failed (fail-visible) even though the primary is on disk.
+        let bakPath = path + ".bak"
+        do {
+            try data.write(to: URL(fileURLWithPath: bakPath), options: .atomic)
+        } catch {
+            logger.error("PetLogStore backup write failed for \(file, privacy: .public); reporting save failure (primary written)")
+            return false
+        }
+        try? FileManager.default.setAttributes(ownerOnly, ofItemAtPath: bakPath)
         return true
     }
 
@@ -2378,8 +2402,14 @@ enum PetLogStore {
             // copy of the original first. Writes stay allowed (recovery of the
             // good entries succeeded — do NOT poison).
             if dropped > 0 {
-                quarantine(path: path, data: data)
-                logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); original quarantined")
+                if quarantine(path: path, data: data) {
+                    logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); original quarantined")
+                } else {
+                    // No safe copy of the original — hold writes fail-closed so
+                    // the next save can't drop the bad entry by overwriting it.
+                    poisonedFiles.insert(file)
+                    logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); quarantine failed, writes held fail-closed")
+                }
             }
             return .success(entries: entries, dropped: dropped)
         }
@@ -2399,14 +2429,21 @@ enum PetLogStore {
     }
 
     private static func handleCorrupt(file: String, path: String, data: Data?) -> LoadOutcome {
-        // Preserve the corrupt original: copy (never move) its bytes to a
-        // timestamped, owner-only quarantine file in the same directory. The
-        // original path stays untouched on disk.
-        quarantine(path: path, data: data)
+        // Preserve the corrupt original first (copy, never move). If we cannot —
+        // disk full, permission, name collision — there is NO safe copy, so
+        // poison and refuse writes: the next append must not overwrite the
+        // un-preserved original.
+        guard quarantine(path: path, data: data) else {
+            poisonedFiles.insert(file)
+            logger.error("PetLogStore corrupt load for \(file, privacy: .public); quarantine failed, writes held fail-closed")
+            return .corrupt(entries: [], recovered: false)
+        }
 
-        // Try to recover from the last-known-good backup.
+        // Recover ONLY from a fully-decodable backup. A partially-corrupt `.bak`
+        // (dropped > 0) is not a trustworthy last-known-good — reject it rather
+        // than silently adopting the salvageable subset.
         if let bakData = try? Data(contentsOf: URL(fileURLWithPath: path + ".bak")),
-           let (entries, _) = decodeEntries(bakData) {
+           let (entries, dropped) = decodeEntries(bakData), dropped == 0 {
             // Body-free provenance: entry count + a hash of the recovered bytes
             // (never any conversation text) so a recovery is auditable.
             let hash = SHA256.hash(data: bakData).map { String(format: "%02x", $0) }.joined()
@@ -2420,12 +2457,15 @@ enum PetLogStore {
         return .corrupt(entries: [], recovered: false)
     }
 
-    private static func quarantine(path: String, data: Data?) {
-        guard let bytes = data ?? (try? Data(contentsOf: URL(fileURLWithPath: path))) else { return }
-        let stamp = quarantineTimestamp()
-        FileManager.default.createFile(
-            atPath: "\(path).corrupt-\(stamp)", contents: bytes,
-            attributes: [.posixPermissions: 0o600]
+    /// Copies the original bytes to a timestamped, owner-only quarantine file in
+    /// the same directory. Returns whether the copy was created — a failure
+    /// means the original could not be preserved, and the caller must fail
+    /// closed rather than allow a later overwrite.
+    private static func quarantine(path: String, data: Data?) -> Bool {
+        guard let bytes = data ?? (try? Data(contentsOf: URL(fileURLWithPath: path))) else { return false }
+        return FileManager.default.createFile(
+            atPath: "\(path).corrupt-\(quarantineTimestamp())", contents: bytes,
+            attributes: ownerOnly
         )
     }
 
