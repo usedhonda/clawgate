@@ -500,7 +500,13 @@ actor OpenClawWSClient {
     private func handleResponse(_ msg: IncomingMessage) {
         let ok = msg.ok ?? false
         let responseId = msg.id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        NSLog("[Pet] handleResponse: ok=%d id=%@ type=%@ error=%@", ok ? 1 : 0, responseId, msg.payload?.type ?? "nil", msg.error?.message ?? "none")
+        // D59 transport privacy: log only BOUNDED STRUCTURAL metadata. The
+        // server-controlled `error.message` is unbounded and can echo input
+        // fragments (hidden prefix / STT / instruction), so it must never reach
+        // the unified log — surface the error CODE and its byte LENGTH instead.
+        NSLog("[Pet] handleResponse: ok=%d id=%@ type=%@ errCode=%@ errLen=%d",
+              ok ? 1 : 0, responseId, msg.payload?.type ?? "nil",
+              msg.error?.code ?? "none", msg.error.map { $0.message.utf8.count } ?? 0)
 
         // Payload-returning requests (ambient.ingest etc.)
         if !responseId.isEmpty, let cont = inFlightResponses.removeValue(forKey: responseId) {

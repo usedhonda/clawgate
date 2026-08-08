@@ -336,6 +336,14 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
             contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)
         XCTAssertFalse(wsClient.contains("data.prefix(200)"),
                        "decode-failure log must not include raw body bytes")
+
+        // D59 transport privacy: no NSLog line in OpenClawWSClient may emit the
+        // server-controlled error MESSAGE body (unbounded, can echo input). Only
+        // bounded structural metadata (code, length) is allowed.
+        for line in wsClient.components(separatedBy: "\n") where line.contains("NSLog(") {
+            XCTAssertFalse(line.contains("error?.message") || line.contains(".message ?"),
+                           "transport NSLog must not log the server error message body: \(line.trimmingCharacters(in: .whitespaces))")
+        }
     }
 
     private func sourceRoot() -> String {
