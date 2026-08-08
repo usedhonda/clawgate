@@ -2740,7 +2740,7 @@ enum PetLogStore {
             // good entries succeeded — do NOT poison).
             var quarantineName: String? = nil
             if dropped > 0 {
-                quarantineName = quarantine(path: path, data: data)
+                quarantineName = quarantine(path: path, data: data)?.name
                 if quarantineName != nil {
                     logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); original quarantined")
                 } else {
@@ -2772,11 +2772,12 @@ enum PetLogStore {
         // disk full, permission, name collision — there is NO safe copy, so
         // poison and refuse writes: the next append must not overwrite the
         // un-preserved original.
-        guard let quarantineName = quarantine(path: path, data: data) else {
+        guard let quarantined = quarantine(path: path, data: data) else {
             poisonedFiles.insert(file)
             logger.error("PetLogStore corrupt load for \(file, privacy: .public); quarantine failed, writes held fail-closed")
             return .corrupt(entries: [], recovered: false, quarantine: nil)
         }
+        let quarantineName = quarantined.name
 
         // Recover ONLY from a fully-decodable backup. A partially-corrupt `.bak`
         // (dropped > 0) is not a trustworthy last-known-good — reject it rather
@@ -2797,17 +2798,34 @@ enum PetLogStore {
     }
 
     /// Copies the original bytes to a timestamped, owner-only quarantine file in
-    /// the same directory. Returns the quarantine file's NAME on success, or nil
-    /// on failure — a failure means the original could not be preserved, and the
-    /// caller must fail closed rather than allow a later overwrite.
-    private static func quarantine(path: String, data: Data?) -> String? {
+    /// the same directory. The name carries a readable timestamp PLUS a UUID, and
+    /// the file is created with `O_EXCL` at 0600 — so two quarantines within the
+    /// same second (re-entrant load, rapid restart, partial-decode re-load) can
+    /// never collide and overwrite or fail-poison each other (D103). Returns the
+    /// file NAME and a SHA-256 of the preserved bytes on success, nil on failure
+    /// — a failure means the original could not be preserved and the caller must
+    /// fail closed rather than allow a later overwrite.
+    private static func quarantine(path: String, data: Data?) -> (name: String, sha256: String)? {
         guard let bytes = data ?? (try? Data(contentsOf: URL(fileURLWithPath: path))) else { return nil }
-        let name = ((path as NSString).lastPathComponent) + ".corrupt-\(quarantineTimestamp())"
-        let quarantinePath = (dir as NSString).appendingPathComponent(name)
-        guard FileManager.default.createFile(atPath: quarantinePath, contents: bytes, attributes: ownerOnly) else {
-            return nil
+        let sha = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let base = ((path as NSString).lastPathComponent) + ".corrupt-\(quarantineTimestamp())"
+        for _ in 0..<3 {
+            let name = base + "-\(UUID().uuidString)"
+            let full = (dir as NSString).appendingPathComponent(name)
+            let fd = full.withCString { open($0, O_WRONLY | O_CREAT | O_EXCL, 0o600) }
+            if fd < 0 { continue }  // EEXIST (astronomically unlikely) or error — retry with a fresh UUID
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            do {
+                try handle.write(contentsOf: bytes)
+                try handle.close()
+            } catch {
+                try? handle.close()
+                try? FileManager.default.removeItem(atPath: full)
+                continue
+            }
+            return (name, sha)
         }
-        return name
+        return nil
     }
 
     private static func quarantineTimestamp() -> String {

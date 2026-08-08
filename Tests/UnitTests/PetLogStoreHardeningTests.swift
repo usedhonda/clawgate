@@ -392,6 +392,28 @@ final class PetLogStoreHardeningTests: XCTestCase {
                        "a .bak chmod failure must surface as save failure")
     }
 
+    /// D103: two quarantines of the same file within the same second must not
+    /// collide — the UUID + O_EXCL create yields two distinct byte-correct 0600
+    /// files, and the second does not fail-poison differently than the first.
+    func testRapidQuarantinesDoNotCollide() throws {
+        let corrupt = Data("{ corrupt payload".utf8)
+        try corrupt.write(to: URL(fileURLWithPath: path("log.json")))
+
+        // Two back-to-back corrupt loads (same wall-clock second in practice).
+        _ = PetLogStore.loadOutcome(file: "log.json")
+        _ = PetLogStore.loadOutcome(file: "log.json")
+
+        let quarantines = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .filter { $0.hasPrefix("log.json.corrupt-") }
+        XCTAssertEqual(quarantines.count, 2, "each quarantine must get a distinct name, no collision")
+        for name in quarantines {
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path(name))), corrupt,
+                           "each quarantine must hold the exact original bytes")
+            let m = (try FileManager.default.attributesOfItem(atPath: path(name))[.posixPermissions] as? NSNumber)?.int16Value
+            XCTAssertEqual(m, 0o600, "each quarantine must be 0600")
+        }
+    }
+
     // MARK: - D54 load-path permission convergence
 
     /// A load-only startup (no save) still tightens an existing 0755 dir and
