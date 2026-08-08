@@ -1076,7 +1076,24 @@ struct AmbientLogPetView: View {
         .padding(.top, 8)
     }
 
+    /// D3 minimal visible status: a fixed one-line note near the input bar for a
+    /// typed dispatch status (e.g. "ログ不足"). Cleared owner-scoped by the next
+    /// accepted request / answer (in PetModel). The full status banner/retry UI
+    /// is a later Wave.
+    private func dispatchStatusText(_ status: PetLogDispatchStatus) -> String {
+        switch status {
+        case .insufficientEvidence: return "根拠となるログが不足しています"
+        case .emptyScopeRefused: return "対象のログがありません"
+        }
+    }
+
     private var inputBar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let status = model.logDispatchStatus {
+                Text(dispatchStatusText(status))
+                    .font(.system(size: 11))
+                    .foregroundColor(Color(red: 1.0, green: 0.82, blue: 0.4))
+            }
         HStack(spacing: 8) {
             TextField("ちーに聞く", text: $instructionText)
                 .textFieldStyle(.plain)
@@ -1102,6 +1119,7 @@ struct AmbientLogPetView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.07)))
+        }
         }
         .padding(12)
     }

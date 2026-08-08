@@ -2005,6 +2005,10 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         recordPetLogAdmissionEvent(.envelopeAccepted(requestId: envelope.requestId))
+        // D3: a newly accepted Log request supersedes any prior dispatch status
+        // (e.g. a previous "ログ不足"). Owner-scoped clear — unrelated summon
+        // successes never touch it.
+        logDispatchStatus = nil
 
         let selectionMode = envelope.scopeOverride == nil ? "automatic" : "explicit"
         let sourceFingerprint = PetLogSourceFingerprint.make(
@@ -2273,6 +2277,8 @@ final class PetModel: NSObject, ObservableObject {
                                 fallbackReason: $0.fallbackReason
                             )
                         }
+                        // A real answer clears any prior dispatch status.
+                        logDispatchStatus = nil
                         entry = NotificationEntry(
                             id: UUID().uuidString, text: result.answer ?? "",
                             source: source, timestamp: Date(),

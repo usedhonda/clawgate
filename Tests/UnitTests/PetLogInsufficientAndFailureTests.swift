@@ -80,6 +80,18 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
                        "insufficient evidence must surface as a typed status")
         XCTAssertFalse(model.logReplies.contains { $0.source == "log" },
                        "no ちー reply is persisted for an insufficient outcome")
+
+        // Owner-scoped clear: an unrelated summon success must NOT clear it...
+        model.addSummonResult(text: "some omakase output", source: "omakase")
+        XCTAssertEqual(model.logDispatchStatus, .insufficientEvidence(requestId: requestId),
+                       "an unrelated summon success must not clear the Log status")
+
+        // ...but the NEXT accepted Log request does. (In production the terminal
+        // event releases the slot before the reply is handled; here we release it
+        // explicitly since addSummonResult bypasses that path.)
+        model.pendingSummonSource = nil
+        model.sendLogInstruction(envelope: automaticEnvelope(requestId: UUID().uuidString, ids: ["x"]))
+        XCTAssertNil(model.logDispatchStatus, "the next accepted Log request clears the prior status")
     }
 
     func testEmptyScopeEnvelopeIsRefusedFastAsStatus() {

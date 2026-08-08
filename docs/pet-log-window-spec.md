@@ -78,7 +78,11 @@ inclusion or a text match. Structural integrity is enforced:
 
 - **Insufficient (D3)**: the parser accepts an `insufficientEvidence` reply
   (structurally, via the discriminator — no text match). The client surfaces a
-  fixed `insufficientEvidence` status and NEVER persists the model body.
+  fixed `insufficientEvidence` status and NEVER persists the model body. A
+  minimal one-line status is shown near the input bar (`logDispatchStatus`),
+  cleared owner-scoped by the next accepted Log request or a real answer — an
+  unrelated summon success never clears it. The full status banner / retry UI is
+  a later Wave (Target).
 - **Fail-fast (D3)**: an empty-segments envelope is refused before build/dispatch
   as a typed `emptyScopeRefused` status — no conversation entry, no slot claim.
 - **Malformed reply (D72)**: a parse failure still persists an entry carrying the
