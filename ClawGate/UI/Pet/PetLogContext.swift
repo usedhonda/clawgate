@@ -297,22 +297,74 @@ struct PetLogDispatchMetadata: Codable, Equatable {
 }
 
 struct PetLogEntryMetadata: Codable, Equatable {
-    let contextDecision: PetLogContextDecision
-    let completeBeforeAnchor: Bool
+    /// Model-reported context selection. Optional so a request-side (`log_user`)
+    /// entry — which has no model reply — can still carry the correlation
+    /// fields below. nil for user entries and for pre-D7 records.
+    let contextDecision: PetLogContextDecision?
+    /// Client's own completeness signal from the originating envelope. Optional
+    /// for the same reason as `contextDecision`.
+    let completeBeforeAnchor: Bool?
     let dispatch: PetLogDispatchMetadata?
 
-    init(contextDecision: PetLogContextDecision, completeBeforeAnchor: Bool, dispatch: PetLogDispatchMetadata? = nil) {
+    // MARK: Correlation metadata (D7)
+    // Persisted so the exact envelope behind an answer is reconstructable after
+    // the fact — the 2026-08 incident's forensics were unrecoverable because
+    // the real sent segment count and scope were never written down. All fields
+    // are optional and backward-compatible. IMPORTANT: declare them as plain
+    // `let ... : T?` with NO `= nil` default on the declaration — a defaulted
+    // `let` stored property is silently dropped from Decodable synthesis and
+    // always reads nil (see NotificationEntry.logMetadata). Defaults live on the
+    // init below instead.
+    /// Client-generated correlation id, shared by the request-side (`log_user`)
+    /// entry and its answer — the seam Wave C uses to pair them in the UI.
+    let requestId: String?
+    let actionId: String?
+    /// The anchor cutoff of the originating envelope (segments at/after it were
+    /// excluded).
+    let anchor: Date?
+    /// The Ambient-log day the query was scoped to (may differ from `anchor`'s
+    /// calendar day for empty past days; sourced from the model, not derived).
+    let selectedDay: Date?
+    /// Number of segments actually sent in the envelope.
+    let segmentCount: Int?
+    /// Explicit scene-scope override, when the user hard-scoped the query.
+    let scopeOverride: [String]?
+    /// "explicit" (scope override present) or "automatic". Stored as a String,
+    /// not an enum, so an unknown future value never fails whole-entry decode.
+    let selectionMode: String?
+
+    init(contextDecision: PetLogContextDecision? = nil,
+         completeBeforeAnchor: Bool? = nil,
+         dispatch: PetLogDispatchMetadata? = nil,
+         requestId: String? = nil,
+         actionId: String? = nil,
+         anchor: Date? = nil,
+         selectedDay: Date? = nil,
+         segmentCount: Int? = nil,
+         scopeOverride: [String]? = nil,
+         selectionMode: String? = nil) {
         self.contextDecision = contextDecision
         self.completeBeforeAnchor = completeBeforeAnchor
         self.dispatch = dispatch
+        self.requestId = requestId
+        self.actionId = actionId
+        self.anchor = anchor
+        self.selectedDay = selectedDay
+        self.segmentCount = segmentCount
+        self.scopeOverride = scopeOverride
+        self.selectionMode = selectionMode
     }
 
     /// True when either signal suggests the answer's context may be
-    /// incomplete or shaky — used to render a short uncertainty marker.
+    /// incomplete or shaky — used to render a short uncertainty marker. A
+    /// request-side entry (both signals nil) is never "uncertain" on its own.
     var isUncertain: Bool {
-        !completeBeforeAnchor
-            || !contextDecision.historyComplete
-            || contextDecision.boundaryConfidence == .low
+        if let completeBeforeAnchor, !completeBeforeAnchor { return true }
+        if let contextDecision {
+            if !contextDecision.historyComplete { return true }
+            if contextDecision.boundaryConfidence == .low { return true }
+        }
+        return false
     }
 }
 

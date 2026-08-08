@@ -1223,7 +1223,7 @@ struct AmbientLogPetView: View {
         guard !trimmed.isEmpty else { return }
         cancelPendingSceneNaming()
         let envelope = logModel.buildQueryEnvelope(actionId: actionId, instruction: trimmed)
-        model.sendLogInstruction(envelope: envelope)
+        model.sendLogInstruction(envelope: envelope, selectedDay: logModel.selectedDay)
     }
 
     private func timeString(_ date: Date) -> String {

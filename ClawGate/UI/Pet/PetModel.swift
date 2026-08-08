@@ -265,6 +265,12 @@ final class PetModel: NSObject, ObservableObject {
     /// Overridable for tests.
     static var logAwaitingReplyTimeoutSeconds: TimeInterval = 180
 
+    /// Structured, retroactively-queryable telemetry for Pet Log envelope
+    /// dispatch. Body-free: request/action ids, sizes, and policy only — never
+    /// the instruction or transcript text. `log show --predicate
+    /// 'subsystem == "com.clawgate" && category == "PetLog"'`.
+    static let petLogTelemetry = Logger(subsystem: "com.clawgate", category: "PetLog")
+
     /// How long a shared-path summon (scene naming / omakase / ask / draft_pr)
     /// may wait for a reply before its slot is reclaimed. Overridable for tests.
     static var summonReplyTimeoutSeconds: TimeInterval = 180
@@ -1476,6 +1482,32 @@ final class PetModel: NSObject, ObservableObject {
         let segmentIds: [String]
         let completeBeforeAnchor: Bool
         let dispatch: PetLogDispatchAck?
+        // Correlation metadata (D7) captured from the originating envelope, so
+        // the persisted reply/user entries record the exact request behind them.
+        let actionId: String
+        let anchor: Date
+        let selectedDay: Date?
+        let segmentCount: Int
+        let scopeOverride: [String]?
+        let selectionMode: String
+
+        /// The correlation metadata to stamp onto a persisted log entry.
+        func entryMetadata(contextDecision: PetLogContextDecision? = nil,
+                           completeBeforeAnchor: Bool? = nil,
+                           dispatch: PetLogDispatchMetadata? = nil) -> PetLogEntryMetadata {
+            PetLogEntryMetadata(
+                contextDecision: contextDecision,
+                completeBeforeAnchor: completeBeforeAnchor,
+                dispatch: dispatch,
+                requestId: requestId,
+                actionId: actionId,
+                anchor: anchor,
+                selectedDay: selectedDay,
+                segmentCount: segmentCount,
+                scopeOverride: scopeOverride,
+                selectionMode: selectionMode
+            )
+        }
     }
     private var pendingLogRequest: PendingLogRequest?
 
@@ -1530,12 +1562,24 @@ final class PetModel: NSObject, ObservableObject {
     /// reply is validated against, without going through `sendLogInstruction`
     /// (which also arms the reply-timeout watchdog). Mirrors what a real
     /// in-flight Log summon leaves behind (`pendingLogRequest` is private).
-    func setPendingLogRequestForTesting(segmentIds: [String], completeBeforeAnchor: Bool, dispatch: PetLogDispatchAck? = nil) {
+    func setPendingLogRequestForTesting(segmentIds: [String], completeBeforeAnchor: Bool,
+                                        dispatch: PetLogDispatchAck? = nil,
+                                        actionId: String = "test-action",
+                                        anchor: Date = Date(),
+                                        selectedDay: Date? = nil,
+                                        scopeOverride: [String]? = nil,
+                                        selectionMode: String = "automatic") {
         pendingLogRequest = PendingLogRequest(
             requestId: UUID().uuidString,
             segmentIds: segmentIds,
             completeBeforeAnchor: completeBeforeAnchor,
-            dispatch: dispatch
+            dispatch: dispatch,
+            actionId: actionId,
+            anchor: anchor,
+            selectedDay: selectedDay,
+            segmentCount: segmentIds.count,
+            scopeOverride: scopeOverride,
+            selectionMode: selectionMode
         )
     }
     /// Test seam: the CURRENT shared-path watchdog token (private), so a test can
@@ -1672,7 +1716,13 @@ final class PetModel: NSObject, ObservableObject {
                         requestId: pending.requestId,
                         segmentIds: pending.segmentIds,
                         completeBeforeAnchor: pending.completeBeforeAnchor,
-                        dispatch: ack
+                        dispatch: ack,
+                        actionId: pending.actionId,
+                        anchor: pending.anchor,
+                        selectedDay: pending.selectedDay,
+                        segmentCount: pending.segmentCount,
+                        scopeOverride: pending.scopeOverride,
+                        selectionMode: pending.selectionMode
                     )
                 }
             } catch {
@@ -1691,7 +1741,10 @@ final class PetModel: NSObject, ObservableObject {
     /// text). `envelope` carries the full query-time raw history (not the
     /// display-capped transcript) plus anchor/scope metadata — see
     /// PetLogContext.swift and AmbientLogModel.buildQueryEnvelope.
-    func sendLogInstruction(envelope: PetLogQueryEnvelope) {
+    /// `selectedDay` is the Ambient-log day the query was scoped to — sourced
+    /// from the caller rather than derived from the anchor (an empty past day's
+    /// anchor lands on the next day's start), and persisted for forensics.
+    func sendLogInstruction(envelope: PetLogQueryEnvelope, selectedDay: Date? = nil) {
         recordPetLogAdmissionEvent(
             .actionReceived(
                 requestId: envelope.requestId,
@@ -1729,9 +1782,23 @@ final class PetModel: NSObject, ObservableObject {
         }
         recordPetLogAdmissionEvent(.envelopeAccepted(requestId: envelope.requestId))
 
+        let selectionMode = envelope.scopeOverride == nil ? "automatic" : "explicit"
+        // Correlation metadata stamped onto both the request-side (`log_user`)
+        // entry and, later, its answer — so the two pair up and the exact
+        // envelope behind the answer is reconstructable after the fact.
+        let correlation = PetLogEntryMetadata(
+            requestId: envelope.requestId,
+            actionId: envelope.actionId,
+            anchor: envelope.anchorTimestamp,
+            selectedDay: selectedDay,
+            segmentCount: envelope.segments.count,
+            scopeOverride: envelope.scopeOverride,
+            selectionMode: selectionMode
+        )
         let userEntry = NotificationEntry(
             id: UUID().uuidString, text: envelope.instruction,
-            source: "log_user", timestamp: Date()
+            source: "log_user", timestamp: Date(),
+            logMetadata: correlation
         )
         appendPersistentLogReplyEntry(userEntry)
         logThreadPaneOpen = true
@@ -1764,11 +1831,23 @@ final class PetModel: NSObject, ObservableObject {
             appendSummonEntry(text: "Error: failed to build log query", source: "log")
             return
         }
+        // Envelope telemetry: structured, queryable, and body-free (never the
+        // instruction or any transcript text). os.Logger — NSLog is not
+        // retroactively queryable via `log show`.
+        Self.petLogTelemetry.info(
+            "envelopeSent request=\(envelope.requestId, privacy: .public) action=\(envelope.actionId, privacy: .public) bytes=\(message.utf8.count, privacy: .public) segments=\(envelope.segments.count, privacy: .public) selection=\(selectionMode, privacy: .public) policyVersion=\(PetLogPromptBuilder.policyVersion, privacy: .public)"
+        )
         pendingLogRequest = PendingLogRequest(
             requestId: envelope.requestId,
             segmentIds: envelope.segments.map(\.id),
             completeBeforeAnchor: envelope.completeBeforeAnchor,
-            dispatch: nil
+            dispatch: nil,
+            actionId: envelope.actionId,
+            anchor: envelope.anchorTimestamp,
+            selectedDay: selectedDay,
+            segmentCount: envelope.segments.count,
+            scopeOverride: envelope.scopeOverride,
+            selectionMode: selectionMode
         )
         sendLogSummon(message, requestId: envelope.requestId)
     }
@@ -1932,7 +2011,7 @@ final class PetModel: NSObject, ObservableObject {
                         entry = NotificationEntry(
                             id: UUID().uuidString, text: result.answer,
                             source: source, timestamp: Date(),
-                            logMetadata: PetLogEntryMetadata(
+                            logMetadata: pending.entryMetadata(
                                 contextDecision: result.contextDecision,
                                 completeBeforeAnchor: pending.completeBeforeAnchor,
                                 dispatch: dispatch
