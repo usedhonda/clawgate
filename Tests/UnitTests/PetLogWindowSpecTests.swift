@@ -34,15 +34,19 @@ final class PetLogWindowSpecTests: XCTestCase {
         // mention can't rescue it).
         let normative = normativeSection(spec)
         let current = PetLogPromptBuilder.policyVersion
-        let occurrences = normative.components(separatedBy: current).count - 1
-        XCTAssertEqual(occurrences, 1,
+
+        // Extract EVERY `pet-log-context-vN` token in the Normative section via
+        // regex (not a fixed v0..v3 list, which silently misses a future vN).
+        // The current version must appear exactly once and no other version at all.
+        let regex = try NSRegularExpression(pattern: "pet-log-context-v[0-9]+")
+        let ns = normative as NSString
+        let matches = regex.matches(in: normative, range: NSRange(location: 0, length: ns.length))
+        let versions = matches.map { ns.substring(with: $0.range) }
+        XCTAssertEqual(versions.filter { $0 == current }.count, 1,
                        "the current policyVersion must appear exactly once in the Normative section")
-        // Any pet-log-context-vN other than the current must be absent from Normative.
-        for old in ["pet-log-context-v0", "pet-log-context-v1", "pet-log-context-v2", "pet-log-context-v3"]
-        where old != current {
-            XCTAssertFalse(normative.contains(old),
-                           "a stale version (\(old)) must not appear in the Normative section")
-        }
+        let stale = versions.filter { $0 != current }
+        XCTAssertTrue(stale.isEmpty,
+                      "no stale policyVersion may appear in the Normative section, found: \(Set(stale))")
     }
 
     /// Public-repo safety: the spec must not leak obvious PII/infra markers.

@@ -232,7 +232,10 @@ enum PetLogPromptBuilder {
               のみ行ってください。時間の空白、語彙の変化、参加者の変化だけでは場面変更と判断しないでください。
               判断に迷う場合は除外せず含めてください。
             - 使える `segments` が空、または文字化け等で根拠にならないものだけの場合は、項目を創作せず、
-              `includedSegmentIds` を空にし、`answer` は「根拠となるログが不足している」旨のみを述べてください。
+              `outcome` を `"insufficientEvidence"` にしてください。automaticスコープでは
+              `includedSegmentIds` を空にし、explicitスコープでは指定された全IDをそのまま
+              `includedSegmentIds` に返します。いずれの場合も `answer` は必ず JSON の `null` にし、
+              本文を書かないでください（詳細は (d) を参照）。
         (b) 文字起こしの補正: 選別したセグメントに対し、高確信度で明らかな誤認識にのみ補正を行ってください。
             固有名詞・数字・日時・金額・URL・否定表現・義務や可能性の推量・話者・発言順序は、明確な根拠が
             ない限り変更しないでください。
@@ -658,8 +661,9 @@ enum PetLogResultParser {
 
         // Whether an excluded-adjacent range is actually present (a value with at
         // least one non-null endpoint). Its full validity is enforced per
-        // outcome/mode below.
-        let excludedPresent = decision.excludedAdjacentRange.map { $0.startSegmentId != nil || $0.endSegmentId != nil } ?? false
+        // outcome/mode below. Note: "no trim" is expressed by the excluded FIELD
+        // being JSON `null` — a {null,null} object is NOT a valid "no trim" form
+        // (validated with `== nil`, D142/D150).
 
         // Outcome × mode validation (D2/D142/D145/D147/D150).
         switch result.outcome {
@@ -685,8 +689,9 @@ enum PetLogResultParser {
                 guard included == allowedSegmentIds else {
                     return .failure(.explicitScopeRequiresExactInclusion)
                 }
-                // Nothing trimmed — no excluded range.
-                guard !excludedPresent else { return .failure(.invalidExcludedRange) }
+                // Nothing trimmed — the excluded FIELD must be JSON null (a
+                // {null,null} object is rejected too, D142).
+                guard decision.excludedAdjacentRange == nil else { return .failure(.invalidExcludedRange) }
             case .automaticBackward:
                 // An answer must actually keep segments.
                 guard !included.isEmpty else { return .failure(.answerOutcomeRequiresInclusion) }
@@ -703,7 +708,9 @@ enum PetLogResultParser {
                 // prefix (allowed.first ... included.first-1); when nothing was
                 // trimmed it must be null. A partial/under-reported trim rejects.
                 if included == allowedSegmentIds {
-                    guard !excludedPresent else { return .failure(.excludedAdjacentRangeIncomplete) }
+                    // Full retention: the excluded FIELD must be JSON null (a
+                    // {null,null} object is rejected too, D142).
+                    guard decision.excludedAdjacentRange == nil else { return .failure(.excludedAdjacentRangeIncomplete) }
                 } else {
                     guard let ex = decision.excludedAdjacentRange,
                           let incFirst = included.first, let pIncFirst = position[incFirst],

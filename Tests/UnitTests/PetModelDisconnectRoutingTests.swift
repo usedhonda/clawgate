@@ -91,7 +91,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
             "includedSegmentIds": ["s0"],
             "includedRange": {"startSegmentId": "s0", "endSegmentId": "s0"},
-            "excludedAdjacentRange": {"startSegmentId": null, "endSegmentId": null},
+            "excludedAdjacentRange": null,
             "boundaryReasonCodes": [],
             "boundaryConfidence": "high",
             "historyComplete": true,

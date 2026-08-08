@@ -149,4 +149,27 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         XCTAssertTrue(entry?.text.contains("unrecognized selection mode") ?? false,
                       "an unknown mode must fail closed, not be validated as automatic")
     }
+
+    // MARK: - Prefix wording guard (empty/garble => typed insufficient, no body)
+
+    /// The empty/garble selection instruction must route through the
+    /// `insufficientEvidence` outcome with a null answer — never the old
+    /// "write an answer that only states the log is insufficient" wording, which
+    /// would tell the model to emit a body the parser then rejects.
+    func testPrefixEmptyCaseRoutesToTypedInsufficientNotAnswerBody() {
+        let prefix = PetLogPromptBuilder.universalPrefix()
+        XCTAssertFalse(prefix.contains("旨のみを述べて"),
+                       "the empty/garble case must not instruct writing an answer body")
+        XCTAssertTrue(prefix.contains("項目を創作せず"),
+                      "the empty/garble instruction must still be present")
+        // The same instruction must now name the typed outcome and null answer.
+        guard let range = prefix.range(of: "項目を創作せず") else {
+            return XCTFail("empty/garble instruction missing")
+        }
+        let tail = String(prefix[range.lowerBound...].prefix(300))
+        XCTAssertTrue(tail.contains("insufficientEvidence"),
+                      "the empty/garble case must route to the insufficientEvidence outcome")
+        XCTAssertTrue(tail.contains("null"),
+                      "the empty/garble case must state answer is null")
+    }
 }

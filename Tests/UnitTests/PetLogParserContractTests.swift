@@ -207,5 +207,25 @@ final class PetLogParserContractTests: XCTestCase {
         """
         XCTAssertEqual(PetLogResultParser.parse(insufficientNullMembers, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
                        .failure(.insufficientMustHaveNullExcluded))
+
+        // D142: an ANSWER outcome must also reject a {null,null} excluded object
+        // (the field itself must be JSON null when nothing was trimmed) — this
+        // path is separate from the insufficient branch above.
+        // explicitExact, full-scope answer, {null,null} excluded.
+        let explicitAnswerNullMembers = """
+        {"outcome":"answer","answer":"本文","contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":["a","b"],"includedRange":{"startSegmentId":"a","endSegmentId":"b"},"excludedAdjacentRange":{"startSegmentId":null,"endSegmentId":null},
+        "boundaryReasonCodes":[],"boundaryConfidence":"high","historyComplete":true,"correctionCounts":{}}}
+        """
+        XCTAssertEqual(PetLogResultParser.parse(explicitAnswerNullMembers, allowedSegmentIds: allowed, selectionMode: .explicitExact),
+                       .failure(.invalidExcludedRange))
+        // automaticBackward, full-retention answer (included == allowed), {null,null} excluded.
+        let automaticFullAnswerNullMembers = """
+        {"outcome":"answer","answer":"本文","contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":["a","b"],"includedRange":{"startSegmentId":"a","endSegmentId":"b"},"excludedAdjacentRange":{"startSegmentId":null,"endSegmentId":null},
+        "boundaryReasonCodes":[],"boundaryConfidence":"high","historyComplete":true,"correctionCounts":{}}}
+        """
+        XCTAssertEqual(PetLogResultParser.parse(automaticFullAnswerNullMembers, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                       .failure(.excludedAdjacentRangeIncomplete))
     }
 }

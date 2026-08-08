@@ -687,7 +687,7 @@ final class AmbientTests: XCTestCase {
             "policyVersion": "\(policyVersion)",
             "includedSegmentIds": ["abc", "def"],
             "includedRange": {"startSegmentId": "abc", "endSegmentId": "def"},
-            "excludedAdjacentRange": {"startSegmentId": null, "endSegmentId": null},
+            "excludedAdjacentRange": null,
             "boundaryReasonCodes": ["scene-continuous"],
             "boundaryConfidence": "high",
             "historyComplete": true,
@@ -749,6 +749,13 @@ final class AmbientTests: XCTestCase {
             func q(_ v: String?) -> String { v.map { "\"\($0)\"" } ?? "null" }
             return "{\"startSegmentId\": \(q(s)), \"endSegmentId\": \(q(e))}"
         }
+        // A no-trim excluded range is the JSON `null` FIELD, not a {null,null}
+        // object (D142: the object form is now rejected for answer outcomes).
+        func excludedJSON(_ r: (String?, String?)?) -> String {
+            guard let (s, e) = r else { return "null" }
+            func q(_ v: String?) -> String { v.map { "\"\($0)\"" } ?? "null" }
+            return "{\"startSegmentId\": \(q(s)), \"endSegmentId\": \(q(e))}"
+        }
         let answerJSON = answer.map { String(data: try! JSONEncoder().encode($0), encoding: .utf8)! } ?? "null"
         let includedJSON = String(data: try! JSONEncoder().encode(included), encoding: .utf8)!
         let countsJSON = String(data: try! JSONEncoder().encode(correctionCounts), encoding: .utf8)!
@@ -760,7 +767,7 @@ final class AmbientTests: XCTestCase {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
             "includedSegmentIds": \(includedJSON),
             "includedRange": \(rangeJSON(includedRange)),
-            "excludedAdjacentRange": \(rangeJSON(excludedRange)),
+            "excludedAdjacentRange": \(excludedJSON(excludedRange)),
             "boundaryReasonCodes": [],
             "boundaryConfidence": "\(boundaryConfidence)",
             "historyComplete": true,

@@ -49,7 +49,7 @@ final class OpenClawDispatchAckTests: XCTestCase {
               "startSegmentId": "\(segmentId)",
               "endSegmentId": "\(segmentId)"
             },
-            "excludedAdjacentRange": {"startSegmentId": null, "endSegmentId": null},
+            "excludedAdjacentRange": null,
             "boundaryReasonCodes": [],
             "boundaryConfidence": "high",
             "historyComplete": true,

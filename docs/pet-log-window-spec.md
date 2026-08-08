@@ -58,8 +58,10 @@ The universal prefix instructs the model as follows:
   contiguous LEADING run may be excluded on a clear high-confidence scene change;
   no gapped or newest-side exclusion.
 - **Insufficient evidence (D3)**: if usable segments are empty or only garble,
-  do not invent items — return an empty `includedSegmentIds` and an `answer`
-  that only states the log is insufficient.
+  do not invent items — return `outcome == "insufficientEvidence"` with `answer`
+  null. Automatic scope returns an empty `includedSegmentIds`; explicit scope
+  echoes the exact-all ids. (The response discriminator below is authoritative
+  for the structural rules.)
 
 ### Response discriminator (D145/D147/D150)
 
@@ -148,6 +150,7 @@ shared-summon events (which have no requestId) carry a bounded owner token, and 
 
 ## Target (not yet shipped — upcoming A2 commits)
 
-All Wave A2 contract behavior is now shipped and Normative above. Later Waves
-(status-rendering UI, cross-day retrieval, etc.) are tracked in the plan and
-will be added here when they ship.
+All Wave A2 contract behavior is now shipped and Normative above (the minimal
+one-line dispatch status is already shipped, per the D3 section). Later Waves
+(the full status banner / retry UI, cross-day retrieval, etc.) are tracked in the
+plan and will be added here when they ship.
