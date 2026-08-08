@@ -606,6 +606,115 @@ final class PetLogRecoveryWarningTests: XCTestCase {
             $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
             "a healthy warnings store raises no insecure-perms status")
     }
+
+    /// I guard (1): a converge failure that STILL persists (fail the converge
+    /// once, let the save succeed) durably clears on the next healthy launch and
+    /// stays cleared thereafter.
+    func testInsecurePermissionsDurablyClearsAfterRepair() throws {
+        try partialDropFixture()
+        PetModel().restorePersistedLogsForTesting()  // seed a valid warnings store
+        let warningsPath = path("recovery-warnings.json")
+
+        // Fail the FIRST chmod hit on the warnings file (its converge), pass the
+        // rest (so the trailing persist succeeds and the status is durable).
+        var failedOnce = false
+        PetLogStore.applyPermissionsHookForTesting = { p in
+            if p == warningsPath && !failedOnce { failedOnce = true; return false }
+            return true
+        }
+        let a = PetModel(); a.restorePersistedLogsForTesting()
+        XCTAssertTrue(a.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
+            "the insecure-perms status is visible the launch it fails")
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        // Healthy restart: the persisted status is derive-cleared, durably.
+        let b = PetModel(); b.restorePersistedLogsForTesting()
+        XCTAssertFalse(b.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
+            "a healthy launch must durably clear the repaired status")
+        let c = PetModel(); c.restorePersistedLogsForTesting()
+        XCTAssertFalse(c.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
+            "the clear must stay cleared on a later launch")
+    }
+
+    /// K: a successful persist via single-issue ack (or resolve) recovers the
+    /// degraded flag to false — a full warning-set commit is healthy evidence,
+    /// not just the bulk-ack path.
+    func testSingleAckSuccessRecoversDegradedFlag() throws {
+        // Two independent informational issues so one remains after a single ack.
+        try Data("[]".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let m = PetModel()
+        m.restorePersistedLogsForTesting()
+        m.logRecoveryWarnings = [
+            PetLogRecoveryWarning(file: "log.json", kind: "insecurePermissions", droppedCount: 0, quarantine: nil, detectedAt: Date()),
+            PetLogRecoveryWarning(file: "summon.json", kind: "partialDrop", droppedCount: 1, quarantine: nil, detectedAt: Date()),
+        ]
+        m.recoveryWarningPersistenceDegraded = true  // simulate a prior persist failure
+
+        XCTAssertTrue(m.acknowledgeLogRecoveryWarning(file: "log.json", kind: "insecurePermissions"))
+        XCTAssertFalse(m.recoveryWarningPersistenceDegraded,
+                       "a successful single-issue ack persist must recover the degraded flag")
+        XCTAssertTrue(m.logRecoveryWarnings.contains { $0.file == "summon.json" }, "the other issue remains")
+    }
+
+    /// I guard (2): the derived CLEAR obeys commit discipline — if the clear's
+    /// persist fails, the warning stays visible and degraded is flagged.
+    func testInsecurePermissionsClearRequiresSuccessfulCommit() throws {
+        // Seed a warnings store that already holds an insecurePermissions status.
+        let w = PetLogRecoveryWarning(file: PetLogStore.recoveryWarningsFile,
+                                      kind: "insecurePermissions", droppedCount: 0,
+                                      quarantine: nil, detectedAt: Date())
+        let data = try JSONEncoder.iso.encode([w])
+        let warningsPath = path("recovery-warnings.json")
+        try data.write(to: URL(fileURLWithPath: warningsPath))
+        try data.write(to: URL(fileURLWithPath: warningsPath + ".bak"))
+
+        // Pass the FIRST warnings-path chmod (converge succeeds -> a clear is
+        // derived) but fail the SECOND (the clear's persist).
+        var seen = false
+        PetLogStore.applyPermissionsHookForTesting = { p in
+            if p == warningsPath { defer { seen = true }; return !seen }
+            return true
+        }
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        XCTAssertTrue(model.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
+            "a clear whose persist fails must leave the warning visible")
+        XCTAssertTrue(model.recoveryWarningPersistenceDegraded, "and flag degraded")
+    }
+
+    /// I guard (3): a chmod failure at the dir, the primary, or the .bak of a
+    /// store each leaves bytes untouched and re-derives the status every launch.
+    func testPermissionFailureAtEachTargetIsByteInvariantAndReDerives() throws {
+        for target in ["", ".bak"] {  // primary and backup of log.json
+            try Data("[]".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+            try Data("[]".utf8).write(to: URL(fileURLWithPath: path("log.json.bak")))
+            let targetPath = path("log.json" + target)
+            let before = try Data(contentsOf: URL(fileURLWithPath: targetPath))
+
+            PetLogStore.applyPermissionsHookForTesting = { $0 == targetPath ? false : true }
+            let model = PetModel(); model.restorePersistedLogsForTesting()
+            XCTAssertTrue(model.logRecoveryWarnings.contains {
+                $0.file == "log.json" && $0.kind == "insecurePermissions" },
+                "a chmod failure at log.json\(target) must surface the status")
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: targetPath)), before,
+                           "bytes at log.json\(target) must be untouched")
+            let restart = PetModel(); restart.restorePersistedLogsForTesting()
+            XCTAssertTrue(restart.logRecoveryWarnings.contains {
+                $0.file == "log.json" && $0.kind == "insecurePermissions" },
+                "the status must re-derive on restart while the failure persists")
+            PetLogStore.applyPermissionsHookForTesting = nil
+            try? FileManager.default.removeItem(atPath: path("log.json"))
+            try? FileManager.default.removeItem(atPath: path("log.json.bak"))
+            try? FileManager.default.removeItem(atPath: path("recovery-warnings.json"))
+            try? FileManager.default.removeItem(atPath: path("recovery-warnings.json.bak"))
+        }
+    }
 }
 
 private extension JSONEncoder {

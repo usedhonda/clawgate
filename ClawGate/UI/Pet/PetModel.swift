@@ -1014,6 +1014,10 @@ final class PetModel: NSObject, ObservableObject {
         let loaded = PetLogStore.loadRecoveryWarnings()
         logRecoveryWarnings = loaded.warnings
         recoveryWarningPersistenceDegraded = loaded.degraded
+        // Track which files' perms converged cleanly this launch, so a repaired
+        // insecurePermissions status can be DERIVED-cleared under commit
+        // discipline (I) — the warnings store itself included.
+        restoreConvergedPermissions = loaded.permissionsInsecure ? [] : [PetLogStore.recoveryWarningsFile]
         if loaded.permissionsInsecure {
             // The warnings store's own perms couldn't be tightened. Surface it as
             // a typed status this launch; it re-derives every launch (perms are
@@ -1033,12 +1037,19 @@ final class PetModel: NSObject, ObservableObject {
         summonResults = restorePersistedLog(file: "summon.json")
         logReplies = restorePersistedLog(file: "log.json")
         localResults = restorePersistedLog(file: "local.json")
-        // Commit the (possibly augmented) warning set through the uniform rule:
-        // a failure stays visible, never silently assumed persisted — otherwise
-        // an append that cleans the source primary would erase the only record
-        // of the loss on the next launch.
-        commitRecoveryWarnings(logRecoveryWarnings)
+        // Derived clear (I) with commit discipline: build a candidate that drops
+        // stale insecurePermissions for every file whose perms converged cleanly
+        // this launch. Applied only via commitRecoveryWarnings, so the clear is
+        // published/durable ONLY on a successful persist; a failed clear leaves
+        // the warning visible and flags degraded.
+        var candidate = logRecoveryWarnings
+        candidate.removeAll { $0.kind == "insecurePermissions" && restoreConvergedPermissions.contains($0.file) }
+        commitRecoveryWarnings(candidate)
     }
+
+    /// Files whose permission convergence succeeded during the current restore —
+    /// used to derive-clear their stale insecurePermissions warnings.
+    private var restoreConvergedPermissions: Set<String> = []
 
     /// Test seam: run the real restore path without the rest of `start()`.
     func restorePersistedLogsForTesting() { restorePersistedLogs() }
@@ -1101,7 +1112,9 @@ final class PetModel: NSObject, ObservableObject {
         // 0700 when a corrupt load writes a quarantine copy and older 0644/0755
         // files are tightened even on a load-only startup. Never touches bytes;
         // a chmod failure surfaces as a durable security warning.
-        if !PetLogStore.convergePermissionsOnLoad(file: file) {
+        if PetLogStore.convergePermissionsOnLoad(file: file) {
+            restoreConvergedPermissions.insert(file)  // derive-clear candidate (I)
+        } else {
             upsertRecoveryWarning(file: file, kind: "insecurePermissions", droppedCount: 0, quarantine: nil)
         }
         let outcome = PetLogStore.loadOutcome(file: file)
