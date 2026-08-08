@@ -975,6 +975,13 @@ final class PetModel: NSObject, ObservableObject {
         let loaded = PetLogStore.loadRecoveryWarnings()
         logRecoveryWarnings = loaded.warnings
         recoveryWarningPersistenceDegraded = loaded.degraded
+        if loaded.permissionsInsecure {
+            // The warnings store's own perms couldn't be tightened. Surface it as
+            // a typed status this launch; it re-derives every launch (perms are
+            // re-checked) until actually repaired, so it never silently vanishes.
+            upsertRecoveryWarning(file: PetLogStore.recoveryWarningsFile,
+                                  kind: "insecurePermissions", droppedCount: 0, quarantine: nil)
+        }
         if loaded.degraded {
             // Both copies of the warning store were unreadable. A clean empty
             // would let the very next launch (which reads the rewritten valid
@@ -2777,26 +2784,29 @@ enum PetLogStore {
     /// caller must surface (never silently swallowed to []). This file is
     /// bookkeeping, never conversation data — it must not recurse the
     /// poison/quarantine machinery onto itself.
-    static func loadRecoveryWarnings() -> (warnings: [PetLogRecoveryWarning], degraded: Bool) {
-        if productionAccessBlocked() { return ([], false) }
+    static func loadRecoveryWarnings() -> (warnings: [PetLogRecoveryWarning], degraded: Bool, permissionsInsecure: Bool) {
+        if productionAccessBlocked() { return ([], false, false) }
         // Tighten the warnings store's own perms (dir 0700, primary/.bak 0600)
-        // before reading — best-effort, it must not touch content.
-        _ = convergePermissionsOnLoad(file: recoveryWarningsFile)
+        // before reading — best-effort on content, but the failure is NO LONGER
+        // discarded (D100): it is returned so the caller surfaces a typed status.
+        // Because this re-checks perms every load, a still-insecure store
+        // re-derives the same status next launch until it is actually repaired.
+        let permissionsInsecure = !convergePermissionsOnLoad(file: recoveryWarningsFile)
         let path = (dir as NSString).appendingPathComponent(recoveryWarningsFile)
         let bakPath = path + ".bak"
-        if let warnings = decodeRecoveryWarnings(path) { return (warnings, false) }
+        if let warnings = decodeRecoveryWarnings(path) { return (warnings, false, permissionsInsecure) }
         let primaryExisted = FileManager.default.fileExists(atPath: path)
         if let warnings = decodeRecoveryWarnings(bakPath) {
             if primaryExisted {
                 logger.error("PetLogStore recovery-warnings primary corrupt; recovered from backup")
             }
-            return (warnings, false)
+            return (warnings, false, permissionsInsecure)
         }
         if primaryExisted || FileManager.default.fileExists(atPath: bakPath) {
             logger.error("PetLogStore recovery-warnings primary+backup both unreadable; durable warning state lost")
-            return ([], true)
+            return ([], true, permissionsInsecure)
         }
-        return ([], false)  // fresh — nothing persisted yet
+        return ([], false, permissionsInsecure)  // fresh — nothing persisted yet
     }
 
     private static func decodeRecoveryWarnings(_ path: String) -> [PetLogRecoveryWarning]? {

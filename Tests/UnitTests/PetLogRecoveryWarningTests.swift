@@ -221,7 +221,7 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json")))
         try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json.bak")))
 
-        let (warnings, degraded) = PetLogStore.loadRecoveryWarnings()
+        let (warnings, degraded, _) = PetLogStore.loadRecoveryWarnings()
         XCTAssertTrue(warnings.isEmpty)
         XCTAssertTrue(degraded, "both copies unreadable must report durability degraded, not a silent empty")
 
@@ -413,7 +413,7 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         // loadRecoveryWarnings converges perms before reading (and does NOT
         // re-save), so this isolates the on-load convergence from the later
         // save() in a full restore.
-        let (warnings, degraded) = PetLogStore.loadRecoveryWarnings()
+        let (warnings, degraded, _) = PetLogStore.loadRecoveryWarnings()
 
         let mode = (try FileManager.default.attributesOfItem(atPath: warningsPath)[.posixPermissions] as? NSNumber)?.int16Value
         XCTAssertEqual(mode, 0o600, "an existing 0644 warnings file must converge to 0600 on load")
@@ -480,6 +480,46 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertFalse(model.resolveLogStoreCorruption(file: "log.json"),
                        "resolve must refuse when no quarantine copy preserved the original")
         XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "store stays fail-closed")
+    }
+
+    // MARK: - Warnings-store permission failure surfaced (D100)
+
+    /// A chmod failure on the warnings store itself is no longer discarded: it
+    /// surfaces a typed insecurePermissions status this launch (bytes unchanged)
+    /// and re-derives on every subsequent launch until repaired.
+    func testWarningsStorePermissionFailureSurfacesAndReDerives() throws {
+        // Seed a valid warnings store (partial-drop → restore writes it).
+        try partialDropFixture()
+        PetModel().restorePersistedLogsForTesting()
+        let warningsPath = path("recovery-warnings.json")
+        let before = try Data(contentsOf: URL(fileURLWithPath: warningsPath))
+
+        // Fail the chmod of the warnings file on subsequent loads.
+        PetLogStore.applyPermissionsHookForTesting = { $0 == warningsPath ? false : true }
+
+        // Current launch: the insecure-perms status is visible for the store.
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(model.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
+            "a warnings-store chmod failure must surface a typed status this launch")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: warningsPath)), before,
+                       "the failed convergence must not alter warnings-store bytes")
+
+        // Next launch (still failing): the status re-derives, never silently gone.
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertTrue(restarted.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
+            "the status must re-derive from the live permission check each launch")
+
+        // Success path: once perms are fine, the status is not raised.
+        PetLogStore.applyPermissionsHookForTesting = nil
+        let healthy = PetModel()
+        healthy.restorePersistedLogsForTesting()
+        XCTAssertFalse(healthy.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "insecurePermissions" },
+            "a healthy warnings store raises no insecure-perms status")
     }
 }
 
