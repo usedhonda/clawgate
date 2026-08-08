@@ -280,21 +280,25 @@ This preserves both attachment and facing correctness.
   - claw whisper -> claw area
   - all other whispers -> head area
 
-## Working Tree Recommendation
+## Working Tree Ownership
 
-Current uncommitted `PetModel.swift` changes should **not** be treated as authoritative yet.
-
-Recommended handling:
+This spec is the behavioral source of truth. When the working tree is dirty on
+entry, treat those changes as another owner's in-progress work, not as noise to
+discard:
 
 1. keep this spec as the behavioral source of truth
-2. **revert the current dirty `PetModel.swift` patch back to the last committed state before further runtime edits**
-3. reapply fixes from this spec intentionally, in small committed steps
+2. confirm who owns any uncommitted changes before touching them; never revert
+   dirty changes of unknown ownership without explicit instruction from that owner
+3. establish a checkpoint (commit) before starting new work, and make further
+   fixes in small, individually committed steps
 
 Reason:
 
-- the current dirty patch is a half-integrated stabilization attempt
-- user-observed instability means it is not yet trustworthy as behavior truth
-- spec-first reconstruction is safer than patching on top of an already unstable working tree
+- an uncommitted patch may be an in-flight change another agent or session is
+  mid-way through; reverting it blind destroys work and its history
+- "dirty" is not the same as "wrong" — verify ownership and intent first
+- committing a checkpoint first keeps every subsequent change independently
+  reviewable and revertible
 
 ## Resolved Decisions
 
