@@ -1,11 +1,43 @@
 import XCTest
 @testable import ClawGate
 
-/// D59 PRIMARY guard (runtime): the transport response log formatter must reduce
-/// every wire-controlled field to bounded structural metadata — no sentinel
-/// content (error message body, injected response id / payload type / error
-/// code) may appear in the produced line.
+/// D59 guards. The PRIMARY guard drives the real `handleResponse` callsite
+/// through an injectable sink and inspects exactly what ships — so a future raw
+/// log added to the emit path (String(describing:), payload dumps, etc.) is
+/// caught, not just the pure formatter. The pure-function and source-scan checks
+/// are AUXILIARY.
 final class TransportLogPrivacyTests: XCTestCase {
+    override func tearDown() {
+        OpenClawWSClient.transportLogSinkForTesting = nil
+        super.tearDown()
+    }
+
+    private final class LineBox: @unchecked Sendable { var lines: [String] = [] }
+
+    /// PRIMARY: a sentinel-laden response driven through the actual
+    /// handleResponse callsite must emit a line with zero wire content.
+    func testHandleResponseCallsiteEmitsOnlyBoundedMetadata() async {
+        let box = LineBox()
+        OpenClawWSClient.transportLogSinkForTesting = { box.lines.append($0) }
+
+        let json = """
+        {"type":"resp","id":"SENTINELID-\(String(repeating: "x", count: 200))","ok":false,
+         "payload":{"type":"evil.SENTINELTYPE.injected"},
+         "error":{"code":"SENTINELCODE with spaces 秘密","message":"SENTINELMSG hidden instruction 機密"}}
+        """
+        let msg = try! JSONDecoder().decode(IncomingMessage.self, from: Data(json.utf8))
+        let client = OpenClawWSClient()
+        await client.handleResponseForTesting(msg)
+
+        XCTAssertEqual(box.lines.count, 1, "the callsite must emit exactly one response log line")
+        let line = box.lines.first ?? ""
+        for sentinel in ["SENTINELID", "SENTINELTYPE", "SENTINELCODE", "SENTINELMSG", "秘密", "機密"] {
+            XCTAssertFalse(line.contains(sentinel), "wire content '\(sentinel)' leaked from the callsite: \(line)")
+        }
+    }
+
+    // MARK: - Auxiliary pure-formatter checks
+
     func testResponseLineNeverEchoesWireControlledContent() {
         let sentinelId = "SENTINELID-" + String(repeating: "x", count: 200)
         let sentinelType = "evil.type.SENTINELTYPE.injected"
@@ -16,9 +48,10 @@ final class TransportLogPrivacyTests: XCTestCase {
         for sentinel in ["SENTINELID", "SENTINELTYPE", "SENTINELCODE", "SENTINELMSG", "秘密", "機密"] {
             XCTAssertFalse(line.contains(sentinel), "wire content '\(sentinel)' leaked: \(line)")
         }
-        // Unknown id → length only; unknown type → length only; unbounded code → length.
-        XCTAssertTrue(line.contains("idLen="))
-        XCTAssertTrue(line.contains("typeLen="))
+        // Unknown id/type/code → bounded hash tag; message → length only.
+        XCTAssertTrue(line.contains("idTag=h"))
+        XCTAssertTrue(line.contains("typeTag=h"))
+        XCTAssertTrue(line.contains("codeTag=h"))
         XCTAssertTrue(line.contains("errMsgLen="))
     }
 
@@ -32,13 +65,17 @@ final class TransportLogPrivacyTests: XCTestCase {
         XCTAssertTrue(line.contains("err=none"))
     }
 
-    func testBoundedErrorCodeLoggedVerbatimButLongOneLengthOnly() {
-        let short = TransportLog.responseLine(ok: false, responseId: "x", known: false,
+    func testAllowlistedErrorCodeVerbatimUnknownHashed() {
+        let known = TransportLog.responseLine(ok: false, responseId: "x", known: false,
                                               payloadType: nil, error: IncomingError(code: "serverError", message: "m"))
-        XCTAssertTrue(short.contains("errCode=serverError"), "a short structural code is safe verbatim")
+        XCTAssertTrue(known.contains("errCode=serverError"), "an allowlisted code is safe verbatim")
 
-        let long = TransportLog.responseLine(ok: false, responseId: "x", known: false,
-                                             payloadType: nil, error: IncomingError(code: String(repeating: "q", count: 80), message: "m"))
-        XCTAssertFalse(long.contains(String(repeating: "q", count: 80)), "an over-long code is reduced to length")
+        // An unknown code — even a short one that could carry a secret — is
+        // hashed, never printed raw.
+        let secretCode = "sk-abcd1234"
+        let unknown = TransportLog.responseLine(ok: false, responseId: "x", known: false,
+                                                payloadType: nil, error: IncomingError(code: secretCode, message: "m"))
+        XCTAssertFalse(unknown.contains(secretCode), "an unknown code must be hashed, never raw")
+        XCTAssertTrue(unknown.contains("codeTag=h"))
     }
 }

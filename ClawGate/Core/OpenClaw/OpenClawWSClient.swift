@@ -1,5 +1,6 @@
 import Foundation
 import os
+import CryptoKit
 
 private let logger = Logger(subsystem: "com.clawgate", category: "OpenClawWS")
 
@@ -15,26 +16,38 @@ enum TransportLog {
         "hello-ok", "chat.history", "chat.send", "connect", "connect.challenge", "health",
     ]
 
-    /// A short structural token: <=32 chars of [A-Za-z0-9._-] only.
-    static func isBoundedToken(_ s: String) -> Bool {
-        s.count <= 32 && s.allSatisfy { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" }
+    /// Server error CODES known to be fixed structural tokens (safe verbatim).
+    /// Anything not on this allowlist is wire-controlled and reduced to a short
+    /// non-reversible hash + length — never printed raw (a secret or STT
+    /// fragment could ride in an unexpected code).
+    static let knownErrorCodes: Set<String> = [
+        "serverError", "unauthorized", "forbidden", "rate_limited", "timeout",
+        "not_found", "bad_request", "internal_error", "unavailable", "conflict",
+        "invalid_request", "session_not_found",
+    ]
+
+    /// Short, non-reversible tag for an unknown wire token: 8 hex of SHA-256 plus
+    /// byte length. Correlatable across log lines without echoing content.
+    static func boundedTag(_ s: String) -> String {
+        let hex = SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "h\(hex.prefix(8))/\(s.utf8.count)"
     }
 
     static func responseLine(ok: Bool, responseId: String, known: Bool,
                              payloadType: String?, error: IncomingError?) -> String {
         // Known ids are our own generated request ids (not wire content) — a
-        // short prefix is safe; unknown ids get length only.
+        // short prefix is safe; unknown ids get a bounded hash tag.
         let idField = known ? "id=\(responseId.prefix(8))/\(responseId.utf8.count)"
-                            : "idLen=\(responseId.utf8.count)"
+                            : "idTag=\(boundedTag(responseId))"
         let typeField: String
         switch payloadType {
         case .none: typeField = "type=none"
         case .some(let t) where knownPayloadTypes.contains(t): typeField = "type=\(t)"
-        case .some(let t): typeField = "typeLen=\(t.utf8.count)"
+        case .some(let t): typeField = "typeTag=\(boundedTag(t))"
         }
         let errField: String
         if let e = error {
-            let code = isBoundedToken(e.code) ? e.code : "len\(e.code.utf8.count)"
+            let code = knownErrorCodes.contains(e.code) ? e.code : "codeTag=\(boundedTag(e.code))"
             errField = "errCode=\(code) errMsgLen=\(e.message.utf8.count)"
         } else {
             errField = "err=none"
@@ -537,19 +550,41 @@ actor OpenClawWSClient {
         }
     }
 
+    /// internal (not private): test seam. When set, transport response log
+    /// lines are captured here INSTEAD of being written to NSLog — so the
+    /// primary D59 guard can drive `handleResponse` and inspect exactly what
+    /// this callsite emits (any future raw log added to the emit path is caught
+    /// too). Reset to nil in tearDown.
+    static var transportLogSinkForTesting: ((String) -> Void)?
+
+    private func emitTransportLog(_ line: String) {
+        if let sink = Self.transportLogSinkForTesting {
+            sink(line)
+        } else {
+            NSLog("[Pet] handleResponse: %@", line)
+        }
+    }
+
+    #if DEBUG
+    /// Test seam: drive the real `handleResponse` callsite with a crafted
+    /// message so the primary D59 guard captures the actually-emitted log line.
+    func handleResponseForTesting(_ msg: IncomingMessage) { handleResponse(msg) }
+    #endif
+
     private func handleResponse(_ msg: IncomingMessage) {
         let ok = msg.ok ?? false
         let responseId = msg.id?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        // D59 transport privacy: route through the bounded formatter — no
-        // wire-controlled content (error message, or raw response id / payload
-        // type / error code) reaches the unified log.
+        // D59 transport privacy: build the line via the bounded formatter and
+        // emit it through the single sink — every byte this callsite logs about
+        // a response goes through here, so the runtime guard captures exactly
+        // what ships (no wire-controlled content: error message, or raw response
+        // id / payload type / error code).
         let knownResponseId = inFlightResponses[responseId] != nil
             || inFlightAcks[responseId] != nil
             || inFlightHealthAcks[responseId] != nil
             || (pendingRequestId.map { $0 == responseId } ?? false)
-        NSLog("[Pet] handleResponse: %@",
-              TransportLog.responseLine(ok: ok, responseId: responseId, known: knownResponseId,
-                                        payloadType: msg.payload?.type, error: msg.error))
+        emitTransportLog(TransportLog.responseLine(ok: ok, responseId: responseId, known: knownResponseId,
+                                                   payloadType: msg.payload?.type, error: msg.error))
 
         // Payload-returning requests (ambient.ingest etc.)
         if !responseId.isEmpty, let cont = inFlightResponses.removeValue(forKey: responseId) {
