@@ -99,4 +99,26 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
                        PetLogSourceFingerprint.make(policyVersion: PetLogPromptBuilder.policyVersion, segmentIds: ids))
         XCTAssertNil(meta.contextDecision, "no fabricated model verdict on failure")
     }
+
+    // MARK: - D148 unknown selection mode fails closed
+
+    func testUnknownSelectionModeFailsClosed() {
+        let model = PetModel()
+        // Establish a pending request with a typo'd selection mode.
+        model.pendingSummonSource = "log"
+        model.setPendingLogRequestForTesting(segmentIds: ["a"], completeBeforeAnchor: true, selectionMode: "future")
+
+        // Even a well-formed reply must be rejected — the mode is unrecognized.
+        let reply = """
+        {"answer":"x","contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":["a"],"includedRange":{"startSegmentId":"a","endSegmentId":"a"},
+        "excludedAdjacentRange":null,"boundaryReasonCodes":[],"boundaryConfidence":"high",
+        "historyComplete":true,"correctionCounts":{}}}
+        """
+        model.addSummonResult(text: reply, source: "log", parseAsStructured: true)
+
+        let entry = model.logReplies.last { $0.source == "log" }
+        XCTAssertTrue(entry?.text.contains("unrecognized selection mode") ?? false,
+                      "an unknown mode must fail closed, not be validated as automatic")
+    }
 }

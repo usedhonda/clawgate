@@ -2234,7 +2234,26 @@ final class PetModel: NSObject, ObservableObject {
                 // request is REQUIRED — never fabricate an empty allowed-id set
                 // or a default completeness signal.
                 if let pending = pendingLogRequest {
-                    let mode: PetLogSelectionMode = pending.selectionMode == "explicit" ? .explicitExact : .automaticBackward
+                    // D148: an unknown/typo selectionMode fails closed — never
+                    // silently validated under the permissive automatic path.
+                    guard let mode = PetLogSelectionMode(persisted: pending.selectionMode) else {
+                        let dispatch = pending.dispatch.map {
+                            PetLogDispatchMetadata(
+                                runId: $0.runId, resolvedModel: $0.resolvedModel,
+                                resolvedThinking: $0.resolvedThinking, degraded: $0.degraded,
+                                fallbackReason: $0.fallbackReason)
+                        }
+                        let failed = NotificationEntry(
+                            id: UUID().uuidString,
+                            text: "Error: unrecognized selection mode — reply rejected",
+                            source: source, timestamp: Date(),
+                            logMetadata: pending.entryMetadata(contextDecision: nil,
+                                                               completeBeforeAnchor: pending.completeBeforeAnchor,
+                                                               dispatch: dispatch))
+                        pendingLogRequest = nil
+                        appendPersistentLogReplyEntry(failed)
+                        return
+                    }
                     switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds, selectionMode: mode) {
                     case .success(let result):
                         let dispatch = pending.dispatch.map {

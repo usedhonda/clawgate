@@ -434,6 +434,17 @@ enum PetLogSelectionMode: Equatable {
     /// that includes the newest sent segment; a strict subset needs high
     /// boundary confidence.
     case automaticBackward
+
+    /// Maps the persisted String form to the typed mode. Returns nil for an
+    /// unknown/typo value so the caller can fail closed (D148) — never silently
+    /// treat an unknown mode as the permissive automatic path.
+    init?(persisted: String) {
+        switch persisted {
+        case "explicit": self = .explicitExact
+        case "automatic": self = .automaticBackward
+        default: return nil
+        }
+    }
 }
 
 /// Bounded limits for a model reply (D52). A reply exceeding any of these is a
