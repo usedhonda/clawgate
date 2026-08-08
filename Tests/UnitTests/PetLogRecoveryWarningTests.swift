@@ -27,6 +27,10 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         super.tearDown()
     }
 
+    private func entry(_ text: String) -> NotificationEntry {
+        NotificationEntry(id: UUID().uuidString, text: text, source: "log", timestamp: Date())
+    }
+
     private func path(_ file: String) -> String {
         (PetLogStore.dir as NSString).appendingPathComponent(file)
     }
@@ -417,6 +421,65 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertTrue(warnings.contains { $0.file == "log.json" && $0.kind == "corrupt" })
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: warningsPath)), before,
                        "convergence must not alter content")
+    }
+
+    // MARK: - Acknowledge vs resolve (D99)
+
+    /// Acknowledging a poisoned (write-blocked) store must NOT clear its warning
+    /// or unblock writes — only resolve does. Otherwise ack creates a silent
+    /// write-disabled state.
+    func testAcknowledgeDoesNotClearOrUnblockPoisonedStore() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" })
+
+        model.acknowledgeLogRecoveryWarnings()
+
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" },
+                      "a poisoned store's warning must remain after ack (blocked status persists)")
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "ack must not unblock the store")
+        XCTAssertFalse(PetLogStore.save([entry("x")], file: "log.json"), "writes still refused after ack")
+    }
+
+    /// Resolve recovers a poisoned store: quarantine bytes are preserved, the
+    /// poison clears, writes resume, and a restart reads a clean store.
+    func testResolveRecoversPoisonedStoreAndPreservesQuarantine() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
+        let quarantineName = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .first { $0.hasPrefix("log.json.corrupt-") }
+        let quarantineBytes = try Data(contentsOf: URL(fileURLWithPath: path(quarantineName!)))
+
+        XCTAssertTrue(model.resolveLogStoreCorruption(file: "log.json"), "resolve must succeed with a quarantine present")
+
+        XCTAssertFalse(PetLogStore.isPoisoned("log.json"), "resolve clears the poison")
+        XCTAssertFalse(model.logRecoveryWarnings.contains { $0.file == "log.json" }, "resolve clears the warning")
+        XCTAssertTrue(PetLogStore.save([entry("fresh")], file: "log.json"), "writes resume after resolve")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path(quarantineName!))), quarantineBytes,
+                       "the quarantine evidence must be untouched by resolve")
+
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertFalse(restarted.logRecoveryWarnings.contains { $0.file == "log.json" }, "restart reads a clean store")
+    }
+
+    /// Resolve is refused when no quarantine copy exists (evidence not
+    /// preserved) — the corrupt bytes must not be overwritten blind.
+    func testResolveRefusedWhenQuarantineMissing() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: PetLogStore.dir)
+        _ = PetLogStore.loadOutcome(file: "log.json")
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: PetLogStore.dir)
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
+
+        let model = PetModel()
+        XCTAssertFalse(model.resolveLogStoreCorruption(file: "log.json"),
+                       "resolve must refuse when no quarantine copy preserved the original")
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "store stays fail-closed")
     }
 }
 

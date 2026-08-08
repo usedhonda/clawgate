@@ -1005,12 +1005,34 @@ final class PetModel: NSObject, ObservableObject {
     /// the durability-degraded flag is raised, so acknowledgement can't silently
     /// drop state ahead of disk.
     func acknowledgeLogRecoveryWarnings() {
-        if PetLogStore.saveRecoveryWarnings([]) {
-            logRecoveryWarnings = []
+        // A still-poisoned store is an ACTIVE write-blocked state, not merely
+        // "seen": keep its warning so the block stays visible (D99). Only
+        // resolveLogStoreCorruption() actually recovers such a store. Non-blocked
+        // warnings (recovered partial-drop, resolved permission issues) clear.
+        let remaining = logRecoveryWarnings.filter { PetLogStore.isPoisoned($0.file) }
+        if PetLogStore.saveRecoveryWarnings(remaining) {
+            logRecoveryWarnings = remaining
             recoveryWarningPersistenceDegraded = false
         } else {
             recoveryWarningPersistenceDegraded = true
         }
+    }
+
+    /// Explicit recover/start-fresh for a write-blocked (poisoned) store — the
+    /// action a UI "Resolve" control (Wave C) drives, kept separate from
+    /// acknowledgement (D99). Requires the corrupt original to be preserved in a
+    /// quarantine copy; on success the store is writable again and its warnings
+    /// clear. Returns whether recovery succeeded.
+    @discardableResult
+    func resolveLogStoreCorruption(file: String) -> Bool {
+        guard PetLogStore.resolveLogStoreCorruption(file: file) else { return false }
+        let remaining = logRecoveryWarnings.filter { $0.file != file }
+        if PetLogStore.saveRecoveryWarnings(remaining) {
+            logRecoveryWarnings = remaining
+        } else {
+            recoveryWarningPersistenceDegraded = true
+        }
+        return true
     }
 
     /// Acknowledges a SINGLE issue independently (identity = file + kind), so
@@ -2464,6 +2486,27 @@ enum PetLogStore {
     /// too (partial decode whose quarantine failed), so callers surface the
     /// visible status from this, not only from a `.corrupt` outcome.
     static func isPoisoned(_ file: String) -> Bool { poisonedFiles.contains(file) }
+
+    /// Resolves a poisoned store — the explicit "recover / start fresh" action,
+    /// distinct from merely acknowledging the warning (D99). Permitted ONLY once
+    /// a quarantine copy of the corrupt original exists (evidence preserved):
+    /// clears the poison and commits a fresh empty primary + backup so saves
+    /// resume. Refuses (returns false, staying fail-closed) when no quarantine
+    /// exists — the corrupt bytes must never be overwritten without a preserved
+    /// copy. Acknowledging without resolving leaves the store write-blocked.
+    @discardableResult
+    static func resolveLogStoreCorruption(file: String) -> Bool {
+        if productionAccessBlocked() { return false }
+        let hasQuarantine = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
+            .contains { $0.hasPrefix(file + ".corrupt-") }
+        guard hasQuarantine else { return false }
+        poisonedFiles.remove(file)
+        guard save([], file: file) else {
+            poisonedFiles.insert(file)  // fresh write failed — stay fail-closed
+            return false
+        }
+        return true
+    }
 
     /// Owner-only (0600): every persisted file is a copy of conversation text.
     private static let ownerOnly: [FileAttributeKey: Any] = [.posixPermissions: 0o600]
