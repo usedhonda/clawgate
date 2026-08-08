@@ -79,7 +79,7 @@ final class PetModelLifecyclePreflightTests: XCTestCase {
             coverageStart: nil,
             coverageEnd: nil,
             completeBeforeAnchor: true,
-            segments: []
+            segments: [PetLogRawSegment(id: "s0", capturedAt: nil, startSeconds: 0, endSeconds: 1, speaker: nil, text: "x")]
         )
     }
 }

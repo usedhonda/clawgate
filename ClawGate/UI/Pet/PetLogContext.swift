@@ -416,6 +416,16 @@ struct PetLogEntryMetadata: Codable, Equatable {
 /// How the parser must validate the model's inclusion claims against the sent
 /// segments (D2). Required — the caller always states the scope it dispatched
 /// under, so an omission can't silently fall back to a permissive default.
+/// Typed, body-free status for a Log dispatch that produced no answer to show
+/// (D3/D110-form). The client surfaces this instead of persisting a meaningless
+/// model body as a "ちー" reply. Carries only the correlation requestId.
+enum PetLogDispatchStatus: Equatable {
+    /// The envelope had no segments — refused before dispatch (fail-fast).
+    case emptyScopeRefused(requestId: String)
+    /// Segments were sent but the model kept none — "ログ不足".
+    case insufficientEvidence(requestId: String)
+}
+
 enum PetLogSelectionMode: Equatable {
     /// scopeOverride was set: the client sent an exact hard scope, so the model
     /// must include EVERY sent id in order — no subsetting.
@@ -457,6 +467,10 @@ enum PetLogParseError: Error, Equatable {
     // D2 — scope-mode violations.
     case explicitScopeRequiresExactInclusion
     case notContiguousBackwardSuffix
+    // D3 — usable segments were sent but the model kept none: a typed
+    // "insufficient evidence" outcome (structural, not a text match), which the
+    // client surfaces as a fixed status rather than persisting the model body.
+    case insufficientEvidence
     // D52 — response bounds.
     case answerTooLong
     case tooManyReasonCodes
@@ -625,6 +639,13 @@ enum PetLogResultParser {
             // A strict subset needs high confidence...
             if included != allowedSegmentIds && decision.boundaryConfidence != .high {
                 return .failure(.subsetRequiresHighBoundaryConfidence)
+            }
+            // D3: usable segments were sent but the model kept none — a typed
+            // insufficient-evidence outcome (the client shows a fixed status).
+            // (An empty-segments query is fail-fast client-side and never gets
+            // here; empty allowed + empty included stays a plain success.)
+            if !allowedSegmentIds.isEmpty && included.isEmpty {
+                return .failure(.insufficientEvidence)
             }
             // ...and a non-empty inclusion must be a contiguous suffix that
             // includes the newest sent segment (only a leading contiguous run

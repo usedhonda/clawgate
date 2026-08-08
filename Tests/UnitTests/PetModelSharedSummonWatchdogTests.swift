@@ -46,7 +46,7 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
         PetLogQueryEnvelope(
             requestId: UUID().uuidString, actionId: "slot-0", instruction: instruction,
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
-            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: [PetLogRawSegment(id: "s0", capturedAt: nil, startSeconds: 0, endSeconds: 1, speaker: nil, text: "x")]
         )
     }
 

@@ -125,6 +125,11 @@ final class PetModel: NSObject, ObservableObject {
     /// the user acknowledges, and exposed as a Published status a future UI
     /// (rendering is Wave C) can bind to — NEVER injected into the conversation
     /// as a "ちー" (source == "log") entry.
+    /// Typed, body-free Log dispatch status (D3/D110-form): surfaced instead of
+    /// persisting a meaningless model body into the conversation. `nil` when
+    /// there is nothing to show. Wave C renders it; it is never mixed into
+    /// `logReplies`.
+    @Published var logDispatchStatus: PetLogDispatchStatus?
     @Published var logRecoveryWarnings: [PetLogRecoveryWarning] = []
     /// True when the durable warning store itself could not be trusted — either
     /// its persisted state was unreadable at load (both primary and backup) or a
@@ -1959,6 +1964,14 @@ final class PetModel: NSObject, ObservableObject {
                 segmentCount: envelope.segments.count
             )
         )
+        // D3 fail-fast: an empty-scope envelope (e.g. a stale explicit scene
+        // selection) has nothing to summarize — refuse before building/dispatch
+        // as a TYPED status, never a conversation entry or a fake watchdog wait.
+        guard !envelope.segments.isEmpty else {
+            logThreadPaneOpen = true
+            logDispatchStatus = .emptyScopeRefused(requestId: envelope.requestId)
+            return
+        }
         // Admission control comes first, before any user-visible entry, save,
         // or watchdog timer is created:
         //  - Busy: a previous Chi summon (scene naming or anything else) is
@@ -2238,13 +2251,32 @@ final class PetModel: NSObject, ObservableObject {
                                 dispatch: dispatch
                             )
                         )
+                    case .failure(.insufficientEvidence):
+                        // D3: segments were sent but the model kept none. Surface
+                        // a fixed typed status — never persist the model body as
+                        // a "ちー" reply. No conversation entry is created.
+                        logDispatchStatus = .insufficientEvidence(requestId: pending.requestId)
+                        pendingLogRequest = nil
+                        return
                     case .failure:
                         // Fail closed: never show a raw/garbled model reply as if
-                        // it were the answer.
+                        // it were the answer. D72: retain the request correlation
+                        // metadata (contextDecision nil) so a malformed reply is
+                        // still traceable to its request.
+                        let dispatch = pending.dispatch.map {
+                            PetLogDispatchMetadata(
+                                runId: $0.runId, resolvedModel: $0.resolvedModel,
+                                resolvedThinking: $0.resolvedThinking, degraded: $0.degraded,
+                                fallbackReason: $0.fallbackReason)
+                        }
                         entry = NotificationEntry(
                             id: UUID().uuidString,
                             text: "Error: model response did not match the expected structured format",
-                            source: source, timestamp: Date()
+                            source: source, timestamp: Date(),
+                            logMetadata: pending.entryMetadata(
+                                contextDecision: nil,
+                                completeBeforeAnchor: pending.completeBeforeAnchor,
+                                dispatch: dispatch)
                         )
                     }
                 } else {

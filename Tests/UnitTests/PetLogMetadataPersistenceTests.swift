@@ -26,6 +26,8 @@ final class PetLogMetadataPersistenceTests: XCTestCase {
         super.tearDown()
     }
 
+    private static let explicitSegmentIds = ["s0"]
+
     private func explicitEnvelope(requestId: String) -> PetLogQueryEnvelope {
         PetLogQueryEnvelope(
             requestId: requestId, actionId: "slot-2", instruction: "質問まとめ",
@@ -33,7 +35,10 @@ final class PetLogMetadataPersistenceTests: XCTestCase {
             anchorTimestamp: Date(timeIntervalSince1970: 1_700_000_400),
             scopeOverride: ["scene-1785822940"],
             coverageStart: nil, coverageEnd: nil,
-            completeBeforeAnchor: true, segments: []
+            completeBeforeAnchor: true,
+            segments: Self.explicitSegmentIds.map {
+                PetLogRawSegment(id: $0, capturedAt: nil, startSeconds: 0, endSeconds: 1, speaker: nil, text: "x")
+            }
         )
     }
 
@@ -55,7 +60,7 @@ final class PetLogMetadataPersistenceTests: XCTestCase {
         }
         XCTAssertEqual(meta.requestId, requestId)
         XCTAssertEqual(meta.actionId, "slot-2")
-        XCTAssertEqual(meta.segmentCount, 0)
+        XCTAssertEqual(meta.segmentCount, 1)
         XCTAssertEqual(meta.scopeOverride, ["scene-1785822940"])
         XCTAssertEqual(meta.selectionMode, "explicit")
         XCTAssertEqual(meta.selectedDay, selectedDay)
@@ -66,7 +71,7 @@ final class PetLogMetadataPersistenceTests: XCTestCase {
         XCTAssertEqual(meta.completeBeforeAnchor, true)
         XCTAssertEqual(meta.policyVersion, PetLogPromptBuilder.policyVersion)
         XCTAssertEqual(meta.sourceFingerprint,
-                       PetLogSourceFingerprint.make(policyVersion: PetLogPromptBuilder.policyVersion, segmentIds: []))
+                       PetLogSourceFingerprint.make(policyVersion: PetLogPromptBuilder.policyVersion, segmentIds: Self.explicitSegmentIds))
         XCTAssertFalse(meta.isUncertain, "a complete request-side entry is not 'uncertain'")
     }
 
@@ -80,8 +85,9 @@ final class PetLogMetadataPersistenceTests: XCTestCase {
         let selectedDay = Date(timeIntervalSince1970: 1_699_920_000)
         model.sendLogInstruction(envelope: explicitEnvelope(requestId: requestId), selectedDay: selectedDay)
 
-        // Deliver a well-formed structured reply for the (empty-segment) request.
-        let reply = PetModelDisconnectRoutingTests.structuredLogReplyJSON(answer: "本文")
+        // Deliver a well-formed structured reply that includes the sent segment
+        // exactly (explicit scope requires exact-all inclusion).
+        let reply = fullInclusionReplyJSON(answer: "本文", ids: Self.explicitSegmentIds)
         model.addSummonResult(text: reply, source: "log", parseAsStructured: true)
 
         guard let answerEntry = model.logReplies.last(where: { $0.source == "log" }) else {
@@ -94,7 +100,7 @@ final class PetLogMetadataPersistenceTests: XCTestCase {
         // Correlation pairs the answer back to the same request as the prompt.
         XCTAssertEqual(meta.requestId, requestId)
         XCTAssertEqual(meta.actionId, "slot-2")
-        XCTAssertEqual(meta.segmentCount, 0)
+        XCTAssertEqual(meta.segmentCount, 1)
         XCTAssertEqual(meta.scopeOverride, ["scene-1785822940"])
         XCTAssertEqual(meta.selectionMode, "explicit")
         XCTAssertEqual(meta.selectedDay, selectedDay)

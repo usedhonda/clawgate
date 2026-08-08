@@ -60,6 +60,20 @@ The universal prefix instructs the model as follows:
   do not invent items — return an empty `includedSegmentIds` and an `answer`
   that only states the log is insufficient.
 
+### Insufficient evidence & failure (D3/D72)
+
+- **Insufficient (D3)**: in automatic scope, if segments were sent but the model
+  kept none, the parser returns a typed `insufficientEvidence` outcome
+  (structural — no text match). The client surfaces a fixed `insufficientEvidence`
+  status and NEVER persists the model body as a reply. In explicit scope the same
+  empty inclusion is a scope violation, not insufficient.
+- **Fail-fast (D3)**: an empty-segments envelope is refused before build/dispatch
+  as a typed `emptyScopeRefused` status — no conversation entry, no slot claim.
+- **Malformed reply (D72)**: a parse failure still persists an entry carrying the
+  request correlation metadata (requestId, sourceFingerprint, etc.) with
+  `contextDecision` nil — a malformed reply stays traceable, without a fabricated
+  model verdict.
+
 ### Parser acceptance (D2/D41/D52)
 
 The parser validates a reply against the exact ids sent, under a REQUIRED
@@ -110,14 +124,6 @@ end.
 
 ## Target (not yet shipped — upcoming A2 commits)
 
-The following are planned for the remaining Wave A2 commits and are NOT yet the
-enforced contract. Each will be promoted into the Normative section in the
-commit that ships it.
-
-- **insufficient-evidence outcome (D3)**: parser returns a typed
-  insufficientEvidence outcome (structural, no text compare); the client maps it
-  to a fixed "ログ不足" status and never persists the model body as a reply.
-- **parser-failure metadata retention (D72)**: a malformed reply keeps the
-  request correlation metadata (contextDecision nil) instead of dropping it.
-- **client fail-fast (D3)**: an empty-segments envelope is refused before
-  dispatch as a typed status, never a conversation entry.
+All Wave A2 contract behavior is now shipped and Normative above. Later Waves
+(status-rendering UI, cross-day retrieval, etc.) are tracked in the plan and
+will be added here when they ship.

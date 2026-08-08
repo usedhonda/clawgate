@@ -117,7 +117,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         let envelope = PetLogQueryEnvelope(
             requestId: UUID().uuidString, actionId: "slot-0", instruction: "質問まとめ",
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
-            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: [PetLogRawSegment(id: "s0", capturedAt: nil, startSeconds: 0, endSeconds: 1, speaker: nil, text: "x")]
         )
         model.sendLogInstruction(envelope: envelope)
         XCTAssertTrue(model.logAwaitingReply)
@@ -145,7 +145,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         let envelope = PetLogQueryEnvelope(
             requestId: UUID().uuidString, actionId: "slot-1", instruction: "質問まとめ",
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
-            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: [PetLogRawSegment(id: "s0", capturedAt: nil, startSeconds: 0, endSeconds: 1, speaker: nil, text: "x")]
         )
         model.sendLogInstruction(envelope: envelope)
 
@@ -250,8 +250,13 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         XCTAssertEqual(logEntries.count, 1)
         XCTAssertTrue(logEntries.first?.text.contains("did not match") ?? false,
                       "must surface the fail-closed marker, not the raw garbled reply")
-        XCTAssertNil(logEntries.first?.logMetadata,
-                     "a parse failure must not carry fabricated model metadata")
+        // D72: a parse FAILURE retains the request correlation metadata (so a
+        // malformed reply is still traceable) — but never a fabricated model
+        // verdict (contextDecision stays nil).
+        XCTAssertNotNil(logEntries.first?.logMetadata,
+                        "a parse failure must retain request correlation metadata (D72)")
+        XCTAssertNil(logEntries.first?.logMetadata?.contextDecision,
+                     "a parse failure must not carry a fabricated model verdict")
     }
 
     /// A structured "log" reply that arrives with NO pending request to
@@ -377,7 +382,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         PetLogQueryEnvelope(
             requestId: UUID().uuidString, actionId: "slot-0", instruction: instruction,
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
-            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: []
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true, segments: [PetLogRawSegment(id: "s0", capturedAt: nil, startSeconds: 0, endSeconds: 1, speaker: nil, text: "x")]
         )
     }
 
