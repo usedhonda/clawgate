@@ -975,6 +975,14 @@ final class PetModel: NSObject, ObservableObject {
         let loaded = PetLogStore.loadRecoveryWarnings()
         logRecoveryWarnings = loaded.warnings
         recoveryWarningPersistenceDegraded = loaded.degraded
+        if loaded.degraded {
+            // Both copies of the warning store were unreadable. A clean empty
+            // would let the very next launch (which reads the rewritten valid
+            // store) erase the evidence — so commit a durable synthetic marker
+            // that survives restart until the user acknowledges it.
+            upsertRecoveryWarning(file: PetLogStore.recoveryWarningsFile,
+                                  kind: "warningStoreCorrupt", droppedCount: 0, quarantine: nil)
+        }
         notificationHistory = restorePersistedLog(file: "notifications.json")
         summonResults = restorePersistedLog(file: "summon.json")
         logReplies = restorePersistedLog(file: "log.json")
@@ -2456,16 +2464,50 @@ enum PetLogStore {
     /// Process-global — reset it in setUp/tearDown under `testIsolationSemaphore`.
     static var applyPermissionsHookForTesting: ((String) -> Bool)?
 
-    /// Applies POSIX permissions, honoring the test hook. Returns whether the
-    /// permission was set — a failure is surfaced (fail-visible), never swallowed.
-    private static func applyPermissions(_ attrs: [FileAttributeKey: Any], path: String) -> Bool {
-        if let hook = applyPermissionsHookForTesting { return hook(path) }
+    /// Applies POSIX permissions to `realPath`, but keys the test hook on
+    /// `hookKey` — so an atomic write can chmod a temp file while a test still
+    /// injects failure by the file's FINAL name. Returns whether it was set; a
+    /// failure is surfaced (fail-visible), never swallowed.
+    private static func applyPermissions(_ attrs: [FileAttributeKey: Any], realPath: String, hookKey: String) -> Bool {
+        if let hook = applyPermissionsHookForTesting { return hook(hookKey) }
         do {
-            try FileManager.default.setAttributes(attrs, ofItemAtPath: path)
+            try FileManager.default.setAttributes(attrs, ofItemAtPath: realPath)
             return true
         } catch {
             return false
         }
+    }
+
+    private static func applyPermissions(_ attrs: [FileAttributeKey: Any], path: String) -> Bool {
+        applyPermissions(attrs, realPath: path, hookKey: path)
+    }
+
+    /// Atomic, owner-only durable write: writes to a sibling temp file, sets
+    /// 0600 on it, then atomically renames it onto `path`. Permissions are
+    /// established BEFORE the file is visible at its final name, so there is no
+    /// window where the final path exists at the wrong mode — closing the
+    /// write-succeeds-then-chmod-fails partial-commit gap. On any failure the
+    /// temp is removed and `path` is left untouched. `hookKey` (the final name)
+    /// lets a test inject a chmod failure.
+    private static func atomicWrite(_ data: Data, to path: String, hookKey: String) -> Bool {
+        let tmp = path + ".tmp-\(UUID().uuidString)"
+        do {
+            try data.write(to: URL(fileURLWithPath: tmp))
+        } catch {
+            return false
+        }
+        guard applyPermissions(ownerOnly, realPath: tmp, hookKey: hookKey) else {
+            try? FileManager.default.removeItem(atPath: tmp)
+            return false
+        }
+        // rename(2) atomically replaces the destination on the same filesystem
+        // (same dir), handling both an existing and a non-existent target.
+        let renamed = path.withCString { cPath in tmp.withCString { cTmp in rename(cTmp, cPath) } }
+        if renamed != 0 {
+            try? FileManager.default.removeItem(atPath: tmp)
+            return false
+        }
+        return true
     }
 
     /// The three ways a load can end. `success` carries `dropped` — the count of
@@ -2502,28 +2544,18 @@ enum PetLogStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(entries) else { return false }
-        do {
-            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-        } catch {
-            return false
-        }
-        guard applyPermissions(ownerOnly, path: path) else {
-            logger.error("PetLogStore primary permission set failed for \(file, privacy: .public); reporting save failure")
+        // Atomic (temp+chmod+rename): the file is never visible at 0644 or
+        // half-written. A write/permission failure is reported, not swallowed.
+        guard atomicWrite(data, to: path, hookKey: path) else {
+            logger.error("PetLogStore primary write failed for \(file, privacy: .public); reporting save failure")
             return false
         }
         // Maintain a last-known-good backup: what we just wrote came from live
         // in-memory state, so it is by definition decodable and good. A backup
-        // write failure is NOT swallowed — the safety net is gone, so the save
-        // is reported failed (fail-visible) even though the primary is on disk.
-        let bakPath = path + ".bak"
-        do {
-            try data.write(to: URL(fileURLWithPath: bakPath), options: .atomic)
-        } catch {
+        // failure is NOT swallowed — the safety net is gone, so the save is
+        // reported failed (fail-visible) even though the primary is on disk.
+        guard atomicWrite(data, to: path + ".bak", hookKey: path + ".bak") else {
             logger.error("PetLogStore backup write failed for \(file, privacy: .public); reporting save failure (primary written)")
-            return false
-        }
-        guard applyPermissions(ownerOnly, path: bakPath) else {
-            logger.error("PetLogStore backup permission set failed for \(file, privacy: .public); reporting save failure")
             return false
         }
         return true
@@ -2663,7 +2695,7 @@ enum PetLogStore {
 
     // MARK: Durable recovery warnings (D39)
 
-    private static let recoveryWarningsFile = "recovery-warnings.json"
+    static let recoveryWarningsFile = "recovery-warnings.json"
 
     /// Loads the durable recovery warnings persisted from prior launches, with
     /// the same last-known-good `.bak` resilience as the main store. `degraded`
@@ -2674,6 +2706,9 @@ enum PetLogStore {
     /// poison/quarantine machinery onto itself.
     static func loadRecoveryWarnings() -> (warnings: [PetLogRecoveryWarning], degraded: Bool) {
         if productionAccessBlocked() { return ([], false) }
+        // Tighten the warnings store's own perms (dir 0700, primary/.bak 0600)
+        // before reading — best-effort, it must not touch content.
+        _ = convergePermissionsOnLoad(file: recoveryWarningsFile)
         let path = (dir as NSString).appendingPathComponent(recoveryWarningsFile)
         let bakPath = path + ".bak"
         if let warnings = decodeRecoveryWarnings(path) { return (warnings, false) }
@@ -2714,19 +2749,11 @@ enum PetLogStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(warnings) else { return false }
-        do {
-            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
-        } catch {
-            return false
-        }
-        guard applyPermissions(ownerOnly, path: path) else { return false }
-        let bakPath = path + ".bak"
-        do {
-            try data.write(to: URL(fileURLWithPath: bakPath), options: .atomic)
-        } catch {
-            return false
-        }
-        return applyPermissions(ownerOnly, path: bakPath)
+        // Atomic primary + backup, same temp+chmod+rename discipline as the main
+        // store: acknowledgement can't leave disk at [] while memory keeps the
+        // warnings (the ack partial-commit window is closed).
+        guard atomicWrite(data, to: path, hookKey: path) else { return false }
+        return atomicWrite(data, to: path + ".bak", hookKey: path + ".bak")
     }
 }
 

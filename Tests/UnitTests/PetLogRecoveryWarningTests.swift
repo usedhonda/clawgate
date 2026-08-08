@@ -281,4 +281,99 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertFalse(kinds.contains("insecurePermissions"), "the acknowledged issue is cleared")
         XCTAssertTrue(kinds.contains("partialDrop"), "the other issue on the same file remains")
     }
+
+    // MARK: - Both-copies-corrupt survives restart (E)
+
+    /// When both copies of the warnings store are corrupt, the loss must be
+    /// committed as a durable synthetic warning that survives a RESTART (not
+    /// just this session) until the user acknowledges it — a clean empty on the
+    /// next launch must not erase the evidence.
+    func testBothCopiesCorruptWarningSurvivesRestartUntilAck() throws {
+        // Seed a valid warnings store, then clean the source log so the only
+        // way a warning can reappear post-restart is the persisted store.
+        try partialDropFixture()
+        let seed = PetModel()
+        seed.restorePersistedLogsForTesting()
+        seed.addSummonResult(text: "clean", source: "log", parseAsStructured: false)  // clears log.json drop
+
+        // Corrupt BOTH copies of the warnings store.
+        try Data("{ x".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json")))
+        try Data("{ x".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json.bak")))
+
+        // Restore detects the double corruption and commits a synthetic marker.
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(model.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "warningStoreCorrupt" })
+
+        // RESTART: a fresh model reading the rewritten (now valid) store must
+        // still see the synthetic warning — the evidence survived the restart.
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertTrue(restarted.logRecoveryWarnings.contains {
+            $0.file == PetLogStore.recoveryWarningsFile && $0.kind == "warningStoreCorrupt" },
+            "the durable warning must survive a restart, not vanish on the next clean read")
+
+        // Only an explicit acknowledge clears it, durably across another restart.
+        restarted.acknowledgeLogRecoveryWarnings()
+        let afterAck = PetModel()
+        afterAck.restorePersistedLogsForTesting()
+        XCTAssertFalse(afterAck.logRecoveryWarnings.contains {
+            $0.kind == "warningStoreCorrupt" }, "acknowledged marker must not return")
+    }
+
+    /// rename atomicity: an acknowledge whose chmod fails must NOT leave disk at
+    /// [] — the temp file is discarded, the previous persisted warnings survive,
+    /// and a restart still shows them.
+    func testAcknowledgeChmodFailureLeavesPriorWarningsOnDisk() throws {
+        try partialDropFixture()
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" })
+
+        // Fail the chmod during ack's warnings write — atomic write must roll
+        // back (never rename the empty temp onto the live warnings file).
+        let warningsPath = path("recovery-warnings.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == warningsPath ? false : true }
+        model.acknowledgeLogRecoveryWarnings()
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        // A restart still sees the original warning — disk was never cleared.
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertTrue(restarted.logRecoveryWarnings.contains { $0.file == "log.json" },
+                      "a failed ack must not have written an empty set to disk")
+    }
+
+    /// The warnings store's own perms are converged on load: a pre-existing
+    /// 0644 recovery-warnings.json (older version) is tightened to 0600 at
+    /// restore, without touching content.
+    func testWarningsStoreFileConvergesToOwnerOnlyOnLoad() throws {
+        // Hand-write a valid warnings file at a loose 0644.
+        let warning = PetLogRecoveryWarning(file: "log.json", kind: "corrupt",
+                                            droppedCount: 0, quarantine: nil, detectedAt: Date())
+        let data = try JSONEncoder.iso.encode([warning])
+        let warningsPath = path("recovery-warnings.json")
+        try data.write(to: URL(fileURLWithPath: warningsPath))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: warningsPath)
+        let before = try Data(contentsOf: URL(fileURLWithPath: warningsPath))
+
+        // loadRecoveryWarnings converges perms before reading (and does NOT
+        // re-save), so this isolates the on-load convergence from the later
+        // save() in a full restore.
+        let (warnings, degraded) = PetLogStore.loadRecoveryWarnings()
+
+        let mode = (try FileManager.default.attributesOfItem(atPath: warningsPath)[.posixPermissions] as? NSNumber)?.int16Value
+        XCTAssertEqual(mode, 0o600, "an existing 0644 warnings file must converge to 0600 on load")
+        XCTAssertFalse(degraded)
+        XCTAssertTrue(warnings.contains { $0.file == "log.json" && $0.kind == "corrupt" })
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: warningsPath)), before,
+                       "convergence must not alter content")
+    }
+}
+
+private extension JSONEncoder {
+    static var iso: JSONEncoder {
+        let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; return e
+    }
 }
