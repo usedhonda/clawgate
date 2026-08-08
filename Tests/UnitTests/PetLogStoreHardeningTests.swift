@@ -195,21 +195,43 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "no usable backup means fail-closed")
     }
 
-    /// D9 gap 3: a `.bak` write failure is not swallowed — the save is reported
-    /// failed (fail-visible), while the primary write still lands.
-    func testBackupWriteFailureIsReportedAsSaveFailure() throws {
-        // Pre-create a DIRECTORY where the `.bak` file would go: the primary
-        // atomic write succeeds, the backup atomic rename onto a directory fails.
+    /// Two-copy ordering (F): the backup is written FIRST and the primary is the
+    /// commit point, so a `.bak` failure leaves the PRIMARY untouched (old
+    /// state), not half-committed. The save is reported failed.
+    func testBackupWriteFailureLeavesPrimaryUntouched() throws {
+        // Seed an existing "old" primary directly (no .bak).
+        try JSONEncoder.iso.encode([entry("old")]).write(to: URL(fileURLWithPath: path("log.json")))
+        let before = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+        // Make the .bak target a directory so the backup rename fails first.
         try FileManager.default.createDirectory(atPath: path("log.json.bak"), withIntermediateDirectories: true)
 
-        let saved = PetLogStore.save([entry("fresh")], file: "log.json")
-        XCTAssertFalse(saved, "a backup write failure must surface as save failure")
+        XCTAssertFalse(PetLogStore.save([entry("fresh")], file: "log.json"),
+                       "a backup write failure must surface as save failure")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path("log.json"))), before,
+                       "the primary must be left untouched (old state) when the backup fails first")
+    }
 
-        // ...but the primary is on disk with the new content.
-        let primary = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        let decoded = try decoder.decode([NotificationEntry].self, from: primary)
-        XCTAssertEqual(decoded.map(\.text), ["fresh"], "the primary write must still have landed")
+    /// Two-copy ordering (F): a primary chmod/rename failure (after the backup
+    /// was written) leaves the OLD primary in place, so a reload returns the old
+    /// state — the primary rename is the only commit point.
+    func testPrimaryFailureLeavesOldPrimaryForReload() throws {
+        // Seed old state via a clean save (primary + .bak both "old").
+        XCTAssertTrue(PetLogStore.save([entry("old")], file: "log.json"))
+        let before = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+
+        // Fail only the primary; the backup write (first) succeeds.
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+        XCTAssertFalse(PetLogStore.save([entry("new")], file: "log.json"))
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path("log.json"))), before,
+                       "primary bytes must be unchanged (old) after a primary-write failure")
+        // A reload returns the old primary content.
+        guard case let .success(entries, _, _) = PetLogStore.loadOutcome(file: "log.json") else {
+            return XCTFail("expected success reading the old primary")
+        }
+        XCTAssertEqual(entries.map(\.text), ["old"], "reload must return the old primary state")
     }
 
     /// D9 gap 3: primary, `.bak`, and quarantine are all owner-only (0600).

@@ -345,6 +345,28 @@ final class PetLogRecoveryWarningTests: XCTestCase {
                       "a failed ack must not have written an empty set to disk")
     }
 
+    /// Two-copy ordering (F): an ack whose BACKUP write fails leaves the primary
+    /// warnings file untouched (backup is written first, primary is the commit
+    /// point) — so a restart still shows the warning.
+    func testAcknowledgeBackupFailureLeavesWarningOnDiskAcrossRestart() throws {
+        try partialDropFixture()
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" })
+
+        // Fail the .bak write during ack; with backup-first ordering the primary
+        // (still holding the warning) is never reached/overwritten.
+        let warningsBak = path("recovery-warnings.json.bak")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == warningsBak ? false : true }
+        model.acknowledgeLogRecoveryWarnings()
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertTrue(restarted.logRecoveryWarnings.contains { $0.file == "log.json" },
+                      "an ack backup failure must leave the primary warning intact across a restart")
+    }
+
     /// The warnings store's own perms are converged on load: a pre-existing
     /// 0644 recovery-warnings.json (older version) is tightened to 0600 at
     /// restore, without touching content.

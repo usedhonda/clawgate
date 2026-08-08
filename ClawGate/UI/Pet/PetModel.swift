@@ -2544,18 +2544,17 @@ enum PetLogStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(entries) else { return false }
-        // Atomic (temp+chmod+rename): the file is never visible at 0644 or
-        // half-written. A write/permission failure is reported, not swallowed.
-        guard atomicWrite(data, to: path, hookKey: path) else {
-            logger.error("PetLogStore primary write failed for \(file, privacy: .public); reporting save failure")
+        // Two-copy commit ordering: write the BACKUP first, then make the
+        // PRIMARY rename the single commit point. If the backup fails, the
+        // primary is left untouched (old visible state preserved); if the
+        // primary fails, load still prefers the old primary. Each atomicWrite is
+        // temp+chmod+rename, so no file is ever visible at 0644 or half-written.
+        guard atomicWrite(data, to: path + ".bak", hookKey: path + ".bak") else {
+            logger.error("PetLogStore backup write failed for \(file, privacy: .public); primary left untouched, reporting save failure")
             return false
         }
-        // Maintain a last-known-good backup: what we just wrote came from live
-        // in-memory state, so it is by definition decodable and good. A backup
-        // failure is NOT swallowed — the safety net is gone, so the save is
-        // reported failed (fail-visible) even though the primary is on disk.
-        guard atomicWrite(data, to: path + ".bak", hookKey: path + ".bak") else {
-            logger.error("PetLogStore backup write failed for \(file, privacy: .public); reporting save failure (primary written)")
+        guard atomicWrite(data, to: path, hookKey: path) else {
+            logger.error("PetLogStore primary write failed for \(file, privacy: .public); reporting save failure")
             return false
         }
         return true
@@ -2749,11 +2748,12 @@ enum PetLogStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(warnings) else { return false }
-        // Atomic primary + backup, same temp+chmod+rename discipline as the main
-        // store: acknowledgement can't leave disk at [] while memory keeps the
-        // warnings (the ack partial-commit window is closed).
-        guard atomicWrite(data, to: path, hookKey: path) else { return false }
-        return atomicWrite(data, to: path + ".bak", hookKey: path + ".bak")
+        // Backup first, primary as the commit point — same two-copy ordering as
+        // the main store. An acknowledge whose backup or primary write fails
+        // leaves the old primary intact, so a restart still reads the prior
+        // warnings (durable-until-ack survives a partial write).
+        guard atomicWrite(data, to: path + ".bak", hookKey: path + ".bak") else { return false }
+        return atomicWrite(data, to: path, hookKey: path)
     }
 }
 
