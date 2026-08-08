@@ -94,4 +94,40 @@ final class PetLogStoreDefaultIsolationTests: XCTestCase {
         let after = try? Data(contentsOf: URL(fileURLWithPath: realLog))
         XCTAssertEqual(before, after, "real production bytes must be untouched")
     }
+
+    /// D97: the runtime guard compares RESOLVED targets, so a trailing slash, a
+    /// `..` segment, or a symlink alias that all point at the production dir are
+    /// each refused for save / load / chmod, with real bytes untouched.
+    func testRuntimeBlocksProductionDirPathVariants() throws {
+        PetLogStore.testIsolationSemaphore.wait()
+        let saved = PetLogStore.dir
+        let production = NSString("~/.clawgate/logs").expandingTildeInPath
+        let symlink = NSTemporaryDirectory() + "clawgate-prod-alias-\(UUID().uuidString)"
+        try? FileManager.default.createSymbolicLink(atPath: symlink, withDestinationPath: production)
+        defer {
+            try? FileManager.default.removeItem(atPath: symlink)
+            PetLogStore.dir = saved  // petlog-test-dir-ok
+            PetLogStore.testIsolationSemaphore.signal()
+        }
+        let realLog = (production as NSString).appendingPathComponent("log.json")
+        let before = try? Data(contentsOf: URL(fileURLWithPath: realLog))
+
+        let variants: [(String, String)] = [
+            ("trailing slash", production + "/"),
+            ("dot-dot", production + "/../logs"),
+            ("symlink alias", symlink),
+        ]
+        for (label, variant) in variants {
+            PetLogStore.dir = variant  // petlog-test-dir-ok
+            XCTAssertFalse(PetLogStore.save([NotificationEntry(id: "x", text: "no", source: "log", timestamp: Date())], file: "log.json"),
+                           "\(label): save must be refused")
+            if case .missing = PetLogStore.loadOutcome(file: "log.json") {} else {
+                XCTFail("\(label): load must be refused (missing)")
+            }
+            XCTAssertTrue(PetLogStore.convergePermissionsOnLoad(file: "log.json"),
+                          "\(label): chmod convergence must be a blocked no-op")
+            let after = try? Data(contentsOf: URL(fileURLWithPath: realLog))
+            XCTAssertEqual(before, after, "\(label): real production bytes must be untouched")
+        }
+    }
 }

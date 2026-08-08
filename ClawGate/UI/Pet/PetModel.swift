@@ -2417,8 +2417,21 @@ enum PetLogStore {
     /// production data structurally untouchable from a test even if a case
     /// assigns `dir` to the real path through an indirection the source scan
     /// can't see. Never true in the shipping app.
+    ///
+    /// Comparison is by RESOLVED TARGET, not string equality (D97): a trailing
+    /// slash, a `..` segment, or a symlink alias all normalize to the same
+    /// canonical path, so none of them can slip past the guard onto real data.
     static func productionAccessBlocked() -> Bool {
-        isUnderXCTest && dir == productionDir
+        isUnderXCTest && resolvedTarget(dir) == resolvedTarget(productionDir)
+    }
+
+    /// Canonical target of a path for same-target comparison: symlinks resolved
+    /// and `.`/`..`/trailing-slash normalized. For a non-existent leaf (the dir
+    /// may not exist yet) `resolvingSymlinksInPath` still resolves the existing
+    /// ancestor components, so a symlinked PARENT is caught too; `standardized`
+    /// then folds `..`/`.`/trailing slash lexically.
+    private static func resolvedTarget(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
     }
 
     /// internal (not private): test seam. `dir` is a process-global static,
