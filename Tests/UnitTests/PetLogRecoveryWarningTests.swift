@@ -92,18 +92,19 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertTrue(afterAck.logRecoveryWarnings.isEmpty, "acknowledged warnings must not come back")
     }
 
-    /// Whole-file corruption surfaces through the same durable warning mechanism.
+    /// Whole-file (unrecoverable) corruption surfaces as a writeBlocked warning
+    /// carrying the incident's quarantine reference (H).
     func testCorruptFileSurfacesDurableWarning() throws {
         try Data("{ not json".utf8).write(to: URL(fileURLWithPath: path("summon.json")))
 
         let model = PetModel()
         model.restorePersistedLogsForTesting()
 
-        guard let warning = model.logRecoveryWarnings.first(where: { $0.file == "summon.json" }) else {
-            return XCTFail("a corrupt file must raise a recovery warning")
+        guard let warning = model.logRecoveryWarnings.first(where: { $0.file == "summon.json" && $0.kind == "writeBlocked" }) else {
+            return XCTFail("a poisoned corrupt file must raise a writeBlocked warning")
         }
-        XCTAssertEqual(warning.kind, "corrupt")
-        XCTAssertNotNil(warning.quarantine)
+        XCTAssertNotNil(warning.quarantine, "the writeBlocked warning must reference the quarantine copy")
+        XCTAssertTrue(PetLogStore.isPoisoned("summon.json"))
     }
 
     /// A load-time permission convergence failure surfaces as a durable security
@@ -274,8 +275,8 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertEqual(kinds.count, 2, "both issues are distinct and coexist")
     }
 
-    /// A permission failure AND whole-file corruption on the same file also
-    /// coexist as distinct issues.
+    /// A permission failure AND an unrecoverable corruption (writeBlocked) on the
+    /// same file coexist as distinct issues.
     func testChmodFailurePlusCorruptKeepsBothIssues() throws {
         try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
         let primary = path("log.json")
@@ -286,8 +287,8 @@ final class PetLogRecoveryWarningTests: XCTestCase {
 
         let kinds = Set(model.logRecoveryWarnings.filter { $0.file == "log.json" }.map(\.kind))
         XCTAssertTrue(kinds.contains("insecurePermissions"))
-        XCTAssertTrue(kinds.contains("corrupt"))
-        XCTAssertEqual(kinds.count, 2, "permission + corrupt issues coexist, neither erased")
+        XCTAssertTrue(kinds.contains("writeBlocked"))
+        XCTAssertEqual(kinds.count, 2, "permission + writeBlocked issues coexist, neither erased")
     }
 
     /// A single issue can be acknowledged independently without dropping a still-
@@ -503,19 +504,67 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "store stays fail-closed")
     }
 
-    /// Per-issue acknowledge must ALSO refuse to clear a poisoned store's
-    /// warning — otherwise the single-issue API reintroduces the silent
-    /// write-disabled state the bulk ack guards against (D99).
-    func testPerIssueAcknowledgeRefusesPoisonedStore() throws {
+    /// H cross-case: a poisoned file carrying BOTH writeBlocked and an
+    /// informational kind — the informational kind is individually ackable while
+    /// writeBlocked is refused and stays visible. (Unrecoverable corruption plus
+    /// a chmod failure gives exactly this pair: writeBlocked + insecurePermissions.)
+    func testWriteBlockedRefusedButCoexistingKindAckable() throws {
         try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
         let model = PetModel()
         model.restorePersistedLogsForTesting()
+        PetLogStore.applyPermissionsHookForTesting = nil
         XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
 
-        XCTAssertFalse(model.acknowledgeLogRecoveryWarning(file: "log.json", kind: "corrupt"),
-                       "per-issue ack must refuse a poisoned store")
-        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" && $0.kind == "corrupt" },
-                      "the blocked-status warning must remain visible")
+        let kinds0 = Set(model.logRecoveryWarnings.filter { $0.file == "log.json" }.map(\.kind))
+        XCTAssertTrue(kinds0.contains("writeBlocked"))
+        XCTAssertTrue(kinds0.contains("insecurePermissions"), "both issues present on the poisoned file")
+
+        // The informational kind is individually acknowledgeable...
+        XCTAssertTrue(model.acknowledgeLogRecoveryWarning(file: "log.json", kind: "insecurePermissions"),
+                      "a non-block kind must be individually ackable even on a poisoned file")
+        // ...but writeBlocked is refused and stays visible.
+        XCTAssertFalse(model.acknowledgeLogRecoveryWarning(file: "log.json", kind: "writeBlocked"),
+                       "the active write-block must not be ackable")
+        let kinds1 = Set(model.logRecoveryWarnings.filter { $0.file == "log.json" }.map(\.kind))
+        XCTAssertFalse(kinds1.contains("insecurePermissions"), "acked informational kind is gone")
+        XCTAssertTrue(kinds1.contains("writeBlocked"), "write-block stays visible")
+    }
+
+    /// H: resolve clears ONLY the writeBlocked warning for a file; an unrelated
+    /// informational kind on the same file remains for separate acknowledgement.
+    func testResolveClearsOnlyWriteBlockedLeavingOtherKinds() throws {
+        // Corrupt log.json (poisoned → writeBlocked), and also fail its chmod so
+        // an independent insecurePermissions warning coexists.
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        PetLogStore.applyPermissionsHookForTesting = nil
+        XCTAssertTrue(PetLogStore.isPoisoned("log.json"))
+
+        XCTAssertTrue(model.resolveLogStoreCorruption(file: "log.json"))
+        let kinds = Set(model.logRecoveryWarnings.filter { $0.file == "log.json" }.map(\.kind))
+        XCTAssertFalse(kinds.contains("writeBlocked"), "resolve clears the write-block")
+        XCTAssertTrue(kinds.contains("insecurePermissions"), "an unrelated kind on the same file remains")
+    }
+
+    /// H: resolve of a healthy (never-poisoned) store is refused — a stray old
+    /// quarantine must not authorize wiping a live store.
+    func testResolveRefusedOnHealthyStore() throws {
+        XCTAssertTrue(PetLogStore.save([entry("live")], file: "log.json"))
+        // Plant stale quarantine debris from some prior incident.
+        try Data("{ old".utf8).write(to: URL(fileURLWithPath: path("log.json.corrupt-2020-01-01T00-00-00Z-STALE")))
+        XCTAssertFalse(PetLogStore.isPoisoned("log.json"))
+
+        let model = PetModel()
+        XCTAssertFalse(model.resolveLogStoreCorruption(file: "log.json"),
+                       "resolve must refuse a store that isn't currently poisoned")
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let primary = try decoder.decode([NotificationEntry].self, from: Data(contentsOf: URL(fileURLWithPath: path("log.json"))))
+        XCTAssertEqual(primary.map(\.text), ["live"], "the live store must be untouched")
     }
 
     // MARK: - Warnings-store permission failure surfaced (D100)

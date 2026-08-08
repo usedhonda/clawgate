@@ -1049,11 +1049,10 @@ final class PetModel: NSObject, ObservableObject {
     /// the durability-degraded flag is raised, so acknowledgement can't silently
     /// drop state ahead of disk.
     func acknowledgeLogRecoveryWarnings() {
-        // A still-poisoned store is an ACTIVE write-blocked state, not merely
-        // "seen": keep its warning so the block stays visible (D99). Only
-        // resolveLogStoreCorruption() actually recovers such a store. Non-blocked
-        // warnings (recovered partial-drop, resolved permission issues) clear.
-        let remaining = logRecoveryWarnings.filter { PetLogStore.isPoisoned($0.file) }
+        // Only kind == "writeBlocked" is an ACTIVE block that ack must not clear
+        // (H) — every other kind, even on a poisoned file, is informational and
+        // acknowledgeable. Only resolveLogStoreCorruption() recovers a block.
+        let remaining = logRecoveryWarnings.filter { $0.kind == "writeBlocked" }
         commitRecoveryWarnings(remaining)
     }
 
@@ -1065,7 +1064,10 @@ final class PetModel: NSObject, ObservableObject {
     @discardableResult
     func resolveLogStoreCorruption(file: String) -> Bool {
         guard PetLogStore.resolveLogStoreCorruption(file: file) else { return false }
-        let remaining = logRecoveryWarnings.filter { $0.file != file }
+        // Resolve clears ONLY the writeBlocked warning for this file (H); other
+        // kinds on the same file (partialDrop, insecurePermissions) are
+        // independent and remain for separate acknowledgement.
+        let remaining = logRecoveryWarnings.filter { !($0.file == file && $0.kind == "writeBlocked") }
         commitRecoveryWarnings(remaining)
         return true
     }
@@ -1073,12 +1075,12 @@ final class PetModel: NSObject, ObservableObject {
     /// Acknowledges a SINGLE issue independently (identity = file + kind), so
     /// e.g. a resolved permission problem can be dismissed without dropping a
     /// still-open partial-drop warning on the same file. Same commit discipline.
-    /// Refuses (returns false) to clear a warning for a still-write-blocked
-    /// (poisoned) store — that would recreate the silent write-disabled state
-    /// D99 exists to prevent; only resolveLogStoreCorruption recovers it.
+    /// Refuses (returns false) ONLY for kind == "writeBlocked" — the active
+    /// write-block D99 protects; only resolveLogStoreCorruption clears it. Every
+    /// other kind (even on the same poisoned file) is independently ackable.
     @discardableResult
     func acknowledgeLogRecoveryWarning(file: String, kind: String) -> Bool {
-        if PetLogStore.isPoisoned(file) { return false }
+        if kind == "writeBlocked" { return false }
         let remaining = logRecoveryWarnings.filter { !($0.file == file && $0.kind == kind) }
         return commitRecoveryWarnings(remaining)
     }
@@ -1102,7 +1104,16 @@ final class PetModel: NSObject, ObservableObject {
         if !PetLogStore.convergePermissionsOnLoad(file: file) {
             upsertRecoveryWarning(file: file, kind: "insecurePermissions", droppedCount: 0, quarantine: nil)
         }
-        switch PetLogStore.loadOutcome(file: file) {
+        let outcome = PetLogStore.loadOutcome(file: file)
+        // The single expression of an ACTIVE write-block is a writeBlocked
+        // warning (H): raise it for any poisoned file, carrying the current
+        // incident's quarantine reference. Only resolve clears it — informational
+        // kinds (corrupt/partialDrop/insecurePermissions) coexist and are
+        // independently acknowledgeable.
+        if let incident = PetLogStore.poisonIncident(file) {
+            upsertRecoveryWarning(file: file, kind: "writeBlocked", droppedCount: 0, quarantine: incident.quarantineName)
+        }
+        switch outcome {
         case .missing:
             return []
         case let .success(entries, dropped, quarantine):
@@ -1112,7 +1123,12 @@ final class PetModel: NSObject, ObservableObject {
             }
             return entries
         case let .corrupt(entries, _, quarantine):
-            upsertRecoveryWarning(file: file, kind: "corrupt", droppedCount: 0, quarantine: quarantine)
+            // A poisoned corrupt is already represented by the writeBlocked
+            // warning above; only a RECOVERED corrupt (from backup, not poisoned)
+            // needs a separate informational "corrupt" note.
+            if !PetLogStore.isPoisoned(file) {
+                upsertRecoveryWarning(file: file, kind: "corrupt", droppedCount: 0, quarantine: quarantine)
+            }
             return entries
         }
     }
@@ -2504,41 +2520,61 @@ enum PetLogStore {
 
     private static let logger = Logger(subsystem: "com.clawgate", category: "PetLog")
 
-    /// Files whose on-disk bytes could not be read/decoded at load AND could not
-    /// be recovered from a last-known-good `.bak`. While a file is poisoned,
-    /// `save` refuses to overwrite it — fail-closed, so a fresh append can never
-    /// destroy history we could not read. The corrupt original stays on disk
-    /// untouched, plus a timestamped quarantine copy is preserved. Process-global
-    /// like `dir`; guarded by `testIsolationSemaphore` and reset via
-    /// `resetPoisonedForTesting` in tests so cases don't poison each other.
-    private static var poisonedFiles: Set<String> = []
+    /// Provenance of a current write-blocking incident (H): the reason and, when
+    /// the corrupt original could be preserved, the exact quarantine copy that
+    /// preserves it. A quarantine-FAILURE incident carries nil name/hash — which
+    /// makes it structurally unresolvable (there is no preserved evidence to
+    /// vouch that overwriting is safe).
+    struct PoisonIncident: Equatable {
+        let reason: String
+        let quarantineName: String?
+        let quarantineSHA256: String?
+    }
 
-    /// internal (not private): test seam. Clears the poisoned set between tests;
+    /// Files held fail-closed, keyed to their CURRENT incident. While a file is
+    /// here `save` refuses to overwrite it — a fresh append can never destroy
+    /// history we could not read. Process-global like `dir`; guarded by
+    /// `testIsolationSemaphore` and reset via `resetPoisonedForTesting`.
+    private static var poisonedIncidents: [String: PoisonIncident] = [:]
+
+    /// internal (not private): test seam. Clears poison state between tests;
     /// callers must already hold `testIsolationSemaphore` (see setUp/tearDown).
-    static func resetPoisonedForTesting() { poisonedFiles = [] }
+    static func resetPoisonedForTesting() { poisonedIncidents = [:] }
 
-    /// True while `file` is held fail-closed (its original bytes were unreadable
-    /// or could not be preserved). Poisoning can be raised on a `.success` path
-    /// too (partial decode whose quarantine failed), so callers surface the
-    /// visible status from this, not only from a `.corrupt` outcome.
-    static func isPoisoned(_ file: String) -> Bool { poisonedFiles.contains(file) }
+    /// True while `file` is held fail-closed. Poisoning can be raised on a
+    /// `.success` path too (partial decode whose quarantine failed), so callers
+    /// surface the visible status from this, not only from a `.corrupt` outcome.
+    static func isPoisoned(_ file: String) -> Bool { poisonedIncidents[file] != nil }
+
+    /// The current write-blocking incident for `file`, so the model can stamp its
+    /// quarantine reference into the writeBlocked warning.
+    static func poisonIncident(_ file: String) -> PoisonIncident? { poisonedIncidents[file] }
 
     /// Resolves a poisoned store — the explicit "recover / start fresh" action,
-    /// distinct from merely acknowledging the warning (D99). Permitted ONLY once
-    /// a quarantine copy of the corrupt original exists (evidence preserved):
-    /// clears the poison and commits a fresh empty primary + backup so saves
-    /// resume. Refuses (returns false, staying fail-closed) when no quarantine
-    /// exists — the corrupt bytes must never be overwritten without a preserved
-    /// copy. Acknowledging without resolving leaves the store write-blocked.
+    /// distinct from acknowledging the warning (D99). Permitted ONLY when: the
+    /// file is CURRENTLY poisoned; the current incident recorded a quarantine
+    /// name + hash (a quarantine-failure incident is unresolvable); and that
+    /// exact quarantine file reads back with the matching hash (so stale debris
+    /// from an OLD incident can't authorize overwriting the CURRENT corrupt
+    /// bytes). On success clears the poison and commits a fresh empty store so
+    /// saves resume; a failed fresh write re-arms the same incident.
     @discardableResult
     static func resolveLogStoreCorruption(file: String) -> Bool {
         if productionAccessBlocked() { return false }
-        let hasQuarantine = ((try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [])
-            .contains { $0.hasPrefix(file + ".corrupt-") }
-        guard hasQuarantine else { return false }
-        poisonedFiles.remove(file)
+        guard let incident = poisonedIncidents[file],
+              let name = incident.quarantineName,
+              let expectedHash = incident.quarantineSHA256 else { return false }
+        // The current incident's exact quarantine must exist and match — not
+        // merely some same-prefix debris from a prior incident.
+        guard let bytes = try? Data(contentsOf: URL(fileURLWithPath: (dir as NSString).appendingPathComponent(name))) else {
+            return false
+        }
+        let actualHash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        guard actualHash == expectedHash else { return false }
+
+        poisonedIncidents[file] = nil
         guard save([], file: file) else {
-            poisonedFiles.insert(file)  // fresh write failed — stay fail-closed
+            poisonedIncidents[file] = incident  // fresh write failed — stay fail-closed
             return false
         }
         return true
@@ -2624,7 +2660,7 @@ enum PetLogStore {
     /// surface; `save` is the Bool-returning compatibility wrapper.
     static func saveOutcome(_ entries: [NotificationEntry], file: String) -> CommitOutcome {
         if productionAccessBlocked() { return .failed }
-        if poisonedFiles.contains(file) { return .failed }
+        if poisonedIncidents[file] != nil { return .failed }
         do {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         } catch {
@@ -2746,7 +2782,7 @@ enum PetLogStore {
                 } else {
                     // No safe copy of the original — hold writes fail-closed so
                     // the next save can't drop the bad entry by overwriting it.
-                    poisonedFiles.insert(file)
+                    poisonedIncidents[file] = PoisonIncident(reason: "partialDropQuarantineFailed", quarantineName: nil, quarantineSHA256: nil)
                     logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); quarantine failed, writes held fail-closed")
                 }
             }
@@ -2773,7 +2809,7 @@ enum PetLogStore {
         // poison and refuse writes: the next append must not overwrite the
         // un-preserved original.
         guard let quarantined = quarantine(path: path, data: data) else {
-            poisonedFiles.insert(file)
+            poisonedIncidents[file] = PoisonIncident(reason: "corruptQuarantineFailed", quarantineName: nil, quarantineSHA256: nil)
             logger.error("PetLogStore corrupt load for \(file, privacy: .public); quarantine failed, writes held fail-closed")
             return .corrupt(entries: [], recovered: false, quarantine: nil)
         }
@@ -2791,8 +2827,11 @@ enum PetLogStore {
             return .corrupt(entries: entries, recovered: true, quarantine: quarantineName)
         }
         // Unrecoverable: empty start, and hold writes fail-closed so the
-        // quarantined original remains the sole surviving copy.
-        poisonedFiles.insert(file)
+        // quarantined original remains the sole surviving copy. Record the
+        // incident with its exact quarantine provenance so resolve can verify it.
+        poisonedIncidents[file] = PoisonIncident(reason: "corruptNoBackup",
+                                                 quarantineName: quarantined.name,
+                                                 quarantineSHA256: quarantined.sha256)
         logger.error("PetLogStore corrupt load for \(file, privacy: .public), no usable backup; writes held fail-closed")
         return .corrupt(entries: [], recovered: false, quarantine: quarantineName)
     }
