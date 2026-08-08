@@ -324,13 +324,17 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                        "message-body prefixes must not be passed to NSLog")
         XCTAssertFalse(petModel.contains("bubble_notify received: %@"),
                        "bubble_notify must not log the message body")
-        let telemetryLogLines = petModel
+        // D139: Pet Log admission lifecycle must go through os.Logger, not
+        // NSLog (NSLog isn't retroactively queryable via `log show`). No
+        // `[PetLog]` NSLog line may remain, and the events route through the
+        // shared petLogTelemetry.
+        let petLogNSLogLines = petModel
             .components(separatedBy: "\n")
             .filter { $0.contains("[PetLog]") && $0.contains("NSLog(") }
-        for line in telemetryLogLines {
-            XCTAssertFalse(line.contains("instruction"),
-                           "PetLog admission telemetry must not log instruction/prompt body")
-        }
+        XCTAssertTrue(petLogNSLogLines.isEmpty,
+                      "Pet Log lifecycle must use os.Logger, not NSLog: \(petLogNSLogLines)")
+        XCTAssertTrue(petModel.contains("let log = Self.petLogTelemetry"),
+                      "admission events must route through the shared petLogTelemetry os.Logger")
 
         let wsClient = try String(
             contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)

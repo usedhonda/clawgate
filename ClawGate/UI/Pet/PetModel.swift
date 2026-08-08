@@ -1715,20 +1715,26 @@ final class PetModel: NSObject, ObservableObject {
         case persistenceFailure(file: String)
     }
 
+    /// Emits admission-lifecycle events through the same os.Logger as
+    /// `envelopeSent` (D139) — so `log show` can retroactively query the whole
+    /// Pet Log lifecycle by requestId, which NSLog never allowed. Body-free:
+    /// only bounded request/action/count/file metadata; never the instruction,
+    /// STT, or any error body.
     private func recordPetLogAdmissionEvent(_ event: PetLogAdmissionEvent) {
+        let log = Self.petLogTelemetry
         switch event {
         case let .actionReceived(requestId, actionId, segmentCount):
-            NSLog("[PetLog] actionReceived request=%@ action=%@ segments=%d", requestId, actionId, segmentCount)
+            log.info("actionReceived request=\(requestId, privacy: .public) action=\(actionId, privacy: .public) segments=\(segmentCount, privacy: .public)")
         case let .busyRefused(requestId):
-            NSLog("[PetLog] actionBusyRefused request=%@", requestId)
+            log.notice("actionBusyRefused request=\(requestId, privacy: .public)")
         case let .disconnectedRefused(requestId):
-            NSLog("[PetLog] actionDisconnectedRefused request=%@", requestId)
+            log.notice("actionDisconnectedRefused request=\(requestId, privacy: .public)")
         case let .envelopeAccepted(requestId):
-            NSLog("[PetLog] envelopeAccepted request=%@", requestId)
+            log.info("envelopeAccepted request=\(requestId, privacy: .public)")
         case let .dispatchAttempted(requestId):
-            NSLog("[PetLog] dispatchAttempted request=%@", requestId)
+            log.info("dispatchAttempted request=\(requestId, privacy: .public)")
         case let .persistenceFailure(file):
-            NSLog("[PetLog] persistenceFailure file=%@", file)
+            log.error("persistenceFailure file=\(file, privacy: .public)")
         }
     }
 
@@ -1838,9 +1844,9 @@ final class PetModel: NSObject, ObservableObject {
                 // background nicety, so its failure gets telemetry only and never
                 // surfaces into the Log conversation pane.
                 self.pendingSceneNamingIDs = []
-                NSLog("[PetLog] summonReplyTimeout source=%@ (slot reclaimed)", source)
+                Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) slotReclaimed=1")
             } else {
-                NSLog("[PetLog] summonReplyTimeout source=%@ (slot reclaimed)", source)
+                Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) slotReclaimed=1")
                 self.addSummonResult(
                     text: "Error: no reply received within \(Int(Self.summonReplyTimeoutSeconds))s",
                     source: source)
