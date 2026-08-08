@@ -70,6 +70,20 @@ enum PetLogSegmentID {
     }
 }
 
+enum PetLogSourceFingerprint {
+    /// Stable, body-free fingerprint of the exact raw snapshot a query ran
+    /// against: `policyVersion` plus the ordered segment ids. Lets an auditor
+    /// confirm which snapshot produced an answer even without the server
+    /// artifact — and never copies any transcript text. Deterministic for an
+    /// empty id set too.
+    static func make(policyVersion: String, segmentIds: [String]) -> String {
+        let key = ([policyVersion] + segmentIds).joined(separator: "|")
+        let hex = SHA256.hash(data: Data(key.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        return String(hex.prefix(32))
+    }
+}
+
 // MARK: - Deterministic, non-truncating reduction
 
 enum PetLogSegmentReducer {
@@ -332,6 +346,15 @@ struct PetLogEntryMetadata: Codable, Equatable {
     /// "explicit" (scope override present) or "automatic". Stored as a String,
     /// not an enum, so an unknown future value never fails whole-entry decode.
     let selectionMode: String?
+    /// Earliest/latest capturedAt actually covered by the sent segments — the
+    /// reference range a re-opened answer header restates without recomputation.
+    let coverageStart: Date?
+    let coverageEnd: Date?
+    /// The prompt policy version in force for this request (persisted on the
+    /// request side too, where there is no model `contextDecision` to carry it).
+    let policyVersion: String?
+    /// Body-free fingerprint of the raw snapshot (policyVersion + ordered ids).
+    let sourceFingerprint: String?
 
     init(contextDecision: PetLogContextDecision? = nil,
          completeBeforeAnchor: Bool? = nil,
@@ -342,7 +365,11 @@ struct PetLogEntryMetadata: Codable, Equatable {
          selectedDay: Date? = nil,
          segmentCount: Int? = nil,
          scopeOverride: [String]? = nil,
-         selectionMode: String? = nil) {
+         selectionMode: String? = nil,
+         coverageStart: Date? = nil,
+         coverageEnd: Date? = nil,
+         policyVersion: String? = nil,
+         sourceFingerprint: String? = nil) {
         self.contextDecision = contextDecision
         self.completeBeforeAnchor = completeBeforeAnchor
         self.dispatch = dispatch
@@ -353,6 +380,10 @@ struct PetLogEntryMetadata: Codable, Equatable {
         self.segmentCount = segmentCount
         self.scopeOverride = scopeOverride
         self.selectionMode = selectionMode
+        self.coverageStart = coverageStart
+        self.coverageEnd = coverageEnd
+        self.policyVersion = policyVersion
+        self.sourceFingerprint = sourceFingerprint
     }
 
     /// True when either signal suggests the answer's context may be

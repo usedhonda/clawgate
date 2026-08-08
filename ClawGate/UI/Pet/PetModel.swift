@@ -1496,6 +1496,8 @@ final class PetModel: NSObject, ObservableObject {
         let segmentCount: Int
         let scopeOverride: [String]?
         let selectionMode: String
+        let coverageStart: Date?
+        let coverageEnd: Date?
 
         /// The correlation metadata to stamp onto a persisted log entry.
         func entryMetadata(contextDecision: PetLogContextDecision? = nil,
@@ -1511,7 +1513,12 @@ final class PetModel: NSObject, ObservableObject {
                 selectedDay: selectedDay,
                 segmentCount: segmentCount,
                 scopeOverride: scopeOverride,
-                selectionMode: selectionMode
+                selectionMode: selectionMode,
+                coverageStart: coverageStart,
+                coverageEnd: coverageEnd,
+                policyVersion: PetLogPromptBuilder.policyVersion,
+                sourceFingerprint: PetLogSourceFingerprint.make(
+                    policyVersion: PetLogPromptBuilder.policyVersion, segmentIds: segmentIds)
             )
         }
     }
@@ -1574,7 +1581,9 @@ final class PetModel: NSObject, ObservableObject {
                                         anchor: Date = Date(),
                                         selectedDay: Date? = nil,
                                         scopeOverride: [String]? = nil,
-                                        selectionMode: String = "automatic") {
+                                        selectionMode: String = "automatic",
+                                        coverageStart: Date? = nil,
+                                        coverageEnd: Date? = nil) {
         pendingLogRequest = PendingLogRequest(
             requestId: UUID().uuidString,
             segmentIds: segmentIds,
@@ -1585,7 +1594,9 @@ final class PetModel: NSObject, ObservableObject {
             selectedDay: selectedDay,
             segmentCount: segmentIds.count,
             scopeOverride: scopeOverride,
-            selectionMode: selectionMode
+            selectionMode: selectionMode,
+            coverageStart: coverageStart,
+            coverageEnd: coverageEnd
         )
     }
     /// Test seam: the CURRENT shared-path watchdog token (private), so a test can
@@ -1728,7 +1739,9 @@ final class PetModel: NSObject, ObservableObject {
                         selectedDay: pending.selectedDay,
                         segmentCount: pending.segmentCount,
                         scopeOverride: pending.scopeOverride,
-                        selectionMode: pending.selectionMode
+                        selectionMode: pending.selectionMode,
+                        coverageStart: pending.coverageStart,
+                        coverageEnd: pending.coverageEnd
                     )
                 }
             } catch {
@@ -1789,17 +1802,28 @@ final class PetModel: NSObject, ObservableObject {
         recordPetLogAdmissionEvent(.envelopeAccepted(requestId: envelope.requestId))
 
         let selectionMode = envelope.scopeOverride == nil ? "automatic" : "explicit"
+        let sourceFingerprint = PetLogSourceFingerprint.make(
+            policyVersion: PetLogPromptBuilder.policyVersion,
+            segmentIds: envelope.segments.map(\.id))
         // Correlation metadata stamped onto both the request-side (`log_user`)
         // entry and, later, its answer — so the two pair up and the exact
-        // envelope behind the answer is reconstructable after the fact.
+        // envelope behind the answer is reconstructable after the fact. The
+        // request side carries `completeBeforeAnchor` too: if the answer never
+        // arrives (crash/timeout), the request entry is the sole evidence of
+        // whether retrieval could vouch for the anchor cutoff.
         let correlation = PetLogEntryMetadata(
+            completeBeforeAnchor: envelope.completeBeforeAnchor,
             requestId: envelope.requestId,
             actionId: envelope.actionId,
             anchor: envelope.anchorTimestamp,
             selectedDay: selectedDay,
             segmentCount: envelope.segments.count,
             scopeOverride: envelope.scopeOverride,
-            selectionMode: selectionMode
+            selectionMode: selectionMode,
+            coverageStart: envelope.coverageStart,
+            coverageEnd: envelope.coverageEnd,
+            policyVersion: PetLogPromptBuilder.policyVersion,
+            sourceFingerprint: sourceFingerprint
         )
         let userEntry = NotificationEntry(
             id: UUID().uuidString, text: envelope.instruction,
@@ -1841,7 +1865,7 @@ final class PetModel: NSObject, ObservableObject {
         // instruction or any transcript text). os.Logger — NSLog is not
         // retroactively queryable via `log show`.
         Self.petLogTelemetry.info(
-            "envelopeSent request=\(envelope.requestId, privacy: .public) action=\(envelope.actionId, privacy: .public) bytes=\(message.utf8.count, privacy: .public) segments=\(envelope.segments.count, privacy: .public) selection=\(selectionMode, privacy: .public) policyVersion=\(PetLogPromptBuilder.policyVersion, privacy: .public)"
+            "envelopeSent request=\(envelope.requestId, privacy: .public) action=\(envelope.actionId, privacy: .public) bytes=\(message.utf8.count, privacy: .public) segments=\(envelope.segments.count, privacy: .public) selection=\(selectionMode, privacy: .public) policyVersion=\(PetLogPromptBuilder.policyVersion, privacy: .public) fingerprint=\(sourceFingerprint, privacy: .public)"
         )
         pendingLogRequest = PendingLogRequest(
             requestId: envelope.requestId,
@@ -1853,7 +1877,9 @@ final class PetModel: NSObject, ObservableObject {
             selectedDay: selectedDay,
             segmentCount: envelope.segments.count,
             scopeOverride: envelope.scopeOverride,
-            selectionMode: selectionMode
+            selectionMode: selectionMode,
+            coverageStart: envelope.coverageStart,
+            coverageEnd: envelope.coverageEnd
         )
         sendLogSummon(message, requestId: envelope.requestId)
     }
