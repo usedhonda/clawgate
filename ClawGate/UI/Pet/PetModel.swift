@@ -2271,12 +2271,28 @@ struct NotificationEntry: Identifiable, Codable {
 // MARK: - Local Persistence for Summon/Notification logs
 
 enum PetLogStore {
-    /// internal (not private): test seam. XCTest must redirect this to a temp
-    /// directory before touching PetLogStore — a real PetModel() starts with
-    /// empty in-memory arrays (load only happens in start()), so any save()
-    /// during a test overwrites the user's real persisted history with test
-    /// fixtures. See feedback_test_data_isolation incident, 2026-07-14.
-    static var dir = NSString("~/.clawgate/logs").expandingTildeInPath
+    /// internal (not private): test seam. XCTest may still redirect this to a
+    /// per-case temp directory for parallel fixture isolation — but it no longer
+    /// HAS to: `defaultDir()` structurally refuses the production path whenever
+    /// the process is running under XCTest, so a case that forgets to override
+    /// can never overwrite the user's real history (2026-07-14 incident class).
+    static var dir = defaultDir()
+
+    /// The default store directory. Safe-by-construction (D37): under XCTest the
+    /// production `~/.clawgate/logs` path is unreachable — a process-wide temp
+    /// root is used instead, so no test can touch real data even without the
+    /// per-case override below. The env var isn't guaranteed under every test
+    /// runner, but the XCTest class being loaded into the process is, and neither
+    /// signal is ever true in the shipping app.
+    /// internal (not private): test seam for the D37 guard.
+    static func defaultDir() -> String {
+        let underTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+        if underTest {
+            return NSTemporaryDirectory() + "clawgate-xctest-store-\(ProcessInfo.processInfo.processIdentifier)"
+        }
+        return NSString("~/.clawgate/logs").expandingTildeInPath
+    }
 
     /// internal (not private): test seam. `dir` is a process-global static,
     /// so parallel test execution across XCTestCase classes could otherwise
