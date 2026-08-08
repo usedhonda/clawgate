@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import os
 
 /// ViewModel for the pet character system
 final class PetModel: NSObject, ObservableObject {
@@ -116,6 +117,13 @@ final class PetModel: NSObject, ObservableObject {
     @Published var logSceneNames: [String: String] = [:]  // scene id -> ちー命名 (memory only)
     @Published var logThreadPaneOpen: Bool = true
     @Published var logAwaitingReply: Bool = false
+    /// Log-store filenames whose persisted history was unreadable at load and
+    /// could not be recovered from a last-known-good backup. Surfaced as a
+    /// visible status (see the corrupt banner) — NEVER injected into the
+    /// conversation as a "ちー" (source == "log") entry. While a file is here,
+    /// its writes are held fail-closed by PetLogStore so the quarantined
+    /// original is preserved.
+    @Published var corruptLogStoreFiles: Set<String> = []
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
 
@@ -940,12 +948,30 @@ final class PetModel: NSObject, ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// Loads one persisted log file through the hardened store, mapping its
+    /// outcome onto the visible corrupt status. Corruption is reported as a
+    /// Published status flag ONLY — never as a conversation entry.
+    private func restorePersistedLog(file: String) -> [NotificationEntry] {
+        switch PetLogStore.loadOutcome(file: file) {
+        case .missing:
+            return []
+        case let .success(entries, _):
+            return entries
+        case let .corrupt(entries, _):
+            corruptLogStoreFiles.insert(file)
+            return entries
+        }
+    }
+
     func start() {
-        // Restore persisted logs
-        notificationHistory = PetLogStore.load(file: "notifications.json")
-        summonResults = PetLogStore.load(file: "summon.json")
-        logReplies = PetLogStore.load(file: "log.json")
-        localResults = PetLogStore.load(file: "local.json")
+        // Restore persisted logs. Each goes through the hardened outcome API so
+        // an unreadable file surfaces as a visible corrupt status (and holds its
+        // writes fail-closed) instead of silently loading as [] and letting the
+        // next append overwrite the real history (2026-08 data-loss path).
+        notificationHistory = restorePersistedLog(file: "notifications.json")
+        summonResults = restorePersistedLog(file: "summon.json")
+        logReplies = restorePersistedLog(file: "log.json")
+        localResults = restorePersistedLog(file: "local.json")
 
         characterManager.scan()
         _ = try? OpenClawDeviceIdentity.loadOrCreate()
@@ -2182,8 +2208,37 @@ enum PetLogStore {
     /// different thread than setUp/tearDown.
     static let testIsolationSemaphore = DispatchSemaphore(value: 1)
 
+    private static let logger = Logger(subsystem: "com.clawgate", category: "PetLog")
+
+    /// Files whose on-disk bytes could not be read/decoded at load AND could not
+    /// be recovered from a last-known-good `.bak`. While a file is poisoned,
+    /// `save` refuses to overwrite it — fail-closed, so a fresh append can never
+    /// destroy history we could not read. The corrupt original stays on disk
+    /// untouched, plus a timestamped quarantine copy is preserved. Process-global
+    /// like `dir`; guarded by `testIsolationSemaphore` and reset via
+    /// `resetPoisonedForTesting` in tests so cases don't poison each other.
+    private static var poisonedFiles: Set<String> = []
+
+    /// internal (not private): test seam. Clears the poisoned set between tests;
+    /// callers must already hold `testIsolationSemaphore` (see setUp/tearDown).
+    static func resetPoisonedForTesting() { poisonedFiles = [] }
+
+    /// The three ways a load can end. `success` carries `dropped` — the count of
+    /// individual entries that failed to decode (unknown/legacy shapes) and were
+    /// skipped, so a single bad entry never sinks the whole array yet the loss is
+    /// still surfaced. `corrupt` means the top-level JSON itself was unreadable;
+    /// `recovered` is true when a `.bak` supplied the returned entries.
+    enum LoadOutcome {
+        case missing
+        case success(entries: [NotificationEntry], dropped: Int)
+        case corrupt(entries: [NotificationEntry], recovered: Bool)
+    }
+
     @discardableResult
     static func save(_ entries: [NotificationEntry], file: String) -> Bool {
+        // Fail-closed: never overwrite a file whose original bytes we could not
+        // read and did not recover — the quarantined copy is the only survivor.
+        if poisonedFiles.contains(file) { return false }
         do {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         } catch {
@@ -2198,14 +2253,100 @@ enum PetLogStore {
         } catch {
             return false
         }
+        // Maintain a last-known-good backup: what we just wrote came from live
+        // in-memory state, so it is by definition decodable and good.
+        try? data.write(to: URL(fileURLWithPath: path + ".bak"), options: .atomic)
         return true
     }
 
+    /// Backward-compatible convenience for callers that only need the entries.
+    /// Prefer `loadOutcome` where the missing/corrupt distinction matters.
     static func load(file: String) -> [NotificationEntry] {
+        switch loadOutcome(file: file) {
+        case .missing: return []
+        case let .success(entries, _): return entries
+        case let .corrupt(entries, _): return entries
+        }
+    }
+
+    static func loadOutcome(file: String) -> LoadOutcome {
         let path = (dir as NSString).appendingPathComponent(file)
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return [] }
+        guard FileManager.default.fileExists(atPath: path) else { return .missing }
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            // Exists but unreadable — treat as corrupt and hold writes.
+            return handleCorrupt(file: file, path: path, data: nil)
+        }
+        if let (entries, dropped) = decodeEntries(data) {
+            // Partial decode is still silent loss in miniature: the next save
+            // rewrites without the dropped entries, so preserve a quarantine
+            // copy of the original first. Writes stay allowed (recovery of the
+            // good entries succeeded — do NOT poison).
+            if dropped > 0 {
+                quarantine(path: path, data: data)
+                logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); original quarantined")
+            }
+            return .success(entries: entries, dropped: dropped)
+        }
+        // Top-level JSON is not even a decodable array — genuine corruption.
+        return handleCorrupt(file: file, path: path, data: data)
+    }
+
+    /// Per-entry resilient decode: returns nil only when the top-level value is
+    /// not a JSON array of objects at all. A single element that fails to decode
+    /// is dropped (counted), not fatal.
+    private static func decodeEntries(_ data: Data) -> (entries: [NotificationEntry], dropped: Int)? {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([NotificationEntry].self, from: data)) ?? []
+        guard let wrapped = try? decoder.decode([FailableEntry].self, from: data) else { return nil }
+        let entries = wrapped.compactMap(\.value)
+        return (entries, wrapped.count - entries.count)
+    }
+
+    private static func handleCorrupt(file: String, path: String, data: Data?) -> LoadOutcome {
+        // Preserve the corrupt original: copy (never move) its bytes to a
+        // timestamped, owner-only quarantine file in the same directory. The
+        // original path stays untouched on disk.
+        quarantine(path: path, data: data)
+
+        // Try to recover from the last-known-good backup.
+        if let bakData = try? Data(contentsOf: URL(fileURLWithPath: path + ".bak")),
+           let (entries, _) = decodeEntries(bakData) {
+            logger.error("PetLogStore recovered \(entries.count, privacy: .public) entries from backup for \(file, privacy: .public) after corrupt load")
+            return .corrupt(entries: entries, recovered: true)
+        }
+        // Unrecoverable: empty start, and hold writes fail-closed so the
+        // quarantined original remains the sole surviving copy.
+        poisonedFiles.insert(file)
+        logger.error("PetLogStore corrupt load for \(file, privacy: .public), no usable backup; writes held fail-closed")
+        return .corrupt(entries: [], recovered: false)
+    }
+
+    private static func quarantine(path: String, data: Data?) {
+        guard let bytes = data ?? (try? Data(contentsOf: URL(fileURLWithPath: path))) else { return }
+        let stamp = quarantineTimestamp()
+        FileManager.default.createFile(
+            atPath: "\(path).corrupt-\(stamp)", contents: bytes,
+            attributes: [.posixPermissions: 0o600]
+        )
+    }
+
+    private static func quarantineTimestamp() -> String {
+        // Colon-free (Finder renders ':' as '/'): 2026-08-09T12-34-56Z.
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.dateFormat = "yyyy-MM-dd'T'HH-mm-ss'Z'"
+        return fmt.string(from: Date())
+    }
+}
+
+/// Decodes a `NotificationEntry` without failing the enclosing array — one
+/// unknown/legacy element decodes to `value == nil` instead of throwing, so a
+/// single bad entry can't sink the whole history. See `PetLogStore.loadOutcome`.
+private struct FailableEntry: Decodable {
+    let value: NotificationEntry?
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        value = try? container.decode(NotificationEntry.self)
     }
 }
