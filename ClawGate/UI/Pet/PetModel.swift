@@ -992,6 +992,13 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func restorePersistedLog(file: String) -> [NotificationEntry] {
+        // Converge existing perms to owner-only BEFORE reading, so the dir is
+        // 0700 when a corrupt load writes a quarantine copy and older 0644/0755
+        // files are tightened even on a load-only startup. Never touches bytes;
+        // a chmod failure surfaces as a durable security warning.
+        if !PetLogStore.convergePermissionsOnLoad(file: file) {
+            upsertRecoveryWarning(file: file, kind: "insecurePermissions", droppedCount: 0, quarantine: nil)
+        }
         switch PetLogStore.loadOutcome(file: file) {
         case .missing:
             return []
@@ -2465,6 +2472,30 @@ enum PetLogStore {
             return false
         }
         return true
+    }
+
+    /// Converges EXISTING on-disk permissions to owner-only at load time — the
+    /// store dir to 0700 and the primary + `.bak` to 0600 — so a load-only
+    /// startup, or files written by an older 0644/0755 version, never leave
+    /// conversation bytes readable or the directory enumerable by other local
+    /// users. NEVER touches file CONTENTS. Returns false if any chmod of an
+    /// existing item failed, so the caller can surface a durable security
+    /// warning; the bytes are untouched regardless. Run before `loadOutcome`
+    /// so the dir is already 0700 when a corrupt load writes a quarantine copy.
+    @discardableResult
+    static func convergePermissionsOnLoad(file: String) -> Bool {
+        var ok = true
+        if FileManager.default.fileExists(atPath: dir) {
+            if !applyPermissions(ownerOnlyDir, path: dir) { ok = false }
+        }
+        let path = (dir as NSString).appendingPathComponent(file)
+        for p in [path, path + ".bak"] where FileManager.default.fileExists(atPath: p) {
+            if !applyPermissions(ownerOnly, path: p) { ok = false }
+        }
+        if !ok {
+            logger.error("PetLogStore permission convergence failed on load for \(file, privacy: .public)")
+        }
+        return ok
     }
 
     /// Backward-compatible convenience for callers that only need the entries.

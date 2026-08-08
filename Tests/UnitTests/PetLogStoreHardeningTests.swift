@@ -242,6 +242,10 @@ final class PetLogStoreHardeningTests: XCTestCase {
         (try FileManager.default.attributesOfItem(atPath: PetLogStore.dir)[.posixPermissions] as? NSNumber)?.int16Value
     }
 
+    private func mode(_ file: String) throws -> Int16? {
+        (try FileManager.default.attributesOfItem(atPath: path(file))[.posixPermissions] as? NSNumber)?.int16Value
+    }
+
     /// D54: a freshly created store dir is owner-only (0700).
     func testFreshStoreDirectoryIsOwnerOnly() throws {
         // setUp created the dir; remove it so save() re-creates it fresh.
@@ -278,5 +282,65 @@ final class PetLogStoreHardeningTests: XCTestCase {
         PetLogStore.applyPermissionsHookForTesting = { $0 == bak ? false : true }
         XCTAssertFalse(PetLogStore.save([entry("a")], file: "log.json"),
                        "a .bak chmod failure must surface as save failure")
+    }
+
+    // MARK: - D54 load-path permission convergence
+
+    /// A load-only startup (no save) still tightens an existing 0755 dir and
+    /// existing 0644 primary/.bak to owner-only, without touching content.
+    func testLoadOnlyConvergesExistingDirAndFilesToOwnerOnly() throws {
+        // Write primary + .bak directly (bypassing save) and loosen their modes
+        // to what an older version could have left behind.
+        let bytes = try JSONEncoder.iso.encode([entry("kept")])
+        try bytes.write(to: URL(fileURLWithPath: path("log.json")))
+        try bytes.write(to: URL(fileURLWithPath: path("log.json.bak")))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path("log.json"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: path("log.json.bak"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: PetLogStore.dir)
+        let before = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+
+        XCTAssertTrue(PetLogStore.convergePermissionsOnLoad(file: "log.json"))
+
+        XCTAssertEqual(try dirMode(), 0o700, "dir must converge to 0700 on load")
+        XCTAssertEqual(try mode("log.json"), 0o600, "existing primary must converge to 0600 on load")
+        XCTAssertEqual(try mode("log.json.bak"), 0o600, "existing .bak must converge to 0600 on load")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path("log.json"))), before,
+                       "convergence must never touch file content")
+    }
+
+    /// A load-time chmod failure leaves the original bytes untouched and is
+    /// reported (false) so the caller can raise a durable security warning.
+    func testLoadPermissionFailureIsReportedWithBytesUntouched() throws {
+        let bytes = try JSONEncoder.iso.encode([entry("kept")])
+        try bytes.write(to: URL(fileURLWithPath: path("log.json")))
+        let before = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+        XCTAssertFalse(PetLogStore.convergePermissionsOnLoad(file: "log.json"),
+                       "a load-time chmod failure must be reported")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path("log.json"))), before,
+                       "a chmod failure must not touch bytes")
+    }
+
+    /// The corrupt/quarantine load path runs in an already-0700 dir.
+    func testCorruptLoadPathConvergesDirTo0700() throws {
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: PetLogStore.dir)
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+
+        XCTAssertTrue(PetLogStore.convergePermissionsOnLoad(file: "log.json"))
+        _ = PetLogStore.loadOutcome(file: "log.json")  // writes a quarantine copy
+
+        XCTAssertEqual(try dirMode(), 0o700, "dir must be 0700 across the corrupt/quarantine path")
+        let quarantine = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .first { $0.hasPrefix("log.json.corrupt-") }
+        XCTAssertNotNil(quarantine)
+        XCTAssertEqual(try mode(quarantine!), 0o600, "quarantine copy stays 0600 in the 0700 dir")
+    }
+}
+
+private extension JSONEncoder {
+    static var iso: JSONEncoder {
+        let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; return e
     }
 }

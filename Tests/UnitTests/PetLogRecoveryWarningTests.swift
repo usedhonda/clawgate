@@ -101,4 +101,28 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertEqual(warning.kind, "corrupt")
         XCTAssertNotNil(warning.quarantine)
     }
+
+    /// A load-time permission convergence failure surfaces as a durable security
+    /// warning through the restore path, without touching bytes.
+    func testLoadPermissionFailureSurfacesSecurityWarning() throws {
+        let json = """
+        [{"id":"g","text":"kept","source":"log","timestamp":"2026-08-09T00:00:00Z"}]
+        """
+        try Data(json.utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let before = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
+
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+
+        XCTAssertEqual(model.logReplies.map(\.text), ["kept"], "content still loads")
+        guard let warning = model.logRecoveryWarnings.first(where: { $0.file == "log.json" }) else {
+            return XCTFail("a load-time chmod failure must raise a security warning")
+        }
+        XCTAssertEqual(warning.kind, "insecurePermissions")
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path("log.json"))), before,
+                       "bytes must be untouched by the failed permission convergence")
+    }
 }
