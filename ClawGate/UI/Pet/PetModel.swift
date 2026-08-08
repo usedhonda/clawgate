@@ -2557,17 +2557,35 @@ enum PetLogStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(entries) else { return false }
-        // Two-copy commit ordering: write the BACKUP first, then make the
-        // PRIMARY rename the single commit point. If the backup fails, the
-        // primary is left untouched (old visible state preserved); if the
-        // primary fails, load still prefers the old primary. Each atomicWrite is
-        // temp+chmod+rename, so no file is ever visible at 0644 or half-written.
-        guard atomicWrite(data, to: path + ".bak", hookKey: path + ".bak") else {
-            logger.error("PetLogStore backup write failed for \(file, privacy: .public); primary left untouched, reporting save failure")
+        return commitTwoCopy(data, primaryPath: path)
+    }
+
+    /// Two-copy durable commit with backup rollback (F/F2). Writes the backup
+    /// first and makes the primary rename the single commit point; but the
+    /// committed backup is never left ahead of an un-committed primary — if the
+    /// primary write fails, the backup is rolled back byte-for-byte to its prior
+    /// committed state (or removed if it didn't exist). So a later
+    /// corrupt-primary recovery can never adopt a half-committed snapshot: a
+    /// failed save leaves BOTH copies at their previous committed state.
+    private static func commitTwoCopy(_ data: Data, primaryPath path: String) -> Bool {
+        let bakPath = path + ".bak"
+        let bakURL = URL(fileURLWithPath: bakPath)
+        let priorBak = try? Data(contentsOf: bakURL)
+        let bakExisted = FileManager.default.fileExists(atPath: bakPath)
+
+        guard atomicWrite(data, to: bakPath, hookKey: bakPath) else {
+            logger.error("PetLogStore backup write failed for \(path, privacy: .public); primary left untouched, reporting save failure")
             return false
         }
         guard atomicWrite(data, to: path, hookKey: path) else {
-            logger.error("PetLogStore primary write failed for \(file, privacy: .public); reporting save failure")
+            logger.error("PetLogStore primary write failed for \(path, privacy: .public); rolling back backup, reporting save failure")
+            // Roll the backup back to its committed state so it is never left
+            // ahead of the un-committed primary (best-effort on double failure).
+            if bakExisted, let priorBak {
+                _ = atomicWrite(priorBak, to: bakPath, hookKey: bakPath)
+            } else {
+                try? FileManager.default.removeItem(atPath: bakPath)
+            }
             return false
         }
         return true
@@ -2761,12 +2779,11 @@ enum PetLogStore {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(warnings) else { return false }
-        // Backup first, primary as the commit point — same two-copy ordering as
-        // the main store. An acknowledge whose backup or primary write fails
-        // leaves the old primary intact, so a restart still reads the prior
-        // warnings (durable-until-ack survives a partial write).
-        guard atomicWrite(data, to: path + ".bak", hookKey: path + ".bak") else { return false }
-        return atomicWrite(data, to: path, hookKey: path)
+        // Same two-copy commit + backup rollback as the main store: an ack whose
+        // primary write fails rolls the backup back to the prior warnings, so a
+        // later corrupt-primary recovery can't adopt the un-committed [] and
+        // silently drop an un-acknowledged warning (durable-until-ack holds).
+        return commitTwoCopy(data, primaryPath: path)
     }
 }
 

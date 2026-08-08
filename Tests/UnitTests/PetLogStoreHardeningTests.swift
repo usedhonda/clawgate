@@ -234,6 +234,37 @@ final class PetLogStoreHardeningTests: XCTestCase {
         XCTAssertEqual(entries.map(\.text), ["old"], "reload must return the old primary state")
     }
 
+    /// F2: a primary-write failure must ROLL BACK the backup to its prior
+    /// committed state — so a later corrupt-primary recovery adopts the old
+    /// content, never the half-committed new data. Also: no orphan temp files.
+    func testPrimaryFailureRollsBackBackupSoRecoveryAdoptsOld() throws {
+        XCTAssertTrue(PetLogStore.save([entry("old")], file: "log.json"))  // primary+.bak = old
+
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+        XCTAssertFalse(PetLogStore.save([entry("new")], file: "log.json"))
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        // The backup must have been rolled back to "old", not left at "new".
+        let bak = try Data(contentsOf: URL(fileURLWithPath: path("log.json.bak")))
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        XCTAssertEqual(try decoder.decode([NotificationEntry].self, from: bak).map(\.text), ["old"],
+                       "backup must be rolled back to the committed 'old', not the un-committed 'new'")
+
+        // Corrupt the primary; recovery must adopt the rolled-back OLD backup.
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        guard case let .corrupt(entries, recovered, _) = PetLogStore.loadOutcome(file: "log.json") else {
+            return XCTFail("expected corrupt")
+        }
+        XCTAssertTrue(recovered)
+        XCTAssertEqual(entries.map(\.text), ["old"], "recovery must adopt old, never the un-committed new")
+
+        // No orphan temp files left behind.
+        let temps = try FileManager.default.contentsOfDirectory(atPath: PetLogStore.dir)
+            .filter { $0.contains(".tmp-") }
+        XCTAssertTrue(temps.isEmpty, "no pending temp files may linger")
+    }
+
     /// D9 gap 3: primary, `.bak`, and quarantine are all owner-only (0600).
     func testAllPersistedFilesAreOwnerOnly() throws {
         XCTAssertTrue(PetLogStore.save([entry("a")], file: "log.json"))

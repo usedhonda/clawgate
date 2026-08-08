@@ -367,6 +367,32 @@ final class PetLogRecoveryWarningTests: XCTestCase {
                       "an ack backup failure must leave the primary warning intact across a restart")
     }
 
+    /// F2: an ack whose PRIMARY write fails rolls the warnings backup back to the
+    /// prior warnings — so even if the primary is later corrupted, recovery
+    /// adopts the old warnings (not the un-committed []). The un-acknowledged
+    /// warning survives a restart.
+    func testAckPrimaryFailureThenCorruptPrimaryStillRecoversWarning() throws {
+        try partialDropFixture()
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()  // writes recovery-warnings.json{,.bak} = [warning]
+        XCTAssertTrue(model.logRecoveryWarnings.contains { $0.file == "log.json" })
+
+        // Ack with the warnings PRIMARY write failing (backup written [] then
+        // rolled back to the prior [warning]).
+        let warningsPrimary = path("recovery-warnings.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == warningsPrimary ? false : true }
+        model.acknowledgeLogRecoveryWarnings()
+        PetLogStore.applyPermissionsHookForTesting = nil
+
+        // Now corrupt the warnings PRIMARY: recovery must fall back to the
+        // rolled-back backup that still holds the warning, not an empty set.
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("recovery-warnings.json")))
+        let restarted = PetModel()
+        restarted.restorePersistedLogsForTesting()
+        XCTAssertTrue(restarted.logRecoveryWarnings.contains { $0.file == "log.json" },
+                      "recovery must adopt the rolled-back warnings backup, not the un-committed empty")
+    }
+
     /// The warnings store's own perms are converged on load: a pre-existing
     /// 0644 recovery-warnings.json (older version) is tightened to 0600 at
     /// restore, without touching content.
