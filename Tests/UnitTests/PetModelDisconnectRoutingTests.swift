@@ -335,6 +335,12 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                       "Pet Log lifecycle must use os.Logger, not NSLog: \(petLogNSLogLines)")
         XCTAssertTrue(petModel.contains("let log = Self.petLogTelemetry"),
                       "admission events must route through the shared petLogTelemetry os.Logger")
+        // D139: every lifecycle event carries a requestId (or a bounded owner
+        // correlation) — persistenceFailure must not be the requestId-less hole.
+        XCTAssertTrue(petModel.contains("persistenceFailure(file: String, requestId: String?)"),
+                      "persistenceFailure must carry a requestId for lifecycle correlation")
+        XCTAssertFalse(petModel.contains("Self.petLogTelemetry.notice(\"summonReplyTimeout source=\\(source, privacy: .public) slotReclaimed"),
+                       "summonReplyTimeout must carry a bounded owner correlation (no requestId available)")
 
         let wsClient = try String(
             contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)

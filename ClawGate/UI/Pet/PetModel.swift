@@ -1712,7 +1712,7 @@ final class PetModel: NSObject, ObservableObject {
         case disconnectedRefused(requestId: String)
         case envelopeAccepted(requestId: String)
         case dispatchAttempted(requestId: String)
-        case persistenceFailure(file: String)
+        case persistenceFailure(file: String, requestId: String?)
     }
 
     /// Emits admission-lifecycle events through the same os.Logger as
@@ -1733,8 +1733,8 @@ final class PetModel: NSObject, ObservableObject {
             log.info("envelopeAccepted request=\(requestId, privacy: .public)")
         case let .dispatchAttempted(requestId):
             log.info("dispatchAttempted request=\(requestId, privacy: .public)")
-        case let .persistenceFailure(file):
-            log.error("persistenceFailure file=\(file, privacy: .public)")
+        case let .persistenceFailure(file, requestId):
+            log.error("persistenceFailure file=\(file, privacy: .public) request=\(requestId ?? "unknown", privacy: .public)")
         }
     }
 
@@ -1844,9 +1844,9 @@ final class PetModel: NSObject, ObservableObject {
                 // background nicety, so its failure gets telemetry only and never
                 // surfaces into the Log conversation pane.
                 self.pendingSceneNamingIDs = []
-                Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) slotReclaimed=1")
+                Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) slotReclaimed=1")
             } else {
-                Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) slotReclaimed=1")
+                Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) slotReclaimed=1")
                 self.addSummonResult(
                     text: "Error: no reply received within \(Int(Self.summonReplyTimeoutSeconds))s",
                     source: source)
@@ -2089,12 +2089,12 @@ final class PetModel: NSObject, ObservableObject {
             logReplies.removeFirst(logReplies.count - 100)
         }
         guard persistStore(logReplies, file: "log.json") else {
-            appendLogPersistenceFailureMarker()
+            appendLogPersistenceFailureMarker(requestId: entry.logMetadata?.requestId)
             return
         }
     }
 
-    private func appendLogPersistenceFailureMarker() {
+    private func appendLogPersistenceFailureMarker(requestId: String?) {
         let marker = NotificationEntry(
             id: UUID().uuidString,
             text: "Error: failed to persist log entry to disk",
@@ -2105,7 +2105,7 @@ final class PetModel: NSObject, ObservableObject {
         if logReplies.count > 100 {
             logReplies.removeFirst(logReplies.count - 100)
         }
-        recordPetLogAdmissionEvent(.persistenceFailure(file: "log.json"))
+        recordPetLogAdmissionEvent(.persistenceFailure(file: "log.json", requestId: requestId))
     }
 
     func requestSceneNaming(scenes: [(id: String, timeLabel: String, excerpt: String)]) {
