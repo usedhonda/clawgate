@@ -664,8 +664,10 @@ enum PetLogResultParser {
         // Outcome × mode validation (D2/D142/D145/D147/D150).
         switch result.outcome {
         case .insufficientEvidence:
-            // D150: insufficient is not a boundary trim — no excluded range.
-            guard !excludedPresent else { return .failure(.insufficientMustHaveNullExcluded) }
+            // D150: insufficient is not a boundary trim — excludedAdjacentRange
+            // must be the JSON `null` FIELD ITSELF (a {null,null} object is
+            // rejected too, not just a non-null range).
+            guard decision.excludedAdjacentRange == nil else { return .failure(.insufficientMustHaveNullExcluded) }
             switch selectionMode {
             case .automaticBackward:
                 // D145/D147: automatic insufficient = empty inclusion, and NO

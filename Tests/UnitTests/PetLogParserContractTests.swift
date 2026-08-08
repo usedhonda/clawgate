@@ -198,5 +198,14 @@ final class PetLogParserContractTests: XCTestCase {
         """
         XCTAssertEqual(PetLogResultParser.parse(insufficientExcluded, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
                        .failure(.insufficientMustHaveNullExcluded))
+        // D150: even a {null,null} object (not JSON null field) is rejected for
+        // insufficient — the field itself must be null.
+        let insufficientNullMembers = """
+        {"outcome":"insufficientEvidence","answer":null,"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":[],"includedRange":null,"excludedAdjacentRange":{"startSegmentId":null,"endSegmentId":null},
+        "boundaryReasonCodes":[],"boundaryConfidence":"high","historyComplete":true,"correctionCounts":{}}}
+        """
+        XCTAssertEqual(PetLogResultParser.parse(insufficientNullMembers, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                       .failure(.insufficientMustHaveNullExcluded))
     }
 }
