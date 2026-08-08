@@ -556,9 +556,23 @@ final class AmbientTests: XCTestCase {
     /// was already caught and fixed.
     func testUniversalPrefixTagsPolicyVersionExactlyOnce() {
         let prefix = PetLogPromptBuilder.universalPrefix()
-        let occurrences = prefix.components(separatedBy: "[pet-log-context-v1]").count - 1
+        let occurrences = prefix.components(separatedBy: "[pet-log-context-v2]").count - 1
         XCTAssertEqual(occurrences, 1, "policy tag must be present exactly once, not doubled")
-        XCTAssertFalse(prefix.contains("pet-log-context-pet-log-context-v1"))
+        XCTAssertFalse(prefix.contains("pet-log-context-pet-log-context-v2"))
+    }
+
+    /// D1 prefix v2: the required clauses must be present — scope re-resolution
+    /// ban, scene-id-vs-segment-id type note, session-contamination boundary,
+    /// contiguous-backward-suffix rule, and insufficient-evidence instruction.
+    func testUniversalPrefixV2HasRequiredClauses() {
+        let prefix = PetLogPromptBuilder.universalPrefix()
+        XCTAssertTrue(prefix.contains("pet-log-context-v2"))
+        XCTAssertTrue(prefix.contains("再解決"), "scope re-resolution ban clause")
+        XCTAssertTrue(prefix.contains("シーンID") && prefix.contains("epoch"), "scene-id type note")
+        XCTAssertTrue(prefix.contains("既往の会話") && prefix.contains("記憶"), "session-contamination boundary")
+        XCTAssertTrue(prefix.contains("contiguous suffix") || prefix.contains("連続した末尾区間"), "contiguous backward suffix rule")
+        XCTAssertTrue(prefix.contains("飛び石"), "no gapped exclusion")
+        XCTAssertTrue(prefix.contains("根拠となるログが不足"), "insufficient-evidence instruction")
     }
 
     /// Trust-boundary regression guard: the policy prose must name the
@@ -699,7 +713,7 @@ final class AmbientTests: XCTestCase {
         let result = PetLogResultParser.parse(
             wellFormedResultJSON(policyVersion: "pet-log-context-v0"), allowedSegmentIds: ["abc", "def"])
         XCTAssertEqual(result, .failure(.policyVersionMismatch(
-            expected: "pet-log-context-v1", got: "pet-log-context-v0")))
+            expected: PetLogPromptBuilder.policyVersion, got: "pet-log-context-v0")))
     }
 
     func testResultParserToleratesJSONCodeFence() {
