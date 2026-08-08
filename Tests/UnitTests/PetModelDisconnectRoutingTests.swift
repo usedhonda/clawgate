@@ -346,6 +346,10 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
                       "persistenceFailure must carry a requestId for lifecycle correlation")
         XCTAssertFalse(petModel.contains("Self.petLogTelemetry.notice(\"summonReplyTimeout source=\\(source, privacy: .public) slotReclaimed"),
                        "summonReplyTimeout must carry a bounded owner correlation (no requestId available)")
+        // D139: a started event with the SAME owner token exists, so
+        // started/timeout correlate (a timeout-only owner tag isn't correlation).
+        XCTAssertTrue(petModel.contains("sharedSummonStarted source=") && petModel.contains("owner="),
+                      "a shared summon must emit a started event with a bounded owner correlation")
 
         let wsClient = try String(
             contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)

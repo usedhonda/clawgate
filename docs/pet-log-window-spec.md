@@ -113,12 +113,13 @@ multiline source scan is an auxiliary.
 
 The whole Pet Log admission lifecycle (actionReceived, busyRefused,
 disconnectedRefused, envelopeAccepted, dispatchAttempted, persistenceFailure,
-envelopeSent, summonReplyTimeout) is emitted through one os.Logger
-(subsystem `com.clawgate`, category `PetLog`) so `log show` can query it
-retroactively — NSLog is not retroactively queryable. Every event is body-free
-(no instruction, STT, or error body) and carries a `requestId` (or, where none
-exists, a bounded owner/correlation token) so the lifecycle correlates end to
-end.
+envelopeSent, sharedSummonStarted, summonReplyTimeout) is emitted through one
+os.Logger (subsystem `com.clawgate`, category `PetLog`) so `log show` can query
+it retroactively — NSLog is not retroactively queryable. Every event is body-free
+(no instruction, STT, or error body). Request-scoped events carry a `requestId`;
+shared-summon events (which have no requestId) carry a bounded owner token, and a
+`sharedSummonStarted` is emitted with the SAME owner token as its
+`summonReplyTimeout` so the pair correlates.
 
 ---
 

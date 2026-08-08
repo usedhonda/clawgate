@@ -1836,6 +1836,10 @@ final class PetModel: NSObject, ObservableObject {
         // never release a newer summon that reused the slot.
         let token = UUID()
         summonWatchdogToken = token
+        // D139: emit the START of a shared summon with the same bounded owner
+        // token as the timeout, so started/timeout correlate in log show. Body-
+        // free: fixed source + owner prefix only (no prompt/STT).
+        Self.petLogTelemetry.info("sharedSummonStarted source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public)")
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.summonReplyTimeoutSeconds) { [weak self] in
             guard let self else { return }
             guard self.summonWatchdogToken == token,
