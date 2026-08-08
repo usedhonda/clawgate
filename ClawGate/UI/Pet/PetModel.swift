@@ -991,7 +991,7 @@ final class PetModel: NSObject, ObservableObject {
     /// Test seam: run the real restore path without the rest of `start()`.
     func restorePersistedLogsForTesting() { restorePersistedLogs() }
 
-    /// Clears the durable recovery warnings once the user has seen them —
+    /// Clears ALL durable recovery warnings once the user has seen them —
     /// treated as a commit: the in-memory/published state is only cleared after
     /// the empty set is persisted. On failure the warnings are kept visible and
     /// the durability-degraded flag is raised, so acknowledgement can't silently
@@ -1005,8 +1005,24 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    /// Acknowledges a SINGLE issue independently (identity = file + kind), so
+    /// e.g. a resolved permission problem can be dismissed without dropping a
+    /// still-open partial-drop warning on the same file. Same commit discipline.
+    func acknowledgeLogRecoveryWarning(file: String, kind: String) {
+        let remaining = logRecoveryWarnings.filter { !($0.file == file && $0.kind == kind) }
+        if PetLogStore.saveRecoveryWarnings(remaining) {
+            logRecoveryWarnings = remaining
+        } else {
+            recoveryWarningPersistenceDegraded = true
+        }
+    }
+
+    /// Warning identity is (file, kind): distinct failure kinds for the same
+    /// file are independent issues that coexist — a permission problem and a
+    /// partial drop on the same file must BOTH stay visible, neither erasing
+    /// the other. Only a re-detection of the SAME kind refreshes in place.
     private func upsertRecoveryWarning(file: String, kind: String, droppedCount: Int, quarantine: String?) {
-        logRecoveryWarnings.removeAll { $0.file == file }
+        logRecoveryWarnings.removeAll { $0.file == file && $0.kind == kind }
         logRecoveryWarnings.append(PetLogRecoveryWarning(
             file: file, kind: kind, droppedCount: droppedCount,
             quarantine: quarantine, detectedAt: Date()))
@@ -2374,12 +2390,27 @@ enum PetLogStore {
     /// signal is ever true in the shipping app.
     /// internal (not private): test seam for the D37 guard.
     static func defaultDir() -> String {
-        let underTest = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-            || NSClassFromString("XCTestCase") != nil
-        if underTest {
+        if isUnderXCTest {
             return NSTemporaryDirectory() + "clawgate-xctest-store-\(ProcessInfo.processInfo.processIdentifier)"
         }
-        return NSString("~/.clawgate/logs").expandingTildeInPath
+        return productionDir
+    }
+
+    private static let productionDir = NSString("~/.clawgate/logs").expandingTildeInPath
+
+    private static var isUnderXCTest: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || NSClassFromString("XCTestCase") != nil
+    }
+
+    /// PRIMARY D37 guard (runtime, not source-scan): under XCTest, refuse any
+    /// real I/O against the production store directory no matter how `dir` was
+    /// overridden — a literal, a variable, a function result. This makes
+    /// production data structurally untouchable from a test even if a case
+    /// assigns `dir` to the real path through an indirection the source scan
+    /// can't see. Never true in the shipping app.
+    static func productionAccessBlocked() -> Bool {
+        isUnderXCTest && dir == productionDir
     }
 
     /// internal (not private): test seam. `dir` is a process-global static,
@@ -2450,6 +2481,9 @@ enum PetLogStore {
 
     @discardableResult
     static func save(_ entries: [NotificationEntry], file: String) -> Bool {
+        // D37 runtime guard: never write real data from a test, however `dir`
+        // was overridden.
+        if productionAccessBlocked() { return false }
         // Fail-closed: never overwrite a file whose original bytes we could not
         // read and did not recover — the quarantined copy is the only survivor.
         if poisonedFiles.contains(file) { return false }
@@ -2505,6 +2539,8 @@ enum PetLogStore {
     /// so the dir is already 0700 when a corrupt load writes a quarantine copy.
     @discardableResult
     static func convergePermissionsOnLoad(file: String) -> Bool {
+        // D37 runtime guard: never chmod real files/dir from a test.
+        if productionAccessBlocked() { return true }
         var ok = true
         if FileManager.default.fileExists(atPath: dir) {
             if !applyPermissions(ownerOnlyDir, path: dir) { ok = false }
@@ -2530,6 +2566,9 @@ enum PetLogStore {
     }
 
     static func loadOutcome(file: String) -> LoadOutcome {
+        // D37 runtime guard: never read real data from a test, however `dir` was
+        // overridden. Report missing rather than touching the production path.
+        if productionAccessBlocked() { return .missing }
         let path = (dir as NSString).appendingPathComponent(file)
         guard FileManager.default.fileExists(atPath: path) else { return .missing }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
@@ -2634,6 +2673,7 @@ enum PetLogStore {
     /// bookkeeping, never conversation data — it must not recurse the
     /// poison/quarantine machinery onto itself.
     static func loadRecoveryWarnings() -> (warnings: [PetLogRecoveryWarning], degraded: Bool) {
+        if productionAccessBlocked() { return ([], false) }
         let path = (dir as NSString).appendingPathComponent(recoveryWarningsFile)
         let bakPath = path + ".bak"
         if let warnings = decodeRecoveryWarnings(path) { return (warnings, false) }
@@ -2663,6 +2703,7 @@ enum PetLogStore {
     /// treats the write as not-yet-durable rather than confirming it.
     @discardableResult
     static func saveRecoveryWarnings(_ warnings: [PetLogRecoveryWarning]) -> Bool {
+        if productionAccessBlocked() { return false }
         do {
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         } catch {

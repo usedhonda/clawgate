@@ -36,29 +36,62 @@ final class PetLogStoreDefaultIsolationTests: XCTestCase {
                        "a bare save must never target the production directory")
     }
 
-    /// Belt-and-suspenders source scan (D37): every `PetLogStore.dir = …`
-    /// assignment across the test suite must target a temp/override/restore
-    /// value — never the production directory. This catches a future test that
-    /// points the store at real data via a write seam even though the runtime
-    /// default already blocks it structurally.
+    /// AUXILIARY lint (the PRIMARY guard is the runtime block in
+    /// PetLogStore.productionAccessBlocked, tested below). Allowlist-style: every
+    /// `PetLogStore.dir = …` assignment must use a recognized safe seam
+    /// (temp root / default / a saved-original restore var / /dev/null), or
+    /// carry an explicit `// petlog-test-dir-ok` opt-out comment for a
+    /// deliberate case. A variable-indirected production assignment that slips
+    /// past this is still caught at runtime.
     func testNoTestAssignsStoreDirToProduction() throws {
         let testsDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
         let files = try FileManager.default.contentsOfDirectory(at: testsDir, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "swift" }
-        // A dir assignment must never resolve to the production directory: no
-        // literal `.clawgate` path and no tilde-home expansion of it.
-        let productionMarkers = [".clawgate", "expandingTildeInPath"]
+        let allowedRHS = ["NSTemporaryDirectory", "defaultDir(", "original", "saved", "/dev/null"]
+        let optOut = "petlog-test-dir-ok"
         for file in files {
             let source = try String(contentsOf: file, encoding: .utf8)
             for (n, line) in source.components(separatedBy: "\n").enumerated() {
+                let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+                // Skip comment/doc lines — only real code assignments matter.
+                if trimmedLine.hasPrefix("//") || trimmedLine.hasPrefix("*") { continue }
                 guard let range = line.range(of: "PetLogStore.dir") else { continue }
                 let after = line[range.upperBound...].trimmingCharacters(in: .whitespaces)
                 // Only assignments (`=`, not `==` comparisons).
                 guard after.hasPrefix("=") && !after.hasPrefix("==") else { continue }
-                let pointsAtProduction = productionMarkers.contains { line.contains($0) }
-                XCTAssertFalse(pointsAtProduction,
-                               "\(file.lastPathComponent):\(n + 1) assigns PetLogStore.dir to a production path: \(line.trimmingCharacters(in: .whitespaces))")
+                let safe = allowedRHS.contains { line.contains($0) } || line.contains(optOut)
+                XCTAssertTrue(safe,
+                              "\(file.lastPathComponent):\(n + 1) assigns PetLogStore.dir without an allowlisted seam (add // \(optOut) if intentional): \(line.trimmingCharacters(in: .whitespaces))")
             }
         }
+    }
+
+    /// PRIMARY D37 guard: even a variable-indirected assignment of the store dir
+    /// to the real production path is refused at the I/O entry points under
+    /// XCTest — save and load both no-op, and no bytes are written.
+    func testRuntimeBlocksProductionDirEvenViaVariable() throws {
+        PetLogStore.testIsolationSemaphore.wait()
+        let saved = PetLogStore.dir
+        let production = NSString("~/.clawgate/logs").expandingTildeInPath
+        defer {
+            PetLogStore.dir = saved  // petlog-test-dir-ok
+            PetLogStore.testIsolationSemaphore.signal()
+        }
+        // Snapshot real files (if any) so we can prove they're untouched.
+        let realLog = (production as NSString).appendingPathComponent("log.json")
+        let before = try? Data(contentsOf: URL(fileURLWithPath: realLog))
+
+        let productionVar = production  // indirection the source scan can't resolve
+        PetLogStore.dir = productionVar  // petlog-test-dir-ok
+
+        let entry = NotificationEntry(id: "x", text: "must not be written", source: "log", timestamp: Date())
+        XCTAssertFalse(PetLogStore.save([entry], file: "log.json"),
+                       "save to production must be refused under XCTest")
+        if case .missing = PetLogStore.loadOutcome(file: "log.json") {} else {
+            XCTFail("load from production must be refused (reported missing) under XCTest")
+        }
+
+        let after = try? Data(contentsOf: URL(fileURLWithPath: realLog))
+        XCTAssertEqual(before, after, "real production bytes must be untouched")
     }
 }

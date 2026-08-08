@@ -227,4 +227,58 @@ final class PetLogRecoveryWarningTests: XCTestCase {
         XCTAssertTrue(restarted.recoveryWarningPersistenceDegraded,
                       "a degraded warnings-store load must raise the model's Published flag")
     }
+
+    // MARK: - Concurrent issues on one file (D39/D54 interaction)
+
+    /// A permission failure AND a partial drop on the SAME file are independent
+    /// issues that must both stay visible — neither erases the other (warning
+    /// identity is (file, kind), not file alone).
+    func testChmodFailurePlusPartialDropKeepsBothIssues() throws {
+        try partialDropFixture()
+        // Fail the chmod of log.json so convergePermissionsOnLoad raises an
+        // insecurePermissions issue, while the load still detects the drop.
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+
+        let kinds = Set(model.logRecoveryWarnings.filter { $0.file == "log.json" }.map(\.kind))
+        XCTAssertTrue(kinds.contains("insecurePermissions"), "permission issue must survive")
+        XCTAssertTrue(kinds.contains("partialDrop"), "partial-drop issue must survive alongside it")
+        XCTAssertEqual(kinds.count, 2, "both issues are distinct and coexist")
+    }
+
+    /// A permission failure AND whole-file corruption on the same file also
+    /// coexist as distinct issues.
+    func testChmodFailurePlusCorruptKeepsBothIssues() throws {
+        try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+
+        let kinds = Set(model.logRecoveryWarnings.filter { $0.file == "log.json" }.map(\.kind))
+        XCTAssertTrue(kinds.contains("insecurePermissions"))
+        XCTAssertTrue(kinds.contains("corrupt"))
+        XCTAssertEqual(kinds.count, 2, "permission + corrupt issues coexist, neither erased")
+    }
+
+    /// A single issue can be acknowledged independently without dropping a still-
+    /// open issue on the same file.
+    func testSingleIssueAcknowledgeLeavesOthers() throws {
+        try partialDropFixture()
+        let primary = path("log.json")
+        PetLogStore.applyPermissionsHookForTesting = { $0 == primary ? false : true }
+        let model = PetModel()
+        model.restorePersistedLogsForTesting()
+        PetLogStore.applyPermissionsHookForTesting = nil  // let ack persist succeed
+
+        model.acknowledgeLogRecoveryWarning(file: "log.json", kind: "insecurePermissions")
+
+        let kinds = Set(model.logRecoveryWarnings.filter { $0.file == "log.json" }.map(\.kind))
+        XCTAssertFalse(kinds.contains("insecurePermissions"), "the acknowledged issue is cleared")
+        XCTAssertTrue(kinds.contains("partialDrop"), "the other issue on the same file remains")
+    }
 }
