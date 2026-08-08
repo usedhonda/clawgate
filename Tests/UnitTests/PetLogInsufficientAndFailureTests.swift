@@ -16,30 +16,52 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
             segments: ids.map(segment))
     }
 
-    private func emptyIncludedReply(answer: String, confidence: String = "high") -> String {
-        let ans = String(data: try! JSONEncoder().encode(answer), encoding: .utf8)!
+    /// An insufficient reply: typed discriminator + null answer. Included is []
+    /// for automatic, the exact-all echo for explicit (D145).
+    private func insufficientReply(included: [String], confidence: String = "high") -> String {
+        let idList = included.map { "\"\($0)\"" }.joined(separator: ",")
+        let range = included.isEmpty ? "null" : "{\"startSegmentId\":\"\(included.first!)\",\"endSegmentId\":\"\(included.last!)\"}"
         return """
-        {"answer":\(ans),"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
-        "includedSegmentIds":[],"includedRange":null,"excludedAdjacentRange":null,
+        {"outcome":"insufficientEvidence","answer":null,"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":[\(idList)],"includedRange":\(range),"excludedAdjacentRange":null,
         "boundaryReasonCodes":[],"boundaryConfidence":"\(confidence)","historyComplete":true,"correctionCounts":{}}}
         """
     }
 
-    // MARK: - Parser (structural, text-independent)
+    private func answerReply(answer: String, ids: [String]) -> String {
+        let ans = String(data: try! JSONEncoder().encode(answer), encoding: .utf8)!
+        let idList = ids.map { "\"\($0)\"" }.joined(separator: ",")
+        return """
+        {"outcome":"answer","answer":\(ans),"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":[\(idList)],"includedRange":{"startSegmentId":"\(ids.first!)","endSegmentId":"\(ids.last!)"},
+        "excludedAdjacentRange":null,"boundaryReasonCodes":[],"boundaryConfidence":"high","historyComplete":true,"correctionCounts":{}}}
+        """
+    }
 
-    func testAutomaticEmptyInclusionWithSentSegmentsIsInsufficient() {
-        // Two different answer texts — the outcome is structural, not a text match.
-        for answer in ["根拠となるログが不足しています", "totally unrelated prose"] {
-            XCTAssertEqual(PetLogResultParser.parse(emptyIncludedReply(answer: answer),
-                                                    allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
-                           .failure(.insufficientEvidence))
+    // MARK: - Parser (typed discriminator, text-independent)
+
+    func testAutomaticInsufficientIsAcceptedRegardlessOfConfidence() {
+        // D147: automatic insufficient (empty inclusion) skips the answer gate —
+        // low/medium confidence is fine, and no answer text is present.
+        for confidence in ["high", "medium", "low"] {
+            switch PetLogResultParser.parse(insufficientReply(included: [], confidence: confidence),
+                                            allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward) {
+            case .success(let r): XCTAssertEqual(r.outcome, .insufficientEvidence)
+            case .failure(let e): XCTFail("automatic insufficient (\(confidence)) must be accepted, got \(e)")
+            }
         }
     }
 
-    func testExplicitEmptyInclusionIsScopeViolationNotInsufficient() {
-        XCTAssertEqual(PetLogResultParser.parse(emptyIncludedReply(answer: "x"),
+    func testExplicitInsufficientRequiresExactAllEcho() {
+        // D145: explicit insufficient must echo the whole scope, not empty.
+        XCTAssertEqual(PetLogResultParser.parse(insufficientReply(included: []),
                                                 allowedSegmentIds: ["a", "b", "c"], selectionMode: .explicitExact),
-                       .failure(.explicitScopeRequiresExactInclusion))
+                       .failure(.insufficientInclusionMismatch))
+        switch PetLogResultParser.parse(insufficientReply(included: ["a", "b", "c"]),
+                                        allowedSegmentIds: ["a", "b", "c"], selectionMode: .explicitExact) {
+        case .success(let r): XCTAssertEqual(r.outcome, .insufficientEvidence)
+        case .failure(let e): XCTFail("explicit exact-all insufficient must be accepted, got \(e)")
+        }
     }
 
     // MARK: - Client mapping
@@ -52,13 +74,12 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
 
         let requestId = UUID().uuidString
         model.sendLogInstruction(envelope: automaticEnvelope(requestId: requestId, ids: ["a", "b", "c"]))
-        model.addSummonResult(text: emptyIncludedReply(answer: "根拠不足"), source: "log", parseAsStructured: true)
+        model.addSummonResult(text: insufficientReply(included: []), source: "log", parseAsStructured: true)
 
         XCTAssertEqual(model.logDispatchStatus, .insufficientEvidence(requestId: requestId),
                        "insufficient evidence must surface as a typed status")
-        XCTAssertFalse(model.logReplies.contains { $0.source == "log" && $0.text.contains("根拠不足") },
-                       "the model body must not be persisted as a ちー reply")
-        XCTAssertFalse(model.logReplies.contains { $0.source == "log" && $0.text == "根拠不足" })
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log" },
+                       "no ちー reply is persisted for an insufficient outcome")
     }
 
     func testEmptyScopeEnvelopeIsRefusedFastAsStatus() {
@@ -109,12 +130,7 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         model.setPendingLogRequestForTesting(segmentIds: ["a"], completeBeforeAnchor: true, selectionMode: "future")
 
         // Even a well-formed reply must be rejected — the mode is unrecognized.
-        let reply = """
-        {"answer":"x","contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
-        "includedSegmentIds":["a"],"includedRange":{"startSegmentId":"a","endSegmentId":"a"},
-        "excludedAdjacentRange":null,"boundaryReasonCodes":[],"boundaryConfidence":"high",
-        "historyComplete":true,"correctionCounts":{}}}
-        """
+        let reply = answerReply(answer: "x", ids: ["a"])
         model.addSummonResult(text: reply, source: "log", parseAsStructured: true)
 
         let entry = model.logReplies.last { $0.source == "log" }

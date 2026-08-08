@@ -20,7 +20,7 @@ final class PetLogParserContractTests: XCTestCase {
         let cc = corrections.map { "\"\($0.key)\":\($0.value)" }.joined(separator: ",")
         let ans = String(data: try! JSONEncoder().encode(answer), encoding: .utf8)!
         return """
-        {"answer":\(ans),"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        {"outcome":"answer","answer":\(ans),"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
         "includedSegmentIds":[\(idList)],"includedRange":\(obj(range)),
         "excludedAdjacentRange":\(obj(excluded)),"boundaryReasonCodes":[\(rc)],
         "boundaryConfidence":"\(confidence)","historyComplete":true,"correctionCounts":{\(cc)}}}
@@ -63,8 +63,8 @@ final class PetLogParserContractTests: XCTestCase {
         // newest-skipping [a]
         XCTAssertEqual(PetLogResultParser.parse(reply(included: ["a"]), allowedSegmentIds: allowed, selectionMode: .automaticBackward),
                        .failure(.notContiguousBackwardSuffix))
-        // valid suffix [c,d]
-        switch PetLogResultParser.parse(reply(included: ["c", "d"]), allowedSegmentIds: allowed, selectionMode: .automaticBackward) {
+        // valid suffix [c,d] with the full dropped prefix [a,b] declared (D142)
+        switch PetLogResultParser.parse(reply(included: ["c", "d"], excluded: ("a", "b")), allowedSegmentIds: allowed, selectionMode: .automaticBackward) {
         case .success: break
         case .failure(let e): XCTFail("valid suffix must be accepted, got \(e)")
         }
@@ -107,24 +107,96 @@ final class PetLogParserContractTests: XCTestCase {
                        .failure(.tooManyReasonCodes))
     }
 
+    private func expectSuccess(_ json: String, _ allowed: [String], _ label: String) {
+        switch PetLogResultParser.parse(json, allowedSegmentIds: allowed, selectionMode: .automaticBackward) {
+        case .success: break
+        case .failure(let e): XCTFail("\(label) at the limit must pass, got \(e)")
+        }
+    }
+
     func testReasonCodeLengthBound() {
         let allowed = ["a", "b"]
+        expectSuccess(reply(included: allowed, reasonCodes: [String(repeating: "c", count: PetLogResponseBounds.maxReasonCodeChars)]),
+                      allowed, "reason code length")
         let over = reply(included: allowed, reasonCodes: [String(repeating: "c", count: PetLogResponseBounds.maxReasonCodeChars + 1)])
         XCTAssertEqual(PetLogResultParser.parse(over, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
                        .failure(.reasonCodeTooLong))
     }
 
-    func testCorrectionCountKeyAndValueBounds() {
+    func testCorrectionKeyCountBound() {
         let allowed = ["a", "b"]
-        var manyKeys: [String: Int] = [:]
-        for i in 0...PetLogResponseBounds.maxCorrectionKeys { manyKeys["k\(i)"] = 0 }
-        XCTAssertEqual(PetLogResultParser.parse(reply(included: allowed, corrections: manyKeys), allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+        var atKeys: [String: Int] = [:]
+        for i in 0..<PetLogResponseBounds.maxCorrectionKeys { atKeys["k\(i)"] = 0 }
+        expectSuccess(reply(included: allowed, corrections: atKeys), allowed, "correction key count")
+        var overKeys = atKeys; overKeys["extra"] = 0
+        XCTAssertEqual(PetLogResultParser.parse(reply(included: allowed, corrections: overKeys), allowedSegmentIds: allowed, selectionMode: .automaticBackward),
                        .failure(.tooManyCorrectionKeys))
-        let bigKey = reply(included: allowed, corrections: [String(repeating: "k", count: PetLogResponseBounds.maxCorrectionKeyChars + 1): 0])
-        XCTAssertEqual(PetLogResultParser.parse(bigKey, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+    }
+
+    func testCorrectionKeyLengthBound() {
+        let allowed = ["a", "b"]
+        expectSuccess(reply(included: allowed, corrections: [String(repeating: "k", count: PetLogResponseBounds.maxCorrectionKeyChars): 0]),
+                      allowed, "correction key length")
+        let over = reply(included: allowed, corrections: [String(repeating: "k", count: PetLogResponseBounds.maxCorrectionKeyChars + 1): 0])
+        XCTAssertEqual(PetLogResultParser.parse(over, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
                        .failure(.correctionKeyTooLong))
-        let bigVal = reply(included: allowed, corrections: ["k": PetLogResponseBounds.maxCorrectionValue + 1])
-        XCTAssertEqual(PetLogResultParser.parse(bigVal, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+    }
+
+    func testCorrectionValueBound() {
+        let allowed = ["a", "b"]
+        expectSuccess(reply(included: allowed, corrections: ["k": PetLogResponseBounds.maxCorrectionValue]), allowed, "correction value")
+        let over = reply(included: allowed, corrections: ["k": PetLogResponseBounds.maxCorrectionValue + 1])
+        XCTAssertEqual(PetLogResultParser.parse(over, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
                        .failure(.correctionValueOutOfRange))
+    }
+
+    // MARK: - D146 raw byte preflight
+
+    func testRawByteBoundPreflight() {
+        let allowed = ["a", "b"]
+        // The byte preflight runs before JSON parsing, so probe its boundary with
+        // raw payloads (a valid reply can never reach the cap — every field is
+        // bounded well below it). Exactly at the limit passes the preflight (then
+        // fails JSON parse); one byte over is rejected by the preflight itself.
+        let atLimit = String(repeating: "z", count: PetLogResponseBounds.maxResponseBytes)
+        XCTAssertNotEqual(PetLogResultParser.parse(atLimit, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                          .failure(.responseTooLarge), "exactly at the byte limit must pass the preflight")
+        let over = String(repeating: "z", count: PetLogResponseBounds.maxResponseBytes + 1)
+        XCTAssertEqual(PetLogResultParser.parse(over, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                       .failure(.responseTooLarge))
+        // A huge unknown-key JSON is rejected by bytes before deserialization.
+        let hugeJSON = "{\"junk\":\"" + String(repeating: "z", count: PetLogResponseBounds.maxResponseBytes) + "\"}"
+        XCTAssertEqual(PetLogResultParser.parse(hugeJSON, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                       .failure(.responseTooLarge))
+    }
+
+    // MARK: - D147 / D150 discriminator ↔ shape integrity
+
+    func testDiscriminatorAnswerIntegrity() {
+        let allowed = ["a", "b"]
+        // insufficient must not carry a body.
+        let insufficientWithBody = """
+        {"outcome":"insufficientEvidence","answer":"本文","contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":[],"includedRange":null,"excludedAdjacentRange":null,"boundaryReasonCodes":[],
+        "boundaryConfidence":"high","historyComplete":true,"correctionCounts":{}}}
+        """
+        XCTAssertEqual(PetLogResultParser.parse(insufficientWithBody, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                       .failure(.insufficientMustHaveNullAnswer))
+        // answer must not be null.
+        let answerNull = """
+        {"outcome":"answer","answer":null,"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":["a","b"],"includedRange":{"startSegmentId":"a","endSegmentId":"b"},"excludedAdjacentRange":null,
+        "boundaryReasonCodes":[],"boundaryConfidence":"high","historyComplete":true,"correctionCounts":{}}}
+        """
+        XCTAssertEqual(PetLogResultParser.parse(answerNull, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                       .failure(.answerOutcomeRequiresAnswer))
+        // D150: insufficient must not claim an excluded (boundary) range.
+        let insufficientExcluded = """
+        {"outcome":"insufficientEvidence","answer":null,"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":[],"includedRange":null,"excludedAdjacentRange":{"startSegmentId":"a","endSegmentId":"a"},
+        "boundaryReasonCodes":[],"boundaryConfidence":"high","historyComplete":true,"correctionCounts":{}}}
+        """
+        XCTAssertEqual(PetLogResultParser.parse(insufficientExcluded, allowedSegmentIds: allowed, selectionMode: .automaticBackward),
+                       .failure(.insufficientMustHaveNullExcluded))
     }
 }

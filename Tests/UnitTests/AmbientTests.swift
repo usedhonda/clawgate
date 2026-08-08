@@ -681,6 +681,7 @@ final class AmbientTests: XCTestCase {
     private func wellFormedResultJSON(policyVersion: String = PetLogPromptBuilder.policyVersion) -> String {
         """
         {
+          "outcome": "answer",
           "answer": "回答本文です",
           "contextDecision": {
             "policyVersion": "\(policyVersion)",
@@ -733,7 +734,8 @@ final class AmbientTests: XCTestCase {
     /// Builds a structured reply JSON from explicit context-decision fields so
     /// each validation case can vary exactly one thing.
     private func resultJSON(
-        answer: String = "回答本文です",
+        outcome: String = "answer",
+        answer: String? = "回答本文です",
         included: [String],
         includedRange: (String?, String?)? = nil,
         excludedRange: (String?, String?)? = nil,
@@ -747,11 +749,12 @@ final class AmbientTests: XCTestCase {
             func q(_ v: String?) -> String { v.map { "\"\($0)\"" } ?? "null" }
             return "{\"startSegmentId\": \(q(s)), \"endSegmentId\": \(q(e))}"
         }
-        let answerJSON = String(data: try! JSONEncoder().encode(answer), encoding: .utf8)!
+        let answerJSON = answer.map { String(data: try! JSONEncoder().encode($0), encoding: .utf8)! } ?? "null"
         let includedJSON = String(data: try! JSONEncoder().encode(included), encoding: .utf8)!
         let countsJSON = String(data: try! JSONEncoder().encode(correctionCounts), encoding: .utf8)!
         return """
         {
+          "outcome": "\(outcome)",
           "answer": \(answerJSON),
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
@@ -769,8 +772,10 @@ final class AmbientTests: XCTestCase {
 
     func testResultParserAutomaticAcceptsBackwardSuffixRejectsMiddleSubset() {
         // D2: automatic scope keeps only a contiguous backward suffix including
-        // the newest segment. [c,d] (a valid suffix, high) is accepted...
-        let suffix = resultJSON(included: ["c", "d"], includedRange: ("c", "d"), boundaryConfidence: "high")
+        // the newest segment. [c,d] (a valid suffix, high) is accepted — with the
+        // full dropped prefix [a,b] declared in excludedAdjacentRange (D142)...
+        let suffix = resultJSON(included: ["c", "d"], includedRange: ("c", "d"),
+                                excludedRange: ("a", "b"), boundaryConfidence: "high")
         switch PetLogResultParser.parse(suffix, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward) {
         case .success(let r): XCTAssertEqual(r.contextDecision.includedSegmentIds, ["c", "d"])
         case .failure(let e): XCTFail("a valid backward suffix must be accepted, got \(e)")
@@ -807,19 +812,19 @@ final class AmbientTests: XCTestCase {
                        .failure(.rangeEndpointMismatch))
     }
 
-    func testResultParserRejectsNonAdjacentExcludedRange() {
-        // included [c], excluded [a] — a is not immediately before b(=incStart-1)
-        // nor immediately after c; it is disjoint from the boundary.
-        let json = resultJSON(included: ["c"], includedRange: ("c", "c"), excludedRange: ("a", "a"))
+    func testResultParserRejectsIncompleteExcludedRange() {
+        // D142: included [d,e] (valid suffix of [a..e]) trims [a,b,c]; the
+        // excluded range must be the FULL dropped prefix (a…c). Under-reporting
+        // it as [b,c] is rejected.
+        let json = resultJSON(included: ["d", "e"], includedRange: ("d", "e"), excludedRange: ("b", "c"))
         XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d", "e"], selectionMode: .automaticBackward),
-                       .failure(.invalidExcludedRange))
+                       .failure(.excludedAdjacentRangeIncomplete))
     }
 
     func testResultParserAcceptsAdjacentExcludedRange() {
-        // included [d,e] (a valid backward suffix of [a..e]), excluded [c]
-        // immediately borders incStart(d) at pos-1. (Fixture uses a suffix so it
-        // is valid under the D2 automaticBackward contract.)
-        let json = resultJSON(included: ["d", "e"], includedRange: ("d", "e"), excludedRange: ("c", "c"),
+        // included [d,e] (a valid backward suffix of [a..e]); the excluded range
+        // must be the FULL dropped prefix [a…c] (D142 completeness).
+        let json = resultJSON(included: ["d", "e"], includedRange: ("d", "e"), excludedRange: ("a", "c"),
                               boundaryConfidence: "high")
         switch PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d", "e"], selectionMode: .automaticBackward) {
         case .success: break
@@ -925,6 +930,7 @@ final class AmbientTests: XCTestCase {
     func testResultParserRejectsExtraTopLevelKey() {
         let json = """
         {
+          "outcome": "answer",
           "answer": "回答本文です",
           "debug": "x",
           "contextDecision": {
@@ -957,6 +963,7 @@ final class AmbientTests: XCTestCase {
     func testResultParserRejectsPartialIncludedRangeObject() {
         let json = """
         {
+          "outcome": "answer",
           "answer": "回答本文です",
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
@@ -978,6 +985,7 @@ final class AmbientTests: XCTestCase {
     func testResultParserRejectsExtraContextDecisionKey() {
         let json = """
         {
+          "outcome": "answer",
           "answer": "回答本文です",
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
@@ -1002,6 +1010,7 @@ final class AmbientTests: XCTestCase {
     func testResultParserRejectsNonEmptyIncludedWithNullRange() {
         let json = """
         {
+          "outcome": "answer",
           "answer": "回答本文です",
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
@@ -1024,6 +1033,7 @@ final class AmbientTests: XCTestCase {
     func testResultParserRejectsNonEmptyIncludedWithHalfNullRange() {
         let json = """
         {
+          "outcome": "answer",
           "answer": "回答本文です",
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
@@ -1046,6 +1056,7 @@ final class AmbientTests: XCTestCase {
     func testResultParserRejectsEmptyIncludedWithNullMemberRangeObject() {
         let json = """
         {
+          "outcome": "answer",
           "answer": "回答本文です",
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
@@ -1068,9 +1079,13 @@ final class AmbientTests: XCTestCase {
         XCTAssertEqual(PetLogResultParser.parse(medium, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
                        .failure(.subsetRequiresHighBoundaryConfidence))
 
-        let low = resultJSON(included: [], includedRangeIsNull: true, boundaryConfidence: "low")
-        XCTAssertEqual(PetLogResultParser.parse(low, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
-                       .failure(.subsetRequiresHighBoundaryConfidence))
+        // An empty inclusion with outcome=answer is a discriminator violation
+        // (an answer must include something) — insufficient must use its own
+        // outcome, so this is answerOutcomeRequiresInclusion, not a confidence
+        // failure.
+        let empty = resultJSON(included: [], includedRangeIsNull: true, boundaryConfidence: "low")
+        XCTAssertEqual(PetLogResultParser.parse(empty, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
+                       .failure(.answerOutcomeRequiresInclusion))
     }
 
     func testResultParserRejectsMiddleSubsetEvenWithHighBoundaryConfidence() {
@@ -1109,10 +1124,13 @@ final class AmbientTests: XCTestCase {
     /// before the included start) must now be rejected — the "after" case that
     /// was wrongly accepted before this fix.
     func testResultParserRejectsExcludedRangeAfterIncluded() {
-        let json = resultJSON(included: ["b", "c"], includedRange: ("b", "c"),
+        // included [c,d] (valid suffix) trims [a,b]; an excluded range placed
+        // AFTER the included end can't be the dropped leading prefix — it fails
+        // the D142 completeness check (start must be the first sent id).
+        let json = resultJSON(included: ["c", "d"], includedRange: ("c", "d"),
                               excludedRange: ("d", "d"))
         XCTAssertEqual(PetLogResultParser.parse(json, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
-                       .failure(.invalidExcludedRange))
+                       .failure(.excludedAdjacentRangeIncomplete))
     }
 
     // MARK: - Fix 5: prefix schema prose states the null-vs-object conditionals
@@ -1126,8 +1144,8 @@ final class AmbientTests: XCTestCase {
                       "prefix must state the empty-included case for includedRange")
         XCTAssertTrue(prefix.contains("includedRange"),
                       "prefix must name the includedRange field in its conditional rule")
-        XCTAssertTrue(prefix.contains("開始直前"),
-                      "prefix must state excludedAdjacentRange is the range immediately before the start")
+        XCTAssertTrue(prefix.contains("直前") && prefix.contains("先頭区間"),
+                      "prefix must state excludedAdjacentRange is the full dropped leading run up to just before the start")
         XCTAssertTrue(prefix.contains("excludedAdjacentRange"),
                       "prefix must name the excludedAdjacentRange field in its conditional rule")
     }
@@ -1164,7 +1182,7 @@ final class AmbientTests: XCTestCase {
         let schemaJSONText = String(prefix[open...end])
         let parsed = try JSONSerialization.jsonObject(with: Data(schemaJSONText.utf8))
         let top = try XCTUnwrap(parsed as? [String: Any])
-        XCTAssertEqual(Set(top.keys), ["answer", "contextDecision"], "top-level keys must be exact")
+        XCTAssertEqual(Set(top.keys), ["outcome", "answer", "contextDecision"], "top-level keys must be exact")
 
         let decision = try XCTUnwrap(top["contextDecision"] as? [String: Any])
         XCTAssertEqual(

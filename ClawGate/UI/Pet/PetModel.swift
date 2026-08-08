@@ -2255,6 +2255,14 @@ final class PetModel: NSObject, ObservableObject {
                         return
                     }
                     switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds, selectionMode: mode) {
+                    case .success(let result) where result.outcome == .insufficientEvidence:
+                        // D3/D145: the model's typed discriminator (not an
+                        // inference) says the log is insufficient. Surface a fixed
+                        // status — never persist the (null) model body as a "ちー"
+                        // reply. No conversation entry is created.
+                        logDispatchStatus = .insufficientEvidence(requestId: pending.requestId)
+                        pendingLogRequest = nil
+                        return
                     case .success(let result):
                         let dispatch = pending.dispatch.map {
                             PetLogDispatchMetadata(
@@ -2266,7 +2274,7 @@ final class PetModel: NSObject, ObservableObject {
                             )
                         }
                         entry = NotificationEntry(
-                            id: UUID().uuidString, text: result.answer,
+                            id: UUID().uuidString, text: result.answer ?? "",
                             source: source, timestamp: Date(),
                             logMetadata: pending.entryMetadata(
                                 contextDecision: result.contextDecision,
@@ -2274,13 +2282,6 @@ final class PetModel: NSObject, ObservableObject {
                                 dispatch: dispatch
                             )
                         )
-                    case .failure(.insufficientEvidence):
-                        // D3: segments were sent but the model kept none. Surface
-                        // a fixed typed status — never persist the model body as
-                        // a "ちー" reply. No conversation entry is created.
-                        logDispatchStatus = .insufficientEvidence(requestId: pending.requestId)
-                        pendingLogRequest = nil
-                        return
                     case .failure:
                         // Fail closed: never show a raw/garbled model reply as if
                         // it were the answer. D72: retain the request correlation

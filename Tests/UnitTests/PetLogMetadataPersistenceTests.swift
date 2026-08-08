@@ -173,6 +173,7 @@ final class PetLogMetadataPersistenceTests: XCTestCase {
         let idList = ids.map { "\"\($0)\"" }.joined(separator: ",")
         return """
         {
+          "outcome": "answer",
           "answer": \(escaped),
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",

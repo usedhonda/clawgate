@@ -49,7 +49,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         // A structured "log" reply is only parsed when there is a pending
         // request to validate it against (fail-closed contract). Establish the
         // one a real in-flight Log summon would have left behind.
-        model.setPendingLogRequestForTesting(segmentIds: [], completeBeforeAnchor: true)
+        model.setPendingLogRequestForTesting(segmentIds: ["s0"], completeBeforeAnchor: true)
 
         // Two deltas for the same messageId: the first starts the stream, the
         // second is what actually (re)schedules the delta-idle finalize timer.
@@ -79,15 +79,18 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
 
     /// A minimal well-formed structured Log reply whose parsed `answer` is
     /// `answer` — the wire shape a real "log" final now carries under Phase A.
+    /// A well-formed structured Log reply (outcome=answer) that includes the
+    /// single sent segment "s0" exactly — valid under the v2 selection contract.
     static func structuredLogReplyJSON(answer: String) -> String {
         let escaped = String(data: try! JSONEncoder().encode(answer), encoding: .utf8)!
         return """
         {
+          "outcome": "answer",
           "answer": \(escaped),
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",
-            "includedSegmentIds": [],
-            "includedRange": null,
+            "includedSegmentIds": ["s0"],
+            "includedRange": {"startSegmentId": "s0", "endSegmentId": "s0"},
             "excludedAdjacentRange": {"startSegmentId": null, "endSegmentId": null},
             "boundaryReasonCodes": [],
             "boundaryConfidence": "high",

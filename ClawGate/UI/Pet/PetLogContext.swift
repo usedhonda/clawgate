@@ -239,17 +239,23 @@ enum PetLogPromptBuilder {
         (c) instruction の実行: 上記で選別・補正したセグメントに対してのみ `instruction` を実行してください。
             除外した範囲の内容を回答に混入させないでください。
         (d) 出力: 次のJSONスキーマに厳密に従ってください（他のテキストを含めないでください）。
-            `includedRange` / `excludedAdjacentRange` の扱いは以下の条件を厳密に守ってください:
+            - `outcome`: `"answer"` または `"insufficientEvidence"` のいずれか。根拠が十分で回答できる
+              場合は `"answer"`、（automaticスコープで）根拠となるセグメントが無い、または全て文字化け等で
+              使えない場合は `"insufficientEvidence"` にします。explicitスコープでは、指定された全セグメント
+              を `includedSegmentIds` に返した上で `"insufficientEvidence"` を返してください（空にはしない）。
+            - `answer`: `outcome` が `"answer"` のときは非空の文字列。`outcome` が
+              `"insufficientEvidence"` のときは必ず JSON の `null` にすること（本文を書かない）。
             - `includedSegmentIds` が空の場合、`includedRange` は必ず JSON の `null` にすること
               （`{"startSegmentId": null, "endSegmentId": null}` のようなオブジェクトにはしない）。
             - `includedSegmentIds` が空でない場合、`includedRange` は必ずオブジェクトで、
               `startSegmentId`/`endSegmentId` の両方を null にせず、それぞれ `includedSegmentIds` の
               最初/最後の要素と一致させること。
-            - `excludedAdjacentRange` は、除外がない場合は `null` または
-              `{"startSegmentId": null, "endSegmentId": null}`。除外がある場合は、`includedRange` の
-              開始直前に隣接する範囲だけを示すオブジェクトにすること（開始直前ではない範囲や、
-              終了直後の範囲は指定しないこと）。
+            - `excludedAdjacentRange`: 先頭側を切り落とした場合のみ、その切り落とした「連続した先頭区間の
+              全体」を示すオブジェクトにすること（`startSegmentId` = 与えられた最初のセグメント、
+              `endSegmentId` = `includedSegmentIds` の最初の要素の直前）。切り落としが無い場合、および
+              `outcome` が `"insufficientEvidence"` の場合は必ず `null` にすること。
         {
+          "outcome": "answer",
           "answer": "string — ユーザーへの回答本文",
           "contextDecision": {
             "policyVersion": "\(policyVersion)",
@@ -308,8 +314,18 @@ struct PetLogContextDecision: Codable, Equatable {
     let correctionCounts: [String: Int]
 }
 
+/// Typed discriminator for a model reply (D145): the model states its OWN
+/// outcome so the client never infers "no answer" from an empty inclusion or a
+/// text match. `answer` is null exactly when `outcome == .insufficientEvidence`.
+enum PetLogModelOutcome: String, Codable {
+    case answer
+    case insufficientEvidence
+}
+
 struct PetLogModelResult: Codable, Equatable {
-    let answer: String
+    let outcome: PetLogModelOutcome
+    /// Non-nil (and non-blank) for `.answer`; null for `.insufficientEvidence`.
+    let answer: String?
     let contextDecision: PetLogContextDecision
 }
 
@@ -452,6 +468,9 @@ enum PetLogSelectionMode: Equatable {
 /// dedicated parse failure — never truncated — so a buggy/hostile model can't
 /// bloat the UI or persistence.
 enum PetLogResponseBounds {
+    /// Raw UTF-8 byte cap on the whole reply, checked BEFORE JSON parsing (D146)
+    /// so a huge/hostile payload can't be fully deserialized first.
+    static let maxResponseBytes = 200_000
     static let maxAnswerChars = 20_000
     static let maxReasonCodes = 16
     static let maxReasonCodeChars = 64
@@ -479,11 +498,17 @@ enum PetLogParseError: Error, Equatable {
     // D2 — scope-mode violations.
     case explicitScopeRequiresExactInclusion
     case notContiguousBackwardSuffix
-    // D3 — usable segments were sent but the model kept none: a typed
-    // "insufficient evidence" outcome (structural, not a text match), which the
-    // client surfaces as a fixed status rather than persisting the model body.
-    case insufficientEvidence
-    // D52 — response bounds.
+    // D145/D147 — discriminator ↔ shape integrity.
+    case insufficientMustHaveNullAnswer
+    case answerOutcomeRequiresAnswer
+    case insufficientInclusionMismatch
+    case answerOutcomeRequiresInclusion
+    // D150 — insufficient must not claim a boundary trim.
+    case insufficientMustHaveNullExcluded
+    // D142 — the excluded-adjacent range must describe the FULL dropped prefix.
+    case excludedAdjacentRangeIncomplete
+    // D146/D52 — response bounds.
+    case responseTooLarge
     case answerTooLong
     case tooManyReasonCodes
     case reasonCodeTooLong
@@ -515,6 +540,11 @@ enum PetLogResultParser {
             return .failure(.duplicateAllowedIds)
         }
         let stripped = stripCodeFence(text)
+        // D146: reject an over-large reply by RAW BYTE COUNT before any JSON
+        // deserialization — never feed a huge/hostile payload to the parser.
+        guard stripped.utf8.count <= PetLogResponseBounds.maxResponseBytes else {
+            return .failure(.responseTooLarge)
+        }
         guard let data = stripped.data(using: .utf8) else { return .failure(.invalidJSON) }
 
         // Exact-key-set check first (JSONDecoder silently ignores unknown keys
@@ -538,13 +568,21 @@ enum PetLogResultParser {
                 got: decision.policyVersion))
         }
 
-        // Answer must be real content, not empty/whitespace.
-        guard !result.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .failure(.blankAnswer)
+        // D145/D147: discriminator ↔ answer integrity, structurally enforced so
+        // a meaningless body can never be shown as an answer, and an "answer"
+        // outcome can never arrive empty.
+        switch result.outcome {
+        case .insufficientEvidence:
+            guard result.answer == nil else { return .failure(.insufficientMustHaveNullAnswer) }
+        case .answer:
+            guard let ans = result.answer else { return .failure(.answerOutcomeRequiresAnswer) }
+            guard !ans.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return .failure(.blankAnswer)
+            }
         }
 
-        // D52 bounds — reject (never truncate) an over-large reply.
-        guard result.answer.count <= PetLogResponseBounds.maxAnswerChars else {
+        // D52 bounds — reject (never truncate) an over-large answer.
+        if let ans = result.answer, ans.count > PetLogResponseBounds.maxAnswerChars {
             return .failure(.answerTooLong)
         }
         guard decision.boundaryReasonCodes.count <= PetLogResponseBounds.maxReasonCodes else {
@@ -618,59 +656,67 @@ enum PetLogResultParser {
             }
         }
 
-        // Excluded-adjacent range (when a real range is given) may ONLY describe
-        // the range immediately BEFORE the included range's start — segments
-        // trimmed right at that leading boundary. A range positioned after the
-        // included end is not a valid use of this field.
-        if let ex = decision.excludedAdjacentRange,
-           ex.startSegmentId != nil || ex.endSegmentId != nil {
-            guard let s = ex.startSegmentId, let e = ex.endSegmentId,
-                  let ps = position[s], let pe = position[e], ps <= pe else {
-                return .failure(.invalidExcludedRange)
-            }
-            guard let incStart = decision.includedRange?.startSegmentId,
-                  let pIncStart = position[incStart] else {
-                return .failure(.invalidExcludedRange)
-            }
-            guard pe == pIncStart - 1 else {
-                return .failure(.invalidExcludedRange)
-            }
-        }
+        // Whether an excluded-adjacent range is actually present (a value with at
+        // least one non-null endpoint). Its full validity is enforced per
+        // outcome/mode below.
+        let excludedPresent = decision.excludedAdjacentRange.map { $0.startSegmentId != nil || $0.endSegmentId != nil } ?? false
 
-        // D2 scope-mode gate (after all structural checks). The generic
-        // "any high-confidence subset is fine" rule is abolished.
-        switch selectionMode {
-        case .explicitExact:
-            // The client sent an exact hard scope — the model must include every
-            // sent id in order. Any subset (including an empty one when segments
-            // were sent) is a scope violation.
-            guard included == allowedSegmentIds else {
-                return .failure(.explicitScopeRequiresExactInclusion)
+        // Outcome × mode validation (D2/D142/D145/D147/D150).
+        switch result.outcome {
+        case .insufficientEvidence:
+            // D150: insufficient is not a boundary trim — no excluded range.
+            guard !excludedPresent else { return .failure(.insufficientMustHaveNullExcluded) }
+            switch selectionMode {
+            case .automaticBackward:
+                // D145/D147: automatic insufficient = empty inclusion, and NO
+                // answer gate (low/medium confidence is fine — it isn't a
+                // boundary-selection success).
+                guard included.isEmpty else { return .failure(.insufficientInclusionMismatch) }
+            case .explicitExact:
+                // D145: explicit insufficient must echo the exact-all scope
+                // (proof the model read the whole scope) — never empty/partial.
+                guard included == allowedSegmentIds else { return .failure(.insufficientInclusionMismatch) }
             }
-        case .automaticBackward:
-            // A strict subset needs high confidence...
-            if included != allowedSegmentIds && decision.boundaryConfidence != .high {
-                return .failure(.subsetRequiresHighBoundaryConfidence)
-            }
-            // D3: usable segments were sent but the model kept none — a typed
-            // insufficient-evidence outcome (the client shows a fixed status).
-            // (An empty-segments query is fail-fast client-side and never gets
-            // here; empty allowed + empty included stays a plain success.)
-            if !allowedSegmentIds.isEmpty && included.isEmpty {
-                return .failure(.insufficientEvidence)
-            }
-            // ...and a non-empty inclusion must be a contiguous suffix that
-            // includes the newest sent segment (only a leading contiguous run
-            // may be dropped — no gapped or newest-side exclusion).
-            if !included.isEmpty && included != Array(allowedSegmentIds.suffix(included.count)) {
-                return .failure(.notContiguousBackwardSuffix)
+        case .answer:
+            switch selectionMode {
+            case .explicitExact:
+                guard included == allowedSegmentIds else {
+                    return .failure(.explicitScopeRequiresExactInclusion)
+                }
+                // Nothing trimmed — no excluded range.
+                guard !excludedPresent else { return .failure(.invalidExcludedRange) }
+            case .automaticBackward:
+                // An answer must actually keep segments.
+                guard !included.isEmpty else { return .failure(.answerOutcomeRequiresInclusion) }
+                // A strict subset needs high confidence.
+                if included != allowedSegmentIds && decision.boundaryConfidence != .high {
+                    return .failure(.subsetRequiresHighBoundaryConfidence)
+                }
+                // Contiguous backward suffix including the newest.
+                guard included == Array(allowedSegmentIds.suffix(included.count)) else {
+                    return .failure(.notContiguousBackwardSuffix)
+                }
+                // D142: excluded-adjacent COMPLETENESS. When a leading prefix was
+                // trimmed the excluded range must describe the ENTIRE dropped
+                // prefix (allowed.first ... included.first-1); when nothing was
+                // trimmed it must be null. A partial/under-reported trim rejects.
+                if included == allowedSegmentIds {
+                    guard !excludedPresent else { return .failure(.excludedAdjacentRangeIncomplete) }
+                } else {
+                    guard let ex = decision.excludedAdjacentRange,
+                          let incFirst = included.first, let pIncFirst = position[incFirst],
+                          ex.startSegmentId == allowedSegmentIds.first,
+                          ex.endSegmentId == allowedSegmentIds[pIncFirst - 1] else {
+                        return .failure(.excludedAdjacentRangeIncomplete)
+                    }
+                }
             }
         }
 
         return .success(result)
     }
 
-    private static let topLevelKeys: Set<String> = ["answer", "contextDecision"]
+    private static let topLevelKeys: Set<String> = ["outcome", "answer", "contextDecision"]
     private static let contextDecisionKeys: Set<String> = [
         "policyVersion", "includedSegmentIds", "includedRange", "excludedAdjacentRange",
         "boundaryReasonCodes", "boundaryConfidence", "historyComplete", "correctionCounts",

@@ -40,6 +40,7 @@ final class OpenClawDispatchAckTests: XCTestCase {
         let escaped = String(data: try! JSONEncoder().encode(answer), encoding: .utf8)!
         return """
         {
+          "outcome": "answer",
           "answer": \(escaped),
           "contextDecision": {
             "policyVersion": "\(PetLogPromptBuilder.policyVersion)",

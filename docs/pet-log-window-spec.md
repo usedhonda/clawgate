@@ -61,13 +61,24 @@ The universal prefix instructs the model as follows:
   do not invent items — return an empty `includedSegmentIds` and an `answer`
   that only states the log is insufficient.
 
+### Response discriminator (D145/D147/D150)
+
+Every reply carries a top-level `outcome` discriminator (`"answer"` |
+`"insufficientEvidence"`) — the client never infers "no answer" from an empty
+inclusion or a text match. Structural integrity is enforced:
+
+- `outcome == "answer"`: `answer` is a non-blank string; `answer == null` and a
+  blank string are rejected.
+- `outcome == "insufficientEvidence"`: `answer` MUST be null; `excludedAdjacentRange`
+  MUST be null (insufficient is not a boundary trim, D150); automatic inclusion
+  MUST be empty (no answer gate — any confidence, D147); explicit inclusion MUST
+  echo the exact-all scope (proof the whole scope was read, never empty/partial).
+
 ### Insufficient evidence & failure (D3/D72)
 
-- **Insufficient (D3)**: in automatic scope, if segments were sent but the model
-  kept none, the parser returns a typed `insufficientEvidence` outcome
-  (structural — no text match). The client surfaces a fixed `insufficientEvidence`
-  status and NEVER persists the model body as a reply. In explicit scope the same
-  empty inclusion is a scope violation, not insufficient.
+- **Insufficient (D3)**: the parser accepts an `insufficientEvidence` reply
+  (structurally, via the discriminator — no text match). The client surfaces a
+  fixed `insufficientEvidence` status and NEVER persists the model body.
 - **Fail-fast (D3)**: an empty-segments envelope is refused before build/dispatch
   as a typed `emptyScopeRefused` status — no conversation entry, no slot claim.
 - **Malformed reply (D72)**: a parse failure still persists an entry carrying the
@@ -88,11 +99,18 @@ The parser validates a reply against the exact ids sent, under a REQUIRED
   that includes the newest sent segment. A gapped or newest-skipping subset is
   `notContiguousBackwardSuffix`. The generic "any high-confidence subset is
   fine" rule is abolished.
+- **Excluded-range completeness (D142)**: for an automatic answer that trimmed a
+  leading prefix, `excludedAdjacentRange` must describe the ENTIRE dropped prefix
+  (allowed.first … included.first-1); with no trim (or explicit scope, or an
+  insufficient outcome) it must be null. A partial/under-reported trim rejects.
 - **Duplicate ids (D41)**: duplicate sent ids or duplicate included ids are
   rejected (positional validation can't disambiguate them).
-- **Bounds (D52)**: answer ≤ 20000 chars; ≤ 16 reason codes, each ≤ 64 chars;
-  ≤ 32 correction keys, each ≤ 64 chars, values 0…10000. An over-limit reply is
-  a dedicated parse failure, never truncated.
+- **Bounds (D52/D149)**: answer ≤ 20000 chars; ≤ 16 reason codes, each ≤ 64 chars;
+  ≤ 32 correction keys, each ≤ 64 chars, values 0…10000. Every bound has an
+  at-limit-passes / over-limit-rejects pair. **Raw-byte preflight (D146)**: the
+  whole reply's UTF-8 byte count is checked BEFORE JSON parsing (cap 200000) so a
+  huge payload is never fully deserialized. An over-limit reply is a dedicated
+  parse failure, never truncated.
 
 ### Transport privacy (D59)
 
