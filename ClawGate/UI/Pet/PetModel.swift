@@ -118,13 +118,14 @@ final class PetModel: NSObject, ObservableObject {
     @Published var logSceneNames: [String: String] = [:]  // scene id -> ちー命名 (memory only)
     @Published var logThreadPaneOpen: Bool = true
     @Published var logAwaitingReply: Bool = false
-    /// Log-store filenames whose persisted history was unreadable at load and
-    /// could not be recovered from a last-known-good backup. Exposed as a
-    /// Published status so a future UI (corrupt-status rendering is Wave C) can
-    /// bind to it — NEVER injected into the conversation as a "ちー"
-    /// (source == "log") entry. While a file is here, its writes are held
-    /// fail-closed by PetLogStore so the quarantined original is preserved.
-    @Published var corruptLogStoreFiles: Set<String> = []
+    /// Durable, user-facing warnings that persisted history could not be fully
+    /// read at load — whole-file corruption OR a partial drop of undecodable
+    /// entries (which is silent loss in miniature: the next save rewrites
+    /// without the dropped entries). Body-free, persisted across launches until
+    /// the user acknowledges, and exposed as a Published status a future UI
+    /// (rendering is Wave C) can bind to — NEVER injected into the conversation
+    /// as a "ちー" (source == "log") entry.
+    @Published var logRecoveryWarnings: [PetLogRecoveryWarning] = []
     @Published var localResults: [NotificationEntry] = []
     @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
 
@@ -958,32 +959,60 @@ final class PetModel: NSObject, ObservableObject {
     /// Loads one persisted log file through the hardened store, mapping its
     /// outcome onto the visible corrupt status. Corruption is reported as a
     /// Published status flag ONLY — never as a conversation entry.
+    /// Restores all four persisted log files through the hardened outcome API,
+    /// surfacing any corruption / partial-drop as durable recovery warnings.
+    /// `start()` calls this; a ForTesting wrapper exercises the same path (the
+    /// full `start()` isn't unit-testable — it opens a WS connection and arms
+    /// timers).
+    private func restorePersistedLogs() {
+        // Carry forward warnings persisted from a prior launch (durable until
+        // the user acknowledges), then layer on anything this load detects.
+        logRecoveryWarnings = PetLogStore.loadRecoveryWarnings()
+        notificationHistory = restorePersistedLog(file: "notifications.json")
+        summonResults = restorePersistedLog(file: "summon.json")
+        logReplies = restorePersistedLog(file: "log.json")
+        localResults = restorePersistedLog(file: "local.json")
+        PetLogStore.saveRecoveryWarnings(logRecoveryWarnings)
+    }
+
+    /// Test seam: run the real restore path without the rest of `start()`.
+    func restorePersistedLogsForTesting() { restorePersistedLogs() }
+
+    /// Clears the durable recovery warnings once the user has seen them.
+    func acknowledgeLogRecoveryWarnings() {
+        logRecoveryWarnings = []
+        PetLogStore.saveRecoveryWarnings([])
+    }
+
+    private func upsertRecoveryWarning(file: String, kind: String, droppedCount: Int, quarantine: String?) {
+        logRecoveryWarnings.removeAll { $0.file == file }
+        logRecoveryWarnings.append(PetLogRecoveryWarning(
+            file: file, kind: kind, droppedCount: droppedCount,
+            quarantine: quarantine, detectedAt: Date()))
+    }
+
     private func restorePersistedLog(file: String) -> [NotificationEntry] {
-        let outcome = PetLogStore.loadOutcome(file: file)
-        // Poisoning can be raised on a `.success` path too (partial decode whose
-        // quarantine failed), so surface the visible status from the poison flag
-        // in addition to the `.corrupt` case.
-        if PetLogStore.isPoisoned(file) { corruptLogStoreFiles.insert(file) }
-        switch outcome {
+        switch PetLogStore.loadOutcome(file: file) {
         case .missing:
             return []
-        case let .success(entries, _):
+        case let .success(entries, dropped, quarantine):
+            // A partial drop is silent loss in miniature — surface it durably.
+            if dropped > 0 {
+                upsertRecoveryWarning(file: file, kind: "partialDrop", droppedCount: dropped, quarantine: quarantine)
+            }
             return entries
-        case let .corrupt(entries, _):
-            corruptLogStoreFiles.insert(file)
+        case let .corrupt(entries, _, quarantine):
+            upsertRecoveryWarning(file: file, kind: "corrupt", droppedCount: 0, quarantine: quarantine)
             return entries
         }
     }
 
     func start() {
         // Restore persisted logs. Each goes through the hardened outcome API so
-        // an unreadable file surfaces as a visible corrupt status (and holds its
-        // writes fail-closed) instead of silently loading as [] and letting the
-        // next append overwrite the real history (2026-08 data-loss path).
-        notificationHistory = restorePersistedLog(file: "notifications.json")
-        summonResults = restorePersistedLog(file: "summon.json")
-        logReplies = restorePersistedLog(file: "log.json")
-        localResults = restorePersistedLog(file: "local.json")
+        // an unreadable file surfaces as a durable recovery warning (and holds
+        // its writes fail-closed) instead of silently loading as [] and letting
+        // the next append overwrite the real history (2026-08 data-loss path).
+        restorePersistedLogs()
 
         characterManager.scan()
         _ = try? OpenClawDeviceIdentity.loadOrCreate()
@@ -2387,8 +2416,8 @@ enum PetLogStore {
     /// `recovered` is true when a `.bak` supplied the returned entries.
     enum LoadOutcome {
         case missing
-        case success(entries: [NotificationEntry], dropped: Int)
-        case corrupt(entries: [NotificationEntry], recovered: Bool)
+        case success(entries: [NotificationEntry], dropped: Int, quarantine: String?)
+        case corrupt(entries: [NotificationEntry], recovered: Bool, quarantine: String?)
     }
 
     @discardableResult
@@ -2443,8 +2472,8 @@ enum PetLogStore {
     static func load(file: String) -> [NotificationEntry] {
         switch loadOutcome(file: file) {
         case .missing: return []
-        case let .success(entries, _): return entries
-        case let .corrupt(entries, _): return entries
+        case let .success(entries, _, _): return entries
+        case let .corrupt(entries, _, _): return entries
         }
     }
 
@@ -2460,8 +2489,10 @@ enum PetLogStore {
             // rewrites without the dropped entries, so preserve a quarantine
             // copy of the original first. Writes stay allowed (recovery of the
             // good entries succeeded — do NOT poison).
+            var quarantineName: String? = nil
             if dropped > 0 {
-                if quarantine(path: path, data: data) {
+                quarantineName = quarantine(path: path, data: data)
+                if quarantineName != nil {
                     logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); original quarantined")
                 } else {
                     // No safe copy of the original — hold writes fail-closed so
@@ -2470,7 +2501,7 @@ enum PetLogStore {
                     logger.error("PetLogStore dropped \(dropped, privacy: .public) undecodable entries loading \(file, privacy: .public); quarantine failed, writes held fail-closed")
                 }
             }
-            return .success(entries: entries, dropped: dropped)
+            return .success(entries: entries, dropped: dropped, quarantine: quarantineName)
         }
         // Top-level JSON is not even a decodable array — genuine corruption.
         return handleCorrupt(file: file, path: path, data: data)
@@ -2492,10 +2523,10 @@ enum PetLogStore {
         // disk full, permission, name collision — there is NO safe copy, so
         // poison and refuse writes: the next append must not overwrite the
         // un-preserved original.
-        guard quarantine(path: path, data: data) else {
+        guard let quarantineName = quarantine(path: path, data: data) else {
             poisonedFiles.insert(file)
             logger.error("PetLogStore corrupt load for \(file, privacy: .public); quarantine failed, writes held fail-closed")
-            return .corrupt(entries: [], recovered: false)
+            return .corrupt(entries: [], recovered: false, quarantine: nil)
         }
 
         // Recover ONLY from a fully-decodable backup. A partially-corrupt `.bak`
@@ -2507,25 +2538,27 @@ enum PetLogStore {
             // (never any conversation text) so a recovery is auditable.
             let hash = SHA256.hash(data: bakData).map { String(format: "%02x", $0) }.joined()
             logger.error("PetLogStore recovered \(entries.count, privacy: .public) entries from backup for \(file, privacy: .public) after corrupt load, sha256=\(hash, privacy: .public)")
-            return .corrupt(entries: entries, recovered: true)
+            return .corrupt(entries: entries, recovered: true, quarantine: quarantineName)
         }
         // Unrecoverable: empty start, and hold writes fail-closed so the
         // quarantined original remains the sole surviving copy.
         poisonedFiles.insert(file)
         logger.error("PetLogStore corrupt load for \(file, privacy: .public), no usable backup; writes held fail-closed")
-        return .corrupt(entries: [], recovered: false)
+        return .corrupt(entries: [], recovered: false, quarantine: quarantineName)
     }
 
     /// Copies the original bytes to a timestamped, owner-only quarantine file in
-    /// the same directory. Returns whether the copy was created — a failure
-    /// means the original could not be preserved, and the caller must fail
-    /// closed rather than allow a later overwrite.
-    private static func quarantine(path: String, data: Data?) -> Bool {
-        guard let bytes = data ?? (try? Data(contentsOf: URL(fileURLWithPath: path))) else { return false }
-        return FileManager.default.createFile(
-            atPath: "\(path).corrupt-\(quarantineTimestamp())", contents: bytes,
-            attributes: ownerOnly
-        )
+    /// the same directory. Returns the quarantine file's NAME on success, or nil
+    /// on failure — a failure means the original could not be preserved, and the
+    /// caller must fail closed rather than allow a later overwrite.
+    private static func quarantine(path: String, data: Data?) -> String? {
+        guard let bytes = data ?? (try? Data(contentsOf: URL(fileURLWithPath: path))) else { return nil }
+        let name = ((path as NSString).lastPathComponent) + ".corrupt-\(quarantineTimestamp())"
+        let quarantinePath = (dir as NSString).appendingPathComponent(name)
+        guard FileManager.default.createFile(atPath: quarantinePath, contents: bytes, attributes: ownerOnly) else {
+            return nil
+        }
+        return name
     }
 
     private static func quarantineTimestamp() -> String {
@@ -2536,6 +2569,62 @@ enum PetLogStore {
         fmt.dateFormat = "yyyy-MM-dd'T'HH-mm-ss'Z'"
         return fmt.string(from: Date())
     }
+
+    // MARK: Durable recovery warnings (D39)
+
+    private static let recoveryWarningsFile = "recovery-warnings.json"
+
+    /// Loads the durable recovery warnings persisted from prior launches.
+    /// Tolerant: an unreadable warnings file yields an empty list (this file is
+    /// bookkeeping, never conversation data — it must not recurse the
+    /// poison/quarantine machinery onto itself).
+    static func loadRecoveryWarnings() -> [PetLogRecoveryWarning] {
+        let path = (dir as NSString).appendingPathComponent(recoveryWarningsFile)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let warnings = try? decoder.decode([PetLogRecoveryWarning].self, from: data) else {
+            logger.error("PetLogStore recovery-warnings file unreadable; starting with none")
+            return []
+        }
+        return warnings
+    }
+
+    @discardableResult
+    static func saveRecoveryWarnings(_ warnings: [PetLogRecoveryWarning]) -> Bool {
+        do {
+            try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        } catch {
+            return false
+        }
+        guard applyPermissions(ownerOnlyDir, path: dir) else { return false }
+        let path = (dir as NSString).appendingPathComponent(recoveryWarningsFile)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(warnings) else { return false }
+        do {
+            try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        } catch {
+            return false
+        }
+        return applyPermissions(ownerOnly, path: path)
+    }
+}
+
+/// A durable, user-facing warning that persisted history could not be fully
+/// read at load — either whole-file corruption or a partial drop of undecodable
+/// entries. Body-free: it names the file, the drop count, and the quarantine
+/// copy, never any conversation text. Persisted until the user acknowledges it.
+struct PetLogRecoveryWarning: Codable, Equatable {
+    let file: String
+    /// "corrupt" (whole file unreadable) or "partialDrop" (some entries skipped).
+    /// A String, not an enum, so an unknown future value never fails decode.
+    let kind: String
+    let droppedCount: Int
+    /// Quarantine file name preserving the original bytes, nil if the copy could
+    /// not be created (in which case writes are held fail-closed).
+    let quarantine: String?
+    let detectedAt: Date
 }
 
 /// Decodes a `NotificationEntry` without failing the enclosing array — one

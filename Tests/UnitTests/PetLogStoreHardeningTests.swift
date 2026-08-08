@@ -46,11 +46,12 @@ final class PetLogStoreHardeningTests: XCTestCase {
         let original = try Data(contentsOf: URL(fileURLWithPath: path("log.json")))
 
         let outcome = PetLogStore.loadOutcome(file: "log.json")
-        guard case let .corrupt(entries, recovered) = outcome else {
+        guard case let .corrupt(entries, recovered, quarantine) = outcome else {
             return XCTFail("expected corrupt, got \(outcome)")
         }
         XCTAssertTrue(entries.isEmpty, "unrecoverable corrupt load must be empty")
         XCTAssertFalse(recovered, "no backup means no recovery")
+        XCTAssertNotNil(quarantine, "the corrupt load must report its quarantine copy")
 
         // A fresh append attempt must be refused (fail-closed) rather than
         // overwriting the unreadable original.
@@ -83,11 +84,12 @@ final class PetLogStoreHardeningTests: XCTestCase {
         let entries = [entry("a"), entry("b")]
         XCTAssertTrue(PetLogStore.save(entries, file: "log.json"))
         let outcome = PetLogStore.loadOutcome(file: "log.json")
-        guard case let .success(loaded, dropped) = outcome else {
+        guard case let .success(loaded, dropped, quarantine) = outcome else {
             return XCTFail("expected success, got \(outcome)")
         }
         XCTAssertEqual(loaded.map(\.text), ["a", "b"])
         XCTAssertEqual(dropped, 0)
+        XCTAssertNil(quarantine, "a clean load quarantines nothing")
     }
 
     /// A successful save maintains a last-known-good `.bak`; a later corrupt
@@ -100,7 +102,7 @@ final class PetLogStoreHardeningTests: XCTestCase {
 
         try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
         let outcome = PetLogStore.loadOutcome(file: "log.json")
-        guard case let .corrupt(entries, recovered) = outcome else {
+        guard case let .corrupt(entries, recovered, _) = outcome else {
             return XCTFail("expected corrupt, got \(outcome)")
         }
         XCTAssertTrue(recovered, "must recover from the last-known-good backup")
@@ -122,11 +124,12 @@ final class PetLogStoreHardeningTests: XCTestCase {
         """
         try Data(json.utf8).write(to: URL(fileURLWithPath: path("log.json")))
         let outcome = PetLogStore.loadOutcome(file: "log.json")
-        guard case let .success(entries, dropped) = outcome else {
+        guard case let .success(entries, dropped, quarantine) = outcome else {
             return XCTFail("expected partial success, got \(outcome)")
         }
         XCTAssertEqual(entries.map(\.text), ["good"])
         XCTAssertEqual(dropped, 1, "the one undecodable entry must be surfaced as dropped")
+        XCTAssertNotNil(quarantine, "a partial drop must report its quarantine copy")
 
         // A partial decode still quarantines a copy (the next save rewrites
         // without the dropped entry — preserve the original first).
@@ -154,11 +157,12 @@ final class PetLogStoreHardeningTests: XCTestCase {
         // Restore perms so the assertions below aren't themselves blocked.
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: PetLogStore.dir)
 
-        guard case let .corrupt(entries, recovered) = outcome else {
+        guard case let .corrupt(entries, recovered, quarantine) = outcome else {
             return XCTFail("expected corrupt, got \(outcome)")
         }
         XCTAssertTrue(entries.isEmpty)
         XCTAssertFalse(recovered)
+        XCTAssertNil(quarantine, "quarantine failed, so no copy name is reported")
         XCTAssertTrue(PetLogStore.isPoisoned("log.json"), "quarantine failure must poison the file")
 
         XCTAssertFalse(PetLogStore.save([entry("new")], file: "log.json"),
@@ -183,7 +187,7 @@ final class PetLogStoreHardeningTests: XCTestCase {
         try Data("{ corrupt".utf8).write(to: URL(fileURLWithPath: path("log.json")))
 
         let outcome = PetLogStore.loadOutcome(file: "log.json")
-        guard case let .corrupt(entries, recovered) = outcome else {
+        guard case let .corrupt(entries, recovered, _) = outcome else {
             return XCTFail("expected corrupt, got \(outcome)")
         }
         XCTAssertFalse(recovered, "a partially-corrupt backup must not be adopted")
