@@ -50,6 +50,17 @@ This document is the Normative contract for the Pet floating chat experience onl
 - Closing full chat must not change settings panel close semantics.
 - Menu-bar right-click and existing settings panel close path remain unchanged.
 
+### Lifecycle teardown behavior
+
+- `PetWindowController.hide()` and controller deallocation must route through a single
+  `PetContentView.detachForLifecycle(preserveChatState:)` coordinator.
+- `detachForLifecycle` must `orderOut`/`removeChildWindow`/`nil` all Pet-associated
+  transient windows (notification, chat, whisper, summon menu, ask window).
+- `detachForLifecycle` must remove local/global dismiss monitors.
+- Hide/deactivate must preserve chat-frame and thread pane preference state so re-show can
+  restore size behavior without duplicates.
+- `hideChatWindow` should invoke `detachChatWindow(preserveState: false)` so pane-open state is cleared on explicit close.
+
 ### Hidden/no-op behavior
 
 - If chat has not been opened yet or is not visible, menu-bar left-click must:

@@ -120,6 +120,7 @@ final class PetWindowController {
     }
 
     func hide() {
+        (window?.contentView as? PetContentView)?.detachForLifecycle(preserveChatState: true)
         model.moveController.stop()
         window?.orderOut(nil)
         window = nil
@@ -127,6 +128,10 @@ final class PetWindowController {
         stateObservation = nil
         opacityObservation = nil
         sizeObservation = nil
+    }
+
+    deinit {
+        (window?.contentView as? PetContentView)?.detachForLifecycle(preserveChatState: true)
     }
 
     /// Forwards to the full chat window, if one is currently open, so the
@@ -497,6 +502,9 @@ private final class PetContentView: NSView, NSWindowDelegate {
             NSEvent.removeMonitor(monitor)
             summonMenuGlobalMonitor = nil
         }
+        if let menuWindow = summonMenuWindow, let parentWindow = window {
+            parentWindow.removeChildWindow(menuWindow)
+        }
         summonMenuWindow?.orderOut(nil)
         summonMenuWindow = nil
     }
@@ -513,8 +521,7 @@ private final class PetContentView: NSView, NSWindowDelegate {
     }
 
     private func showAskInput() {
-        askWindow?.orderOut(nil)
-        askWindow = nil
+        detachAskWindow()
 
         guard let parentWindow = window else { return }
 
@@ -528,15 +535,13 @@ private final class PetContentView: NSView, NSWindowDelegate {
         field.isBordered = false
         field.drawsBackground = true
         field.onSubmit = { [weak self] text in
-            self?.askWindow?.orderOut(nil)
-            self?.askWindow = nil
+            self?.detachAskWindow()
             let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !instruction.isEmpty else { return }
             self?.model.summonAsk(instruction: instruction)
         }
         field.onCancel = { [weak self] in
-            self?.askWindow?.orderOut(nil)
-            self?.askWindow = nil
+            self?.detachAskWindow()
         }
 
         let label = NSTextField(labelWithString: "Type your instruction here")
@@ -771,6 +776,14 @@ private final class PetContentView: NSView, NSWindowDelegate {
         refreshPetPanelDismissMonitor()
     }
 
+    private func detachAskWindow() {
+        if let aw = askWindow {
+            window?.removeChildWindow(aw)
+            aw.orderOut(nil)
+            askWindow = nil
+        }
+    }
+
     /// Brings the full chat window to the current active space/front if it's
     /// already visible. No-op if chat is closed, minimized, or not yet
     /// created — called from menu bar left-click settings open path.
@@ -788,29 +801,48 @@ private final class PetContentView: NSView, NSWindowDelegate {
         }
     }
 
+    func detachForLifecycle(preserveChatState: Bool) {
+        detachChatWindow(preserveState: preserveChatState)
+        hideNotificationBubble()
+        dismissSummonMenu()
+        detachAskWindow()
+        hideWhisper()
+        removePetPanelDismissMonitor()
+    }
+
     private func hideChatWindow() {
-        if model.stateMachine.isChatOpen {
-            model.stateMachine.isChatOpen = false
-        }
-        if let cw = chatWindow {
-            var frameToSave = cw.frame
-            if model.logThreadPaneOpen {
-                if let baseWidth = chatBaseWidth {
-                    frameToSave.size.width = baseWidth
-                } else {
-                    frameToSave.size.width = max(cw.minSize.width, cw.frame.width - petLogThreadPaneExpansionWidth)
-                }
-                if let parentWindow = window {
-                    frameToSave = clampedChatFrame(frameToSave, relativeTo: parentWindow)
-                }
-            }
-            UserDefaults.standard.set(NSStringFromRect(frameToSave), forKey: petChatWindowFrameKey)
+        detachChatWindow(preserveState: false)
+        refreshPetPanelDismissMonitor()
+    }
+
+    private func detachChatWindow(preserveState: Bool) {
+        guard let cw = chatWindow else { return }
+        let frameToSave = chatWindowFrameForSave(from: cw)
+        UserDefaults.standard.set(NSStringFromRect(frameToSave), forKey: petChatWindowFrameKey)
+
+        if !preserveState {
             model.logThreadPaneOpen = false
             chatBaseWidth = nil
-            cw.orderOut(nil)
-            chatWindow = nil
         }
-        refreshPetPanelDismissMonitor()
+        model.stateMachine.isChatOpen = false
+        window?.removeChildWindow(cw)
+        cw.orderOut(nil)
+        chatWindow = nil
+    }
+
+    private func chatWindowFrameForSave(from cw: NSWindow) -> NSRect {
+        var frameToSave = cw.frame
+        if model.logThreadPaneOpen {
+            if let baseWidth = chatBaseWidth {
+                frameToSave.size.width = baseWidth
+            } else {
+                frameToSave.size.width = max(cw.minSize.width, cw.frame.width - petLogThreadPaneExpansionWidth)
+            }
+            if let parentWindow = window {
+                frameToSave = clampedChatFrame(frameToSave, relativeTo: parentWindow)
+            }
+        }
+        return frameToSave
     }
 
     private func clampedChatFrame(_ frame: NSRect, relativeTo parentWindow: NSWindow) -> NSRect {

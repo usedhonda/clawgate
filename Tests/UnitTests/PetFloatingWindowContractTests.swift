@@ -112,6 +112,40 @@ final class PetFloatingWindowContractTests: XCTestCase {
                       "chat windows should still route close through cleanup policy path")
     }
 
+    func testVisualLifecycleUsesSingleDetachCoordinator() throws {
+        let source = try source("ClawGate/UI/Pet/PetWindow.swift")
+        let hideBody = try functionBody(from: source, functionName: "hide", nextFunctionHeader: "/// Forwards to the full chat window")
+        let detachBody = try functionBody(from: source, functionName: "detachForLifecycle", nextFunctionHeader: "private func hideChatWindow() {")
+
+        XCTAssertTrue(hideBody.contains("detachForLifecycle(preserveChatState: true)"),
+                      "hide must use the shared visual-window lifecycle coordinator")
+        XCTAssertTrue(detachBody.contains("removePetPanelDismissMonitor()"),
+                      "teardown coordinator must remove local/global click-out monitors")
+        XCTAssertTrue(detachBody.contains("detachChatWindow(preserveState: preserveChatState)"),
+                      "teardown coordinator must close full chat through shared path")
+        XCTAssertTrue(detachBody.contains("detachAskWindow()"),
+                      "teardown coordinator must dispose Ask window")
+        XCTAssertTrue(detachBody.contains("dismissSummonMenu()"),
+                      "teardown coordinator must dispose summon menu")
+        XCTAssertTrue(detachBody.contains("hideWhisper()"),
+                      "teardown coordinator must dispose whisper window")
+        XCTAssertTrue(source.contains("func detachForLifecycle(preserveChatState: Bool)"),
+                      "PetContentView must expose a single visual lifecycle detachment helper")
+        XCTAssertTrue(source.contains("private func detachAskWindow()"),
+                      "Ask dispose helper should exist for child-window teardown symmetry")
+    }
+
+    func testCloseVsHideDistinguishChatStatePreservationInTeardown() throws {
+        let source = try source("ClawGate/UI/Pet/PetWindow.swift")
+        let detachBody = try functionBody(from: source, functionName: "detachChatWindow", nextFunctionHeader: "private func chatWindowFrameForSave(from cw: NSWindow) -> NSRect {")
+        let hideBody = try functionBody(from: source, functionName: "hideChatWindow", nextFunctionHeader: "private func detachChatWindow(preserveState: Bool) {")
+
+        XCTAssertTrue(detachBody.contains("if !preserveState"),
+                      "pane state reset should be conditional on detach mode")
+        XCTAssertTrue(hideBody.contains("detachChatWindow(preserveState: false)"),
+                      "close path must use non-preserving chat teardown")
+    }
+
     func testFloatingWindowContractSpecContainsActivationRevealAndKeyboardGuards() throws {
         let spec = try source("docs/pet-floating-window-spec.md")
         XCTAssertTrue(spec.contains("## Normative (shipped)"), "spec must define a shipped contract section")
