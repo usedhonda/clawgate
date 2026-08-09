@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import ClawGate
 
 final class OpenClawDispatchAckTests: XCTestCase {
@@ -127,6 +128,45 @@ final class OpenClawDispatchAckTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .path
+    }
+
+    private func waitForMainQueue(_ hops: Int = 1) async {
+        guard hops > 0 else { return }
+        for _ in 0..<hops {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    private func persistedJsonHashes() -> [String: String?] {
+        let watchedFiles = [
+            "summon.json",
+            "log.json",
+            "notifications.json",
+            "local.json",
+            "recovery-warnings.json"
+        ]
+
+        return Dictionary(uniqueKeysWithValues: watchedFiles.map { file in
+            let path = (PetLogStore.dir as NSString).appendingPathComponent(file)
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+                return (file, nil)
+            }
+            let digest = SHA256.hash(data: data)
+            let hash = digest.map { String(format: "%02x", $0) }.joined()
+            return (file, hash)
+        })
+    }
+
+    private func assertNonSummonPersistenceUnchanged(before: [String: String?], after: [String: String?]) {
+        let ignoreSet = ["summon.json"]
+        let candidates = before.keys.filter { !ignoreSet.contains($0) }
+        for filename in candidates {
+            XCTAssertEqual(before[filename], after[filename], "\(filename) changed")
+        }
     }
 
     private func routeIncomingEvents(_ eventName: String, payloadJSON: String) throws -> [OpenClawEvent] {
@@ -353,8 +393,9 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertNotEqual(primaryMessage.owner?.completeOwnerKey, secondaryMessage.owner?.completeOwnerKey)
     }
 
-    func testPetModelMessageFinalCorrelatesPendingSummonByOwnerRunIdNotMessageId() throws {
+    func testPetModelMessageFinalCorrelatesPendingSummonByOwnerRunIdNotMessageId() async throws {
         let model = PetModel()
+        let baselineHashes = persistedJsonHashes()
 
         model.pendingSummonSource = "manual"
         model.pendingSummonRunId = "run-A"
@@ -374,11 +415,16 @@ final class OpenClawDispatchAckTests: XCTestCase {
             return
         }
         model.handleEvent(.message(msg))
+        await waitForMainQueue(2)
 
         XCTAssertNil(model.pendingSummonSource)
         XCTAssertNil(model.pendingSummonRunId)
         XCTAssertEqual(model.summonResults.count, beforeSummonResultsCount + 1)
-        XCTAssertEqual(model.messages.last?.text, "accepted reply")
+        XCTAssertEqual(model.summonResults.last?.text, "accepted reply")
+        XCTAssertEqual(model.summonResults.last?.source, "manual")
+        let afterAcceptedHashes = persistedJsonHashes()
+        XCTAssertNotEqual(baselineHashes["summon.json"], afterAcceptedHashes["summon.json"])
+        assertNonSummonPersistenceUnchanged(before: baselineHashes, after: afterAcceptedHashes)
 
         let staleModel = PetModel()
         staleModel.pendingSummonSource = "manual"
@@ -412,12 +458,16 @@ final class OpenClawDispatchAckTests: XCTestCase {
         }
         staleModel.handleEvent(.message(runMismatchMessage))
         staleModel.handleEvent(.message(absentRunMessage))
+        await waitForMainQueue(2)
 
         XCTAssertEqual(staleModel.pendingSummonSource, "manual")
         XCTAssertEqual(staleModel.pendingSummonRunId, "run-A")
         XCTAssertEqual(staleModel.summonResults.count, staleSummonResultsCount)
         XCTAssertFalse(staleModel.messages.contains(where: { $0.text == "ignored because run id mismatched" }))
         XCTAssertFalse(staleModel.messages.contains(where: { $0.text == "ignored because run id absent" }))
+        let finalHashes = persistedJsonHashes()
+        assertNonSummonPersistenceUnchanged(before: afterAcceptedHashes, after: finalHashes)
+        XCTAssertEqual(afterAcceptedHashes["summon.json"], finalHashes["summon.json"])
     }
 
     func testValidNormalSolDispatchAckPassesValidation() throws {
