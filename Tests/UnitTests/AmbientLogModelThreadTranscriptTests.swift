@@ -438,6 +438,28 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
                        "a lunch gap does not permanently drop the morning from retrieval")
     }
 
+    /// D155: an EMPTY past day must not borrow the previous day's history via a
+    /// day-end anchor — the automatic scope is empty (refused downstream), never a
+    /// silent cross-day send for a visibly empty day.
+    func testEmptyPastDayDoesNotBorrowPreviousDayHistory() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 25; c.timeZone = jst
+        let emptyDay = Calendar(identifier: .gregorian).date(from: c)!
+        let emptyStart = startOfDayJST(emptyDay).timeIntervalSince1970
+        // Data only on the PREVIOUS day (1h before the empty day's start).
+        try writeSession("ctx-prev", [seg("前日の会議", at: emptyStart - 3600)], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(emptyDay)
+        let env = model.buildQueryEnvelope(actionId: "free", instruction: "この日をまとめて", sessionsRoot: root)
+        XCTAssertTrue(env.segments.isEmpty,
+                      "an empty past day sends nothing — no previous-day history borrowed")
+        XCTAssertFalse(env.segments.contains { $0.text == "前日の会議" },
+                       "the previous day's text must never leak into an empty day's query")
+    }
+
     /// D153: scanBackward reports `truncatedBeforeCoverage` from capturedAt
     /// (never mtime) — true whenever any retained segment is older than the cap.
     /// The window is exactly the in-`[cap, anchor)` segments, ordered. A pre-cap

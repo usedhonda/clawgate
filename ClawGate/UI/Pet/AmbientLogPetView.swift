@@ -559,6 +559,15 @@ final class AmbientLogModel: ObservableObject {
             candidateSegments = resolved.segments
             scopeOverride = ids
             retrievalTruncatedBeforeCoverage = false
+        } else if day != today && daySegments.isEmpty {
+            // D155: a non-today automatic query needs a coverage-tail anchor from
+            // the SELECTED day itself. An empty past day has none — do NOT fall
+            // back to the day-end anchor and fetch the previous 48h (that would
+            // silently send another day's history for a visibly empty day).
+            // Produce an empty scope so admission refuses it (D3 empty-scope).
+            candidateSegments = []
+            scopeOverride = nil
+            retrievalTruncatedBeforeCoverage = false
         } else {
             let scan = AmbientStorage.scanBackward(
                 anchor: anchor, timeZone: timeZone, sessionsRoot: sessionsRoot)
