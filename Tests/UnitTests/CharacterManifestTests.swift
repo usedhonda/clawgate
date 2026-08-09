@@ -4,6 +4,7 @@ import XCTest
 
 final class CharacterManifestTests: XCTestCase {
     private let fileManager = FileManager.default
+    private let defaultFrameSize = CGSize(width: 16, height: 16)
 
     // MARK: - JSON Decoding
 
@@ -47,6 +48,59 @@ final class CharacterManifestTests: XCTestCase {
         XCTAssertEqual(manifest.author, "ClawGate")
         XCTAssertEqual(manifest.version, "1.0.0")
         XCTAssertEqual(manifest.states.count, 2)
+    }
+
+    // MARK: - Chi Manifest fixture integration
+
+    func testChiManifestLoadsFromBundleFixture() throws {
+        let moduleBundle = Bundle(for: CharacterManager.self)
+        let candidatePaths = [
+            "Characters/chi",
+            "Characters/chi-claw",
+            "chi",
+            "chi-claw",
+        ]
+
+        let manifestURL = candidatePaths.compactMap {
+            moduleBundle.url(
+                forResource: "manifest",
+                withExtension: "json",
+                subdirectory: $0
+            )
+        }.first { FileManager.default.fileExists(atPath: $0.path) }
+
+        let enumeratedManifestURL = moduleBundle.resourceURL.flatMap { resourceURL in
+            let enumerator = FileManager.default.enumerator(at: resourceURL, includingPropertiesForKeys: nil)
+            return enumerator?.compactMap { ($0 as? URL) }.first(where: {
+                $0.lastPathComponent == "manifest.json" &&
+                ($0.path.contains("/chi/") || $0.path.contains("/chi-claw/"))
+            })
+        }
+
+        let sourceManifestURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ClawGate/Resources/Characters/chi/manifest.json")
+        let sourceBundleManifestURL = FileManager.default.fileExists(atPath: sourceManifestURL.path) ? sourceManifestURL : nil
+
+        let fallbackURL = moduleBundle.urls(
+            forResourcesWithExtension: "json",
+            subdirectory: "Characters"
+        )?.first(where: {
+            $0.lastPathComponent == "manifest.json" && $0.path.contains("/chi/")
+        })
+
+        guard let manifestURL = manifestURL ?? enumeratedManifestURL ?? fallbackURL ?? sourceBundleManifestURL else {
+            XCTFail("Expected chi manifest fixture in Bundle.module")
+            return
+        }
+
+        let data = try Data(contentsOf: manifestURL)
+        let manifest = try JSONDecoder().decode(CharacterManifest.self, from: data)
+        XCTAssertEqual(manifest.name, "chi")
+        XCTAssertTrue(manifest.states.contains(where: { $0.name == "idle" }))
+        XCTAssertTrue(manifest.states.contains(where: { $0.name == "speak" }))
     }
 
     // MARK: - State Info
@@ -174,6 +228,73 @@ final class CharacterManifestTests: XCTestCase {
         XCTAssertEqual(manager.selectedName, "first")
     }
 
+    func testSelectedNameFallsBackDeterministicallyOnEmptyScan() {
+        let manager = CharacterManager(searchPaths: [nonExistentRoot()])
+        manager.selectedName = "previous-name"
+        manager.scan()
+
+        XCTAssertEqual(manager.selectedName, "")
+        XCTAssertNil(manager.current())
+        XCTAssertEqual(manager.characters, [])
+    }
+
+    func testScanRefreshUpdatesPreviewWhenBundleMovesWithSameCharacterName() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        let firstPath = root.appendingPathComponent("first")
+        try makeBundle(
+            at: firstPath,
+            manifest: makeManifest(name: "same-name", states: [
+                makeState(name: "idle", frames: ["idle.png"]),
+            ]),
+            frameColors: ["idle.png": .systemBlue],
+            previewColor: .systemRed,
+            previewSize: CGSize(width: 12, height: 12)
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.selectedName = "same-name"
+        manager.scan()
+
+        guard let first = manager.current() else {
+            return XCTFail("bundle should load")
+        }
+        XCTAssertEqual(first.preview?.size.width, 12)
+        XCTAssertEqual(first.preview?.size.height, 12)
+        let firstPreviewColor = pixelTuple(from: first.preview)
+        guard let firstPreviewColor else {
+            return XCTFail("preview should decode")
+        }
+
+        try fileManager.removeItem(at: firstPath)
+        let secondPath = root.appendingPathComponent("second")
+        try makeBundle(
+            at: secondPath,
+            manifest: makeManifest(name: "same-name", states: [
+                makeState(name: "idle", frames: ["idle.png"]),
+            ]),
+            frameColors: ["idle.png": .systemBlue],
+            previewColor: .systemBlue,
+            previewSize: CGSize(width: 20, height: 20)
+        )
+
+        manager.scan()
+        guard let second = manager.current() else {
+            return XCTFail("bundle should reload after move")
+        }
+        XCTAssertEqual(second.preview?.size.width, 20)
+        XCTAssertEqual(second.preview?.size.height, 20)
+        let secondPreviewColor = pixelTuple(from: second.preview)
+        guard let secondPreviewColor else {
+            return XCTFail("preview should decode after move")
+        }
+
+        if pixelTuplesEqual(firstPreviewColor, secondPreviewColor) {
+            return XCTFail("preview assets should differ after rescan")
+        }
+    }
+
     func testMalformedManifestAndFrameDoNotPublishInvalidBundle() throws {
         let root = makeTempRoot()
         defer { try? fileManager.removeItem(at: root) }
@@ -193,6 +314,122 @@ final class CharacterManifestTests: XCTestCase {
 
         XCTAssertEqual(manager.characters.map { $0.name }, ["valid"])
         XCTAssertEqual(diagCount(CharacterManager.missingFrameFileCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testInvalidImageFrameIsRejected() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        let badPath = root.appendingPathComponent("invalid-image")
+        try fileManager.createDirectory(at: badPath, withIntermediateDirectories: true)
+        let manifest = makeManifest(name: "invalid-image", states: [makeState(name: "idle", frames: ["broken.png"])])
+        try encodeManifest(manifest, to: badPath.appendingPathComponent("manifest.json"))
+        try Data("not an image".utf8).write(to: badPath.appendingPathComponent("broken.png"))
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidImageFileCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testInvalidSpriteGridIsRejectedBeforePublishing() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("bad-grid"),
+            manifest: CharacterManifest(
+                name: "bad-grid",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "walk",
+                        frames: ["walk.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 4,
+                        sheetRows: 3
+                    )
+                ]
+            ),
+            frameColors: ["walk.png": .systemYellow],
+            imageSize: CGSize(width: 10, height: 10)
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testSpriteCellOverflowIsRejectedWithoutCrash() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("overflow"),
+            manifest: CharacterManifest(
+                name: "overflow",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: Int.max,
+                        sheetRows: 2
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemOrange],
+            imageSize: CGSize(width: 32, height: 32)
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testDuplicateStateNamesAreRejected() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("dupe"),
+            manifest: CharacterManifest(
+                name: "dupe",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    makeState(name: "idle", frames: ["idle-1.png"]),
+                    makeState(name: "idle", frames: ["idle-2.png"]),
+                ]
+            ),
+            frameColors: ["idle-1.png": .systemBlue, "idle-2.png": .systemGreen]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.duplicateStateNameCode, manager.lastScanDiagnostics), 1)
         XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
     }
 
@@ -234,31 +471,69 @@ final class CharacterManifestTests: XCTestCase {
         XCTAssertEqual(character.decodedFrameCount, 3)
     }
 
-    func testChangingIdentityComponentsInvalidatesFrameCacheExactlyOnce() throws {
+    func testSamePathImageRewriteRefreshesAssetFingerprintAndReloadsFrame() throws {
         let root = makeTempRoot()
         defer { try? fileManager.removeItem(at: root) }
-        let alphaPath = root.appendingPathComponent("alpha")
+        let path = root.appendingPathComponent("rewrite")
 
+        try makeBundle(
+            at: path,
+            manifest: makeManifest(name: "rewrite", states: [
+                makeState(name: "idle", frames: ["idle.png"]),
+            ]),
+            frameColors: ["idle.png": .systemRed]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.selectedName = "rewrite"
+        manager.scan()
+
+        guard let before = manager.current() else {
+            return XCTFail("bundle should load")
+        }
+        let beforeFrame = before.frames(for: "idle").first
+        let beforeColor = pixelTuple(from: beforeFrame)
+        XCTAssertEqual(before.decodedFrameCount, 1)
+
+        try writePNG(at: path.appendingPathComponent("idle.png"), color: .systemGreen)
+        manager.scan()
+
+        guard let after = manager.current() else {
+            return XCTFail("bundle should reload after rewrite")
+        }
+        let afterFrame = after.frames(for: "idle").first
+        let afterColor = pixelTuple(from: afterFrame)
+        XCTAssertEqual(after.decodedFrameCount, 1)
+        if pixelTuplesEqual(beforeColor, afterColor) {
+            return XCTFail("frame asset should refresh when rewritten at same path")
+        }
+    }
+
+    func testFrameCacheIdentityIncludesRenderKeyComponents() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        let alphaPath = root.appendingPathComponent("alpha")
         try makeBundle(
             at: alphaPath,
             manifest: makeManifest(name: "alpha", states: [
-                makeState(name: "idle", frames: ["idle@1x-0.png", "idle@1x-1.png"]),
-                makeState(name: "speak", frames: ["speak@1x-0.png"]),
+                makeState(name: "idle", frames: ["idle-1.png", "idle-1.png"]),
+                makeState(name: "sheet", frames: ["sheet.png"], sheetColumns: 1, sheetRows: 2),
             ]),
             frameColors: [
-                "idle@1x-0.png": .systemBlue,
-                "idle@1x-1.png": .systemBlue,
-                "speak@1x-0.png": .systemRed,
-                "idle@1x-2.png": .systemGreen,
-                "idle@2x-0.png": .systemPurple,
+                "idle-1.png": .systemBlue,
+                "sheet.png": .systemBlue,
+            ],
+            imageSizes: [
+                "sheet.png": CGSize(width: 20, height: 10),
             ]
         )
         try makeBundle(
             at: root.appendingPathComponent("beta"),
             manifest: makeManifest(name: "beta", states: [
-                makeState(name: "idle", frames: ["idle@1x-0.png"]),
+                makeState(name: "idle", frames: ["beta.png"]),
             ]),
-            frameColors: ["idle@1x-0.png": .systemBlue]
+            frameColors: ["beta.png": .systemRed]
         )
 
         let manager = CharacterManager(searchPaths: [root])
@@ -269,52 +544,41 @@ final class CharacterManifestTests: XCTestCase {
             return XCTFail("alpha should load")
         }
 
-        _ = alpha.frames(for: "idle")
+        let framesByIndex = alpha.frames(for: "idle")
+        XCTAssertEqual(framesByIndex.count, 2)
+        XCTAssertFalse(framesByIndex[0] === framesByIndex[1])
         XCTAssertEqual(alpha.decodedFrameCount, 2)
-        _ = alpha.frames(for: "idle")
-        XCTAssertEqual(alpha.decodedFrameCount, 2)
-        _ = alpha.frames(for: "speak")
-        XCTAssertEqual(alpha.decodedFrameCount, 3)
-        _ = alpha.frames(for: "idle")
-        XCTAssertEqual(alpha.decodedFrameCount, 3)
 
-        try encodeManifest(
-            makeManifest(name: "alpha", states: [
-                makeState(name: "idle", frames: ["idle@1x-2.png"]),
-            ]),
-            to: alphaPath.appendingPathComponent("manifest.json")
-        )
-        manager.scan()
-        guard let alphaAfterFrameIndexChange = manager.current() else {
-            return XCTFail("alpha should load after frame index change")
-        }
-        _ = alphaAfterFrameIndexChange.frames(for: "idle")
-        XCTAssertEqual(alphaAfterFrameIndexChange.decodedFrameCount, 1)
-        _ = alphaAfterFrameIndexChange.frames(for: "idle")
-        XCTAssertEqual(alphaAfterFrameIndexChange.decodedFrameCount, 1)
-
-        try encodeManifest(
-            makeManifest(name: "alpha", states: [
-                makeState(name: "idle", frames: ["idle@2x-0.png"]),
-            ]),
-            to: alphaPath.appendingPathComponent("manifest.json")
-        )
-        manager.scan()
-        guard let alphaAfterScaleChange = manager.current() else {
-            return XCTFail("alpha should load after scale variant change")
-        }
-        _ = alphaAfterScaleChange.frames(for: "idle")
-        XCTAssertEqual(alphaAfterScaleChange.decodedFrameCount, 1)
-        _ = alphaAfterScaleChange.frames(for: "idle")
-        XCTAssertEqual(alphaAfterScaleChange.decodedFrameCount, 1)
+        let sheetFrames = alpha.frames(for: "sheet")
+        XCTAssertEqual(sheetFrames.count, 2)
+        XCTAssertEqual(alpha.decodedFrameCount, 3)
 
         manager.selectedName = "beta"
         guard let beta = manager.current() else {
             return XCTFail("beta should load")
         }
-        _ = beta.frames(for: "idle")
+        let betaFrames = beta.frames(for: "idle")
+        XCTAssertEqual(betaFrames.count, 1)
         XCTAssertEqual(beta.decodedFrameCount, 1)
-        XCTAssertEqual(alphaAfterScaleChange.decodedFrameCount, 1)
+
+        manager.selectedName = "alpha"
+        try encodeManifest(
+            makeManifest(name: "alpha", states: [
+                makeState(name: "idle", frames: ["idle-2.png", "idle-1.png"]),
+                makeState(name: "sheet", frames: ["sheet.png"], sheetColumns: 2, sheetRows: 1),
+            ]),
+            to: alphaPath.appendingPathComponent("manifest.json")
+        )
+        try writePNG(at: alphaPath.appendingPathComponent("idle-2.png"), color: .systemGreen)
+        manager.scan()
+
+        guard let alphaAfter = manager.current() else {
+            return XCTFail("alpha should load after identity update")
+        }
+        _ = alphaAfter.frames(for: "idle")
+        XCTAssertEqual(alphaAfter.decodedFrameCount, 2)
+        _ = alphaAfter.frames(for: "sheet")
+        XCTAssertEqual(alphaAfter.decodedFrameCount, 3)
     }
 
     // MARK: - Helpers
@@ -340,23 +604,41 @@ final class CharacterManifestTests: XCTestCase {
         )
     }
 
-    private func makeState(name: String, frames: [String]) -> CharacterManifest.StateInfo {
+    private func makeState(
+        name: String,
+        frames: [String],
+        sheetColumns: Int? = nil,
+        sheetRows: Int? = nil
+    ) -> CharacterManifest.StateInfo {
         CharacterManifest.StateInfo(
             name: name,
             frames: frames,
             fps: nil,
             loop: nil,
-            sheetColumns: nil,
-            sheetRows: nil
+            sheetColumns: sheetColumns,
+            sheetRows: sheetRows
         )
     }
 
-    private func makeBundle(at path: URL, manifest: CharacterManifest, frameColors: [String: NSColor]) throws {
+    private func makeBundle(
+        at path: URL,
+        manifest: CharacterManifest,
+        frameColors: [String: NSColor],
+        previewColor: NSColor? = nil,
+        previewSize: CGSize = CGSize(width: 16, height: 16),
+        imageSize: CGSize? = nil,
+        imageSizes: [String: CGSize] = [:]
+    ) throws {
         try fileManager.createDirectory(at: path, withIntermediateDirectories: true)
         try encodeManifest(manifest, to: path.appendingPathComponent("manifest.json"))
 
+        if let previewColor {
+            try writePNG(at: path.appendingPathComponent("preview.png"), color: previewColor, size: previewSize)
+        }
+
         for (filename, color) in frameColors {
-            try writePNG(at: path.appendingPathComponent(filename), color: color)
+            let size = imageSizes[filename] ?? imageSize ?? defaultFrameSize
+            try writePNG(at: path.appendingPathComponent(filename), color: color, size: size)
         }
     }
 
@@ -365,8 +647,12 @@ final class CharacterManifestTests: XCTestCase {
         try data.write(to: url)
     }
 
-    private func writePNG(at url: URL, color: NSColor) throws {
-        let imageSize = CGSize(width: 16, height: 16)
+    private func writePNG(
+        at url: URL,
+        color: NSColor,
+        size: CGSize = CGSize(width: 16, height: 16)
+    ) throws {
+        let imageSize = size
         let image = NSImage(size: imageSize)
         image.lockFocus()
         color.setFill()
@@ -380,6 +666,32 @@ final class CharacterManifestTests: XCTestCase {
         }
 
         try png.write(to: url)
+    }
+
+    private func pixelTuple(from image: NSImage?) -> (UInt8, UInt8, UInt8, UInt8)? {
+        guard let image,
+              let imageData = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: imageData),
+              let color = rep.colorAt(x: 0, y: 0)?.usingColorSpace(.deviceRGB) else {
+            return nil
+        }
+
+        return (
+            UInt8((color.redComponent * 255).rounded()),
+            UInt8((color.greenComponent * 255).rounded()),
+            UInt8((color.blueComponent * 255).rounded()),
+            UInt8((color.alphaComponent * 255).rounded())
+        )
+    }
+
+    private func pixelTuplesEqual(_ lhs: (UInt8, UInt8, UInt8, UInt8)?, _ rhs: (UInt8, UInt8, UInt8, UInt8)?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case let (.some(left), .some(right)):
+            return left.0 == right.0 && left.1 == right.1 && left.2 == right.2 && left.3 == right.3
+        default:
+            return false
+        }
     }
 
     private func diagCount(_ code: String, _ diagnostics: [CharacterManagerScanDiagnostic]) -> Int {

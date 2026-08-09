@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 
 /// Character manifest loaded from manifest.json
@@ -35,13 +36,13 @@ struct CharacterManagerScanDiagnostic: Equatable {
 
 private struct ParsedFrameName {
     let fileName: String
-    let scaleVariant: String
     let parsedIndex: Int?
 }
 
 private struct ScannedBundle {
     let manifest: CharacterManifest
     let directory: URL
+    let assetFingerprint: String
 }
 
 private struct CharacterManagerScanSnapshot {
@@ -55,7 +56,6 @@ private struct CharacterFrameCacheKey: Hashable {
     let stateName: String
     let frameIndex: Int
     let frameFileName: String
-    let frameScaleVariant: String
     let sheetColumns: Int
     let sheetRows: Int
 }
@@ -71,7 +71,8 @@ private struct CharacterSheetCacheKey: Hashable {
 final class LoadedCharacter {
     var manifest: CharacterManifest
     var directory: URL
-    let preview: NSImage?
+    var preview: NSImage?
+    private var assetFingerprint: String
 
     private var frameCache: [CharacterFrameCacheKey: NSImage] = [:]
     private var sheetFrameCache: [CharacterSheetCacheKey: [NSImage]] = [:]
@@ -79,17 +80,24 @@ final class LoadedCharacter {
     private(set) var decodedFrameCount: Int = 0
     private(set) var frameCacheHitCount: Int = 0
 
-    init(manifest: CharacterManifest, directory: URL) {
+    init(manifest: CharacterManifest, directory: URL, assetFingerprint: String) {
         self.manifest = manifest
         self.directory = directory
+        self.assetFingerprint = assetFingerprint
         let previewPath = directory.appendingPathComponent("preview.png")
         self.preview = NSImage(contentsOf: previewPath)
     }
 
-    func refresh(manifest: CharacterManifest, directory: URL) {
-        guard self.manifest != manifest || self.directory != directory else { return }
+    func refresh(manifest: CharacterManifest, directory: URL, assetFingerprint: String) {
+        guard self.manifest != manifest || self.directory != directory || self.assetFingerprint != assetFingerprint else {
+            return
+        }
+
         self.manifest = manifest
         self.directory = directory
+        self.assetFingerprint = assetFingerprint
+        let previewPath = directory.appendingPathComponent("preview.png")
+        self.preview = NSImage(contentsOf: previewPath)
         frameCache.removeAll(keepingCapacity: true)
         sheetFrameCache.removeAll(keepingCapacity: true)
         decodedFrameCount = 0
@@ -134,7 +142,6 @@ final class LoadedCharacter {
                 stateName: info.name,
                 frameIndex: index,
                 frameFileName: frameRef.fileName,
-                frameScaleVariant: frameRef.scaleVariant,
                 sheetColumns: 0,
                 sheetRows: 0
             )
@@ -191,7 +198,6 @@ final class LoadedCharacter {
                 stateName: info.name,
                 frameIndex: index,
                 frameFileName: frameRef.fileName,
-                frameScaleVariant: frameRef.scaleVariant,
                 sheetColumns: cols,
                 sheetRows: rows
             )
@@ -261,9 +267,11 @@ final class CharacterManager: ObservableObject {
     static let missingStatesCode = "character.bundle.missing_states"
     static let tooManyStatesCode = "character.bundle.too_many_states"
     static let invalidStateNameCode = "character.bundle.invalid_state_name"
+    static let duplicateStateNameCode = "character.bundle.duplicate_state_name"
     static let invalidFramesCode = "character.bundle.invalid_frames"
     static let invalidFrameReferenceCode = "character.bundle.invalid_frame_reference"
     static let missingFrameFileCode = "character.bundle.missing_frame_file"
+    static let invalidImageFileCode = "character.bundle.invalid_image_file"
     static let invalidSpriteConfigCode = "character.bundle.invalid_sprite_config"
     static let invalidFpsCode = "character.bundle.invalid_fps"
     static let duplicateBundleNameCode = "character.bundle.duplicate_name"
@@ -303,10 +311,14 @@ final class CharacterManager: ObservableObject {
         var nextCache: [String: LoadedCharacter] = [:]
         for bundle in snapshot.bundles {
             if let existing = loadedCache[bundle.manifest.name] {
-                existing.refresh(manifest: bundle.manifest, directory: bundle.directory)
+                existing.refresh(manifest: bundle.manifest, directory: bundle.directory, assetFingerprint: bundle.assetFingerprint)
                 nextCache[bundle.manifest.name] = existing
             } else {
-                nextCache[bundle.manifest.name] = LoadedCharacter(manifest: bundle.manifest, directory: bundle.directory)
+                nextCache[bundle.manifest.name] = LoadedCharacter(
+                    manifest: bundle.manifest,
+                    directory: bundle.directory,
+                    assetFingerprint: bundle.assetFingerprint
+                )
             }
         }
 
@@ -319,7 +331,9 @@ final class CharacterManager: ObservableObject {
             .prefix(CharacterManager.diagnosticEntryLimit)
             .map { $0 }
 
-        if !characters.isEmpty, !characters.contains(where: { $0.name == selectedName }) {
+        if characters.isEmpty {
+            selectedName = ""
+        } else if !characters.contains(where: { $0.name == selectedName }) {
             selectedName = characters[0].name
         }
     }
@@ -383,14 +397,28 @@ final class CharacterManager: ObservableObject {
             return nil
         }
 
-        guard isValidBundle(manifest, in: directory, issueCounts: &issueCounts) else {
+        var assetFingerprints: [String] = []
+        guard isValidBundle(manifest, in: directory, issueCounts: &issueCounts, assetFingerprints: &assetFingerprints) else {
             return nil
         }
 
-        return ScannedBundle(manifest: manifest, directory: directory)
+        guard let fingerprint = makeBundleFingerprint(manifest: manifest, frameFingerprints: assetFingerprints) else {
+            return nil
+        }
+
+        return ScannedBundle(
+            manifest: manifest,
+            directory: directory,
+            assetFingerprint: fingerprint
+        )
     }
 
-    private func isValidBundle(_ manifest: CharacterManifest, in directory: URL, issueCounts: inout [String: Int]) -> Bool {
+    private func isValidBundle(
+        _ manifest: CharacterManifest,
+        in directory: URL,
+        issueCounts: inout [String: Int],
+        assetFingerprints: inout [String]
+    ) -> Bool {
         let trimmedName = manifest.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else {
             issueCounts[Self.invalidCharacterNameCode, default: 0] += 1
@@ -407,8 +435,25 @@ final class CharacterManager: ObservableObject {
             return false
         }
 
+        var seenStateNames = Set<String>()
         for state in manifest.states {
-            guard isValidState(state, in: directory, issueCounts: &issueCounts) else {
+            let trimmedStateName = state.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedStateName.isEmpty else {
+                issueCounts[Self.invalidStateNameCode, default: 0] += 1
+                return false
+            }
+
+            guard seenStateNames.insert(trimmedStateName).inserted else {
+                issueCounts[Self.duplicateStateNameCode, default: 0] += 1
+                return false
+            }
+
+            guard isValidState(
+                state,
+                in: directory,
+                issueCounts: &issueCounts,
+                assetFingerprints: &assetFingerprints
+            ) else {
                 return false
             }
         }
@@ -416,13 +461,12 @@ final class CharacterManager: ObservableObject {
         return true
     }
 
-    private func isValidState(_ state: CharacterManifest.StateInfo, in directory: URL, issueCounts: inout [String: Int]) -> Bool {
-        let trimmedStateName = state.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedStateName.isEmpty else {
-            issueCounts[Self.invalidStateNameCode, default: 0] += 1
-            return false
-        }
-
+    private func isValidState(
+        _ state: CharacterManifest.StateInfo,
+        in directory: URL,
+        issueCounts: inout [String: Int],
+        assetFingerprints: inout [String]
+    ) -> Bool {
         guard !state.frames.isEmpty, state.frames.count <= Self.maxFramesPerState else {
             issueCounts[Self.invalidFramesCode, default: 0] += 1
             return false
@@ -435,11 +479,12 @@ final class CharacterManager: ObservableObject {
                 issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
                 return false
             }
-            guard cols * rows <= Self.maxSpriteCellCount else {
+            let product = cols.multipliedReportingOverflow(by: rows)
+            guard !product.overflow, product.partialValue <= Self.maxSpriteCellCount else {
                 issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
                 return false
             }
-            if state.frames.count != 1 {
+            guard state.frames.count == 1 else {
                 issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
                 return false
             }
@@ -463,6 +508,26 @@ final class CharacterManager: ObservableObject {
             guard FileManager.default.fileExists(atPath: framePath.path, isDirectory: &isDir), !isDir.boolValue else {
                 issueCounts[Self.missingFrameFileCode, default: 0] += 1
                 return false
+            }
+
+            guard let frameFingerprint = frameFileFingerprint(at: framePath) else {
+                issueCounts[Self.invalidImageFileCode, default: 0] += 1
+                return false
+            }
+            assetFingerprints.append(frameFingerprint)
+
+            guard let image = decodeFrameImage(at: framePath) else {
+                issueCounts[Self.invalidImageFileCode, default: 0] += 1
+                return false
+            }
+
+            if state.isSheet {
+                let cols = state.sheetColumns ?? 1
+                let rows = state.sheetRows ?? 1
+                guard isValidSpriteGrid(image: image, columns: cols, rows: rows) else {
+                    issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
+                    return false
+                }
             }
 
             if let parsedIndex = frameRef.parsedIndex, parsedIndex > Self.maxParsedFrameIndex {
@@ -489,7 +554,6 @@ private func parseFrameName(_ raw: String) -> ParsedFrameName? {
 
     return ParsedFrameName(
         fileName: fileName,
-        scaleVariant: parseScaleVariant(from: stem),
         parsedIndex: parseTrailingIndex(from: stem)
     )
 }
@@ -502,13 +566,62 @@ private func parseTrailingIndex(from stem: String) -> Int? {
     return index
 }
 
-private func parseScaleVariant(from stem: String) -> String {
-    let parts = stem.split(separator: "@", omittingEmptySubsequences: false)
-    guard parts.count >= 2 else { return "1x" }
-    guard let suffix = parts.last else { return "1x" }
-    let scale = String(suffix)
-    guard scale.hasSuffix("x"), Int(scale.dropLast()) != nil else {
-        return "1x"
+private func decodeFrameImage(at path: URL) -> NSImage? {
+    guard let image = NSImage(contentsOf: path) else {
+        return nil
     }
-    return scale
+
+    guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        return nil
+    }
+
+    guard cgImage.width > 0, cgImage.height > 0 else {
+        return nil
+    }
+
+    return image
+}
+
+private func isValidSpriteGrid(image: NSImage, columns: Int, rows: Int) -> Bool {
+    guard columns > 0, rows > 0 else { return false }
+    guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return false }
+    guard cgImage.width > 0, cgImage.height > 0 else { return false }
+    guard cgImage.width % columns == 0, cgImage.height % rows == 0 else {
+        return false
+    }
+    let frameWidth = cgImage.width / columns
+    let frameHeight = cgImage.height / rows
+    return frameWidth > 0 && frameHeight > 0
+}
+
+private func frameFileFingerprint(at path: URL) -> String? {
+    guard let data = try? Data(contentsOf: path) else {
+        return nil
+    }
+
+    let digest = SHA256.hash(data: data)
+    let hex = digest.map { String(format: "%02x", $0) }.joined()
+
+    let filename = path.lastPathComponent
+    return "\(filename):\(data.count):\(hex)"
+}
+
+private func makeBundleFingerprint(
+    manifest: CharacterManifest,
+    frameFingerprints: [String]
+) -> String? {
+    let manifestDigest = makeManifestFingerprint(manifest)
+    guard let manifestDigest else { return nil }
+    let payload = ([manifestDigest] + frameFingerprints).joined(separator: "|")
+    guard let data = payload.data(using: .utf8) else { return nil }
+    let digest = SHA256.hash(data: data)
+    return digest.map { String(format: "%02x", $0) }.joined()
+}
+
+private func makeManifestFingerprint(_ manifest: CharacterManifest) -> String? {
+    guard let data = try? JSONEncoder().encode(manifest) else {
+        return nil
+    }
+    let hex = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    return hex
 }
