@@ -159,6 +159,60 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
     }
 
+    /// D16 refusal position: an incomplete request refuses fail-closed BEFORE the
+    /// busy admission check — the typed incomplete status wins, and no busy
+    /// "Error" marker entry is appended, so nothing side-effects while a prior
+    /// summon is in flight (the slot is left untouched).
+    func testIncompleteRefusesBeforeBusyAdmissionWithNoSideEffect() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+        // A prior summon is already in flight — the model is busy.
+        model.pendingSummonSource = "scene"
+        let priorReplyCount = model.logReplies.count
+
+        let requestId = UUID().uuidString
+        let env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "free", instruction: "まとめて",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [segment("a"), segment("b")], retrievalComplete: false)
+        let accepted = model.sendLogInstruction(envelope: env)
+
+        XCTAssertFalse(accepted, "an incomplete request is refused, never dispatched")
+        XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId),
+                       "incomplete is evaluated before busy — the typed incomplete status wins")
+        XCTAssertEqual(model.logReplies.count, priorReplyCount,
+                       "no log_user entry and no 'Error: busy' marker for an incomplete refusal")
+        XCTAssertEqual(model.pendingSummonSource, "scene",
+                       "the incomplete refusal never claims or disturbs the in-flight summon slot")
+    }
+
+    /// D16 refusal position: an incomplete request refuses fail-closed BEFORE the
+    /// not-connected admission check too — no "Error: not connected" marker is
+    /// appended, so the draft is left intact even while offline.
+    func testIncompleteRefusesBeforeNotConnectedAdmissionWithNoSideEffect() {
+        let model = PetModel()
+        model.connectionState = .disconnected
+        model.suppressLogSendForTesting = true
+        let priorReplyCount = model.logReplies.count
+
+        let requestId = UUID().uuidString
+        let env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "free", instruction: "まとめて",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [segment("a"), segment("b")], retrievalComplete: false)
+        let accepted = model.sendLogInstruction(envelope: env)
+
+        XCTAssertFalse(accepted, "an incomplete request is refused, never dispatched")
+        XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId),
+                       "incomplete is evaluated before the not-connected check")
+        XCTAssertEqual(model.logReplies.count, priorReplyCount,
+                       "no 'Error: not connected' marker is appended for an incomplete refusal")
+    }
+
     // MARK: - D72 parser-failure metadata retention
 
     func testMalformedReplyRetainsRequestCorrelationMetadata() {

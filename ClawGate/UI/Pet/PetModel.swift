@@ -1970,7 +1970,8 @@ final class PetModel: NSObject, ObservableObject {
     /// `selectedDay` is the Ambient-log day the query was scoped to — sourced
     /// from the caller rather than derived from the anchor (an empty past day's
     /// anchor lands on the next day's start), and persisted for forensics.
-    func sendLogInstruction(envelope requestedEnvelope: PetLogQueryEnvelope, selectedDay: Date? = nil) {
+    @discardableResult
+    func sendLogInstruction(envelope requestedEnvelope: PetLogQueryEnvelope, selectedDay: Date? = nil) -> Bool {
         recordPetLogAdmissionEvent(
             .actionReceived(
                 requestId: requestedEnvelope.requestId,
@@ -1984,55 +1985,23 @@ final class PetModel: NSObject, ObservableObject {
         guard !requestedEnvelope.segments.isEmpty else {
             logThreadPaneOpen = true
             logDispatchStatus = .emptyScopeRefused(requestId: requestedEnvelope.requestId)
-            return
+            return false
         }
-        // Admission control comes first, before any user-visible entry, save,
-        // or watchdog timer is created:
-        //  - Busy: a previous Chi summon (scene naming or anything else) is
-        //    still in flight. Starting a Log summon here would silently
-        //    overwrite pendingSummonSource/RunId/pendingLogRequest out from
-        //    under it, so refuse with a bounded, immediate marker instead.
-        //  - Not connected: sendLogSummon silently no-ops without a sessionKey,
-        //    which previously left a saved log_user entry and a fake
-        //    180s watchdog wait before any error surfaced. Surface the error
-        //    immediately instead.
-        guard !isSummonBusy else {
-            logThreadPaneOpen = true
-            recordPetLogAdmissionEvent(.busyRefused(requestId: requestedEnvelope.requestId))
-            appendLogErrorEntry("Error: busy — a previous Chi request is still in progress")
-            return
-        }
-        guard connectionState == .connected else {
-            logThreadPaneOpen = true
-            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: requestedEnvelope.requestId))
-            appendLogErrorEntry("Error: not connected")
-            return
-        }
-        guard sessionKey != nil else {
-            logThreadPaneOpen = true
-            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: requestedEnvelope.requestId))
-            appendLogErrorEntry("Error: not connected")
-            return
-        }
-        recordPetLogAdmissionEvent(.envelopeAccepted(requestId: requestedEnvelope.requestId))
-        // D3: a newly accepted Log request supersedes any prior dispatch status
-        // (e.g. a previous "ログ不足"). Owner-scoped clear — unrelated summon
-        // successes never touch it.
-        logDispatchStatus = nil
-
-        // D16/D20 fail-closed: A3 never sends incomplete history to the model.
-        // All causes — retrieval truncated at the sanity cap, or the request
-        // over budget — converge here and refuse BEFORE any side-effect (no
-        // log_user entry, no summon-slot claim, no watchdog, no send), leaving
-        // the user's draft intact (D60). A typed status + telemetry are the only
-        // outputs. Degraded (elided) dispatch stays disabled until a model-facing
+        // D16/D20 fail-closed FIRST — before any admission side-effect. A3 never
+        // sends incomplete history to the model. Both causes (retrieval truncated
+        // at the sanity cap, or the request over budget) are pure envelope
+        // properties, so they are evaluated ahead of busy/not-connected admission:
+        // an incomplete/over-budget request refuses with a TYPED status only —
+        // NO log_user entry, NO summon-slot claim, NO watchdog, NO "Error" marker
+        // entry — leaving the user's draft intact (D60) even while busy or offline.
+        // Degraded (elided) dispatch stays disabled until a model-facing
         // truncation signal exists (Target).
         guard requestedEnvelope.retrievalComplete else {
             logThreadPaneOpen = true
             recordPetLogAdmissionEvent(
                 .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: "sanityCap"))
             logDispatchStatus = .historyIncompleteRefused(requestId: requestedEnvelope.requestId)
-            return
+            return false
         }
         let requestBudget: Int
         #if DEBUG
@@ -2049,8 +2018,41 @@ final class PetModel: NSObject, ObservableObject {
             recordPetLogAdmissionEvent(
                 .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: reason.rawValue))
             logDispatchStatus = .historyIncompleteRefused(requestId: requestedEnvelope.requestId)
-            return
+            return false
         }
+        // Admission control follows the envelope-level fail-closed checks, before
+        // any user-visible entry, save, or watchdog timer is created:
+        //  - Busy: a previous Chi summon (scene naming or anything else) is
+        //    still in flight. Starting a Log summon here would silently
+        //    overwrite pendingSummonSource/RunId/pendingLogRequest out from
+        //    under it, so refuse with a bounded, immediate marker instead.
+        //  - Not connected: sendLogSummon silently no-ops without a sessionKey,
+        //    which previously left a saved log_user entry and a fake
+        //    180s watchdog wait before any error surfaced. Surface the error
+        //    immediately instead.
+        guard !isSummonBusy else {
+            logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(.busyRefused(requestId: requestedEnvelope.requestId))
+            appendLogErrorEntry("Error: busy — a previous Chi request is still in progress")
+            return false
+        }
+        guard connectionState == .connected else {
+            logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: requestedEnvelope.requestId))
+            appendLogErrorEntry("Error: not connected")
+            return false
+        }
+        guard sessionKey != nil else {
+            logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: requestedEnvelope.requestId))
+            appendLogErrorEntry("Error: not connected")
+            return false
+        }
+        recordPetLogAdmissionEvent(.envelopeAccepted(requestId: requestedEnvelope.requestId))
+        // D3: a newly accepted Log request supersedes any prior dispatch status
+        // (e.g. a previous "ログ不足"). Owner-scoped clear — unrelated summon
+        // successes never touch it.
+        logDispatchStatus = nil
 
         let selectionMode = envelope.scopeOverride == nil ? "automatic" : "explicit"
         let sourceFingerprint = PetLogSourceFingerprint.make(
@@ -2110,7 +2112,7 @@ final class PetModel: NSObject, ObservableObject {
             logAwaitingReply = false
             logAwaitingReplyToken = nil
             appendSummonEntry(text: "Error: failed to build log query", source: "log")
-            return
+            return false
         }
         // Envelope telemetry: structured, queryable, and body-free (never the
         // instruction or any transcript text). os.Logger — NSLog is not
@@ -2133,6 +2135,7 @@ final class PetModel: NSObject, ObservableObject {
             coverageEnd: envelope.coverageEnd
         )
         sendLogSummon(message, requestId: envelope.requestId)
+        return true
     }
 
     /// Appends a bounded, immediate, persisted "log"-sourced error/status
