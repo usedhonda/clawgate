@@ -18,17 +18,17 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // D162: acquire the shared semaphore FIRST so the process-global static
+        // timeout snapshot/override below is inside the same critical section as
+        // the PetLogStore.dir redirect — otherwise a parallel test in another
+        // class can race the timeout values (and the 2026-07-14 real-data-loss
+        // incident is guarded by the dir redirect that must also be atomic).
+        PetLogStore.testIsolationSemaphore.wait()
         originalSummonReplyTimeoutSeconds = PetModel.summonReplyTimeoutSeconds
         PetModel.summonReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
         originalLogAwaitingReplyTimeoutSeconds = PetModel.logAwaitingReplyTimeoutSeconds
         PetModel.logAwaitingReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
 
-        // Any "log"/summon completion reached below must never write through to
-        // the user's real ~/.clawgate/logs/*.json — redirect to a throwaway temp
-        // directory. `dir` is a process-global static: hold the shared semaphore
-        // for the entire setUp...tearDown lifetime so a parallel test in another
-        // class can't race this override (2026-07-14 real-data-loss incident).
-        PetLogStore.testIsolationSemaphore.wait()
         originalLogStoreDir = PetLogStore.dir
         PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
     }

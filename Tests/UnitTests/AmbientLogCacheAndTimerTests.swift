@@ -112,4 +112,22 @@ final class AmbientLogCacheAndTimerTests: XCTestCase {
         XCTAssertNotNil(model.pollTimerForTesting, "start after stop arms a fresh timer")
         model.stop()
     }
+
+    /// D152: a duplicate start() (e.g. a repeated onAppear) must not re-enqueue a
+    /// heavy load() — the timer-idempotency guard now runs BEFORE load(), so
+    /// exactly one load happens per polling lifecycle.
+    func testDuplicateStartDoesNotReEnqueueLoad() {
+        let model = AmbientLogModel()
+        model.start()
+        model.start()
+        model.start()
+        XCTAssertEqual(model.loadCallCountForTesting, 1,
+                       "duplicate start() while already polling must not re-scan storage")
+        model.stop()
+
+        // A start() after stop() is a fresh lifecycle and loads once more.
+        model.start()
+        XCTAssertEqual(model.loadCallCountForTesting, 2, "start after stop loads once for the new lifecycle")
+        model.stop()
+    }
 }

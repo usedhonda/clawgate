@@ -401,11 +401,13 @@ final class AmbientLogModel: ObservableObject {
 
     func start() {
         queryLifecycleActive = true
-        load()
-        // D92: idempotent — a second start() (e.g. a duplicate onAppear) must not
-        // leave a second 3-second Timer running that stop() can't reach. Arm only
-        // when not already polling.
+        // D92/D152: idempotent — a second start() (e.g. a duplicate onAppear)
+        // must not arm a second 3-second Timer that stop() can't reach, AND must
+        // not re-enqueue a heavy load(). The guard runs BEFORE load(), so a
+        // duplicate start() while already polling returns without scanning
+        // storage; the first start() (or a start() after stop()) loads once.
         guard timer == nil else { return }
+        load()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.load()
         }
@@ -430,6 +432,9 @@ final class AmbientLogModel: ObservableObject {
     /// Test seam: the current poll timer (private), so a test can assert start()
     /// is idempotent (repeated start keeps the SAME single timer, D92).
     var pollTimerForTesting: Timer? { timer }
+    /// Test seam: how many times `load()` was invoked, so a test can assert a
+    /// duplicate start() does NOT re-enqueue a heavy load (D152).
+    private(set) var loadCallCountForTesting = 0
     #endif
 
     func moveDay(by days: Int) {
@@ -766,6 +771,9 @@ final class AmbientLogModel: ObservableObject {
     /// on a serial background queue; only the final publish returns to main. A
     /// fingerprint of the inputs skips the rebuild entirely when nothing changed.
     private func load() {
+        #if DEBUG
+        loadCallCountForTesting += 1
+        #endif
         let day = clampedDay(selectedDay)
         if day != selectedDay { selectedDay = day }
         // Snapshot the main-thread inputs (selection, font, per-day cache) so the
