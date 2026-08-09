@@ -366,6 +366,19 @@ final class AmbientLogModel: ObservableObject {
     // main. `lastLoadedFingerprint` lets an unchanged poll skip the rebuild.
     private let loadQueue = DispatchQueue(label: "com.clawgate.ambientlog.load", qos: .userInitiated)
     private var lastLoadedFingerprint: String?
+    // D21: the owner generation bumps whenever the selection or day changes. A
+    // backgrounded query snapshots it at preparation; the main-thread commit
+    // dispatches only if it still matches, so a chip change mid-preparation
+    // cancels the stale query instead of dispatching an outdated scope.
+    private(set) var queryGeneration = 0
+    // D21: distinct from the generation — a stop() (view gone) flips this off so
+    // an in-flight query's commit-mismatch path drops instead of rebuilding. The
+    // generation bump alone invalidates the stale dispatch; this prevents a
+    // rebuild-and-dispatch after the view is gone.
+    private var queryLifecycleActive = true
+    // D21: an action-click sets this immediately so the UI can show a "preparing"
+    // status while the envelope is built off-main; the commit clears it.
+    @Published private(set) var isPreparingLogQuery = false
 
     init() {
         var cal = Calendar(identifier: .gregorian)
@@ -379,6 +392,7 @@ final class AmbientLogModel: ObservableObject {
     }
 
     func start() {
+        queryLifecycleActive = true
         load()
         // D92: idempotent — a second start() (e.g. a duplicate onAppear) must not
         // leave a second 3-second Timer running that stop() can't reach. Arm only
@@ -392,6 +406,12 @@ final class AmbientLogModel: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        // D21: invalidate any in-flight query. The generation bump makes its
+        // commit fail; `queryLifecycleActive = false` stops the mismatch path
+        // from rebuilding — no dispatch happens after the view is gone.
+        queryLifecycleActive = false
+        queryGeneration += 1
+        isPreparingLogQuery = false
     }
 
     deinit {
@@ -408,17 +428,20 @@ final class AmbientLogModel: ObservableObject {
         guard let day = calendar.date(byAdding: .day, value: days, to: selectedDay) else { return }
         selectedSceneIDs = []
         selectedDay = clampedDay(day)
+        queryGeneration += 1
         load()
     }
 
     func jumpToToday() {
         selectedSceneIDs = []
         selectedDay = today
+        queryGeneration += 1
         load()
     }
 
     func selectAllScenes() {
         selectedSceneIDs = []
+        queryGeneration += 1
         load()
     }
 
@@ -432,6 +455,7 @@ final class AmbientLogModel: ObservableObject {
         } else {
             selectedSceneIDs = [id]
         }
+        queryGeneration += 1
         load()
     }
 
@@ -488,9 +512,17 @@ final class AmbientLogModel: ObservableObject {
     /// same-day query never leaks content at/after the moment it was sent.
     /// An explicit scene selection is a hard scope override: only that
     /// scene's segments are included, anchor-filtered the same way.
+    /// D21: this is a PURE resolver — it takes `day`/`selection` as snapshotted
+    /// inputs (defaulting to the current published state for direct callers) and
+    /// does NOT mutate any published state. The reconciled selection travels back
+    /// in the envelope's `scopeOverride`; publishing it (and dispatching) is the
+    /// caller's job on the main thread, guarded by the owner generation so a
+    /// chip change mid-preparation cancels the stale query.
     func buildQueryEnvelope(actionId: String, instruction: String, now: Date = Date(),
+                            day: Date? = nil, selection: Set<String>? = nil,
                             sessionsRoot: URL = AmbientStorage.sessionsRoot) -> PetLogQueryEnvelope {
-        let day = selectedDay
+        let day = day ?? selectedDay
+        let selection = selection ?? selectedSceneIDs
         let daySegments = AmbientStorage.segments(forDay: day, timeZone: timeZone, sessionsRoot: sessionsRoot)
 
         let anchor: Date
@@ -513,14 +545,14 @@ final class AmbientLogModel: ObservableObject {
         // was the "visible full day / send 0" divergence D45 targets.
         let daysScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: timeZone)
         let resolved = AmbientLogGrouping.resolveScope(
-            selection: selectedSceneIDs, scenes: daysScenes, daySegments: daySegments)
-        if resolved.selection != selectedSceneIDs { selectedSceneIDs = resolved.selection }
+            selection: selection, scenes: daysScenes, daySegments: daySegments)
         let candidateSegments: [TranscriptSegment]
         let scopeOverride: [String]?
-        // D20: retrieval never stops at a gap. `retrievalComplete` is false only
-        // when the automatic window truncated an ongoing conversation at the
-        // sanity cap — the client fails closed on it rather than sending partial
-        // history to the model (D16). Explicit day-scoped selection is complete.
+        // D20: retrieval never stops at a gap. `retrievalComplete` is false
+        // whenever retained data older than the sanity cap exists — storage
+        // cannot prove a gap is a semantic boundary, so it fails closed rather
+        // than sending partial history to the model (D16). Explicit day-scoped
+        // selection is complete.
         let retrievalComplete: Bool
         if let ids = resolved.scopeIDs {
             // Explicit scene selection stays day-scoped exact-all.
@@ -590,6 +622,87 @@ final class AmbientLogModel: ObservableObject {
         )
     }
 
+    /// A query built off the main thread, tagged with the owner generation and
+    /// day it was prepared under (D21).
+    struct PreparedLogQuery {
+        let envelope: PetLogQueryEnvelope
+        let generation: Int
+        let day: Date
+    }
+
+    /// D21 production path: prepare the query envelope on the background queue
+    /// (storage read + scope resolution, snapshot inputs only, no shared-state
+    /// access) and dispatch on the main thread — but only if the owner generation
+    /// still matches (no chip/day change since preparation). If the selection or
+    /// day changed mid-preparation, the stale envelope is dropped and the query
+    /// is rebuilt from the latest snapshot so the action still resolves with the
+    /// corrected scope — UNLESS the model was stopped (view gone), in which case
+    /// it is dropped with no dispatch. Shows an immediate "preparing" status.
+    func startLogQuery(actionId: String, instruction: String, now: Date = Date(),
+                       sessionsRoot: URL = AmbientStorage.sessionsRoot,
+                       dispatch: @escaping (PetLogQueryEnvelope, Date) -> Void) {
+        isPreparingLogQuery = true
+        enqueueLogQueryBuild(actionId: actionId, instruction: instruction, now: now,
+                             sessionsRoot: sessionsRoot, dispatch: dispatch)
+    }
+
+    /// One prepare→commit cycle: snapshot the owner generation/day/selection,
+    /// build off-main from those snapshots only, and commit on main. On a
+    /// generation mismatch it rebuilds (if still active) or drops (if stopped).
+    private func enqueueLogQueryBuild(actionId: String, instruction: String, now: Date,
+                                      sessionsRoot: URL,
+                                      dispatch: @escaping (PetLogQueryEnvelope, Date) -> Void) {
+        let generation = queryGeneration
+        let day = selectedDay
+        let selection = selectedSceneIDs
+        loadQueue.async { [weak self] in
+            guard let self else { return }
+            let envelope = self.buildQueryEnvelope(
+                actionId: actionId, instruction: instruction, now: now,
+                day: day, selection: selection, sessionsRoot: sessionsRoot)
+            DispatchQueue.main.async {
+                let prepared = PreparedLogQuery(envelope: envelope, generation: generation, day: day)
+                if self.commitPreparedLogQuery(prepared, dispatch: dispatch) {
+                    self.isPreparingLogQuery = false
+                    return
+                }
+                // Generation changed since preparation. Rebuild from the latest
+                // snapshot only while the lifecycle is still active — a stop()
+                // (view gone) invalidates in-flight work with no dispatch.
+                guard self.queryLifecycleActive else {
+                    self.isPreparingLogQuery = false
+                    return
+                }
+                self.enqueueLogQueryBuild(actionId: actionId, instruction: instruction, now: now,
+                                          sessionsRoot: sessionsRoot, dispatch: dispatch)
+            }
+        }
+    }
+
+    /// Prepares a query synchronously against the current snapshot (test seam and
+    /// the building block for `startLogQuery`). Pure: it does not publish.
+    func prepareLogQuery(actionId: String, instruction: String, now: Date = Date(),
+                         sessionsRoot: URL = AmbientStorage.sessionsRoot) -> PreparedLogQuery {
+        let envelope = buildQueryEnvelope(
+            actionId: actionId, instruction: instruction, now: now,
+            day: selectedDay, selection: selectedSceneIDs, sessionsRoot: sessionsRoot)
+        return PreparedLogQuery(envelope: envelope, generation: queryGeneration, day: selectedDay)
+    }
+
+    /// Main-thread commit: dispatch only if the query is still current (owner
+    /// generation unchanged since preparation). Publishes the reconciled
+    /// selection (derived from the envelope's scope) so the chip and the query
+    /// agree, then dispatches. Returns whether it dispatched.
+    @discardableResult
+    func commitPreparedLogQuery(_ prepared: PreparedLogQuery,
+                                dispatch: (PetLogQueryEnvelope, Date) -> Void) -> Bool {
+        guard prepared.generation == queryGeneration else { return false }
+        let resolved: Set<String> = prepared.envelope.scopeOverride.map { Set($0) } ?? []
+        if resolved != selectedSceneIDs { selectedSceneIDs = resolved }
+        dispatch(prepared.envelope, prepared.day)
+        return true
+    }
+
     func updateThreadTranscript(entries: [NotificationEntry]) {
         let signature = entries.map { "\($0.id):\(Int($0.timestamp.timeIntervalSince1970))" }.joined(separator: "|") + "|\(fontSize)"
         guard signature != cachedThreadSignature else { return }
@@ -626,19 +739,34 @@ final class AmbientLogModel: ObservableObject {
             let daySegments: [TranscriptSegment]
             let newScenes: [AmbientLogGrouping.Scene]
             var dayFingerprintToStore: String?
+            // D38: the day's on-disk fingerprint (full sub-second mtime + size)
+            // is folded into the input fingerprint below for past days, so a late
+            // same-count rewrite still forces a republish. "today" for the live
+            // day (no per-day cache; live capture changes count/first/last).
+            let dayDiskFingerprint: String
             if !isToday {
                 // D38: only trust the past-day cache while the day's on-disk
                 // fingerprint is unchanged; a late write invalidates it.
-                let currentDayFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
-                if let cachedScenes, let cachedRaw, cachedDayFingerprint == currentDayFingerprint {
+                let preFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
+                if let cachedScenes, let cachedRaw, cachedDayFingerprint == preFingerprint {
                     daySegments = cachedRaw
                     newScenes = cachedScenes
+                    dayDiskFingerprint = preFingerprint
                 } else {
                     daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
                     newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
-                    dayFingerprintToStore = currentDayFingerprint
+                    // D38 two-phase: re-read the fingerprint AFTER the decode (still
+                    // off-main). The just-decoded content is published under the
+                    // post-decode fingerprint; the cache is only trusted (stored)
+                    // when the on-disk state was stable across the read, so a write
+                    // that raced the decode is not cached as authoritative and the
+                    // next poll re-reads it.
+                    let postFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
+                    dayDiskFingerprint = postFingerprint
+                    dayFingerprintToStore = (postFingerprint == preFingerprint) ? postFingerprint : nil
                 }
             } else {
+                dayDiskFingerprint = "today"
                 daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
                 newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
             }
@@ -647,11 +775,12 @@ final class AmbientLogModel: ObservableObject {
             let resolved = AmbientLogGrouping.resolveScope(
                 selection: selectionSnapshot, scenes: newScenes, daySegments: daySegments)
             // Cheap input fingerprint — ambient segments are append/backfill only,
-            // so count + first/last capturedAt + selection + font fully identifies
-            // the output. Unchanged fingerprint => skip the rebuild and publish.
+            // so count + first/last capturedAt + selection + font identifies the
+            // output; the day disk fingerprint (D38) closes the same-count rewrite
+            // hole. Unchanged fingerprint => skip the rebuild and publish.
             let firstAt = daySegments.first?.capturedAt ?? 0
             let lastAt = daySegments.last?.capturedAt ?? 0
-            let fingerprint = "\(Int(day.timeIntervalSince1970))|\(daySegments.count)|\(firstAt)|\(lastAt)|\(resolved.selection.sorted().joined(separator: ","))|\(font)"
+            let fingerprint = "\(Int(day.timeIntervalSince1970))|\(daySegments.count)|\(firstAt)|\(lastAt)|\(dayDiskFingerprint)|\(resolved.selection.sorted().joined(separator: ","))|\(font)"
             if fingerprint == previousFingerprint {
                 return
             }
@@ -1235,7 +1364,14 @@ struct AmbientLogPetView: View {
 
     private var inputBar: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let status = model.logDispatchStatus {
+            // D21: immediate feedback while the envelope is built off-main. The
+            // preparing state supersedes a prior dispatch status until the commit
+            // resolves (accepted clears it, refused replaces it with a status).
+            if logModel.isPreparingLogQuery {
+                Text("準備中…")
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.5))
+            } else if let status = model.logDispatchStatus {
                 Text(dispatchStatusText(status))
                     .font(.system(size: 11))
                     .foregroundColor(Color(red: 1.0, green: 0.82, blue: 0.4))
@@ -1249,8 +1385,7 @@ struct AmbientLogPetView: View {
                 .padding(.vertical, 7)
                 .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
             Button("送信") {
-                sendInstruction(instructionText, actionId: "free")
-                instructionText = ""
+                sendInstruction(instructionText, actionId: "free") { instructionText = "" }
             }
             .buttonStyle(PetPressableButtonStyle())
             .font(.system(size: 12, weight: .semibold))
@@ -1382,12 +1517,19 @@ struct AmbientLogPetView: View {
         sceneNamingWorkItem = nil
     }
 
-    private func sendInstruction(_ instruction: String, actionId: String) {
+    private func sendInstruction(_ instruction: String, actionId: String, onAccepted: (() -> Void)? = nil) {
         let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         cancelPendingSceneNaming()
-        let envelope = logModel.buildQueryEnvelope(actionId: actionId, instruction: trimmed)
-        model.sendLogInstruction(envelope: envelope, selectedDay: logModel.selectedDay)
+        // D21: build the envelope off the main thread; dispatch only if the
+        // selection/day hasn't changed since preparation (owner generation).
+        // D16/D60: the draft is cleared only when the send is actually accepted —
+        // an incomplete/over-budget/busy/offline refusal keeps it for retry.
+        logModel.startLogQuery(actionId: actionId, instruction: trimmed) { [model] envelope, day in
+            if model.sendLogInstruction(envelope: envelope, selectedDay: day) {
+                onAccepted?()
+            }
+        }
     }
 
     private func timeString(_ date: Date) -> String {

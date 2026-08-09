@@ -58,6 +58,39 @@ final class AmbientLogCacheAndTimerTests: XCTestCase {
         XCTAssertNotEqual(fp1, fp2, "a late write to a past day changes its fingerprint (invalidates the cache)")
     }
 
+    /// D38: a same-second, same-size rewrite (content corrected without changing
+    /// the byte count) still changes the fingerprint — the mod-time is kept at
+    /// full sub-second precision, so whole-second truncation cannot hide it.
+    func testDayFingerprintDetectsSameSecondSameSizeRewrite() throws {
+        let root = makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 7; c.day = 6; c.hour = 12; c.timeZone = jst
+        let day = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(day).timeIntervalSince1970
+        let raw = root.appendingPathComponent("ctx-rw/transcripts/raw.jsonl")
+        let fm = FileManager.default
+
+        // Same byte count, different content.
+        try writeSession("ctx-rw", [seg("AAAA", at: dayStart + 10)], under: root)
+        let sizeBefore = (try fm.attributesOfItem(atPath: raw.path)[.size] as? NSNumber)!.uint64Value
+        // Pin the mtime to a whole second (sub-second .25) inside the day.
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: dayStart + 100.25)],
+                             ofItemAtPath: raw.path)
+        let fp1 = AmbientStorage.dayFingerprint(forDay: startOfDayJST(day), timeZone: jst, sessionsRoot: root)
+
+        // Rewrite same-size, then pin to the SAME whole second (different sub-second).
+        try writeSession("ctx-rw", [seg("BBBB", at: dayStart + 10)], under: root)
+        let sizeAfter = (try fm.attributesOfItem(atPath: raw.path)[.size] as? NSNumber)!.uint64Value
+        XCTAssertEqual(sizeBefore, sizeAfter, "the rewrite is same-size by construction")
+        try fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: dayStart + 100.75)],
+                             ofItemAtPath: raw.path)
+        let fp2 = AmbientStorage.dayFingerprint(forDay: startOfDayJST(day), timeZone: jst, sessionsRoot: root)
+
+        XCTAssertNotEqual(fp1, fp2,
+                          "a same-second same-size rewrite still changes the fingerprint (sub-second mtime)")
+    }
+
     // MARK: - D92 poll timer idempotency
 
     func testStartIsIdempotentKeepingASingleTimer() {

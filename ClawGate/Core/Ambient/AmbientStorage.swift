@@ -189,7 +189,10 @@ enum AmbientStorage {
     /// mod-time) of every session file that could hold this day, with NO decode.
     /// A cached past day is invalidated when this changes, so a late STT write,
     /// recovery, or backfill that grows a past day's raw is picked up instead of
-    /// being hidden behind the "past days are static" cache.
+    /// being hidden behind the "past days are static" cache. The mod-time is kept
+    /// at FULL sub-second precision so a same-second, same-size rewrite (content
+    /// corrected without changing byte count) still changes the fingerprint —
+    /// truncating to whole seconds would let such a rewrite collide and hide.
     static func dayFingerprint(forDay day: Date, timeZone: TimeZone,
                                sessionsRoot: URL = AmbientStorage.sessionsRoot) -> String {
         var cal = Calendar(identifier: .gregorian)
@@ -209,7 +212,10 @@ enum AmbientStorage {
             let mod = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
             // Same "could this session hold this day" rule as segments(forDay:).
             if mod < dayStartEpoch { continue }
-            parts.append("\(dir.lastPathComponent):\(size):\(Int(mod))")
+            // Full-precision mod-time (not Int(mod)) so a sub-second late rewrite
+            // is not truncated into a collision. Encoded via bitPattern for an
+            // exact, locale-independent, round-trip-stable representation.
+            parts.append("\(dir.lastPathComponent):\(size):\(mod.bitPattern)")
         }
         return parts.isEmpty ? "empty" : parts.joined(separator: "|")
     }
@@ -225,16 +231,16 @@ enum AmbientStorage {
     ///
     /// The only bound is the sanity cap (default 48h, or the storage retention
     /// window, whichever is smaller — callers pass the smaller). `reachedCap` is
-    /// true when the window truncated an ongoing conversation: the whole window
-    /// is one gapless run AND data continues past the cap (so the current
-    /// conversation may extend beyond what we fetched). When the window contains
-    /// a gap greater than `gapSeconds`, the model can find the conversation's
-    /// start within the window, so retrieval is complete even if older data
-    /// exists. `reachedCap` is the client-side "history incomplete" signal —
-    /// callers fail closed on it rather than letting the model assume it saw the
-    /// whole conversation (D16). No new wire/prefix field is added.
+    /// the client-side "history incomplete" signal — callers fail closed on it
+    /// (D16) rather than letting the model assume it saw the whole conversation.
+    /// It is conservatively true whenever ANY retained data older than the cap
+    /// exists: the storage layer cannot prove that a time gap is a semantic
+    /// conversation boundary (that trimming is the model's job), so a gap inside
+    /// the window does NOT make retrieval complete — the conversation the user
+    /// is asking about may extend into what the cap truncated. Retrieval is
+    /// complete only when there is no older retained data at all. No new
+    /// wire/prefix field is added.
     static func segmentsBackwardFromAnchor(anchor: Date,
-                                           gapSeconds: Double = 900,
                                            sanityCapHours: Double = 48,
                                            timeZone: TimeZone,
                                            sessionsRoot: URL) -> (segments: [TranscriptSegment], reachedCap: Bool) {
@@ -257,25 +263,37 @@ enum AmbientStorage {
         }
         guard !window.isEmpty else { return ([], false) }
 
-        // Is there a real conversation boundary (gap) inside the window? If so,
-        // the model can locate the current conversation's start within it.
-        var hasInternalBoundary = false
-        for i in 1..<window.count {
-            if (window[i].capturedAt ?? 0) - (window[i - 1].capturedAt ?? 0) > gapSeconds {
-                hasInternalBoundary = true
-                break
-            }
-        }
-        // Does the window's oldest segment continue (within one gap) into data
-        // older than the cap? Then the conversation may extend past what we
-        // fetched and, with no internal boundary, we truncated it.
-        let oldestInWindow = window.first?.capturedAt ?? anchorEpoch
-        let continuesPastCap = sorted.contains { seg in
+        // Conservative incompleteness: any scanned segment older than the cap
+        // proves retained history the window truncated.
+        let hasPreCapSegment = sorted.contains { seg in
             guard let at = seg.capturedAt else { return false }
-            return at < capEpoch && (oldestInWindow - at) <= gapSeconds
+            return at < capEpoch
         }
-        let reachedCap = !hasInternalBoundary && continuesPastCap
+        // Cheap no-decode extension beyond the 3-day scan: a non-empty session
+        // file last written before the cap can only hold pre-cap data, so its
+        // presence proves older retained history exists even when it falls
+        // outside the scanned days.
+        let reachedCap = hasPreCapSegment || sessionFileWrittenBefore(capEpoch, sessionsRoot: sessionsRoot)
         return (window, reachedCap)
+    }
+
+    /// No-decode check: does any session's `raw.jsonl` have a last-write time
+    /// before `epoch` (and non-empty content)? Such a file can only hold
+    /// segments captured at/before that write, i.e. entirely older than `epoch`.
+    private static func sessionFileWrittenBefore(_ epoch: Double, sessionsRoot: URL) -> Bool {
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: sessionsRoot, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return false
+        }
+        for dir in dirs where dir.lastPathComponent.hasPrefix("ctx-") {
+            let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
+            guard let attrs = try? fm.attributesOfItem(atPath: raw.path),
+                  let mod = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970,
+                  let size = (attrs[.size] as? NSNumber)?.uint64Value, size > 0 else { continue }
+            if mod < epoch { return true }
+        }
+        return false
     }
 
     /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune

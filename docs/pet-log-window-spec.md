@@ -153,10 +153,16 @@ user is in, not the calendar day:
   supplies the ordered cross-day history; both sides of a gap are included, in
   order, and the model trims. A conversation straddling midnight is one context.
 - The only bound is the sanity cap (48h, or the storage retention window,
-  whichever is smaller). Reaching the cap sets a client-side incomplete signal
-  (`retrievalComplete == false`) when a gapless run continued past the cap — the
-  current conversation may extend beyond what was fetched. A gap inside the
-  window means the conversation's start is within it, so retrieval is complete.
+  whichever is smaller). The client-side incomplete signal
+  (`retrievalComplete == false`) is set conservatively whenever ANY retained
+  data older than the cap exists: the storage layer cannot prove that a time
+  gap is a semantic conversation boundary (that trimming is the model's job), so
+  a gap inside the window does NOT make retrieval complete — the conversation
+  the user is asking about may extend into what the cap truncated. Retrieval is
+  complete only when no older retained data exists at all. Detection combines
+  the decoded 3-day scan with a cheap no-decode check: a non-empty session file
+  last written before the cap can only hold pre-cap data, so it marks retrieval
+  incomplete even when it falls outside the scan window.
 - `retrievalComplete` is client-side only, NEVER encoded to the wire (a
   model-facing signal needs a prefix revision — out of scope). It is distinct
   from `completeBeforeAnchor` (the anchor-cutoff verification). The client fails
@@ -186,11 +192,15 @@ of incompleteness converge to ONE typed fail-closed path.
   automatic window truncated at the sanity cap (`retrievalComplete == false`),
   OR the request exceeds the budget (either mode) — the request is refused
   BEFORE any side-effect: no `log_user` entry, no summon-slot claim, no reply
-  watchdog, no send. The user's draft/instruction text is preserved (D60). The
-  only outputs are a typed `historyIncompleteRefused` status (reason + remedy:
-  narrow the scene selection or the time range) and a telemetry event recording
-  the specific cause (`sanityCap` / `automaticScopeOverBudget` /
-  `explicitScopeOverBudget`).
+  watchdog, no send. Because both causes are pure envelope properties, this
+  refusal is evaluated AHEAD of the busy / not-connected admission checks: an
+  incomplete or over-budget request surfaces the typed incomplete status even
+  while a prior summon is in flight or the connection is down, and never appends
+  a busy / not-connected "Error" marker entry. The user's draft/instruction text
+  is preserved (D60). The only outputs are a typed `historyIncompleteRefused`
+  status (reason + remedy: narrow the scene selection or the time range) and a
+  telemetry event recording the specific cause (`sanityCap` /
+  `automaticScopeOverBudget` / `explicitScopeOverBudget`).
 - **No degraded dispatch in A3**: whole-segment elision-and-send is NOT
   implemented; an over-budget automatic scope refuses rather than trimming. See
   Target for the unlock condition.
@@ -205,6 +215,29 @@ of incompleteness converge to ONE typed fail-closed path.
   cheap input fingerprint (day + segment count + first/last capturedAt +
   selection + font) skips the rebuild entirely when nothing changed — an idle
   poll does a cached storage read off-main and returns.
+- **Off-main query with owner generation (D21)**: the action-click path is also
+  backgrounded — the main thread snapshots day/selection and the owner
+  `queryGeneration`, the pure resolver builds the envelope on the background
+  queue from those snapshots only (no shared-state access, no publish), and the
+  main-thread commit dispatches ONLY if `queryGeneration` still matches. A chip
+  or day change bumps the generation, so a query prepared under an old scope is
+  cancelled at commit — no stale reconcile publish, no stale dispatch — and the
+  reconciled selection is published from the committed envelope's scope so the
+  chip and the dispatched query always agree.
+  - **Rebuild on mismatch**: a cancelled query is not lost — while the model is
+    still active, the production path rebuilds from the latest snapshot and
+    dispatches THAT, so a chip change mid-preparation results in exactly one
+    dispatch carrying the corrected scope (old scope: 0 dispatches; new scope: 1).
+  - **Lifecycle invalidation**: `stop()` (view gone) bumps the generation AND
+    flips the lifecycle inactive, so an in-flight query's commit fails and the
+    mismatch path drops it WITHOUT rebuilding — no dispatch happens after the
+    view disappears.
+  - **Preparing status**: the click sets an immediate "preparing" status while
+    the envelope builds off-main; the commit clears it (accepted) or it is
+    replaced by the refusal status (refused).
+  - **Draft retention**: the instruction draft is cleared only when the send is
+    actually accepted — an incomplete/over-budget/busy/offline refusal keeps it
+    for retry (D16/D60).
 - **Cache thread-safety (D42)**: the process-global session-segments cache is
   guarded by a lock, with the heavy decode I/O OUTSIDE the lock (check under
   lock, decode unlocked, re-store under lock). Parallel poll+query reads across
@@ -221,6 +254,17 @@ of incompleteness converge to ONE typed fail-closed path.
   content update while a past day is being read refreshes in place — the day
   stays selected and the scroll is not yanked to the bottom (only today follows
   live capture, and a day change scrolls once on navigation).
+  - **Collision resistance**: the mod-time in the fingerprint is kept at FULL
+    sub-second precision, so a same-second, same-size rewrite (content corrected
+    without changing the byte count) still changes it. The day fingerprint is
+    also folded into the cheap input fingerprint for past days, so a same-count
+    rewrite forces a republish rather than matching count/first/last and being
+    skipped.
+  - **Two-phase read**: the day fingerprint is re-read (off-main) after the
+    decode; the decoded content is published under the post-decode fingerprint,
+    but the cache is only stored when the on-disk state was stable across the
+    read — a write that raced the decode is not cached as authoritative, so the
+    next poll re-reads it.
 - **Poll timer idempotency (D92)**: `start()` is idempotent — a duplicate
   `start()` (e.g. a repeated `onAppear`) keeps the same single 3-second timer
   rather than leaking a second one that `stop()` can't reach; `stop()` clears

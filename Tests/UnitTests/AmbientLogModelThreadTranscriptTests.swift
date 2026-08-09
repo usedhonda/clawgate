@@ -169,13 +169,15 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let model = AmbientLogModel()
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = ["stale-scene-id-that-does-not-exist"]
-        let envelope = model.buildQueryEnvelope(actionId: "slot-0", instruction: "このシーンだけ",
-                                                now: Date(), sessionsRoot: root)
-        XCTAssertEqual(envelope.segments.map(\.text), ["real content A", "real content B"],
+        // D21: the pure resolver does not publish; the main-thread commit does.
+        let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "このシーンだけ",
+                                             sessionsRoot: root)
+        XCTAssertEqual(prepared.envelope.segments.map(\.text), ["real content A", "real content B"],
                        "an irreconcilable stale selection clears to the full day, not an empty send")
-        XCTAssertNil(envelope.scopeOverride, "a cleared selection is automatic (full-day) scope")
+        XCTAssertNil(prepared.envelope.scopeOverride, "a cleared selection is automatic (full-day) scope")
+        model.commitPreparedLogQuery(prepared) { _, _ in }
         XCTAssertTrue(model.selectedSceneIDs.isEmpty,
-                      "the UI selection is explicitly cleared so the chip and the query agree")
+                      "commit clears the irreconcilable selection so chip and query agree")
     }
 
     /// D17: a single giant scene straddling the old 2000 display cap keeps ONE
@@ -229,12 +231,115 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let model = AmbientLogModel()
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [oldID]
-        let envelope = model.buildQueryEnvelope(actionId: "slot-0", instruction: "このシーン",
-                                                now: Date(), sessionsRoot: root)
-        XCTAssertEqual(envelope.segments.map(\.text), ["pre", "A", "B"],
+        let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "このシーン",
+                                             sessionsRoot: root)
+        XCTAssertEqual(prepared.envelope.segments.map(\.text), ["pre", "A", "B"],
                        "the reconciled scene includes the backfilled earlier segment")
-        XCTAssertEqual(envelope.scopeOverride, [newID], "scope migrated to the new scene id")
-        XCTAssertEqual(model.selectedSceneIDs, [newID], "the chip selection follows the migrated id")
+        XCTAssertEqual(prepared.envelope.scopeOverride, [newID], "scope migrated to the new scene id")
+        model.commitPreparedLogQuery(prepared) { _, _ in }
+        XCTAssertEqual(model.selectedSceneIDs, [newID], "commit publishes the migrated selection")
+    }
+
+    /// D21: a query prepared under one selection is CANCELLED at commit if the
+    /// owner generation changed (a chip/day change mid-preparation) — no stale
+    /// reconcile publish, no stale dispatch. A fresh query dispatches once.
+    func testStaleGenerationQueryIsCancelledAtCommit() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 22; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        let a = [seg("A1", at: dayStart + 100)]
+        let b = [seg("B1", at: dayStart + 5000)]  // >900s later => a separate scene
+        try writeSession("ctx-two", a + b, under: root)
+        let sceneA = AmbientLogGrouping.scenes(from: a + b, timeZone: jst)[0].id
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        model.selectedSceneIDs = [sceneA]
+        let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "A", sessionsRoot: root)
+
+        // A chip change bumps the owner generation, invalidating the in-flight query.
+        model.selectScene("some-other-id", toggling: false)
+
+        var dispatched = 0
+        let ok = model.commitPreparedLogQuery(prepared) { _, _ in dispatched += 1 }
+        XCTAssertFalse(ok, "a stale-generation query must not commit")
+        XCTAssertEqual(dispatched, 0, "no stale scope is dispatched")
+
+        // A fresh query under the current selection dispatches exactly once.
+        let prepared2 = model.prepareLogQuery(actionId: "slot-0", instruction: "A", sessionsRoot: root)
+        var dispatched2 = 0
+        model.commitPreparedLogQuery(prepared2) { _, _ in dispatched2 += 1 }
+        XCTAssertEqual(dispatched2, 1, "the current query dispatches once")
+    }
+
+    /// D21: stop() (view gone) invalidates any in-flight query — its commit fails
+    /// the generation check, so no stale scope is dispatched after the view
+    /// disappears. (The production path additionally does not rebuild while the
+    /// lifecycle is inactive.)
+    func testStopInvalidatesInFlightQueryAtCommit() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 22; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        try writeSession("ctx-stop", [seg("A1", at: dayStart + 100)], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "A", sessionsRoot: root)
+
+        model.stop()  // invalidates the in-flight generation
+
+        var dispatched = 0
+        let ok = model.commitPreparedLogQuery(prepared) { _, _ in dispatched += 1 }
+        XCTAssertFalse(ok, "an in-flight query prepared before stop() must not commit")
+        XCTAssertEqual(dispatched, 0, "no dispatch happens after stop()")
+    }
+
+    /// D21 production path (end-to-end, real background queue): a chip change
+    /// WHILE an action-click query is being built off-main drops the stale
+    /// (old-scope) envelope and rebuilds from the latest snapshot — the old scope
+    /// dispatches 0 times, the new scope exactly once. Here the chip change is
+    /// "全日" (selectAllScenes), so the rebuilt scope is full-day (automatic /
+    /// nil), never the stale explicit sceneA.
+    func testChipChangeDuringPreparationRebuildsWithNewScope() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 22; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        let a = [seg("A1", at: dayStart + 100)]
+        let b = [seg("B1", at: dayStart + 5000)]  // >900s later => a separate scene
+        try writeSession("ctx-two", a + b, under: root)
+        let sceneA = AmbientLogGrouping.scenes(from: a + b, timeZone: jst)[0].id
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        model.selectedSceneIDs = [sceneA]
+
+        let exp = expectation(description: "rebuilt query dispatches")
+        var dispatchedScopes: [[String]?] = []
+        model.startLogQuery(actionId: "slot-0", instruction: "A", sessionsRoot: root) { envelope, _ in
+            dispatchedScopes.append(envelope.scopeOverride)
+            exp.fulfill()
+        }
+        // Synchronously (before any background commit can run) change the chip to
+        // "全日": the in-flight query prepared under sceneA is now stale.
+        model.selectAllScenes()
+
+        wait(for: [exp], timeout: 2.0)
+        XCTAssertEqual(dispatchedScopes.count, 1,
+                       "exactly one dispatch — the rebuilt query, not the stale one")
+        XCTAssertNil(dispatchedScopes.first ?? nil,
+                     "the rebuilt query carries the new full-day scope")
+        XCTAssertNotEqual(dispatchedScopes.first ?? nil, [sceneA],
+                          "the stale explicit sceneA scope is never dispatched")
+        XCTAssertFalse(model.isPreparingLogQuery, "preparing clears once the query resolves")
     }
 
     /// Same-day query: a segment at/after the anchor instant is excluded.
@@ -332,17 +437,18 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
                        "a lunch gap does not permanently drop the morning from retrieval")
     }
 
-    /// D20 sanity cap: a gapless run that continues past the cap truncated an
-    /// ongoing conversation — reachedCap (client-side incomplete) is set. A run
-    /// with a boundary inside the window, or one that starts within it, is complete.
-    func testRetrievalReachedCapOnlyWhenGaplessRunContinuesPastCap() throws {
+    /// D20/D16 sanity cap: retrieval is conservatively INCOMPLETE whenever any
+    /// retained data older than the cap exists. Storage cannot prove a gap is a
+    /// semantic boundary, so a gap inside the window does NOT make it complete —
+    /// only a window with no older retained data at all is complete.
+    func testRetrievalReachedCapWheneverOlderDataExistsPastCap() throws {
         let root = makeTempSessionsRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
         var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
         let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
         let anchor = Date(timeIntervalSince1970: base)
-        // Every 5 min (gap < 900s) from 3h before the anchor to well past a 1h cap.
+        // Every 5 min from 3h before the anchor to well past a 1h cap.
         var segs: [TranscriptSegment] = []
         var t = base - 3 * 3600
         while t < base { segs.append(seg("u\(Int(t))", at: t)); t += 300 }
@@ -351,11 +457,11 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let capped = AmbientStorage.segmentsBackwardFromAnchor(
             anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
         XCTAssertTrue(capped.reachedCap,
-                      "a gapless run continuing past the 1h cap is incomplete")
+                      "retained data older than the 1h cap makes retrieval incomplete")
 
-        // Add a >15m gap INSIDE the 1h window (skip [base-40m, base-20m)): the
-        // current conversation starts within the window, so retrieval is complete
-        // even though older data still continues past the cap.
+        // A >15m gap INSIDE the 1h window (skip [base-40m, base-20m)) does NOT
+        // make it complete: older data still exists past the cap, and a gap is
+        // not a boundary the storage layer is allowed to trust.
         var withBoundary: [TranscriptSegment] = []
         var t2 = base - 3 * 3600
         while t2 < base {
@@ -363,10 +469,59 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             withBoundary.append(seg("v\(Int(t2))", at: t2)); t2 += 300
         }
         try writeSession("ctx-cap", withBoundary, under: root)
+        let stillIncomplete = AmbientStorage.segmentsBackwardFromAnchor(
+            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertTrue(stillIncomplete.reachedCap,
+                      "a gap inside the window is not a boundary — older pre-cap data still means incomplete")
+
+        // Only data entirely within the window (nothing older than the cap) is
+        // complete.
+        var withinCapOnly: [TranscriptSegment] = []
+        var t3 = base - 1800  // 30 min before anchor, all inside the 1h cap
+        while t3 < base { withinCapOnly.append(seg("w\(Int(t3))", at: t3)); t3 += 300 }
+        try writeSession("ctx-cap", withinCapOnly, under: root)
         let complete = AmbientStorage.segmentsBackwardFromAnchor(
             anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
         XCTAssertFalse(complete.reachedCap,
-                       "a boundary within the window makes retrieval complete")
+                       "no retained data older than the cap — retrieval is complete")
+    }
+
+    /// D20: the no-decode extension — a session file last written before the cap
+    /// (its content therefore entirely pre-cap) marks retrieval incomplete even
+    /// when it falls OUTSIDE the 3-day decode scan window, so old retained
+    /// archives are never silently treated as absent.
+    func testRetrievalReachedCapFromPreCapSessionFileOutsideScanWindow() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+        let anchor = Date(timeIntervalSince1970: base)
+        let capEpoch = base - 3600  // 1h cap
+
+        // A recent in-window session (so the window is non-empty and, on its own,
+        // complete).
+        var recent: [TranscriptSegment] = []
+        var t = base - 1800
+        while t < base { recent.append(seg("r\(Int(t))", at: t)); t += 300 }
+        try writeSession("ctx-recent", recent, under: root)
+        let beforeArchive = AmbientStorage.segmentsBackwardFromAnchor(
+            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertFalse(beforeArchive.reachedCap, "recent in-window data alone is complete")
+
+        // An archive whose data sits days before the scan window AND whose file
+        // was last written before the cap — undetectable by the decode scan, but
+        // its stale mtime proves pre-cap history exists.
+        try writeSession("ctx-archive", [seg("old", at: base - 6 * 86400)], under: root)
+        let archiveRaw = root.appendingPathComponent("ctx-archive/transcripts/raw.jsonl")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: capEpoch - 1000)],
+            ofItemAtPath: archiveRaw.path)
+
+        let withArchive = AmbientStorage.segmentsBackwardFromAnchor(
+            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertTrue(withArchive.reachedCap,
+                      "a pre-cap session file outside the scan window still marks retrieval incomplete")
     }
 
     /// D20: midnight alone never splits a contiguous run.
