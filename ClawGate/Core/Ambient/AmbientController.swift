@@ -327,7 +327,9 @@ final class AmbientController {
                 // Stamp absolute utterance time: chunk start + in-chunk offset.
                 let stamped = labeled.map { seg -> TranscriptSegment in
                     var s = seg
-                    s.capturedAt = chunk.startedAt.timeIntervalSince1970 + seg.startSeconds
+                    if let startedAt = chunk.startedAt {
+                        s.capturedAt = startedAt.timeIntervalSince1970 + seg.startSeconds
+                    }
                     return s
                 }
                 var kept: [TranscriptSegment] = []
