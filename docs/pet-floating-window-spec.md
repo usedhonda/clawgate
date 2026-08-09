@@ -25,6 +25,8 @@ This document is the Normative contract for the Pet floating chat experience onl
   - force activation with `NSApp.activate(ignoringOtherApps: true)`
   - call `cw.makeKeyAndOrderFront(nil)`
   - keep chat in active Space movement via `PetChatWindowPolicy.chatWindowCollectionBehavior`
+- Main-menu close control must expose standard semantics through a menu item that sends
+  `performClose(_:)` with `Cmd+W` so key-window close dispatch follows first-responder chain.
 
 ### Z-order and Space behavior
 

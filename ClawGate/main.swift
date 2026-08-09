@@ -372,6 +372,12 @@ private func installMainMenu() {
     appMenuItem.submenu = appMenu
     mainMenu.addItem(appMenuItem)
 
+    let fileMenuItem = NSMenuItem()
+    let fileMenu = NSMenu(title: "File")
+    fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+    fileMenuItem.submenu = fileMenu
+    mainMenu.addItem(fileMenuItem)
+
     let editMenuItem = NSMenuItem()
     let editMenu = NSMenu(title: "Edit")
     editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")

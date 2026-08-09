@@ -32,12 +32,14 @@ final class PetFloatingWindowContractTests: XCTestCase {
         }
 
         let afterStart = source.index(after: bodyStart)
-        guard let nextStart = source[afterStart...].range(of: "\n    \(nextFunctionHeader)", options: .literal)?.lowerBound else {
+        let nextStart = source[afterStart...].range(of: "\n    \(nextFunctionHeader)", options: .literal)
+            ?? source[afterStart...].range(of: "\n\(nextFunctionHeader)", options: .literal)
+        guard let nextStart = nextStart else {
             throw NSError(domain: "PetFloatingWindowContractTests", code: 3,
                           userInfo: [NSLocalizedDescriptionKey: "Missing next marker \(nextFunctionHeader)"])
         }
 
-        return String(source[afterStart..<nextStart])
+        return String(source[afterStart..<nextStart.lowerBound])
     }
 
     func testFullChatPolicyCapturesWindowModeAndCloseSemantics() {
@@ -78,6 +80,22 @@ final class PetFloatingWindowContractTests: XCTestCase {
                       "settings-open path should route to conditional chat reveal")
         XCTAssertFalse(body.contains("showFullChat()"),
                        "menu toggles should not create chat directly")
+    }
+
+    func testMainMenuContainsStandardCloseShortcut() throws {
+        let source = try source("ClawGate/main.swift")
+        let body = try functionBody(from: source, functionName: "installMainMenu", nextFunctionHeader: "let app = NSApplication.shared")
+
+        XCTAssertTrue(body.contains("let fileMenu = NSMenu(title: \"File\")"),
+                      "main menu should configure a Close menu command path")
+        XCTAssertTrue(body.contains("addItem(withTitle: \"Close\""),
+                      "main menu should expose a standard Close command")
+        XCTAssertTrue(body.contains("performClose"),
+                      "main menu close command should route through first-responder performClose(_:)")
+        XCTAssertTrue(body.contains("keyEquivalent: \"w\""),
+                      "main menu should include Cmd+W binding")
+        XCTAssertTrue(body.contains("mainMenu.addItem(fileMenuItem)"),
+                      "main menu should wire File menu into app menu bar")
     }
 
     func testPolicyRoutingIsDelegatedFromContentWindow() throws {
