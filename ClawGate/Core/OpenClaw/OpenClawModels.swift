@@ -21,11 +21,17 @@ enum OpenClawEvent {
 }
 
 struct OpenClawEventOwnerIdentity: Equatable, Hashable {
-    let runId: String
+    let messageId: String
+    let runId: String?
     let sessionKey: String?
 
-    init(runId: String, sessionKey: String? = nil) {
-        self.runId = runId.trimmingCharacters(in: .whitespacesAndNewlines)
+    init(messageId: String, runId: String? = nil, sessionKey: String? = nil) {
+        self.messageId = messageId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedRunId = Self.normalized(runId) {
+            self.runId = normalizedRunId
+        } else {
+            self.runId = nil
+        }
         if let normalizedSessionKey = sessionKey?
             .trimmingCharacters(in: .whitespacesAndNewlines),
            !normalizedSessionKey.isEmpty {
@@ -35,27 +41,33 @@ struct OpenClawEventOwnerIdentity: Equatable, Hashable {
         }
     }
 
-    static func fromPayload(runId: String?, sessionKey: String?) -> OpenClawEventOwnerIdentity? {
-        let normalizedRunId = runId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let runId = normalizedRunId, !runId.isEmpty else { return nil }
-        return OpenClawEventOwnerIdentity(runId: runId, sessionKey: sessionKey)
+    init(runId: String, sessionKey: String? = nil) {
+        self.init(messageId: runId, runId: runId, sessionKey: sessionKey)
+    }
+
+    static func fromPayload(messageId: String?, runId: String?, sessionKey: String?) -> OpenClawEventOwnerIdentity? {
+        guard let normalizedMessageId = normalized(messageId) else { return nil }
+        return OpenClawEventOwnerIdentity(
+            messageId: normalizedMessageId,
+            runId: runId,
+            sessionKey: sessionKey
+        )
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        let normalizedValue = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalizedValue.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     var hasSessionKey: Bool { sessionKey != nil }
+    var completeOwnerKey: String? {
+        guard let runId, let sessionKey else { return nil }
+        return "\(sessionKey)#\(runId)"
+    }
 }
 
-extension OpenClawEventOwnerIdentity: ExpressibleByStringLiteral {
-    init(stringLiteral value: String) {
-        self.init(runId: value, sessionKey: nil)
-    }
-
-    init(extendedGraphemeClusterLiteral value: String) {
-        self.init(stringLiteral: value)
-    }
-
-    init(unicodeScalarLiteral value: String) {
-        self.init(stringLiteral: value)
-    }
+extension OpenClawEventOwnerIdentity {
+    var hasCompleteOwnerKey: Bool { completeOwnerKey != nil }
 }
 
 /// Chat message for pet bubble display

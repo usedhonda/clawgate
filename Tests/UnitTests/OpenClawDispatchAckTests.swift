@@ -129,6 +129,11 @@ final class OpenClawDispatchAckTests: XCTestCase {
             .path
     }
 
+    private func routeIncomingEvents(_ eventName: String, payloadJSON: String) throws -> [OpenClawEvent] {
+        let payload = try decodeIncomingPayload(payloadJSON)
+        return OpenClawWSClient.routeIncomingEvent(name: eventName, payload: payload)
+    }
+
     func testEventOwnerIdentityPreservesRunIdAndSessionKeyWithoutCollapsingByRunId() throws {
         let sameRunPrimary = OpenClawEventOwnerIdentity(runId: "run-1", sessionKey: "agent:main:main")
         let sameRunProactive = OpenClawEventOwnerIdentity(runId: "run-1", sessionKey: "agent:main:proactive:heartbeat")
@@ -136,6 +141,9 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertNotEqual(sameRunPrimary, sameRunProactive)
         XCTAssertEqual(sameRunPrimary.runId, sameRunProactive.runId)
         XCTAssertNotEqual(sameRunPrimary.sessionKey, sameRunProactive.sessionKey)
+        XCTAssertNotEqual(sameRunPrimary.completeOwnerKey, sameRunProactive.completeOwnerKey)
+        XCTAssertEqual(sameRunPrimary.messageId, "run-1")
+        XCTAssertTrue(sameRunPrimary.hasCompleteOwnerKey)
 
         let canonicalDelta = OpenClawEvent.delta(messageId: sameRunPrimary, text: "typing")
         guard case .delta(let owner, _) = canonicalDelta else {
@@ -152,9 +160,10 @@ final class OpenClawDispatchAckTests: XCTestCase {
             return
         }
         XCTAssertNil(incompleteOwner.sessionKey)
+        XCTAssertFalse(incompleteOwner.hasCompleteOwnerKey)
     }
 
-    func testIncomingPayloadPreservesCanonicalFinalIdentityAndNoInference() throws {
+    func testCanonicalChatFinalEventPreservesRunIdSessionAndCompleteOwner() throws {
         let payloadJSON = """
         {
           "type": "chat",
@@ -169,46 +178,171 @@ final class OpenClawDispatchAckTests: XCTestCase {
           }
         }
         """
-        let message = try decodeIncomingPayload(payloadJSON)
-        XCTAssertEqual(message.runId, "run-1")
-        XCTAssertEqual(message.sessionKey, "agent:main:main")
+        let events = try routeIncomingEvents("chat", payloadJSON: payloadJSON)
+        let event = try XCTUnwrap(events.first)
+        guard case .message(let msg) = event else {
+            XCTFail("chat final should map to .message")
+            return
+        }
+        XCTAssertEqual(msg.id, "run-1")
+        XCTAssertEqual(msg.owner?.messageId, "run-1")
+        XCTAssertEqual(msg.owner?.runId, "run-1")
+        XCTAssertEqual(msg.owner?.sessionKey, "agent:main:main")
+        XCTAssertEqual(msg.owner?.completeOwnerKey, "agent:main:main#run-1")
+    }
 
-        let ownerFromPayload = OpenClawEventOwnerIdentity.fromPayload(
-            runId: message.runId, sessionKey: message.sessionKey
-        )
-        XCTAssertNotNil(ownerFromPayload)
-        XCTAssertEqual(ownerFromPayload?.runId, "run-1")
-        XCTAssertEqual(ownerFromPayload?.sessionKey, "agent:main:main")
-
-        let missingSessionPayload = try decodeIncomingPayload("""
+    func testCanonicalProactiveChatFinalKeepsProactiveFlag() throws {
+        let payloadJSON = """
         {
           "type": "chat",
           "state": "final",
-          "runId": "run-2",
+          "runId": "run-1",
+          "sessionKey": "agent:main:proactive:heartbeat",
+          "message": {
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "proactive hello" }]
+          }
+        }
+        """
+        let events = try routeIncomingEvents("chat", payloadJSON: payloadJSON)
+        let event = try XCTUnwrap(events.first)
+        guard case .message(let msg) = event else {
+            XCTFail("chat final should map to .message")
+            return
+        }
+        XCTAssertTrue(msg.isProactive)
+        XCTAssertEqual(msg.owner?.sessionKey, "agent:main:proactive:heartbeat")
+    }
+
+    func testCanonicalAgentDeltaPreservesWireRunIdAndSessionKey() throws {
+        let events = try routeIncomingEvents("agent", payloadJSON: """
+        {
+          "type": "agent",
+          "stream": "assistant",
+          "runId": "run-1",
+          "sessionKey": "agent:main:main",
+          "data": {
+            "delta": "typing"
+          }
+        }
+        """)
+        let event = try XCTUnwrap(events.first)
+        guard case .delta(let owner, let delta) = event else {
+            XCTFail("agent event should map to .delta")
+            return
+        }
+        XCTAssertEqual(owner.messageId, "run-1")
+        XCTAssertEqual(owner.runId, "run-1")
+        XCTAssertEqual(owner.sessionKey, "agent:main:main")
+        XCTAssertEqual(owner.completeOwnerKey, "agent:main:main#run-1")
+        XCTAssertEqual(delta, "typing")
+    }
+
+    func testAssistantLegacyDeltaAndCompleteStayIncompleteWithoutRunId() throws {
+        let deltaEvents = try routeIncomingEvents("assistant.delta", payloadJSON: """
+        {
+          "type": "assistant.delta",
+          "messageId": "message-id-1",
+          "delta": "typing"
+        }
+        """)
+        let deltaEvent = try XCTUnwrap(deltaEvents.first)
+        guard case .delta(let owner, let deltaText) = deltaEvent else {
+            XCTFail("assistant.delta should map to .delta")
+            return
+        }
+        XCTAssertEqual(owner.messageId, "message-id-1")
+        XCTAssertNil(owner.runId)
+        XCTAssertNil(owner.completeOwnerKey)
+        XCTAssertEqual(deltaText, "typing")
+
+        let completeEvents = try routeIncomingEvents("assistant.message_complete", payloadJSON: """
+        {
+          "type": "assistant.message_complete",
+          "messageId": "message-id-1"
+        }
+        """)
+        let completeEvent = try XCTUnwrap(completeEvents.first)
+        guard case .messageComplete(let owner) = completeEvent else {
+            XCTFail("assistant.message_complete should map to .messageComplete")
+            return
+        }
+        XCTAssertEqual(owner.messageId, "message-id-1")
+        XCTAssertNil(owner.runId)
+        XCTAssertNil(owner.completeOwnerKey)
+    }
+
+    func testAssistantMessageWithRunIdAndSessionKeyIsCompleteOwner() throws {
+        let events = try routeIncomingEvents("assistant.message", payloadJSON: """
+        {
+          "type": "assistant.message",
+          "messageId": "message-id-2",
+          "runId": "run-3",
+          "sessionKey": "agent:main:main",
+          "content": "hello"
+        }
+        """)
+        let event = try XCTUnwrap(events.first)
+        guard case .message(let msg) = event else {
+            XCTFail("assistant.message should map to .message")
+            return
+        }
+        XCTAssertEqual(msg.owner?.messageId, "message-id-2")
+        XCTAssertEqual(msg.owner?.runId, "run-3")
+        XCTAssertEqual(msg.owner?.sessionKey, "agent:main:main")
+        XCTAssertEqual(msg.owner?.completeOwnerKey, "agent:main:main#run-3")
+    }
+
+    func testMissingSessionKeyIsNotInferred() throws {
+        let events = try routeIncomingEvents("chat", payloadJSON: """
+        {
+          "type": "chat",
+          "state": "final",
+          "runId": "run-4",
           "message": {
             "role": "assistant",
             "content": [{ "type": "text", "text": "hello" }]
           }
         }
         """)
-        let missingSession = OpenClawEventOwnerIdentity.fromPayload(
-            runId: missingSessionPayload.runId, sessionKey: missingSessionPayload.sessionKey
-        )
-        XCTAssertNotNil(missingSession)
-        XCTAssertNil(missingSession?.sessionKey)
+        let event = try XCTUnwrap(events.first)
+        guard case .message(let msg) = event else {
+            XCTFail("chat final should map to .message when sessionKey is absent")
+            return
+        }
+        XCTAssertNil(msg.owner?.sessionKey)
+        XCTAssertNil(msg.owner?.completeOwnerKey)
     }
 
-    func testWsClientEventCaseUsesWireSessionKeyAndDoesNotSynthesizeSessionKey() throws {
-        let root = sourceRoot()
-        let wsClient = try String(contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)
-
-        XCTAssertTrue(wsClient.contains("case \"chat\""))
-        XCTAssertTrue(wsClient.contains("OpenClawEventOwnerIdentity.fromPayload(runId: runId, sessionKey: payload?.sessionKey)"))
-        XCTAssertTrue(wsClient.contains("case \"assistant.delta\""))
-        XCTAssertTrue(wsClient.contains("case \"assistant.message_complete\""))
-        XCTAssertTrue(wsClient.contains("OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey)"))
-        XCTAssertFalse(wsClient.contains("payload?.sessionKey ?? self.sessionKey"))
-        XCTAssertFalse(wsClient.contains("if let currentSessionKey = self.sessionKey"))
+    func testCanonicalRunIdAcrossSessionsProducesDistinctCompleteOwnerKey() throws {
+        let primaryEvents = try routeIncomingEvents("assistant.message", payloadJSON: """
+        {
+          "type": "assistant.message",
+          "messageId": "message-id-1",
+          "runId": "run-5",
+          "sessionKey": "agent:main:main",
+          "content": "hello"
+        }
+        """)
+        let secondaryEvents = try routeIncomingEvents("assistant.message", payloadJSON: """
+        {
+          "type": "assistant.message",
+          "messageId": "message-id-2",
+          "runId": "run-5",
+          "sessionKey": "agent:main:proactive:heartbeat",
+          "content": "hello"
+        }
+        """)
+        let primaryEvent = try XCTUnwrap(primaryEvents.first)
+        let secondaryEvent = try XCTUnwrap(secondaryEvents.first)
+        guard case .message(let primaryMessage) = primaryEvent,
+              case .message(let secondaryMessage) = secondaryEvent else {
+            XCTFail("assistant.message should map to .message")
+            return
+        }
+        XCTAssertEqual(primaryMessage.owner?.completeOwnerKey, "agent:main:main#run-5")
+        XCTAssertEqual(secondaryMessage.owner?.completeOwnerKey, "agent:main:proactive:heartbeat#run-5")
+        XCTAssertNotEqual(primaryMessage.owner?.completeOwnerKey, secondaryMessage.owner?.completeOwnerKey)
     }
 
     func testValidNormalSolDispatchAckPassesValidation() throws {

@@ -505,58 +505,66 @@ actor OpenClawWSClient {
     }
 
     private func handleEvent(_ name: String, payload: IncomingPayload?) async {
-        switch name {
-        case "connect.challenge":
+        if name == "connect.challenge" {
             NSLog("[Pet] Received connect.challenge, sending connect request...")
             await sendConnectRequest(nonce: payload?.nonce)
+            return
+        }
+        for event in Self.routeIncomingEvent(name: name, payload: payload) {
+            continuation?.yield(event)
+        }
+    }
 
+    static func routeIncomingEvent(name: String, payload: IncomingPayload?) -> [OpenClawEvent] {
+        switch name {
         case "agent":
             guard payload?.stream == "assistant",
                   let delta = payload?.data?.delta,
                   let runId = payload?.runId,
-                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: runId, sessionKey: payload?.sessionKey) else { return }
-            continuation?.yield(.delta(messageId: owner, text: delta))
+                  let owner = OpenClawEventOwnerIdentity.fromPayload(messageId: runId, runId: runId, sessionKey: payload?.sessionKey) else { return [] }
+            return [.delta(messageId: owner, text: delta)]
 
         case "chat":
             guard let state = payload?.state,
                   let runId = payload?.runId,
-                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: runId, sessionKey: payload?.sessionKey) else { return }
-            if state == "final" {
-                let text = payload?.message?.content?
-                    .compactMap { $0.type == "text" ? $0.text : nil }
-                    .joined(separator: "\n\n")
-                if let text, !text.isEmpty {
-                    let isProactive = payload?.sessionKey?.contains("proactive") == true
-                    let msg = OpenClawChatMessage(
-                        id: runId, role: .assistant, text: text, isProactive: isProactive, owner: owner
-                    )
-                    continuation?.yield(.message(msg))
-                }
+                  let owner = OpenClawEventOwnerIdentity.fromPayload(messageId: runId, runId: runId, sessionKey: payload?.sessionKey) else { return [] }
+            guard state == "final" else { return [] }
+            let text = payload?.message?.content?
+                .compactMap { $0.type == "text" ? $0.text : nil }
+                .joined(separator: "\n\n")
+            if let text, !text.isEmpty {
+                let isProactive = payload?.sessionKey?.contains("proactive") == true
+                let msg = OpenClawChatMessage(
+                    id: owner.messageId, role: .assistant, text: text, isProactive: isProactive, owner: owner
+                )
+                return [.message(msg)]
             }
+            return []
 
         case "assistant.message":
             guard let id = payload?.messageId,
-                  let content = payload?.content,
-                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey) else { return }
-            let msg = OpenClawChatMessage(id: id, role: .assistant, text: content, owner: owner)
-            continuation?.yield(.message(msg))
+                  let content = payload?.content else { return [] }
+            let owner = OpenClawEventOwnerIdentity.fromPayload(messageId: id, runId: payload?.runId, sessionKey: payload?.sessionKey)
+            return [.message(OpenClawChatMessage(id: id, role: .assistant, text: content, owner: owner))]
 
         case "assistant.delta":
             guard let id = payload?.messageId,
-                  let delta = payload?.delta,
-                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey) else { return }
-            continuation?.yield(.delta(messageId: owner, text: delta))
+                  let delta = payload?.delta else { return [] }
+            let owner = OpenClawEventOwnerIdentity.fromPayload(messageId: id, runId: payload?.runId, sessionKey: payload?.sessionKey)
+            guard let owner else { return [] }
+            return [.delta(messageId: owner, text: delta)]
 
         case "assistant.message_complete":
-            guard let id = payload?.messageId,
-                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey) else { return }
-            continuation?.yield(.messageComplete(messageId: owner))
+            guard let id = payload?.messageId else { return [] }
+            let owner = OpenClawEventOwnerIdentity.fromPayload(messageId: id, runId: payload?.runId, sessionKey: payload?.sessionKey)
+            guard let owner else { return [] }
+            return [.messageComplete(messageId: owner)]
 
         case "health", "tick", "presence", "telemetry.ack":
-            break
+            return []
 
         default:
-            break
+            return []
         }
     }
 

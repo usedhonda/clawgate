@@ -370,8 +370,9 @@ final class PetModel: NSObject, ObservableObject {
                 }
 
             case .delta(let eventId, let text):
-                let messageId = eventId.runId
-                if let expectedRunId = self.pendingSummonRunId, expectedRunId != messageId {
+                let messageId = eventId.messageId
+                if let expectedRunId = self.pendingSummonRunId,
+                   eventId.runId != expectedRunId {
                     // Delta from a stale/different run — drop it rather than
                     // let it pollute the pending summon's accumulation or
                     // leak into the plain chat pane.
@@ -412,10 +413,10 @@ final class PetModel: NSObject, ObservableObject {
                 }
 
             case .messageComplete(let eventId):
-                let messageId = eventId.runId
+                let messageId = eventId.messageId
                 NSLog("[Pet] messageComplete: %@", messageId)
                 if let expectedRunId = self.pendingSummonRunId,
-                   expectedRunId != messageId {
+                   eventId.runId != expectedRunId {
                     break
                 }
                 self.isStreaming = false
