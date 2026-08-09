@@ -243,7 +243,7 @@ final class AmbientCaptureTimingTests: XCTestCase {
         XCTAssertFalse(ordered[0].provenOverlap)
         let expectedSecondStart = secondTap.timeIntervalSince1970 - Double(primedFrames) / sampleRate
         XCTAssertEqual(
-            ordered[1].startedAt?.timeIntervalSince1970,
+            ordered[1].startedAt!.timeIntervalSince1970,
             expectedSecondStart,
             accuracy: 1e-9
         )
@@ -252,6 +252,41 @@ final class AmbientCaptureTimingTests: XCTestCase {
         XCTAssertNil(ordered[2].startedAt)
         XCTAssertEqual(ordered[2].actualPrimedFrames, 0)
         XCTAssertFalse(ordered[2].provenOverlap)
+    }
+
+    func testShortChunkFinalizeResetsTimingStateBeforeNextOpen() {
+        let expectation = expectation(description: "short chunk callback should not be emitted")
+        let manager = makeManager(writeAudioFile: { file, buffer in
+            try file.write(from: buffer)
+            return buffer.frameLength
+        })
+        manager.onChunkReady = { _ in expectation.fulfill() }
+
+        _ = try! manager.testOpenChunk(at: tempURL("short-1.wav"))
+        manager.testSetOverlapTail([0.1, 0.2, 0.3, 0.4])
+        manager.testMarkCurrentChunkFirstLiveSample(date(1_700_000_800))
+        _ = manager.testPrimeAndMark()
+        manager.testWriteBuffer(buffer(frames: 10_000), firstLiveSampleDate: date(1_700_000_800))
+
+        let short = manager.testFinalizeCurrentChunk()
+        XCTAssertNil(short)
+        XCTAssertNil(manager.testCurrentChunkTiming().firstLiveSampleAt)
+        XCTAssertEqual(manager.testCurrentChunkTiming().actualPrimedFrames, 0)
+        XCTAssertFalse(manager.testCurrentChunkTiming().provenOverlap)
+
+        _ = try! manager.testOpenChunk(at: tempURL("short-2.wav"))
+        let nextTap = date(1_700_001_000)
+        manager.testMarkCurrentChunkFirstLiveSample(nextTap)
+        manager.testWriteBuffer(buffer(frames: 17_001), firstLiveSampleDate: nextTap)
+
+        let nextChunk = manager.testFinalizeCurrentChunk()
+        waitForExpectations(timeout: 0.1)
+        XCTAssertNotNil(nextChunk)
+        if let nextChunk {
+            XCTAssertEqual(nextChunk.actualPrimedFrames, 0)
+            XCTAssertFalse(nextChunk.provenOverlap)
+            XCTAssertEqual(nextChunk.startedAt, nextTap)
+        }
     }
 
     func testInvalidSampleRateDoesNotProduceTimestampWhenOverlapNeedsSubtraction() {

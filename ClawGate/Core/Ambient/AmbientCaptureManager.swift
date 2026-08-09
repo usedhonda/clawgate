@@ -449,12 +449,12 @@ final class AmbientCaptureManager {
         sumSquaresInCurrentChunk = 0
         let sampleRate = recordFormat.sampleRate
         let metadata = currentChunkTiming.completedChunk(url: url, sampleRate: sampleRate)
+        currentChunkTiming.reset(for: chunkSeq)
         // Only surface chunks with real audio (skip empty stubs).
         guard frames > 16_000 else {  // < ~1s of audio
             try? FileManager.default.removeItem(at: url)
             return nil
         }
-        currentChunkTiming.reset(for: chunkSeq)
         let rms = Float((sumSquares / Double(frames)).squareRoot())
         recordChunkReady()   // a real chunk was finalized (incl. silence chunks — silence-safe liveness)
         let cb = onChunkReady
