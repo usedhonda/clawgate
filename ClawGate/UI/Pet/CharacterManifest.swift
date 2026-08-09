@@ -49,6 +49,7 @@ private struct ScannedBundle {
     let directory: URL
     let assetFingerprint: String
     let previewImage: NSImage?
+    let frameAssets: [String: NSImage]
 }
 
 private struct CharacterManagerScanSnapshot {
@@ -79,6 +80,7 @@ final class LoadedCharacter {
     var directory: URL
     var preview: NSImage?
     private var assetFingerprint: String
+    private var frameAssets: [String: NSImage]
 
     private var frameCache: [CharacterFrameCacheKey: NSImage] = [:]
     private var sheetFrameCache: [CharacterSheetCacheKey: [NSImage]] = [:]
@@ -86,14 +88,27 @@ final class LoadedCharacter {
     private(set) var decodedFrameCount: Int = 0
     private(set) var frameCacheHitCount: Int = 0
 
-    init(manifest: CharacterManifest, directory: URL, assetFingerprint: String, previewImage: NSImage?) {
+    init(
+        manifest: CharacterManifest,
+        directory: URL,
+        assetFingerprint: String,
+        previewImage: NSImage?,
+        frameAssets: [String: NSImage]
+    ) {
         self.manifest = manifest
         self.directory = directory
         self.assetFingerprint = assetFingerprint
         self.preview = previewImage
+        self.frameAssets = frameAssets
     }
 
-    func refresh(manifest: CharacterManifest, directory: URL, assetFingerprint: String, previewImage: NSImage?) {
+    func refresh(
+        manifest: CharacterManifest,
+        directory: URL,
+        assetFingerprint: String,
+        previewImage: NSImage?,
+        frameAssets: [String: NSImage]
+    ) {
         guard self.manifest != manifest || self.directory != directory || self.assetFingerprint != assetFingerprint else {
             return
         }
@@ -102,6 +117,7 @@ final class LoadedCharacter {
         self.directory = directory
         self.assetFingerprint = assetFingerprint
         self.preview = previewImage
+        self.frameAssets = frameAssets
         frameCache.removeAll(keepingCapacity: true)
         sheetFrameCache.removeAll(keepingCapacity: true)
         decodedFrameCount = 0
@@ -156,7 +172,8 @@ final class LoadedCharacter {
             }
 
             let path = directory.appendingPathComponent(frameRef.fileName)
-            guard let image = NSImage(contentsOf: path) else {
+            let pathKey = path.standardizedFileURL.path
+            guard let image = frameAssets[pathKey] else {
                 return nil
             }
 
@@ -187,7 +204,8 @@ final class LoadedCharacter {
             sheetFrames = cached
         } else {
             let path = directory.appendingPathComponent(frameRef.fileName)
-            guard let sheet = NSImage(contentsOf: path) else {
+            let pathKey = path.standardizedFileURL.path
+            guard let sheet = frameAssets[pathKey] else {
                 return []
             }
             decodedFrameCount += 1
@@ -276,6 +294,7 @@ final class CharacterManager: ObservableObject {
     static let invalidFrameReferenceCode = "character.bundle.invalid_frame_reference"
     static let missingFrameFileCode = "character.bundle.missing_frame_file"
     static let invalidImageFileCode = "character.bundle.invalid_image_file"
+    static let invalidPreviewFileCode = "character.bundle.invalid_preview_file"
     static let invalidSpriteConfigCode = "character.bundle.invalid_sprite_config"
     static let invalidFpsCode = "character.bundle.invalid_fps"
     static let duplicateBundleNameCode = "character.bundle.duplicate_name"
@@ -324,7 +343,8 @@ final class CharacterManager: ObservableObject {
                     manifest: bundle.manifest,
                     directory: bundle.directory,
                     assetFingerprint: bundle.assetFingerprint,
-                    previewImage: bundle.previewImage
+                    previewImage: bundle.previewImage,
+                    frameAssets: bundle.frameAssets
                 )
                 nextCache[bundle.manifest.name] = existing
             } else {
@@ -332,7 +352,8 @@ final class CharacterManager: ObservableObject {
                     manifest: bundle.manifest,
                     directory: bundle.directory,
                     assetFingerprint: bundle.assetFingerprint,
-                    previewImage: bundle.previewImage
+                    previewImage: bundle.previewImage,
+                    frameAssets: bundle.frameAssets
                 )
             }
         }
@@ -425,7 +446,11 @@ final class CharacterManager: ObservableObject {
         }
 
         let previewImage: NSImage?
-        if let preview = makePreviewAsset(in: directory, reader: frameAssetReader) {
+        if let preview = makePreviewAsset(
+            in: directory,
+            reader: frameAssetReader,
+            onInvalid: { issueCounts[Self.invalidPreviewFileCode, default: 0] += 1 }
+        ) {
             assetFingerprints.append(preview.fingerprint)
             previewImage = preview.image
         } else {
@@ -436,11 +461,14 @@ final class CharacterManager: ObservableObject {
             return nil
         }
 
+        let scannedFrameAssets = frameAssetCache.compactMapValues { $0?.image }
+
         return ScannedBundle(
             manifest: manifest,
             directory: directory,
             assetFingerprint: fingerprint,
-            previewImage: previewImage
+            previewImage: previewImage,
+            frameAssets: scannedFrameAssets
         )
     }
 
@@ -633,7 +661,8 @@ private func isValidSpriteGrid(image: NSImage, columns: Int, rows: Int) -> Bool 
 
 private func makePreviewAsset(
     in directory: URL,
-    reader: (URL) throws -> Data
+    reader: (URL) throws -> Data,
+    onInvalid: () -> Void
 ) -> CharacterAsset? {
     let previewPath = directory.appendingPathComponent("preview.png")
     var isDir: ObjCBool = false
@@ -642,16 +671,21 @@ private func makePreviewAsset(
     }
 
     guard let data = try? reader(previewPath) else {
+        onInvalid()
         return nil
     }
 
     let digest = SHA256.hash(data: data)
     let hex = digest.map { String(format: "%02x", $0) }.joined()
     let filename = previewPath.lastPathComponent
-    return CharacterAsset(
+    let asset = CharacterAsset(
         fingerprint: "\(filename):\(data.count):\(hex)",
         image: decodeFrameImage(from: data)
     )
+    if asset.image == nil {
+        onInvalid()
+    }
+    return asset
 }
 
 private func decodeAndFingerprintFrame(

@@ -385,7 +385,7 @@ final class CharacterManifestTests: XCTestCase {
         XCTAssertEqual(managerBReads, 1)
     }
 
-    func testFrameAssetReaderUsedOnceForSharedFramePathPerScan() throws {
+    func testFramesUseScannedImageCacheWithoutAdditionalReaderReads() throws {
         let root = makeTempRoot()
         defer { try? fileManager.removeItem(at: root) }
 
@@ -393,11 +393,19 @@ final class CharacterManifestTests: XCTestCase {
             at: root.appendingPathComponent("scan-read-count"),
             manifest: makeManifest(name: "scan-read-count", states: [
                 makeState(name: "idle", frames: ["shared-idle.png", "shared-idle.png"]),
-                makeState(name: "blink", frames: ["shared-idle.png"]),
+                CharacterManifest.StateInfo(
+                    name: "sheet",
+                    frames: ["shared-idle.png"],
+                    fps: nil,
+                    loop: nil,
+                    sheetColumns: 2,
+                    sheetRows: 1
+                ),
             ]),
             frameColors: [
                 "shared-idle.png": .systemBlue,
-            ]
+            ],
+            imageSize: CGSize(width: 12, height: 6)
         )
 
         var readCounts: [String: Int] = [:]
@@ -410,10 +418,16 @@ final class CharacterManifestTests: XCTestCase {
         manager.scan()
 
         XCTAssertEqual(readCounts["shared-idle.png"], 1)
+        manager.selectedName = "scan-read-count"
 
-        manager.scan()
-
-        XCTAssertEqual(readCounts["shared-idle.png"], 2)
+        guard let character = manager.current() else {
+            return XCTFail("character cache should be present")
+        }
+        _ = character.frames(for: "idle")
+        _ = character.frames(for: "sheet")
+        _ = character.frames(for: "idle")
+        _ = character.frames(for: "sheet")
+        XCTAssertEqual(readCounts["shared-idle.png"], 1)
     }
 
     func testSharedFramePathReusedAcrossStatesStillValidatesEachSheetGrid() throws {
@@ -448,7 +462,7 @@ final class CharacterManifestTests: XCTestCase {
                 ]
             ),
             frameColors: ["sprite.png": .systemBlue],
-            imageSize: CGSize(width: 6, height: 2)
+            imageSize: CGSize(width: 4, height: 2)
         )
 
         var readCounts: [String: Int] = [:]
@@ -482,11 +496,34 @@ final class CharacterManifestTests: XCTestCase {
         try Data("not an image".utf8).write(to: bundlePath.appendingPathComponent("preview.png"))
 
         let manager = CharacterManager(searchPaths: [root])
+        manager.selectedName = "corrupt-preview"
         manager.scan()
 
         XCTAssertEqual(manager.characters.map { $0.name }, ["corrupt-preview"])
         XCTAssertNotNil(manager.current())
         XCTAssertNil(manager.current()?.preview)
+        XCTAssertEqual(diagCount(CharacterManager.invalidPreviewFileCode, manager.lastScanDiagnostics), 1)
+    }
+
+    func testMissingPreviewDoesNotEmitPreviewDiagnostic() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("no-preview"),
+            manifest: makeManifest(name: "no-preview", states: [
+                makeState(name: "idle", frames: ["idle.png"]),
+            ]),
+            frameColors: ["idle.png": .systemBlue]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.selectedName = "no-preview"
+        manager.scan()
+
+        XCTAssertEqual(manager.characters.map { $0.name }, ["no-preview"])
+        XCTAssertNil(manager.current()?.preview)
+        XCTAssertEqual(diagCount(CharacterManager.invalidPreviewFileCode, manager.lastScanDiagnostics), 0)
     }
 
     func testMalformedManifestAndFrameDoNotPublishInvalidBundle() throws {
@@ -740,7 +777,7 @@ final class CharacterManifestTests: XCTestCase {
 
         let framesByIndex = alpha.frames(for: "idle")
         XCTAssertEqual(framesByIndex.count, 2)
-        XCTAssertFalse(framesByIndex[0] === framesByIndex[1])
+        XCTAssertTrue(framesByIndex[0] === framesByIndex[1])
         XCTAssertEqual(alpha.decodedFrameCount, 2)
 
         let sheetFrames = alpha.frames(for: "sheet")
