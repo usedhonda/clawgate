@@ -795,10 +795,12 @@ final class AmbientLogModel: ObservableObject {
             let daySegments: [TranscriptSegment]
             let newScenes: [AmbientLogGrouping.Scene]
             var dayFingerprintToStore: String?
-            // D38: the day's on-disk fingerprint (full sub-second mtime + size)
-            // is folded into the input fingerprint below for past days, so a late
-            // same-count rewrite still forces a republish. "today" for the live
-            // day (no per-day cache; live capture changes count/first/last).
+            // D38/D161: the day's on-disk fingerprint (full sub-second mtime +
+            // size) is folded into the input fingerprint below — for past days AND
+            // today (D161), so a same-count/same-endpoint rewrite (a text/speaker
+            // correction that doesn't change count or first/last capturedAt) still
+            // forces a republish instead of being hidden behind an unchanged input
+            // fingerprint.
             let dayDiskFingerprint: String
             if !isToday {
                 // D38: only trust the past-day cache while the day's on-disk
@@ -822,9 +824,14 @@ final class AmbientLogModel: ObservableObject {
                     dayFingerprintToStore = (postFingerprint == preFingerprint) ? postFingerprint : nil
                 }
             } else {
-                dayDiskFingerprint = "today"
+                // D161: today is live and uncached, but a same-count rewrite of
+                // today's raw (text corrected without changing count/endpoints)
+                // must still republish. Read the fingerprint AFTER the decode and
+                // fold it into the input fingerprint (a mid-decode write just
+                // means the next poll re-reads — today has no cache to poison).
                 daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
                 newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
+                dayDiskFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
             }
             // D45: reconcile a stale selection against the current scenes so the
             // display and query paths agree (migrate or clear).

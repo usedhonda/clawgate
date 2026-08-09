@@ -302,9 +302,10 @@ of incompleteness converge to ONE typed fail-closed path.
   - **Collision resistance**: the mod-time in the fingerprint is kept at FULL
     sub-second precision, so a same-second, same-size rewrite (content corrected
     without changing the byte count) still changes it. The day fingerprint is
-    also folded into the cheap input fingerprint for past days, so a same-count
-    rewrite forces a republish rather than matching count/first/last and being
-    skipped.
+    also folded into the cheap input fingerprint for past days AND today (D161),
+    so a same-count/same-endpoint rewrite forces a republish rather than matching
+    count/first/last and being skipped (today reads the fingerprint after the
+    decode; it is uncached, so a mid-decode write just re-reads next poll).
   - **Two-phase read**: the day fingerprint is re-read (off-main) after the
     decode; the decoded content is published under the post-decode fingerprint,
     but the cache is only stored when the on-disk state was stable across the
