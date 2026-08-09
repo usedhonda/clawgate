@@ -295,6 +295,84 @@ final class CharacterManifestTests: XCTestCase {
         }
     }
 
+    func testScanRefreshUpdatesPreviewWhenOnlyPreviewChanges() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        let bundlePath = root.appendingPathComponent("same-path-preview")
+        try makeBundle(
+            at: bundlePath,
+            manifest: makeManifest(name: "same-name", states: [
+                makeState(name: "idle", frames: ["idle.png"]),
+            ]),
+            frameColors: ["idle.png": .systemBlue],
+            previewColor: .systemRed,
+            previewSize: CGSize(width: 12, height: 12)
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.selectedName = "same-name"
+        manager.scan()
+
+        guard let before = manager.current() else {
+            return XCTFail("bundle should load")
+        }
+        let beforeColor = pixelTuple(from: before.preview)
+        guard let beforeColor else {
+            return XCTFail("preview should decode")
+        }
+
+        try writePNG(at: bundlePath.appendingPathComponent("preview.png"), color: .systemBlue)
+        manager.scan()
+
+        guard let after = manager.current() else {
+            return XCTFail("bundle should reload after preview rewrite")
+        }
+        let afterColor = pixelTuple(from: after.preview)
+        guard let afterColor else {
+            return XCTFail("preview should decode after rewrite")
+        }
+
+        if pixelTuplesEqual(beforeColor, afterColor) {
+            return XCTFail("preview rewrite should invalidate refresh path and update preview")
+        }
+    }
+
+    func testFrameAssetReaderIsUsedExactlyOncePerFrameFilePerScan() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("scan-read-count"),
+            manifest: makeManifest(name: "scan-read-count", states: [
+                makeState(name: "idle", frames: ["idle-a.png", "idle-b.png"]),
+            ]),
+            frameColors: [
+                "idle-a.png": .systemBlue,
+                "idle-b.png": .systemGreen,
+            ]
+        )
+
+        let originalReader = CharacterManager.frameAssetReader
+        var readCounts: [String: Int] = [:]
+        CharacterManager.frameAssetReader = { url in
+            readCounts[url.lastPathComponent, default: 0] += 1
+            return try originalReader(url)
+        }
+        defer { CharacterManager.frameAssetReader = originalReader }
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(readCounts["idle-a.png"], 1)
+        XCTAssertEqual(readCounts["idle-b.png"], 1)
+
+        manager.scan()
+
+        XCTAssertEqual(readCounts["idle-a.png"], 2)
+        XCTAssertEqual(readCounts["idle-b.png"], 2)
+    }
+
     func testMalformedManifestAndFrameDoNotPublishInvalidBundle() throws {
         let root = makeTempRoot()
         defer { try? fileManager.removeItem(at: root) }

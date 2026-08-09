@@ -250,6 +250,8 @@ final class LoadedCharacter {
 
 /// Manages available characters (bundled + custom)
 final class CharacterManager: ObservableObject {
+    static var frameAssetReader: (URL) throws -> Data = { try Data(contentsOf: $0) }
+
     @Published private(set) var characters: [CharacterManifest] = []
     @Published var selectedName: String = "chi-claw"
     @Published private(set) var lastScanDiagnostics: [CharacterManagerScanDiagnostic] = []
@@ -402,6 +404,10 @@ final class CharacterManager: ObservableObject {
             return nil
         }
 
+        if let previewFingerprint = makePreviewFingerprint(in: directory) {
+            assetFingerprints.append(previewFingerprint)
+        }
+
         guard let fingerprint = makeBundleFingerprint(manifest: manifest, frameFingerprints: assetFingerprints) else {
             return nil
         }
@@ -510,21 +516,16 @@ final class CharacterManager: ObservableObject {
                 return false
             }
 
-            guard let frameFingerprint = frameFileFingerprint(at: framePath) else {
+            guard let frameAsset = decodeAndFingerprintFrame(at: framePath) else {
                 issueCounts[Self.invalidImageFileCode, default: 0] += 1
                 return false
             }
-            assetFingerprints.append(frameFingerprint)
-
-            guard let image = decodeFrameImage(at: framePath) else {
-                issueCounts[Self.invalidImageFileCode, default: 0] += 1
-                return false
-            }
+            assetFingerprints.append(frameAsset.fingerprint)
 
             if state.isSheet {
                 let cols = state.sheetColumns ?? 1
                 let rows = state.sheetRows ?? 1
-                guard isValidSpriteGrid(image: image, columns: cols, rows: rows) else {
+                guard isValidSpriteGrid(image: frameAsset.image, columns: cols, rows: rows) else {
                     issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
                     return false
                 }
@@ -566,8 +567,25 @@ private func parseTrailingIndex(from stem: String) -> Int? {
     return index
 }
 
-private func decodeFrameImage(at path: URL) -> NSImage? {
-    guard let image = NSImage(contentsOf: path) else {
+private func decodeAndFingerprintFrame(at path: URL) -> (fingerprint: String, image: NSImage)? {
+    guard let data = try? CharacterManager.frameAssetReader(path) else {
+        return nil
+    }
+
+    let digest = SHA256.hash(data: data)
+    let hex = digest.map { String(format: "%02x", $0) }.joined()
+    let filename = path.lastPathComponent
+    let fingerprint = "\(filename):\(data.count):\(hex)"
+
+    guard let image = decodeFrameImage(from: data) else {
+        return nil
+    }
+
+    return (fingerprint: fingerprint, image: image)
+}
+
+private func decodeFrameImage(from data: Data) -> NSImage? {
+    guard let image = NSImage(data: data) else {
         return nil
     }
 
@@ -594,16 +612,20 @@ private func isValidSpriteGrid(image: NSImage, columns: Int, rows: Int) -> Bool 
     return frameWidth > 0 && frameHeight > 0
 }
 
-private func frameFileFingerprint(at path: URL) -> String? {
-    guard let data = try? Data(contentsOf: path) else {
+private func makePreviewFingerprint(in directory: URL) -> String? {
+    let previewPath = directory.appendingPathComponent("preview.png")
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: previewPath.path, isDirectory: &isDir), !isDir.boolValue else {
+        return nil
+    }
+
+    guard let data = try? CharacterManager.frameAssetReader(previewPath) else {
         return nil
     }
 
     let digest = SHA256.hash(data: data)
     let hex = digest.map { String(format: "%02x", $0) }.joined()
-
-    let filename = path.lastPathComponent
-    return "\(filename):\(data.count):\(hex)"
+    return "preview.png:\(data.count):\(hex)"
 }
 
 private func makeBundleFingerprint(
@@ -619,7 +641,9 @@ private func makeBundleFingerprint(
 }
 
 private func makeManifestFingerprint(_ manifest: CharacterManifest) -> String? {
-    guard let data = try? JSONEncoder().encode(manifest) else {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    guard let data = try? encoder.encode(manifest) else {
         return nil
     }
     let hex = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
