@@ -344,11 +344,14 @@ final class AmbientLogModel: ObservableObject {
     var sceneNames: [String: String] = [:]
     private var requestedNamingDay: Date?
     private let timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
-    private lazy var calendar: Calendar = {
+    // D21: computed (not a lazy var) so the background query build never races a
+    // first-access lazy initialization — `Calendar`/`TimeZone` are value types,
+    // so a fresh local copy per access is thread-safe with no shared mutation.
+    private var calendar: Calendar {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = timeZone
         return cal
-    }()
+    }
     // Past days cache uncapped scenes + raw segments so scene identity stays
     // the SAME single source as the query path (D17). Blocks are re-derived
     // from these per load (a display cap is applied then, not to identity).
@@ -371,6 +374,11 @@ final class AmbientLogModel: ObservableObject {
     // dispatches only if it still matches, so a chip change mid-preparation
     // cancels the stale query instead of dispatching an outdated scope.
     private(set) var queryGeneration = 0
+    // D21: the per-action-click owner. Each `startLogQuery` bumps it, so a rapid
+    // second click supersedes the first (latest-only commit) — distinct from
+    // `queryGeneration` (the scope/day owner that drives rebuild-on-mismatch). A
+    // superseded query is DROPPED (never rebuilt); a scope change rebuilds.
+    private(set) var actionEpoch = 0
     // D21: distinct from the generation — a stop() (view gone) flips this off so
     // an in-flight query's commit-mismatch path drops instead of rebuilding. The
     // generation bump alone invalidates the stale dispatch; this prevents a
@@ -655,6 +663,8 @@ final class AmbientLogModel: ObservableObject {
         let envelope: PetLogQueryEnvelope
         let generation: Int
         let day: Date
+        // D21: the action-click owner this query was prepared under.
+        var actionEpoch: Int = 0
     }
 
     /// D21 production path: prepare the query envelope on the background queue
@@ -668,15 +678,19 @@ final class AmbientLogModel: ObservableObject {
     func startLogQuery(actionId: String, instruction: String, now: Date = Date(),
                        sessionsRoot: URL = AmbientStorage.sessionsRoot,
                        dispatch: @escaping (PetLogQueryEnvelope, Date) -> Void) {
+        // D21: a fresh action-click owns the query from here on — a rapid second
+        // click supersedes an in-flight first one (latest-only).
+        actionEpoch += 1
         isPreparingLogQuery = true
         enqueueLogQueryBuild(actionId: actionId, instruction: instruction, now: now,
-                             sessionsRoot: sessionsRoot, dispatch: dispatch)
+                             epoch: actionEpoch, sessionsRoot: sessionsRoot, dispatch: dispatch)
     }
 
     /// One prepare→commit cycle: snapshot the owner generation/day/selection,
-    /// build off-main from those snapshots only, and commit on main. On a
-    /// generation mismatch it rebuilds (if still active) or drops (if stopped).
-    private func enqueueLogQueryBuild(actionId: String, instruction: String, now: Date,
+    /// build off-main from those snapshots only, and commit on main. A newer
+    /// action click supersedes this one (drop, no rebuild); a scope/day change
+    /// under the SAME action rebuilds (if still active); a stop() drops it.
+    private func enqueueLogQueryBuild(actionId: String, instruction: String, now: Date, epoch: Int,
                                       sessionsRoot: URL,
                                       dispatch: @escaping (PetLogQueryEnvelope, Date) -> Void) {
         let generation = queryGeneration
@@ -688,20 +702,23 @@ final class AmbientLogModel: ObservableObject {
                 actionId: actionId, instruction: instruction, now: now,
                 day: day, selection: selection, sessionsRoot: sessionsRoot)
             DispatchQueue.main.async {
-                let prepared = PreparedLogQuery(envelope: envelope, generation: generation, day: day)
+                let prepared = PreparedLogQuery(envelope: envelope, generation: generation,
+                                                day: day, actionEpoch: epoch)
                 if self.commitPreparedLogQuery(prepared, dispatch: dispatch) {
                     self.isPreparingLogQuery = false
                     return
                 }
-                // Generation changed since preparation. Rebuild from the latest
-                // snapshot only while the lifecycle is still active — a stop()
-                // (view gone) invalidates in-flight work with no dispatch.
+                // The commit was refused. If a NEWER action click superseded this
+                // one, drop it silently — the newer query owns the preparing state
+                // and will dispatch. Otherwise the scope/day changed under the
+                // SAME action: rebuild from the latest snapshot while active.
+                guard epoch == self.actionEpoch else { return }
                 guard self.queryLifecycleActive else {
                     self.isPreparingLogQuery = false
                     return
                 }
                 self.enqueueLogQueryBuild(actionId: actionId, instruction: instruction, now: now,
-                                          sessionsRoot: sessionsRoot, dispatch: dispatch)
+                                          epoch: epoch, sessionsRoot: sessionsRoot, dispatch: dispatch)
             }
         }
     }
@@ -713,7 +730,8 @@ final class AmbientLogModel: ObservableObject {
         let envelope = buildQueryEnvelope(
             actionId: actionId, instruction: instruction, now: now,
             day: selectedDay, selection: selectedSceneIDs, sessionsRoot: sessionsRoot)
-        return PreparedLogQuery(envelope: envelope, generation: queryGeneration, day: selectedDay)
+        return PreparedLogQuery(envelope: envelope, generation: queryGeneration,
+                                day: selectedDay, actionEpoch: actionEpoch)
     }
 
     /// Main-thread commit: dispatch only if the query is still current (owner
@@ -723,6 +741,9 @@ final class AmbientLogModel: ObservableObject {
     @discardableResult
     func commitPreparedLogQuery(_ prepared: PreparedLogQuery,
                                 dispatch: (PetLogQueryEnvelope, Date) -> Void) -> Bool {
+        // D21 latest-only: a newer action click supersedes this query.
+        guard prepared.actionEpoch == actionEpoch else { return false }
+        // D21 owner generation: a scope/day change invalidates this query.
         guard prepared.generation == queryGeneration else { return false }
         let resolved: Set<String> = prepared.envelope.scopeOverride.map { Set($0) } ?? []
         if resolved != selectedSceneIDs { selectedSceneIDs = resolved }
@@ -1420,8 +1441,8 @@ struct AmbientLogPetView: View {
             }
             .buttonStyle(PetPressableButtonStyle())
             .font(.system(size: 12, weight: .semibold))
-            .foregroundColor((instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.logAwaitingReply) ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
-            .disabled(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.logAwaitingReply)
+            .foregroundColor((instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.logAwaitingReply || logModel.isPreparingLogQuery) ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
+            .disabled(instructionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.logAwaitingReply || logModel.isPreparingLogQuery)
             Button(editingCustomActions ? "✓" : "✎") {
                 editingCustomActions.toggle()
             }
@@ -1469,8 +1490,8 @@ struct AmbientLogPetView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke((action == nil ? Color(red: 0.55, green: 0.78, blue: 1.0) : activeColor).opacity(action == nil ? 0.16 : 0.55), lineWidth: 1)
         )
-        .disabled(model.logAwaitingReply)
-        .opacity(model.logAwaitingReply ? 0.45 : 1)
+        .disabled(model.logAwaitingReply || logModel.isPreparingLogQuery)
+        .opacity((model.logAwaitingReply || logModel.isPreparingLogQuery) ? 0.45 : 1)
     }
 
     private func customActionRow(_ range: Range<Int>) -> some View {

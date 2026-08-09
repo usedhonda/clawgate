@@ -263,6 +263,16 @@ of incompleteness converge to ONE typed fail-closed path.
     still active, the production path rebuilds from the latest snapshot and
     dispatches THAT, so a chip change mid-preparation results in exactly one
     dispatch carrying the corrected scope (old scope: 0 dispatches; new scope: 1).
+  - **Per-action owner (latest-only)**: each action click also bumps a distinct
+    `actionEpoch`, so a rapid double-click of the SAME action supersedes the
+    first in-flight query — the superseded query is DROPPED (never rebuilt),
+    dispatching only the latest (double-click → 1 dispatch). This is distinct
+    from the scope-change rebuild: `actionEpoch` mismatch drops, `queryGeneration`
+    mismatch rebuilds. The send/preset buttons are additionally disabled while a
+    query is preparing (UI admission closed).
+  - **Pure resolver**: the background build reads only value-type snapshots
+    (`Calendar`/`TimeZone` are computed fresh per access, not a lazy var), so it
+    never races shared mutable state.
   - **Lifecycle invalidation**: `stop()` (view gone) bumps the generation AND
     flips the lifecycle inactive, so an in-flight query's commit fails and the
     mismatch path drops it WITHOUT rebuilding — no dispatch happens after the

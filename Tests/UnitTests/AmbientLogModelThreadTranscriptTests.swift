@@ -353,6 +353,33 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         XCTAssertFalse(model.isPreparingLogQuery, "preparing clears once the query resolves")
     }
 
+    /// D21 per-action owner: a rapid double-click of the SAME action (no scope
+    /// change) dispatches ONLY the latest query — the first is superseded and
+    /// dropped (never rebuilt), distinct from the chip-change rebuild path.
+    func testRapidDoubleClickDispatchesOnlyLatest() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 22; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        try writeSession("ctx-one", [seg("A", at: dayStart + 100)], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+
+        var dispatched = 0
+        model.startLogQuery(actionId: "slot-0", instruction: "1", sessionsRoot: root) { _, _ in dispatched += 1 }
+        model.startLogQuery(actionId: "slot-0", instruction: "2", sessionsRoot: root) { _, _ in dispatched += 1 }
+
+        let exp = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { exp.fulfill() }
+        wait(for: [exp], timeout: 2.0)
+
+        XCTAssertEqual(dispatched, 1, "a rapid double-click dispatches only the latest query, not both")
+        XCTAssertFalse(model.isPreparingLogQuery, "preparing clears once the latest resolves")
+    }
+
     /// Same-day query: a segment at/after the anchor instant is excluded.
     func testBuildQueryEnvelopeExcludesSegmentsAtOrAfterAnchor() throws {
         let root = makeTempSessionsRoot()
