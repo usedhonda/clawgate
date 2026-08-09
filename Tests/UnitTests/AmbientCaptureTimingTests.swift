@@ -184,7 +184,7 @@ final class AmbientCaptureTimingTests: XCTestCase {
         XCTAssertEqual(manager.testStartedAtFromCurrentTiming(sampleRate: sampleRate), firstSuccessful)
     }
 
-    func testFinalizeCallbackPreservesTimingStateAndIsExactlyOnce() {
+    func testFinalizeCallbackPreservesTimingStateAndIsExactlyOnce() throws {
         let expectation = expectation(description: "chunk callback")
         expectation.expectedFulfillmentCount = 3
         let primedFrames: AVAudioFrameCount = 2_400
@@ -242,7 +242,7 @@ final class AmbientCaptureTimingTests: XCTestCase {
         XCTAssertEqual(ordered[0].actualPrimedFrames, 0)
         XCTAssertFalse(ordered[0].provenOverlap)
         let expectedSecondStart = secondTap.timeIntervalSince1970 - Double(primedFrames) / sampleRate
-        let secondStartedAt = try! XCTUnwrap(ordered[1].startedAt)
+        let secondStartedAt = try XCTUnwrap(ordered[1].startedAt)
         XCTAssertEqual(
             secondStartedAt.timeIntervalSince1970,
             expectedSecondStart,
