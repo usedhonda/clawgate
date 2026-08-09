@@ -310,7 +310,14 @@ final class CharacterManifestTests: XCTestCase {
             previewSize: CGSize(width: 12, height: 12)
         )
 
-        let manager = CharacterManager(searchPaths: [root])
+        var readCounts: [String: Int] = [:]
+        let manager = CharacterManager(
+            searchPaths: [root],
+            frameAssetReader: { url in
+                readCounts[url.lastPathComponent, default: 0] += 1
+                return try Data(contentsOf: url)
+            }
+        )
         manager.selectedName = "same-name"
         manager.scan()
 
@@ -321,6 +328,7 @@ final class CharacterManifestTests: XCTestCase {
         guard let beforeColor else {
             return XCTFail("preview should decode")
         }
+        XCTAssertEqual(readCounts["preview.png"], 1)
 
         try writePNG(at: bundlePath.appendingPathComponent("preview.png"), color: .systemBlue)
         manager.scan()
@@ -332,45 +340,153 @@ final class CharacterManifestTests: XCTestCase {
         guard let afterColor else {
             return XCTFail("preview should decode after rewrite")
         }
+        XCTAssertEqual(readCounts["preview.png"], 2)
 
         if pixelTuplesEqual(beforeColor, afterColor) {
             return XCTFail("preview rewrite should invalidate refresh path and update preview")
         }
     }
 
-    func testFrameAssetReaderIsUsedExactlyOncePerFrameFilePerScan() throws {
+    func testFrameAssetReaderInstanceDependencyDoesNotCrossManagers() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("multi-manager"),
+            manifest: makeManifest(name: "multi-manager", states: [
+                makeState(name: "idle", frames: ["idle.png"]),
+            ]),
+            frameColors: ["idle.png": .systemBlue]
+        )
+
+        var managerAReads = 0
+        var managerBReads = 0
+        let managerA = CharacterManager(
+            searchPaths: [root],
+            frameAssetReader: { url in
+                managerAReads += 1
+                return try Data(contentsOf: url)
+            }
+        )
+
+        let managerB = CharacterManager(
+            searchPaths: [root],
+            frameAssetReader: { url in
+                managerBReads += 1
+                return try Data(contentsOf: url)
+            }
+        )
+
+        // Ensure a previous manager's injected reader is still used after another manager is created.
+        managerB.scan()
+        managerA.scan()
+
+        XCTAssertEqual(managerAReads, 1)
+        XCTAssertEqual(managerBReads, 1)
+    }
+
+    func testFrameAssetReaderUsedOnceForSharedFramePathPerScan() throws {
         let root = makeTempRoot()
         defer { try? fileManager.removeItem(at: root) }
 
         try makeBundle(
             at: root.appendingPathComponent("scan-read-count"),
             manifest: makeManifest(name: "scan-read-count", states: [
-                makeState(name: "idle", frames: ["idle-a.png", "idle-b.png"]),
+                makeState(name: "idle", frames: ["shared-idle.png", "shared-idle.png"]),
+                makeState(name: "blink", frames: ["shared-idle.png"]),
             ]),
             frameColors: [
-                "idle-a.png": .systemBlue,
-                "idle-b.png": .systemGreen,
+                "shared-idle.png": .systemBlue,
             ]
         )
 
-        let originalReader = CharacterManager.frameAssetReader
         var readCounts: [String: Int] = [:]
-        CharacterManager.frameAssetReader = { url in
+        let reader: (URL) throws -> Data = { url in
             readCounts[url.lastPathComponent, default: 0] += 1
-            return try originalReader(url)
+            return try Data(contentsOf: url)
         }
-        defer { CharacterManager.frameAssetReader = originalReader }
+
+        let manager = CharacterManager(searchPaths: [root], frameAssetReader: reader)
+        manager.scan()
+
+        XCTAssertEqual(readCounts["shared-idle.png"], 1)
+
+        manager.scan()
+
+        XCTAssertEqual(readCounts["shared-idle.png"], 2)
+    }
+
+    func testSharedFramePathReusedAcrossStatesStillValidatesEachSheetGrid() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("shared-sheet"),
+            manifest: CharacterManifest(
+                name: "shared-sheet",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "sheetA",
+                        frames: ["sprite.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 2,
+                        sheetRows: 1
+                    ),
+                    CharacterManifest.StateInfo(
+                        name: "sheetB",
+                        frames: ["sprite.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 3,
+                        sheetRows: 1
+                    ),
+                ]
+            ),
+            frameColors: ["sprite.png": .systemBlue],
+            imageSize: CGSize(width: 6, height: 2)
+        )
+
+        var readCounts: [String: Int] = [:]
+        let manager = CharacterManager(
+            searchPaths: [root],
+            frameAssetReader: { url in
+                readCounts[url.lastPathComponent, default: 0] += 1
+                return try Data(contentsOf: url)
+            }
+        )
+
+        manager.scan()
+
+        XCTAssertEqual(readCounts["sprite.png"], 1)
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testCorruptPreviewFileKeepsBundleValidWithNilPreview() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try fileManager.createDirectory(at: root.appendingPathComponent("corrupt-preview"), withIntermediateDirectories: true)
+        let bundlePath = root.appendingPathComponent("corrupt-preview")
+        try encodeManifest(
+            makeManifest(name: "corrupt-preview", states: [makeState(name: "idle", frames: ["idle.png"])]),
+            to: bundlePath.appendingPathComponent("manifest.json")
+        )
+        try writePNG(at: bundlePath.appendingPathComponent("idle.png"), color: .systemBlue)
+        try Data("not an image".utf8).write(to: bundlePath.appendingPathComponent("preview.png"))
 
         let manager = CharacterManager(searchPaths: [root])
         manager.scan()
 
-        XCTAssertEqual(readCounts["idle-a.png"], 1)
-        XCTAssertEqual(readCounts["idle-b.png"], 1)
-
-        manager.scan()
-
-        XCTAssertEqual(readCounts["idle-a.png"], 2)
-        XCTAssertEqual(readCounts["idle-b.png"], 2)
+        XCTAssertEqual(manager.characters.map { $0.name }, ["corrupt-preview"])
+        XCTAssertNotNil(manager.current())
+        XCTAssertNil(manager.current()?.preview)
     }
 
     func testMalformedManifestAndFrameDoNotPublishInvalidBundle() throws {
