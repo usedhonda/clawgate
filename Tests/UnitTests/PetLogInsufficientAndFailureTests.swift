@@ -109,9 +109,11 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         XCTAssertFalse(model.isSummonBusy, "no slot is claimed for an empty-scope query")
     }
 
-    // MARK: - D16 over-budget refuse is fail-visible, never dispatched
+    // MARK: - D16/D20 fail-closed: incomplete history is never dispatched
 
-    func testExplicitOverBudgetRefusesVisiblyWithoutDispatch() {
+    /// Over-budget refuses fail-closed before any side-effect (no log_user entry,
+    /// no slot claim, no dispatch).
+    func testOverBudgetRefusesFailClosedWithoutDispatch() {
         let model = PetModel()
         model.connectionState = .connected
         model.setSessionKeyForTesting("test-session")
@@ -126,10 +128,34 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
             segments: [segment("a"), segment("b")])
         model.sendLogInstruction(envelope: env)
 
-        XCTAssertEqual(model.logDispatchStatus, .overBudgetRefused(requestId: requestId),
-                       "an explicit over-budget scope refuses visibly (exact-or-refuse)")
+        XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId),
+                       "over budget refuses fail-closed with a typed status")
         XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
-                       "over-budget refuse must not create a log_user entry or dispatch")
+                       "refuse must not create a log_user entry or dispatch")
+        XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
+    }
+
+    /// A retrieval-incomplete envelope (sanity cap truncated an ongoing
+    /// conversation) refuses fail-closed — the same path as over-budget, before
+    /// any side-effect. The model is never handed partial history.
+    func testRetrievalIncompleteRefusesFailClosedWithoutDispatch() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let requestId = UUID().uuidString
+        let env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "free", instruction: "まとめて",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [segment("a"), segment("b")], retrievalComplete: false)
+        model.sendLogInstruction(envelope: env)
+
+        XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId),
+                       "a sanity-cap-truncated history refuses fail-closed, same path as over-budget")
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
+                       "refuse must not create a log_user entry or dispatch")
         XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
     }
 

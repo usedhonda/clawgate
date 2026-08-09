@@ -144,48 +144,56 @@ impossible:
 Automatic scope (no explicit scene selection) retrieves the conversation the
 user is in, not the calendar day:
 
-- The retrieval source is the backward-contiguous run of segments ending
-  strictly before the anchor, walking back across calendar days. The calendar
-  day is a display/navigation boundary, not a context boundary.
-- The run stops at the first inter-segment gap greater than 900s (the same
-  threshold that defines scene identity) — a clear semantic boundary. The gap
-  between the anchor and the newest segment never splits the run (a question
-  asked minutes after a meeting still captures it).
-- A conversation straddling midnight with a <15m gap is one context (both days
-  included); a >15m gap before midnight excludes the prior day's separate
-  meeting; midnight alone never splits a run.
+- The retrieval source is ALL segments in the window `[anchor - 48h, anchor)`,
+  crossing calendar days. The calendar day is a display/navigation boundary,
+  not a context boundary. Retrieval does NOT stop at a time gap: a lunch gap
+  must not permanently drop the morning, and a mere gap is not a scene change.
+- Choosing which leading run to exclude on a real scene change is the MODEL's
+  job (the shipped `automaticBackward` suffix-trim contract). Retrieval only
+  supplies the ordered cross-day history; both sides of a gap are included, in
+  order, and the model trims. A conversation straddling midnight is one context.
+- The only bound is the sanity cap (48h, or the storage retention window,
+  whichever is smaller). Reaching the cap sets a client-side incomplete signal
+  (`retrievalComplete == false`) when a gapless run continued past the cap — the
+  current conversation may extend beyond what was fetched. A gap inside the
+  window means the conversation's start is within it, so retrieval is complete.
+- `retrievalComplete` is client-side only, NEVER encoded to the wire (a
+  model-facing signal needs a prefix revision — out of scope). It is distinct
+  from `completeBeforeAnchor` (the anchor-cutoff verification). The client fails
+  closed on `retrievalComplete == false` (see Context budget below).
 - Explicit scene selection stays day-scoped exact-all (unchanged).
-- `coverageStart`/`coverageEnd`/`completeBeforeAnchor` reflect the actual
-  cross-day retrieved range. No new envelope field is added (truncation
-  visibility under a budget is a later concern, tracked in Target).
+- `coverageStart`/`coverageEnd` reflect the actual cross-day retrieved range.
 
-### Context budget (D16)
+### Context budget & fail-closed history (D16)
 
-The whole built request (universal prefix + JSON envelope) is bounded before
-dispatch. The budget is a named contract constant in UTF-8 BYTES
-(`PetLogRequestBudget.maxRequestBytes`) — without the model's exact tokenizer a
-token count is a heuristic, not a contract.
+A3's provisional contract is that incomplete history is NEVER sent to the model
+silently — a degraded (truncated) request would let the model assume it saw the
+whole conversation, the exact misread this project exists to prevent. All causes
+of incompleteness converge to ONE typed fail-closed path.
 
+- **Budget**: the whole built request (universal prefix + JSON envelope) is
+  bounded by a named contract constant in UTF-8 BYTES
+  (`PetLogRequestBudget.maxRequestBytes`) — without the model's exact tokenizer
+  a token count is a heuristic, not a contract. The constant is sized well above
+  a real day/scene so a refusal is pathological, not routine.
 - **Dedup (a)**: duplicates are removed deterministically regardless of budget —
   noise/exact-adjacent (reduce), overlap re-emits (same speaker + same trimmed
   text + intersecting capture window → keep the earlier; a disjoint-time repeat
   is kept), and a keep-first id dedup (two segments must never share an id, or
   the parser's duplicate-id rule would reject the envelope's own scope).
 - **Fits**: a request under budget is dispatched unchanged (no transformation).
-- **Automatic over budget**: the OLDEST whole segments are elided one at a time
-  until the request fits, keeping the anchor-nearest; the dropped id range is
-  recorded (telemetry + a visible one-line `historyTrimmed` status). This is
-  structural whole-segment elision — never fixed-text truncation.
-- **Explicit over budget**: refused visibly (`overBudgetRefused`). A user-selected
-  scope is exact-or-refuse: trimming it and letting the model echo the trimmed
-  set as "exact-all" would look like an exact scope while covering less — the
-  incident class this project exists to kill.
-- **Unfittable minimum**: if even the newest single segment exceeds the budget,
-  refuse visibly (both modes). An over-limit request is never dispatched.
-- `coverageStart`/`coverageEnd` follow the trimmed (sent) set; no new envelope
-  field is added. Summarizing an elided region (which needs a second model call,
-  i.e. not one pass) is out of scope and surfaces as refuse rather than a silent
-  lossy compression.
+- **Fail-closed refusal**: when the history cannot be dispatched intact — the
+  automatic window truncated at the sanity cap (`retrievalComplete == false`),
+  OR the request exceeds the budget (either mode) — the request is refused
+  BEFORE any side-effect: no `log_user` entry, no summon-slot claim, no reply
+  watchdog, no send. The user's draft/instruction text is preserved (D60). The
+  only outputs are a typed `historyIncompleteRefused` status (reason + remedy:
+  narrow the scene selection or the time range) and a telemetry event recording
+  the specific cause (`sanityCap` / `automaticScopeOverBudget` /
+  `explicitScopeOverBudget`).
+- **No degraded dispatch in A3**: whole-segment elision-and-send is NOT
+  implemented; an over-budget automatic scope refuses rather than trimming. See
+  Target for the unlock condition.
 
 ### Background load & cache safety (D21/D42)
 
@@ -248,9 +256,17 @@ shared-summon events (which have no requestId) carry a bounded owner token, and 
 
 ---
 
-## Target (not yet shipped — upcoming A2 commits)
+## Target (not yet shipped)
 
-All Wave A2 contract behavior is now shipped and Normative above (the minimal
-one-line dispatch status is already shipped, per the D3 section). Later Waves
-(the full status banner / retry UI, cross-day retrieval, etc.) are tracked in the
-plan and will be added here when they ship.
+All Wave A2/A3 contract behavior is now shipped and Normative above (the minimal
+one-line dispatch status is already shipped, per the D3 section).
+
+- **Model-facing truncation signal + degraded dispatch**: A3 fails closed on
+  incomplete history (D16) because there is no way to tell the model it is
+  seeing a partial view. Degraded (whole-segment elision-and-send) dispatch for
+  automatic scope MUST NOT be unlocked until the envelope AND the universal
+  prefix carry an explicit model-facing truncation signal (so the model cannot
+  mistake a trimmed history for the whole conversation). This is a guarded
+  invariant: no degraded dispatch without that signal.
+- Later UI (full status banner / retry UI) and cross-day retrieval refinements
+  are tracked in the plan and will be added here when they ship.

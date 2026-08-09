@@ -517,16 +517,25 @@ final class AmbientLogModel: ObservableObject {
         if resolved.selection != selectedSceneIDs { selectedSceneIDs = resolved.selection }
         let candidateSegments: [TranscriptSegment]
         let scopeOverride: [String]?
+        // D20: retrieval never stops at a gap. `retrievalComplete` is false only
+        // when the automatic window truncated an ongoing conversation at the
+        // sanity cap — the client fails closed on it rather than sending partial
+        // history to the model (D16). Explicit day-scoped selection is complete.
+        let retrievalComplete: Bool
         if let ids = resolved.scopeIDs {
             // Explicit scene selection stays day-scoped exact-all.
             candidateSegments = resolved.segments
             scopeOverride = ids
+            retrievalComplete = true
         } else {
-            // D20: automatic scope is the cross-day backward run ending at the
-            // anchor — the conversation you are in, not the calendar day.
-            candidateSegments = AmbientStorage.segmentsBackwardFromAnchor(
+            // D20: automatic scope is the whole cross-day window ending at the
+            // anchor — the conversation you are in, not the calendar day. The
+            // model trims the leading run; retrieval only supplies the history.
+            let backward = AmbientStorage.segmentsBackwardFromAnchor(
                 anchor: anchor, timeZone: timeZone, sessionsRoot: sessionsRoot)
+            candidateSegments = backward.segments
             scopeOverride = nil
+            retrievalComplete = !backward.reachedCap
         }
 
         // Every segment here is expected to already carry a capturedAt
@@ -576,7 +585,8 @@ final class AmbientLogModel: ObservableObject {
             coverageStart: coverageStart,
             coverageEnd: coverageEnd,
             completeBeforeAnchor: completeBeforeAnchor,
-            segments: rawSegments
+            segments: rawSegments,
+            retrievalComplete: retrievalComplete
         )
     }
 
@@ -1218,8 +1228,8 @@ struct AmbientLogPetView: View {
         switch status {
         case .insufficientEvidence: return "根拠となるログが不足しています"
         case .emptyScopeRefused: return "対象のログがありません"
-        case .historyTrimmed: return "履歴が長いため古い部分を省いて送信しました"
-        case .overBudgetRefused: return "対象範囲が大きすぎるため送信できません"
+        case .historyIncompleteRefused:
+            return "対象の履歴が大きすぎる/古すぎるため送信できません。シーン選択や対象範囲を狭めてください"
         }
     }
 

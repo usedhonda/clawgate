@@ -1718,12 +1718,11 @@ final class PetModel: NSObject, ObservableObject {
         case envelopeAccepted(requestId: String)
         case dispatchAttempted(requestId: String)
         case persistenceFailure(file: String, requestId: String?)
-        /// D16: automatic scope exceeded the request budget, so the oldest
-        /// segments were structurally elided (id range recorded) before dispatch.
-        case historyTrimmed(requestId: String, droppedFirstId: String, droppedLastId: String)
-        /// D16: the request exceeded the budget and could not be safely trimmed
-        /// (explicit scope, or an unfittable minimum) — refused before dispatch.
-        case budgetRefused(requestId: String, reason: String)
+        /// D16/D20 fail-closed: the history could not be dispatched intact (sanity
+        /// cap or over budget) — refused before any side-effect. `reason` records
+        /// the specific cause (sanityCap / automaticScopeOverBudget /
+        /// explicitScopeOverBudget) for forensics.
+        case historyIncompleteRefused(requestId: String, reason: String)
     }
 
     /// Emits admission-lifecycle events through the same os.Logger as
@@ -1746,10 +1745,8 @@ final class PetModel: NSObject, ObservableObject {
             log.info("dispatchAttempted request=\(requestId, privacy: .public)")
         case let .persistenceFailure(file, requestId):
             log.error("persistenceFailure file=\(file, privacy: .public) request=\(requestId ?? "unknown", privacy: .public)")
-        case let .historyTrimmed(requestId, droppedFirstId, droppedLastId):
-            log.notice("historyTrimmed request=\(requestId, privacy: .public) droppedFirst=\(droppedFirstId, privacy: .public) droppedLast=\(droppedLastId, privacy: .public)")
-        case let .budgetRefused(requestId, reason):
-            log.notice("budgetRefused request=\(requestId, privacy: .public) reason=\(reason, privacy: .public)")
+        case let .historyIncompleteRefused(requestId, reason):
+            log.notice("historyIncompleteRefused request=\(requestId, privacy: .public) reason=\(reason, privacy: .public)")
         }
     }
 
@@ -2023,11 +2020,20 @@ final class PetModel: NSObject, ObservableObject {
         // successes never touch it.
         logDispatchStatus = nil
 
-        // D16: request budget enforcement (deterministic whole-segment elision,
-        // never text truncation). Automatic over-budget drops the oldest whole
-        // segments to fit and dispatches with a visible trimmed-history status;
-        // explicit over-budget (trimming a user scope would look exact-scope
-        // while covering less) or an unfittable minimum refuses visibly.
+        // D16/D20 fail-closed: A3 never sends incomplete history to the model.
+        // All causes — retrieval truncated at the sanity cap, or the request
+        // over budget — converge here and refuse BEFORE any side-effect (no
+        // log_user entry, no summon-slot claim, no watchdog, no send), leaving
+        // the user's draft intact (D60). A typed status + telemetry are the only
+        // outputs. Degraded (elided) dispatch stays disabled until a model-facing
+        // truncation signal exists (Target).
+        guard requestedEnvelope.retrievalComplete else {
+            logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(
+                .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: "sanityCap"))
+            logDispatchStatus = .historyIncompleteRefused(requestId: requestedEnvelope.requestId)
+            return
+        }
         let requestBudget: Int
         #if DEBUG
         requestBudget = petLogRequestBudgetForTesting ?? PetLogRequestBudget.maxRequestBytes
@@ -2038,17 +2044,11 @@ final class PetModel: NSObject, ObservableObject {
         switch PetLogRequestEnforcer.enforce(requestedEnvelope, budget: requestBudget) {
         case .fits(let e):
             envelope = e
-        case .compressed(let e, let droppedFirstId, let droppedLastId):
-            envelope = e
-            recordPetLogAdmissionEvent(
-                .historyTrimmed(requestId: e.requestId,
-                                droppedFirstId: droppedFirstId, droppedLastId: droppedLastId))
-            logDispatchStatus = .historyTrimmed(requestId: e.requestId)
         case .refused(let reason):
             logThreadPaneOpen = true
             recordPetLogAdmissionEvent(
-                .budgetRefused(requestId: requestedEnvelope.requestId, reason: reason.rawValue))
-            logDispatchStatus = .overBudgetRefused(requestId: requestedEnvelope.requestId)
+                .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: reason.rawValue))
+            logDispatchStatus = .historyIncompleteRefused(requestId: requestedEnvelope.requestId)
             return
         }
 

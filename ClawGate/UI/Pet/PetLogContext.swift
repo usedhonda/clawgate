@@ -171,6 +171,13 @@ struct PetLogQueryEnvelope: Codable, Equatable {
     /// PetLogContextDecision.
     let completeBeforeAnchor: Bool
     let segments: [PetLogRawSegment]
+    /// D20/D16 client-side signal: false when retrieval truncated an ongoing
+    /// conversation at the sanity cap (48h) so the history is NOT complete. This
+    /// is distinct from `completeBeforeAnchor` (the anchor-cutoff verification)
+    /// and is NEVER encoded to the wire (see `encode(to:)`) — a model-facing
+    /// truncation signal needs a prefix revision (Explicitly Out of A3). The
+    /// client fails closed on `false` rather than dispatching partial history.
+    var retrievalComplete: Bool = true
 }
 
 extension PetLogQueryEnvelope {
@@ -225,7 +232,8 @@ extension PetLogQueryEnvelope {
             coverageStart: epochs.min().map { Date(timeIntervalSince1970: $0) },
             coverageEnd: epochs.max().map { Date(timeIntervalSince1970: $0) },
             completeBeforeAnchor: completeBeforeAnchor,
-            segments: newSegments
+            segments: newSegments,
+            retrievalComplete: retrievalComplete
         )
     }
 }
@@ -249,50 +257,33 @@ enum PetLogBudgetRefusal: String, Equatable {
     /// exact scope while covering less — the incident class this project exists
     /// to kill. Exact-or-refuse.
     case explicitScopeOverBudget
-    /// Even the minimal request (instruction + the single newest segment)
-    /// exceeds the cap — nothing can be safely dropped to make it fit.
-    case minimalRequestOverBudget
+    /// Automatic history exceeds the budget. A3 is fail-closed: partial history
+    /// is never dispatched (a degraded/elided send would let the model assume it
+    /// saw the whole conversation). Degraded dispatch is unlocked only after a
+    /// model-facing truncation signal exists (Target).
+    case automaticScopeOverBudget
 }
 
 enum PetLogBudgetOutcome: Equatable {
     case fits(PetLogQueryEnvelope)
-    case compressed(PetLogQueryEnvelope, droppedFirstId: String, droppedLastId: String)
     case refused(PetLogBudgetRefusal)
 }
 
 enum PetLogRequestEnforcer {
-    /// D16 request-budget enforcement. Deterministic whole-segment structural
-    /// elision — never fixed-text truncation. If the built request already fits
-    /// the envelope is returned unchanged. Over budget:
-    ///  - explicit scope → refuse (`explicitScopeOverBudget`): a user scope is
-    ///    exact-or-refuse, never silently narrowed.
-    ///  - automatic scope → drop OLDEST whole segments one at a time until it
-    ///    fits, keeping the anchor-nearest, recording the dropped id range.
-    ///  - if even the newest single segment can't fit → refuse
-    ///    (`minimalRequestOverBudget`).
+    /// D16 request-budget enforcement, fail-closed. If the built request fits the
+    /// budget the envelope is returned unchanged; otherwise it is refused — both
+    /// modes, no dispatch. A3 does NOT elide-and-send: sending a budget-trimmed
+    /// automatic scope would let the model assume it saw the whole conversation,
+    /// the exact misread this project exists to prevent. Explicit scope is
+    /// likewise exact-or-refuse. Budget is sized well above a real day/scene so a
+    /// refusal is pathological, not routine.
     static func enforce(_ envelope: PetLogQueryEnvelope,
                         budget: Int = PetLogRequestBudget.maxRequestBytes) -> PetLogBudgetOutcome {
-        func requestBytes(_ e: PetLogQueryEnvelope) -> Int {
-            guard let message = try? PetLogPromptBuilder.buildMessage(envelope: e) else { return Int.max }
-            return message.utf8.count
+        guard let message = try? PetLogPromptBuilder.buildMessage(envelope: envelope) else {
+            return .refused(envelope.scopeOverride != nil ? .explicitScopeOverBudget : .automaticScopeOverBudget)
         }
-        if requestBytes(envelope) <= budget { return .fits(envelope) }
-        if envelope.scopeOverride != nil { return .refused(.explicitScopeOverBudget) }
-
-        var kept = envelope.segments
-        var droppedFirst: String?
-        var droppedLast: String?
-        while kept.count > 1 {
-            let dropped = kept.removeFirst()  // oldest is first (sorted ascending)
-            if droppedFirst == nil { droppedFirst = dropped.id }
-            droppedLast = dropped.id
-            let trimmed = envelope.withSegments(kept)
-            if requestBytes(trimmed) <= budget {
-                return .compressed(trimmed, droppedFirstId: droppedFirst!, droppedLastId: droppedLast!)
-            }
-        }
-        // Only the newest segment remains and it still doesn't fit.
-        return .refused(.minimalRequestOverBudget)
+        if message.utf8.count <= budget { return .fits(envelope) }
+        return .refused(envelope.scopeOverride != nil ? .explicitScopeOverBudget : .automaticScopeOverBudget)
     }
 }
 
@@ -552,12 +543,11 @@ enum PetLogDispatchStatus: Equatable {
     case emptyScopeRefused(requestId: String)
     /// Segments were sent but the model kept none — "ログ不足".
     case insufficientEvidence(requestId: String)
-    /// D16: automatic scope exceeded the request budget, so the oldest segments
-    /// were structurally elided before dispatch — the sent history is partial.
-    case historyTrimmed(requestId: String)
-    /// D16: the request exceeded the budget and could not be safely trimmed
-    /// (explicit scope, or an unfittable minimum) — refused before dispatch.
-    case overBudgetRefused(requestId: String)
+    /// D16/D20 fail-closed: the history could not be dispatched intact — it was
+    /// truncated at the sanity cap, or the request exceeded the budget. A3 never
+    /// sends partial history to the model, so all such cases converge here and
+    /// refuse before dispatch (typed status + telemetry only).
+    case historyIncompleteRefused(requestId: String)
 }
 
 enum PetLogSelectionMode: Equatable {

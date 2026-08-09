@@ -40,24 +40,15 @@ final class PetLogRequestBudgetTests: XCTestCase {
         }
     }
 
-    /// Automatic over-budget drops the OLDEST whole segments (keeping the
-    /// anchor-nearest) and reports the dropped id range; coverageStart follows.
-    func testAutomaticOverBudgetDropsOldestKeepsNewest() {
+    /// A3 is fail-closed: automatic scope over budget refuses (never an
+    /// elide-and-send) so the model is never handed partial history.
+    func testAutomaticOverBudgetRefusesFailClosed() {
         let segs = (0..<6).map { raw("s\($0)", at: 1000 + Double($0), text: big) }
         let env = envelope(scopeOverride: nil, segments: segs)
-        let budget = bytes(env.withSegments(Array(segs.suffix(4))))  // fits newest 4, not all 6
-        switch PetLogRequestEnforcer.enforce(env, budget: budget) {
-        case .compressed(let out, let droppedFirst, let droppedLast):
-            XCTAssertEqual(out.segments.map(\.id), ["s2", "s3", "s4", "s5"],
-                           "only the newest run that fits is kept")
-            XCTAssertEqual(out.segments.last?.id, "s5", "the anchor-nearest segment is always kept")
-            XCTAssertEqual(droppedFirst, "s0")
-            XCTAssertEqual(droppedLast, "s1", "the dropped id range covers the oldest elided run")
-            XCTAssertEqual(out.coverageStart, Date(timeIntervalSince1970: 1002),
-                           "coverageStart reflects the trimmed (sent) range, no new field")
-        default:
-            XCTFail("automatic over-budget must trim, not refuse")
-        }
+        let budget = bytes(env.withSegments(Array(segs.suffix(4))))  // would fit 4, not all 6
+        XCTAssertEqual(PetLogRequestEnforcer.enforce(env, budget: budget),
+                       .refused(.automaticScopeOverBudget),
+                       "A3 does not degrade-dispatch; it refuses rather than trim")
     }
 
     /// Explicit (user-selected) scope over budget refuses — never silently
@@ -68,16 +59,6 @@ final class PetLogRequestBudgetTests: XCTestCase {
         let budget = bytes(env.withSegments(Array(segs.suffix(2))))
         XCTAssertEqual(PetLogRequestEnforcer.enforce(env, budget: budget),
                        .refused(.explicitScopeOverBudget))
-    }
-
-    /// If even the newest single segment can't fit, refuse (both modes) rather
-    /// than dispatch an over-limit request.
-    func testMinimalRequestOverBudgetRefuses() {
-        let segs = (0..<3).map { raw("s\($0)", at: 1000 + Double($0), text: big) }
-        let env = envelope(scopeOverride: nil, segments: segs)
-        let budget = bytes(env.withSegments([segs.last!])) - 1
-        XCTAssertEqual(PetLogRequestEnforcer.enforce(env, budget: budget),
-                       .refused(.minimalRequestOverBudget))
     }
 
     /// D16(a): an overlapping same-content re-emit is dropped (keep earlier); a

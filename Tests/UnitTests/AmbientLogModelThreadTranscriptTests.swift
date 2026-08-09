@@ -285,9 +285,11 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
                        "a <15m gap across midnight is one conversation — both days included")
     }
 
-    /// D20: a >15m gap is a semantic boundary — the automatic backward run stops
-    /// there, excluding the prior day's separate meeting.
-    func testAutomaticScopeStopsAtHighBoundaryExcludingPriorMeeting() throws {
+    /// D20: retrieval does NOT stop at a gap — it INCLUDES both sides, in order,
+    /// and leaves the boundary decision to the model's automaticBackward trim.
+    /// (Excluding the prior meeting is the model's job, not retrieval's — a gap
+    /// alone is not a scene change.)
+    func testAutomaticScopeIncludesBothSidesOfAHighGapForModelToTrim() throws {
         let root = makeTempSessionsRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -295,16 +297,76 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let day = Calendar(identifier: .gregorian).date(from: c)!
         let dayStart = startOfDayJST(day).timeIntervalSince1970
         try writeSession("ctx-brk", [
-            seg("前日の別会議", at: dayStart - 30 * 60),    // 23:30 (previous day) — ends
-            seg("今日の新しい会議", at: dayStart + 5 * 60),  // 00:05 (selected day) — new meeting
+            seg("前日の別会議", at: dayStart - 30 * 60),    // 23:30 (previous day)
+            seg("今日の新しい会議", at: dayStart + 5 * 60),  // 00:05 (selected day)
         ], under: root)
 
         let model = AmbientLogModel()
         model.selectedDay = startOfDayJST(day)
         let env = model.buildQueryEnvelope(actionId: "free", instruction: "まとめて",
                                            now: Date(), sessionsRoot: root)
-        XCTAssertEqual(env.segments.map(\.text), ["今日の新しい会議"],
-                       "a >15m gap is a scene boundary — the prior day's meeting is excluded")
+        XCTAssertEqual(env.segments.map(\.text), ["前日の別会議", "今日の新しい会議"],
+                       "retrieval includes both sides of the gap, ordered; exclusion is the model's job")
+        XCTAssertTrue(env.retrievalComplete, "a boundary exists within the window — retrieval is complete")
+    }
+
+    /// D20: a same-day lunch gap must not drop the morning — a mere time gap is
+    /// not a scene change; retrieval includes the whole day's history.
+    func testAutomaticScopeKeepsMorningAcrossALunchGap() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 18; c.hour = 12; c.timeZone = jst
+        let day = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(day).timeIntervalSince1970
+        try writeSession("ctx-lunch", [
+            seg("朝会", at: dayStart + 10 * 3600),    // 10:00
+            seg("午後MTG", at: dayStart + 14 * 3600),  // 14:00 (4h lunch gap)
+        ], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(day)
+        let env = model.buildQueryEnvelope(actionId: "free", instruction: "今日を全部",
+                                           now: Date(), sessionsRoot: root)
+        XCTAssertEqual(env.segments.map(\.text), ["朝会", "午後MTG"],
+                       "a lunch gap does not permanently drop the morning from retrieval")
+    }
+
+    /// D20 sanity cap: a gapless run that continues past the cap truncated an
+    /// ongoing conversation — reachedCap (client-side incomplete) is set. A run
+    /// with a boundary inside the window, or one that starts within it, is complete.
+    func testRetrievalReachedCapOnlyWhenGaplessRunContinuesPastCap() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+        let anchor = Date(timeIntervalSince1970: base)
+        // Every 5 min (gap < 900s) from 3h before the anchor to well past a 1h cap.
+        var segs: [TranscriptSegment] = []
+        var t = base - 3 * 3600
+        while t < base { segs.append(seg("u\(Int(t))", at: t)); t += 300 }
+        try writeSession("ctx-cap", segs, under: root)
+
+        let capped = AmbientStorage.segmentsBackwardFromAnchor(
+            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertTrue(capped.reachedCap,
+                      "a gapless run continuing past the 1h cap is incomplete")
+
+        // Add a >15m gap INSIDE the 1h window (skip [base-40m, base-20m)): the
+        // current conversation starts within the window, so retrieval is complete
+        // even though older data still continues past the cap.
+        var withBoundary: [TranscriptSegment] = []
+        var t2 = base - 3 * 3600
+        while t2 < base {
+            if t2 >= base - 2400 && t2 < base - 1200 { t2 += 300; continue }
+            withBoundary.append(seg("v\(Int(t2))", at: t2)); t2 += 300
+        }
+        try writeSession("ctx-cap", withBoundary, under: root)
+        let complete = AmbientStorage.segmentsBackwardFromAnchor(
+            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertFalse(complete.reachedCap,
+                       "a boundary within the window makes retrieval complete")
     }
 
     /// D20: midnight alone never splits a contiguous run.

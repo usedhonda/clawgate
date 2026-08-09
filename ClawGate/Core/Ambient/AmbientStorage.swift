@@ -214,44 +214,68 @@ enum AmbientStorage {
         return parts.isEmpty ? "empty" : parts.joined(separator: "|")
     }
 
-    /// D20: the automatic-scope retrieval source. Returns the backward-contiguous
-    /// run of segments ending strictly before `anchor`, crossing calendar days —
-    /// the calendar day is a display/navigation boundary, not a context boundary.
-    /// Walking backward from the newest segment, the run stops at the first
-    /// inter-segment gap greater than `gapSeconds` (the same 900s that defines
-    /// scene identity). The gap between the anchor and the newest segment never
-    /// splits the run, so a question asked minutes after a meeting still captures
-    /// it. Candidates span at least the previous day, so a midnight-straddling
-    /// conversation is not cut at 00:00. (A conversation contiguous for more than
-    /// a day without a 15-minute gap does not occur in practice; the gap boundary
-    /// is the real stopper, so a two-day candidate window is sufficient.)
+    /// D20: the automatic-scope retrieval source. Returns ALL segments in the
+    /// window `[anchor - sanityCapHours, anchor)`, crossing calendar days — the
+    /// calendar day is a display/navigation boundary, not a context boundary.
+    /// Retrieval does NOT stop at a time gap: a lunch gap must not permanently
+    /// drop the morning, and a mere gap is not a scene change. Deciding which
+    /// leading run to exclude is the MODEL's job (the shipped automaticBackward
+    /// suffix-trim contract); retrieval only supplies the cross-day ordered
+    /// history it trims from.
+    ///
+    /// The only bound is the sanity cap (default 48h, or the storage retention
+    /// window, whichever is smaller — callers pass the smaller). `reachedCap` is
+    /// true when the window truncated an ongoing conversation: the whole window
+    /// is one gapless run AND data continues past the cap (so the current
+    /// conversation may extend beyond what we fetched). When the window contains
+    /// a gap greater than `gapSeconds`, the model can find the conversation's
+    /// start within the window, so retrieval is complete even if older data
+    /// exists. `reachedCap` is the client-side "history incomplete" signal —
+    /// callers fail closed on it rather than letting the model assume it saw the
+    /// whole conversation (D16). No new wire/prefix field is added.
     static func segmentsBackwardFromAnchor(anchor: Date,
                                            gapSeconds: Double = 900,
+                                           sanityCapHours: Double = 48,
                                            timeZone: TimeZone,
-                                           sessionsRoot: URL) -> [TranscriptSegment] {
+                                           sessionsRoot: URL) -> (segments: [TranscriptSegment], reachedCap: Bool) {
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = timeZone
         let anchorEpoch = anchor.timeIntervalSince1970
+        let capEpoch = anchorEpoch - sanityCapHours * 3600
         let anchorDay = cal.startOfDay(for: anchor)
+        // The 48h window spans up to three calendar days; scan one extra day
+        // back so we can also see whether data continues just before the cap.
         var candidates: [TranscriptSegment] = []
-        for offset in [-1, 0] {
+        for offset in [-3, -2, -1, 0] {
             guard let d = cal.date(byAdding: .day, value: offset, to: anchorDay) else { continue }
             candidates += segments(forDay: d, timeZone: timeZone, sessionsRoot: sessionsRoot)
         }
-        let before = candidates
-            .filter { ($0.capturedAt ?? 0) < anchorEpoch }
-            .sorted { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
-        guard !before.isEmpty else { return [] }
-        var startIdx = 0
-        for i in stride(from: before.count - 1, to: 0, by: -1) {
-            let cur = before[i].capturedAt ?? 0
-            let prev = before[i - 1].capturedAt ?? 0
-            if cur - prev > gapSeconds {
-                startIdx = i
+        let sorted = candidates.sorted { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
+        let window = sorted.filter { seg in
+            guard let at = seg.capturedAt else { return false }
+            return at >= capEpoch && at < anchorEpoch
+        }
+        guard !window.isEmpty else { return ([], false) }
+
+        // Is there a real conversation boundary (gap) inside the window? If so,
+        // the model can locate the current conversation's start within it.
+        var hasInternalBoundary = false
+        for i in 1..<window.count {
+            if (window[i].capturedAt ?? 0) - (window[i - 1].capturedAt ?? 0) > gapSeconds {
+                hasInternalBoundary = true
                 break
             }
         }
-        return Array(before[startIdx...])
+        // Does the window's oldest segment continue (within one gap) into data
+        // older than the cap? Then the conversation may extend past what we
+        // fetched and, with no internal boundary, we truncated it.
+        let oldestInWindow = window.first?.capturedAt ?? anchorEpoch
+        let continuesPastCap = sorted.contains { seg in
+            guard let at = seg.capturedAt else { return false }
+            return at < capEpoch && (oldestInWindow - at) <= gapSeconds
+        }
+        let reachedCap = !hasInternalBoundary && continuesPastCap
+        return (window, reachedCap)
     }
 
     /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune
