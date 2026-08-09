@@ -242,6 +242,30 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
     }
 
+    /// D156: a stale-scope-cleared envelope is cancelled with a DISTINCT typed
+    /// status (not the generic empty-scope refusal), before any side effect.
+    func testStaleScopeClearedRefusesWithDistinctStatus() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let requestId = UUID().uuidString
+        var env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "slot-0", instruction: "このシーン",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [])
+        env.staleScopeCleared = true
+        let accepted = model.sendLogInstruction(envelope: env)
+
+        XCTAssertFalse(accepted, "a stale-scope action is cancelled, never dispatched")
+        XCTAssertEqual(model.logDispatchStatus, .staleScopeRefused(requestId: requestId),
+                       "the distinct stale-scope status wins over the generic empty-scope refusal")
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" })
+        XCTAssertFalse(model.isSummonBusy)
+    }
+
     // MARK: - D153 truncated-before-coverage parser branches
 
     /// A truncated automatic answer must TRIM a real leading prefix — full

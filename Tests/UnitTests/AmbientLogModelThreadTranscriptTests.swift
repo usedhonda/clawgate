@@ -148,13 +148,13 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
                        "the envelope must carry the true full-day count, not a clamped 2000")
     }
 
-    /// D45: an explicit selection that reconciles to NO current scene is
-    /// EXPLICITLY cleared — UI and query fall back to the SAME full-day scope.
-    /// This supersedes the A2 stopgap (hard scope, `segments` empty,
-    /// `scopeOverride` still set), which WAS the "visible full day / send 0"
-    /// divergence this Wave removes: display fell back to the full day while the
-    /// query sent zero. Now both share one scope.
-    func testBuildQueryEnvelopeStaleIrreconcilableSelectionClearsToFullDay() throws {
+    /// D156: an explicit selection that reconciles to NO current scene is NOT
+    /// silently widened to the full day within the same click (the old D45
+    /// clear-and-auto-expand). Instead the envelope is flagged `staleScopeCleared`
+    /// (empty segments, no scope), the commit publishes the clear so the chip
+    /// resets, and the action is cancelled downstream. The NEXT click — now with
+    /// no selection — uses automatic full-day scope.
+    func testBuildQueryEnvelopeStaleIrreconcilableSelectionRefusesNotAutoExpands() throws {
         let root = makeTempSessionsRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -172,12 +172,23 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         // D21: the pure resolver does not publish; the main-thread commit does.
         let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "このシーンだけ",
                                              sessionsRoot: root)
-        XCTAssertEqual(prepared.envelope.segments.map(\.text), ["real content A", "real content B"],
-                       "an irreconcilable stale selection clears to the full day, not an empty send")
-        XCTAssertNil(prepared.envelope.scopeOverride, "a cleared selection is automatic (full-day) scope")
-        model.commitPreparedLogQuery(prepared) { _, _ in }
+        XCTAssertTrue(prepared.envelope.segments.isEmpty,
+                      "a stale selection is NOT silently widened to the full day (no auto-expand)")
+        XCTAssertTrue(prepared.envelope.staleScopeCleared,
+                      "the envelope is flagged so the action is cancelled with a distinct status")
+        XCTAssertNil(prepared.envelope.scopeOverride)
+
+        var dispatched = 0
+        model.commitPreparedLogQuery(prepared) { _, _ in dispatched += 1 }
         XCTAssertTrue(model.selectedSceneIDs.isEmpty,
-                      "commit clears the irreconcilable selection so chip and query agree")
+                      "commit clears the stale selection so the chip resets for the next click")
+
+        // A fresh query — now with no selection — is the full-day automatic scope.
+        model.selectedSceneIDs = []
+        let next = model.prepareLogQuery(actionId: "slot-0", instruction: "全部", sessionsRoot: root)
+        XCTAssertEqual(next.envelope.segments.map(\.text), ["real content A", "real content B"],
+                       "the next click (no selection) uses automatic full-day scope")
+        XCTAssertFalse(next.envelope.staleScopeCleared)
     }
 
     /// D17: a single giant scene straddling the old 2000 display cap keeps ONE

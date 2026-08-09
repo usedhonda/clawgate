@@ -184,6 +184,12 @@ struct PetLogQueryEnvelope: Codable, Equatable {
     /// timestamp. Client-side ONLY (never encoded to the wire): the client fails
     /// closed on it rather than sending a silently partial/undated view.
     var sourceReadIncomplete: Bool = false
+    /// D156: an explicit scene selection that reconciled to nothing (its scene
+    /// id no longer exists / is ambiguous). The client does NOT silently widen it
+    /// to the full day within the same click — this flags the action to be
+    /// cancelled (typed status) and the chip cleared; the NEXT click (now with no
+    /// selection) uses automatic scope. Client-side ONLY.
+    var staleScopeCleared: Bool = false
 }
 
 extension PetLogQueryEnvelope {
@@ -244,7 +250,8 @@ extension PetLogQueryEnvelope {
             completeBeforeAnchor: completeBeforeAnchor,
             segments: newSegments,
             retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage,
-            sourceReadIncomplete: sourceReadIncomplete
+            sourceReadIncomplete: sourceReadIncomplete,
+            staleScopeCleared: staleScopeCleared
         )
     }
 }
@@ -580,6 +587,10 @@ enum PetLogDispatchStatus: Equatable {
     /// malformed line, or a real utterance missing a timestamp) — refused before
     /// dispatch rather than sending a silently partial/undated view.
     case sourceReadIncompleteRefused(requestId: String)
+    /// D156: the explicit scene selection went stale (its scene no longer
+    /// exists) — the client cleared it and cancelled this action rather than
+    /// silently widening to the full day. Click again for automatic scope.
+    case staleScopeRefused(requestId: String)
 }
 
 enum PetLogSelectionMode: Equatable {

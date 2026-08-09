@@ -163,14 +163,20 @@ impossible:
   set. A giant scene straddling the display cap therefore has ONE id across the
   chip and the query; selecting its chip sends the whole scene as an exact
   scope, never zero.
-- **Selection reconcile-or-clear (D45)**: `Scene.id` is the integer first-epoch,
-  which shifts when an earlier late/backfill segment joins the scene. A stale
-  selection is reconciled to the unique current scene whose `[startEpoch,
-  endEpoch]` contains the stale epoch (the id migrates, and the chip follows).
-  If it maps to no scene, an ambiguous set, or a non-numeric id, the WHOLE
-  selection is EXPLICITLY cleared and both the UI and the query fall back to the
-  same full-day (automatic) scope — never a display-only widen with an empty
-  send. `scopeOverride` reflects the reconciled ids (or nil when cleared).
+- **Selection reconcile-or-clear (D45/D156)**: `Scene.id` is the integer
+  first-epoch, which shifts when an earlier late/backfill segment joins the
+  scene. A stale selection is reconciled to the unique current scene whose
+  `[startEpoch, endEpoch]` contains the stale epoch (the id migrates, and the
+  chip follows). If it maps to no scene, an ambiguous set, or a non-numeric id,
+  the selection is EXPLICITLY cleared — but the QUERY is NOT silently widened to
+  the full day within that same click (D156, superseding the old D45
+  clear-and-auto-expand). The envelope is flagged `staleScopeCleared`, the commit
+  publishes the clear (the chip resets), and the action is cancelled with a
+  distinct typed `staleScopeRefused` status (dispatch 0, draft preserved). The
+  NEXT click — now with no selection — uses automatic full-day scope. The
+  DISPLAY still falls back to the full day (D17: display and query never diverge
+  into "visible full day / send 0"); only the auto-EXPAND of a hard-scope request
+  is withheld until the user clicks again.
 
 ### Cross-day backward context (D20)
 

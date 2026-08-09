@@ -557,11 +557,25 @@ final class AmbientLogModel: ObservableObject {
         let retrievalTruncatedBeforeCoverage: Bool
         // D159/D163: source-completeness issue found by the backward scan.
         let sourceReadIncomplete: Bool
+        // D156: an explicit selection that reconciled to nothing.
+        var staleScopeCleared = false
         if let ids = resolved.scopeIDs {
             candidateSegments = resolved.segments
             scopeOverride = ids
             retrievalTruncatedBeforeCoverage = false
             sourceReadIncomplete = false
+        } else if !selection.isEmpty {
+            // D156: the user's explicit scene selection is irreconcilable (its
+            // scene id no longer exists / is ambiguous). Do NOT silently widen it
+            // to the full automatic scope within this same click — clear it and
+            // cancel the action (staleScopeRefused). The NEXT click, now with no
+            // selection, uses automatic scope. This replaces the old D45
+            // clear-and-auto-expand-in-one-click behavior.
+            candidateSegments = []
+            scopeOverride = nil
+            retrievalTruncatedBeforeCoverage = false
+            sourceReadIncomplete = false
+            staleScopeCleared = true
         } else if day != today && daySegments.isEmpty {
             // D155: a non-today automatic query needs a coverage-tail anchor from
             // the SELECTED day itself. An empty past day has none — do NOT fall
@@ -630,7 +644,8 @@ final class AmbientLogModel: ObservableObject {
             completeBeforeAnchor: completeBeforeAnchor,
             segments: rawSegments,
             retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage,
-            sourceReadIncomplete: sourceReadIncomplete
+            sourceReadIncomplete: sourceReadIncomplete,
+            staleScopeCleared: staleScopeCleared
         )
     }
 
@@ -1373,6 +1388,8 @@ struct AmbientLogPetView: View {
             return "対象の履歴が大きすぎる/古すぎるため送信できません。シーン選択や対象範囲を狭めてください"
         case .sourceReadIncompleteRefused:
             return "ログの一部を読み取れなかったため送信できません（破損・タイムスタンプ欠落）"
+        case .staleScopeRefused:
+            return "選択したシーンが見つからないため選択を解除しました。もう一度押すと全日を対象にします"
         }
     }
 

@@ -1986,6 +1986,15 @@ final class PetModel: NSObject, ObservableObject {
                 segmentCount: requestedEnvelope.segments.count
             )
         )
+        // D156: an explicit selection that went stale was cleared (not silently
+        // widened to the full day). Cancel THIS action with a distinct typed
+        // status — the chip is already cleared, so the next click is automatic.
+        // Checked before the generic empty-scope refusal so the remedy is clear.
+        guard !requestedEnvelope.staleScopeCleared else {
+            logThreadPaneOpen = true
+            logDispatchStatus = .staleScopeRefused(requestId: requestedEnvelope.requestId)
+            return false
+        }
         // D3 fail-fast: an empty-scope envelope (e.g. a stale explicit scene
         // selection) has nothing to summarize — refuse before building/dispatch
         // as a TYPED status, never a conversation entry or a fake watchdog wait.
