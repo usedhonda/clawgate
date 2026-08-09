@@ -1687,6 +1687,10 @@ final class PetModel: NSObject, ObservableObject {
         let selectionMode: String
         let coverageStart: Date?
         let coverageEnd: Date?
+        // D153: the REQUEST-side truncation bit. The parser branches on THIS
+        // (not the model's self-reported response) so a model can't fake the
+        // relaxed truncated-answer path. Default false covers non-Log/test paths.
+        var retrievalTruncatedBeforeCoverage: Bool = false
 
         /// The correlation metadata to stamp onto a persisted log entry.
         func entryMetadata(contextDecision: PetLogContextDecision? = nil,
@@ -1707,7 +1711,8 @@ final class PetModel: NSObject, ObservableObject {
                 coverageEnd: coverageEnd,
                 policyVersion: PetLogPromptBuilder.policyVersion,
                 sourceFingerprint: PetLogSourceFingerprint.make(
-                    policyVersion: PetLogPromptBuilder.policyVersion, segmentIds: segmentIds)
+                    policyVersion: PetLogPromptBuilder.policyVersion, segmentIds: segmentIds),
+                retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage
             )
         }
     }
@@ -1989,22 +1994,23 @@ final class PetModel: NSObject, ObservableObject {
             logDispatchStatus = .emptyScopeRefused(requestId: requestedEnvelope.requestId)
             return false
         }
-        // D16/D20 fail-closed FIRST — before any admission side-effect. A3 never
-        // sends incomplete history to the model. Both causes (retrieval truncated
-        // at the sanity cap, or the request over budget) are pure envelope
-        // properties, so they are evaluated ahead of busy/not-connected admission:
-        // an incomplete/over-budget request refuses with a TYPED status only —
-        // NO log_user entry, NO summon-slot claim, NO watchdog, NO "Error" marker
-        // entry — leaving the user's draft intact (D60) even while busy or offline.
-        // Degraded (elided) dispatch stays disabled until a model-facing
-        // truncation signal exists (Target).
-        guard requestedEnvelope.retrievalComplete else {
+        // D153 client invariant — before any admission side-effect. Explicit
+        // scope is always non-truncated (day-scoped exact-all); a truncated
+        // explicit envelope is a client bug, so refuse it before dispatch rather
+        // than sending a contradictory envelope. Automatic truncation does NOT
+        // refuse here (A案): it dispatches with the wire flag set, and the model
+        // decides answer-with-boundary vs typed insufficient.
+        if requestedEnvelope.scopeOverride != nil && requestedEnvelope.retrievalTruncatedBeforeCoverage {
             logThreadPaneOpen = true
             recordPetLogAdmissionEvent(
-                .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: "sanityCap"))
+                .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: "explicitTruncatedInvariant"))
             logDispatchStatus = .historyIncompleteRefused(requestId: requestedEnvelope.requestId)
             return false
         }
+        // D16 budget fail-closed — a pure envelope property, evaluated ahead of
+        // busy/not-connected admission so an over-budget request refuses with a
+        // TYPED status only (no log_user entry, no slot claim, no watchdog, no
+        // "Error" marker) and the draft is preserved (D60) even while busy/offline.
         let requestBudget: Int
         #if DEBUG
         requestBudget = petLogRequestBudgetForTesting ?? PetLogRequestBudget.maxRequestBytes
@@ -2078,7 +2084,8 @@ final class PetModel: NSObject, ObservableObject {
             coverageStart: envelope.coverageStart,
             coverageEnd: envelope.coverageEnd,
             policyVersion: PetLogPromptBuilder.policyVersion,
-            sourceFingerprint: sourceFingerprint
+            sourceFingerprint: sourceFingerprint,
+            retrievalTruncatedBeforeCoverage: envelope.retrievalTruncatedBeforeCoverage
         )
         let userEntry = NotificationEntry(
             id: UUID().uuidString, text: envelope.instruction,
@@ -2142,7 +2149,8 @@ final class PetModel: NSObject, ObservableObject {
             scopeOverride: envelope.scopeOverride,
             selectionMode: selectionMode,
             coverageStart: envelope.coverageStart,
-            coverageEnd: envelope.coverageEnd
+            coverageEnd: envelope.coverageEnd,
+            retrievalTruncatedBeforeCoverage: envelope.retrievalTruncatedBeforeCoverage
         )
         sendLogSummon(message, requestId: envelope.requestId)
         return true
@@ -2313,7 +2321,8 @@ final class PetModel: NSObject, ObservableObject {
                         appendPersistentLogReplyEntry(failed)
                         return
                     }
-                    switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds, selectionMode: mode) {
+                    switch PetLogResultParser.parse(text, allowedSegmentIds: pending.segmentIds, selectionMode: mode,
+                                                    truncatedBeforeCoverage: pending.retrievalTruncatedBeforeCoverage) {
                     case .success(let result) where result.outcome == .insufficientEvidence:
                         // D3/D145: the model's typed discriminator (not an
                         // inference) says the log is insufficient. Surface a fixed

@@ -556,17 +556,21 @@ final class AmbientTests: XCTestCase {
     /// was already caught and fixed.
     func testUniversalPrefixTagsPolicyVersionExactlyOnce() {
         let prefix = PetLogPromptBuilder.universalPrefix()
-        let occurrences = prefix.components(separatedBy: "[pet-log-context-v2]").count - 1
+        let tag = "[\(PetLogPromptBuilder.policyVersion)]"
+        let occurrences = prefix.components(separatedBy: tag).count - 1
         XCTAssertEqual(occurrences, 1, "policy tag must be present exactly once, not doubled")
-        XCTAssertFalse(prefix.contains("pet-log-context-pet-log-context-v2"))
+        XCTAssertFalse(prefix.contains("pet-log-context-pet-log-context"))
     }
 
-    /// D1 prefix v2: the required clauses must be present — scope re-resolution
-    /// ban, scene-id-vs-segment-id type note, session-contamination boundary,
-    /// contiguous-backward-suffix rule, and insufficient-evidence instruction.
-    func testUniversalPrefixV2HasRequiredClauses() {
+    /// D1/D153 prefix v3: the required clauses must be present — scope
+    /// re-resolution ban, scene-id-vs-segment-id type note, session-contamination
+    /// boundary, contiguous-backward-suffix rule, insufficient-evidence
+    /// instruction, and the truncated-before-coverage answer-or-insufficient rule.
+    func testUniversalPrefixV3HasRequiredClauses() {
         let prefix = PetLogPromptBuilder.universalPrefix()
-        XCTAssertTrue(prefix.contains("pet-log-context-v2"))
+        XCTAssertTrue(prefix.contains(PetLogPromptBuilder.policyVersion))
+        XCTAssertTrue(prefix.contains("retrievalTruncatedBeforeCoverage"),
+                      "D153: the truncated-before-coverage clause must be present in v3")
         XCTAssertTrue(prefix.contains("再解決"), "scope re-resolution ban clause")
         XCTAssertTrue(prefix.contains("シーンID") && prefix.contains("epoch"), "scene-id type note")
         XCTAssertTrue(prefix.contains("既往の会話") && prefix.contains("記憶"), "session-contamination boundary")
@@ -916,6 +920,7 @@ final class AmbientTests: XCTestCase {
         XCTAssertEqual(Set(dict.keys), [
             "requestId", "actionId", "instruction", "queryTimestamp", "anchorTimestamp",
             "scopeOverride", "coverageStart", "coverageEnd", "completeBeforeAnchor", "segments",
+            "retrievalTruncatedBeforeCoverage",
         ], "envelope must carry exactly the contract key set, no more, no fewer")
         XCTAssertTrue(dict["scopeOverride"] is NSNull, "nil scopeOverride must serialize as explicit JSON null")
         XCTAssertTrue(dict["coverageStart"] is NSNull, "nil coverageStart must serialize as explicit JSON null")

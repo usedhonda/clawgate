@@ -548,26 +548,23 @@ final class AmbientLogModel: ObservableObject {
             selection: selection, scenes: daysScenes, daySegments: daySegments)
         let candidateSegments: [TranscriptSegment]
         let scopeOverride: [String]?
-        // D20: retrieval never stops at a gap. `retrievalComplete` is false
-        // whenever retained data older than the sanity cap exists — storage
-        // cannot prove a gap is a semantic boundary, so it fails closed rather
-        // than sending partial history to the model (D16). Explicit day-scoped
-        // selection is complete.
-        let retrievalComplete: Bool
+        // D20/D153: automatic retrieval never stops at a gap; it supplies the
+        // cross-day window ending at the anchor and reports whether older history
+        // exists beyond it (`truncatedBeforeCoverage`). Unlike the old fail-closed
+        // signal this does NOT refuse — the flag travels to the model (v3), which
+        // answers only with a high-confidence boundary. Explicit scope is always
+        // non-truncated (day-scoped exact-all).
+        let retrievalTruncatedBeforeCoverage: Bool
         if let ids = resolved.scopeIDs {
-            // Explicit scene selection stays day-scoped exact-all.
             candidateSegments = resolved.segments
             scopeOverride = ids
-            retrievalComplete = true
+            retrievalTruncatedBeforeCoverage = false
         } else {
-            // D20: automatic scope is the whole cross-day window ending at the
-            // anchor — the conversation you are in, not the calendar day. The
-            // model trims the leading run; retrieval only supplies the history.
-            let backward = AmbientStorage.segmentsBackwardFromAnchor(
+            let scan = AmbientStorage.scanBackward(
                 anchor: anchor, timeZone: timeZone, sessionsRoot: sessionsRoot)
-            candidateSegments = backward.segments
+            candidateSegments = scan.window
             scopeOverride = nil
-            retrievalComplete = !backward.reachedCap
+            retrievalTruncatedBeforeCoverage = scan.truncatedBeforeCoverage
         }
 
         // Every segment here is expected to already carry a capturedAt
@@ -618,7 +615,7 @@ final class AmbientLogModel: ObservableObject {
             coverageEnd: coverageEnd,
             completeBeforeAnchor: completeBeforeAnchor,
             segments: rawSegments,
-            retrievalComplete: retrievalComplete
+            retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage
         )
     }
 

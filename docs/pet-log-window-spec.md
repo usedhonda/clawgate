@@ -33,11 +33,30 @@ fields to the Gateway wire contract.
 
 ### Policy version
 
-`policyVersion` = `pet-log-context-v2`. It is emitted as a literal tag at the
+`policyVersion` = `pet-log-context-v3`. It is emitted as a literal tag at the
 top of the universal prefix and echoed in the response schema; the parser
 rejects a reply whose `contextDecision.policyVersion` does not match.
 
-### Prefix v2 contract (D1/D6/D3 prefix text)
+### Truncated-before-coverage retrieval (D153)
+
+Automatic retrieval never refuses on truncation. A single backward scan of the
+retained sessions (partitioned by `capturedAt`, never file mtime) returns the
+in-`[anchor − 48h, anchor)` window plus `truncatedBeforeCoverage` = whether any
+retained segment is older than the cap. The envelope carries
+`retrievalTruncatedBeforeCoverage` on the WIRE (v3); with the v3 prefix it tells
+the model that history may exist before `coverageStart`. The model may then
+answer ONLY when it can identify a high-confidence semantic boundary inside the
+window (a real leading-prefix trim, justified by non-empty `boundaryReasonCodes`);
+otherwise it returns typed `insufficientEvidence` with `historyComplete=false`.
+A time gap alone is never a boundary. The parser branches on the REQUEST-side
+truncation bit (persisted on `PendingLogRequest`), never the model's
+self-report, so a model cannot fake the relaxed path. Explicit scope is always
+non-truncated (day-scoped exact-all); a truncated explicit envelope is a client
+invariant violation refused before dispatch. Only an over-budget request (either
+mode) still refuses fail-closed. `retrievalTruncatedBeforeCoverage` is persisted
+to entry metadata as `Bool?` (nil for pre-v3 records).
+
+### Prefix v3 contract (D1/D6/D3/D153 prefix text)
 
 The universal prefix instructs the model as follows:
 
@@ -152,22 +171,15 @@ user is in, not the calendar day:
   job (the shipped `automaticBackward` suffix-trim contract). Retrieval only
   supplies the ordered cross-day history; both sides of a gap are included, in
   order, and the model trims. A conversation straddling midnight is one context.
-- The only bound is the sanity cap (48h, or the storage retention window,
-  whichever is smaller). The client-side incomplete signal
-  (`retrievalComplete == false`) is set conservatively whenever ANY retained
-  data older than the cap exists: the storage layer cannot prove that a time
-  gap is a semantic conversation boundary (that trimming is the model's job), so
-  a gap inside the window does NOT make retrieval complete — the conversation
-  the user is asking about may extend into what the cap truncated. Retrieval is
-  complete only when no older retained data exists at all. Detection combines
-  the decoded 3-day scan with a cheap no-decode check: a non-empty session file
-  last written before the cap can only hold pre-cap data, so it marks retrieval
-  incomplete even when it falls outside the scan window.
-- `retrievalComplete` is client-side only, NEVER encoded to the wire (a
-  model-facing signal needs a prefix revision — out of scope). It is distinct
-  from `completeBeforeAnchor` (the anchor-cutoff verification). The client fails
-  closed on `retrievalComplete == false` (see Context budget below).
-- Explicit scene selection stays day-scoped exact-all (unchanged).
+- The only bound is the sanity cap (48h). When retained data older than the cap
+  exists, retrieval is NOT refused (D153): the window is dispatched with
+  `retrievalTruncatedBeforeCoverage = true`, and the model decides whether to
+  answer (with a high-confidence boundary) or return typed insufficient. See
+  "Truncated-before-coverage retrieval (D153)" above for the full contract; the
+  bit is determined from `capturedAt` via a single backward scan (never file
+  mtime). It is distinct from `completeBeforeAnchor` (the anchor-cutoff
+  verification).
+- Explicit scene selection stays day-scoped exact-all, always non-truncated.
 - `coverageStart`/`coverageEnd` reflect the actual cross-day retrieved range.
 
 ### Context budget & fail-closed history (D16)
@@ -188,22 +200,25 @@ of incompleteness converge to ONE typed fail-closed path.
   is kept), and a keep-first id dedup (two segments must never share an id, or
   the parser's duplicate-id rule would reject the envelope's own scope).
 - **Fits**: a request under budget is dispatched unchanged (no transformation).
-- **Fail-closed refusal**: when the history cannot be dispatched intact — the
-  automatic window truncated at the sanity cap (`retrievalComplete == false`),
-  OR the request exceeds the budget (either mode) — the request is refused
-  BEFORE any side-effect: no `log_user` entry, no summon-slot claim, no reply
-  watchdog, no send. Because both causes are pure envelope properties, this
-  refusal is evaluated AHEAD of the busy / not-connected admission checks: an
-  incomplete or over-budget request surfaces the typed incomplete status even
-  while a prior summon is in flight or the connection is down, and never appends
-  a busy / not-connected "Error" marker entry. The user's draft/instruction text
-  is preserved (D60). The only outputs are a typed `historyIncompleteRefused`
+- **Fail-closed refusal**: automatic truncation NO LONGER refuses (D153 — it
+  dispatches with the wire flag). The remaining pre-dispatch refusals are the
+  over-budget request (either mode) and the explicit-truncated client invariant
+  violation. A refusal happens BEFORE any side-effect: no `log_user` entry, no
+  summon-slot claim, no reply watchdog, no send. Because the cause is a pure
+  envelope property, the refusal is evaluated AHEAD of the busy / not-connected
+  admission checks: an over-budget request surfaces the typed status even while a
+  prior summon is in flight or the connection is down, and never appends a busy /
+  not-connected "Error" marker entry. The user's draft/instruction text is
+  preserved (D60). The only outputs are a typed `historyIncompleteRefused`
   status (reason + remedy: narrow the scene selection or the time range) and a
-  telemetry event recording the specific cause (`sanityCap` /
+  telemetry event recording the specific cause (`explicitTruncatedInvariant` /
   `automaticScopeOverBudget` / `explicitScopeOverBudget`).
-- **No degraded dispatch in A3**: whole-segment elision-and-send is NOT
-  implemented; an over-budget automatic scope refuses rather than trimming. See
-  Target for the unlock condition.
+- **Cap-truncation now dispatches (D153)**: the model-facing truncation signal
+  is shipped — a cap-truncated automatic scope is sent with
+  `retrievalTruncatedBeforeCoverage = true` rather than refused, and the model
+  answers only with a high-confidence boundary. Budget-driven whole-segment
+  elision-and-send is still NOT implemented; an over-budget scope refuses rather
+  than trimming (see Target).
 
 ### Background load & cache safety (D21/D42)
 
@@ -305,12 +320,14 @@ shared-summon events (which have no requestId) carry a bounded owner token, and 
 All Wave A2/A3 contract behavior is now shipped and Normative above (the minimal
 one-line dispatch status is already shipped, per the D3 section).
 
-- **Model-facing truncation signal + degraded dispatch**: A3 fails closed on
-  incomplete history (D16) because there is no way to tell the model it is
-  seeing a partial view. Degraded (whole-segment elision-and-send) dispatch for
-  automatic scope MUST NOT be unlocked until the envelope AND the universal
-  prefix carry an explicit model-facing truncation signal (so the model cannot
-  mistake a trimmed history for the whole conversation). This is a guarded
-  invariant: no degraded dispatch without that signal.
+- **Model-facing truncation signal — SHIPPED (D153)**: the cap-truncation signal
+  now exists (`retrievalTruncatedBeforeCoverage` on the wire + the v3 prefix
+  rule), so a cap-truncated automatic scope dispatches instead of failing closed
+  (see Normative above). **Budget-driven degraded dispatch** (whole-segment
+  elision-and-send to fit an over-budget scope) remains the future item: it MUST
+  NOT be unlocked until an elision carries its own explicit model-facing "this
+  was trimmed to fit" signal, so the model cannot mistake a budget-trimmed
+  history for the whole conversation. A guarded invariant: no budget elision
+  without that signal; until then an over-budget scope refuses.
 - Later UI (full status banner / retry UI) and cross-day retrieval refinements
   are tracked in the plan and will be added here when they ship.

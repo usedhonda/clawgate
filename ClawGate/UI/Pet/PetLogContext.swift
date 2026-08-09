@@ -171,19 +171,21 @@ struct PetLogQueryEnvelope: Codable, Equatable {
     /// PetLogContextDecision.
     let completeBeforeAnchor: Bool
     let segments: [PetLogRawSegment]
-    /// D20/D16 client-side signal: false when retrieval truncated an ongoing
-    /// conversation at the sanity cap (48h) so the history is NOT complete. This
-    /// is distinct from `completeBeforeAnchor` (the anchor-cutoff verification)
-    /// and is NEVER encoded to the wire (see `encode(to:)`) — a model-facing
-    /// truncation signal needs a prefix revision (Explicitly Out of A3). The
-    /// client fails closed on `false` rather than dispatching partial history.
-    var retrievalComplete: Bool = true
+    /// D153: true when automatic retrieval was truncated before its coverage —
+    /// retained history older than the 48h sanity cap exists, so the conversation
+    /// the user is asking about MAY extend earlier than `coverageStart`. Unlike
+    /// the old fail-closed `retrievalComplete`, this does NOT refuse the send: it
+    /// is ENCODED to the wire (v3) and, with the v3 prefix, tells the model it may
+    /// answer only when it can find a high-confidence semantic boundary inside the
+    /// window (else typed insufficient). Always false for explicit scope.
+    var retrievalTruncatedBeforeCoverage: Bool = false
 }
 
 extension PetLogQueryEnvelope {
     enum CodingKeys: String, CodingKey {
         case requestId, actionId, instruction, queryTimestamp, anchorTimestamp
         case scopeOverride, coverageStart, coverageEnd, completeBeforeAnchor, segments
+        case retrievalTruncatedBeforeCoverage
     }
 
     /// Emit the exact key set always, with explicit JSON `null` for the
@@ -215,6 +217,9 @@ extension PetLogQueryEnvelope {
         }
         try container.encode(completeBeforeAnchor, forKey: .completeBeforeAnchor)
         try container.encode(segments, forKey: .segments)
+        // D153: encoded to the wire — the model reads this to decide whether it
+        // may answer (with a high-confidence boundary) or must return insufficient.
+        try container.encode(retrievalTruncatedBeforeCoverage, forKey: .retrievalTruncatedBeforeCoverage)
     }
 
     /// Returns a copy carrying `newSegments`, with `coverageStart`/`coverageEnd`
@@ -233,7 +238,7 @@ extension PetLogQueryEnvelope {
             coverageEnd: epochs.max().map { Date(timeIntervalSince1970: $0) },
             completeBeforeAnchor: completeBeforeAnchor,
             segments: newSegments,
-            retrievalComplete: retrievalComplete
+            retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage
         )
     }
 }
@@ -290,7 +295,7 @@ enum PetLogRequestEnforcer {
 // MARK: - Universal hidden prefix (pure builder)
 
 enum PetLogPromptBuilder {
-    static let policyVersion = "pet-log-context-v2"
+    static let policyVersion = "pet-log-context-v3"
 
     /// The instruction text sent ahead of the JSON envelope. Pure, static,
     /// versioned — every preset/custom/free Log action goes through this
@@ -312,6 +317,10 @@ enum PetLogPromptBuilder {
         - `scopeOverride`: モードフラグです（不活性メタデータではありません）。これが与えられている場合、
           クライアントは既にハードスコープを適用済みで、`segments` はその確定範囲です。値に含まれるシーンID
           （epoch整数）は `segments[].id` とは別物であり、セグメントIDとして解釈してはいけません。
+        - `retrievalTruncatedBeforeCoverage`: モードフラグです（不活性メタデータではありません）。`true` の
+          場合、`coverageStart` より前にも保持された会話履歴が存在し得ますが、それはこの envelope には
+          含まれていません（automaticスコープのみで、48h上限により後方が打ち切られたことを意味します）。
+          あなたが見ているのは会話の途中からの可能性があるという警告です。判断への影響は (a) を参照。
 
         事実根拠の境界: 回答の事実根拠として使えるのは、この envelope の `segments` だけです。過去セッションの
         既往の会話や記憶は、たとえ `instruction` がそれらを求めていても、証拠として使ってはいけません。必要な
@@ -330,6 +339,12 @@ enum PetLogPromptBuilder {
               明白な場面変更（話題・参加者がはっきり切り替わったこと）が高確信度で判断できる場合に、先頭側
               のみ行ってください。時間の空白、語彙の変化、参加者の変化だけでは場面変更と判断しないでください。
               判断に迷う場合は除外せず含めてください。
+            - `retrievalTruncatedBeforeCoverage` が `true` の場合（automaticスコープ）: 与えられた範囲より
+              前に履歴が存在し得るため、この範囲が対象の会話の「始まり」を含んでいる保証はありません。範囲内
+              に高確信度の場面境界（明白な場面変更・明示的な会話の終了）を見つけられ、それ以降が独立した会話
+              だと確信できる場合にのみ `"answer"` を返してください。境界を確認できない場合（範囲の先頭が別の
+              会話の途中かもしれない場合）は、創作せず `outcome` を `"insufficientEvidence"` にしてください。
+              時間の空白だけを境界とみなしてはいけません。
             - 使える `segments` が空、または文字化け等で根拠にならないものだけの場合は、項目を創作せず、
               `outcome` を `"insufficientEvidence"` にしてください。automaticスコープでは
               `includedSegmentIds` を空にし、explicitスコープでは指定された全IDをそのまま
@@ -488,6 +503,10 @@ struct PetLogEntryMetadata: Codable, Equatable {
     let policyVersion: String?
     /// Body-free fingerprint of the raw snapshot (policyVersion + ordered ids).
     let sourceFingerprint: String?
+    /// D153/D158: whether automatic retrieval was truncated before its coverage.
+    /// `Bool?` (decodes to nil for pre-v3 records that lack the key — a
+    /// nonoptional Bool would fail whole-entry decode and mis-fire D9 quarantine).
+    let retrievalTruncatedBeforeCoverage: Bool?
 
     init(contextDecision: PetLogContextDecision? = nil,
          completeBeforeAnchor: Bool? = nil,
@@ -502,7 +521,8 @@ struct PetLogEntryMetadata: Codable, Equatable {
          coverageStart: Date? = nil,
          coverageEnd: Date? = nil,
          policyVersion: String? = nil,
-         sourceFingerprint: String? = nil) {
+         sourceFingerprint: String? = nil,
+         retrievalTruncatedBeforeCoverage: Bool? = nil) {
         self.contextDecision = contextDecision
         self.completeBeforeAnchor = completeBeforeAnchor
         self.dispatch = dispatch
@@ -517,6 +537,7 @@ struct PetLogEntryMetadata: Codable, Equatable {
         self.coverageEnd = coverageEnd
         self.policyVersion = policyVersion
         self.sourceFingerprint = sourceFingerprint
+        self.retrievalTruncatedBeforeCoverage = retrievalTruncatedBeforeCoverage
     }
 
     /// True when either signal suggests the answer's context may be
@@ -543,10 +564,11 @@ enum PetLogDispatchStatus: Equatable {
     case emptyScopeRefused(requestId: String)
     /// Segments were sent but the model kept none — "ログ不足".
     case insufficientEvidence(requestId: String)
-    /// D16/D20 fail-closed: the history could not be dispatched intact — it was
-    /// truncated at the sanity cap, or the request exceeded the budget. A3 never
-    /// sends partial history to the model, so all such cases converge here and
-    /// refuse before dispatch (typed status + telemetry only).
+    /// D16/D153 fail-closed: the request could not be dispatched — it exceeded
+    /// the budget, or it was an explicit scope flagged truncated (a client
+    /// invariant violation). Cap truncation is NO longer refused (it dispatches
+    /// with the wire flag, D153). These refusals surface a typed status +
+    /// telemetry only, before any side-effect.
     case historyIncompleteRefused(requestId: String)
 }
 
@@ -614,6 +636,10 @@ enum PetLogParseError: Error, Equatable {
     case insufficientMustHaveNullExcluded
     // D142 — the excluded-adjacent range must describe the FULL dropped prefix.
     case excludedAdjacentRangeIncomplete
+    // D153 — truncated-before-coverage automatic answer/insufficient constraints.
+    case truncatedAnswerRequiresBoundaryTrim
+    case truncatedAnswerRequiresReasonCodes
+    case truncatedInsufficientRequiresIncompleteHistory
     // D146/D52 — response bounds.
     case responseTooLarge
     case answerTooLong
@@ -640,7 +666,8 @@ enum PetLogResultParser {
     /// set, a blank answer, a negative correction count) is a sign the reply
     /// can't be trusted and is rejected.
     static func parse(_ text: String, allowedSegmentIds: [String],
-                      selectionMode: PetLogSelectionMode) -> Result<PetLogModelResult, PetLogParseError> {
+                      selectionMode: PetLogSelectionMode,
+                      truncatedBeforeCoverage: Bool = false) -> Result<PetLogModelResult, PetLogParseError> {
         // D41: duplicate sent ids make positional validation ambiguous — the
         // builder must send unique ids, so a duplicate is a hard failure.
         guard Set(allowedSegmentIds).count == allowedSegmentIds.count else {
@@ -782,6 +809,14 @@ enum PetLogResultParser {
                 // answer gate (low/medium confidence is fine — it isn't a
                 // boundary-selection success).
                 guard included.isEmpty else { return .failure(.insufficientInclusionMismatch) }
+                // D153: when the request was truncated before coverage, a
+                // "cannot find the boundary" insufficient must assert incomplete
+                // history — it is exactly the case where earlier context is missing.
+                if truncatedBeforeCoverage {
+                    guard decision.historyComplete == false else {
+                        return .failure(.truncatedInsufficientRequiresIncompleteHistory)
+                    }
+                }
             case .explicitExact:
                 // D145: explicit insufficient must echo the exact-all scope
                 // (proof the model read the whole scope) — never empty/partial.
@@ -821,6 +856,19 @@ enum PetLogResultParser {
                           ex.startSegmentId == allowedSegmentIds.first,
                           ex.endSegmentId == allowedSegmentIds[pIncFirst - 1] else {
                         return .failure(.excludedAdjacentRangeIncomplete)
+                    }
+                }
+                // D153: a truncated automatic query may only answer when the
+                // model actually FOUND the conversation's start inside the
+                // window — i.e. it trimmed a real leading prefix (subset, never
+                // full inclusion) AND justified the boundary with reason codes.
+                // High confidence is already required for any subset above.
+                if truncatedBeforeCoverage {
+                    guard included != allowedSegmentIds else {
+                        return .failure(.truncatedAnswerRequiresBoundaryTrim)
+                    }
+                    guard !decision.boundaryReasonCodes.isEmpty else {
+                        return .failure(.truncatedAnswerRequiresReasonCodes)
                     }
                 }
             }

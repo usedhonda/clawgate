@@ -412,7 +412,8 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
                                            now: Date(), sessionsRoot: root)
         XCTAssertEqual(env.segments.map(\.text), ["前日の別会議", "今日の新しい会議"],
                        "retrieval includes both sides of the gap, ordered; exclusion is the model's job")
-        XCTAssertTrue(env.retrievalComplete, "a boundary exists within the window — retrieval is complete")
+        XCTAssertFalse(env.retrievalTruncatedBeforeCoverage,
+                       "no retained data older than the cap — not truncated")
     }
 
     /// D20: a same-day lunch gap must not drop the morning — a mere time gap is
@@ -437,91 +438,58 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
                        "a lunch gap does not permanently drop the morning from retrieval")
     }
 
-    /// D20/D16 sanity cap: retrieval is conservatively INCOMPLETE whenever any
-    /// retained data older than the cap exists. Storage cannot prove a gap is a
-    /// semantic boundary, so a gap inside the window does NOT make it complete —
-    /// only a window with no older retained data at all is complete.
-    func testRetrievalReachedCapWheneverOlderDataExistsPastCap() throws {
+    /// D153: scanBackward reports `truncatedBeforeCoverage` from capturedAt
+    /// (never mtime) — true whenever any retained segment is older than the cap.
+    /// The window is exactly the in-`[cap, anchor)` segments, ordered. A pre-cap
+    /// segment marks truncation even when the file's mtime is recent (backfilled).
+    func testScanBackwardTruncatedFromCapturedAtAndOrderedWindow() throws {
         let root = makeTempSessionsRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
         var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
         let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
         let anchor = Date(timeIntervalSince1970: base)
-        // Every 5 min from 3h before the anchor to well past a 1h cap.
-        var segs: [TranscriptSegment] = []
-        var t = base - 3 * 3600
-        while t < base { segs.append(seg("u\(Int(t))", at: t)); t += 300 }
-        try writeSession("ctx-cap", segs, under: root)
 
-        let capped = AmbientStorage.segmentsBackwardFromAnchor(
-            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
-        XCTAssertTrue(capped.reachedCap,
-                      "retained data older than the 1h cap makes retrieval incomplete")
+        // (c) only within-cap data -> not truncated; window = those segments.
+        var within: [TranscriptSegment] = []
+        var t = base - 1800  // 30 min before anchor (inside the 1h cap)
+        while t < base { within.append(seg("w\(Int(t))", at: t)); t += 300 }
+        try writeSession("ctx-in", within, under: root)
+        let s1 = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertFalse(s1.truncatedBeforeCoverage, "no data older than the cap -> not truncated")
+        XCTAssertEqual(s1.window.map(\.text), within.map(\.text), "window is the ordered in-cap segments")
 
-        // A >15m gap INSIDE the 1h window (skip [base-40m, base-20m)) does NOT
-        // make it complete: older data still exists past the cap, and a gap is
-        // not a boundary the storage layer is allowed to trust.
-        var withBoundary: [TranscriptSegment] = []
-        var t2 = base - 3 * 3600
-        while t2 < base {
-            if t2 >= base - 2400 && t2 < base - 1200 { t2 += 300; continue }
-            withBoundary.append(seg("v\(Int(t2))", at: t2)); t2 += 300
-        }
-        try writeSession("ctx-cap", withBoundary, under: root)
-        let stillIncomplete = AmbientStorage.segmentsBackwardFromAnchor(
-            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
-        XCTAssertTrue(stillIncomplete.reachedCap,
-                      "a gap inside the window is not a boundary — older pre-cap data still means incomplete")
-
-        // Only data entirely within the window (nothing older than the cap) is
-        // complete.
-        var withinCapOnly: [TranscriptSegment] = []
-        var t3 = base - 1800  // 30 min before anchor, all inside the 1h cap
-        while t3 < base { withinCapOnly.append(seg("w\(Int(t3))", at: t3)); t3 += 300 }
-        try writeSession("ctx-cap", withinCapOnly, under: root)
-        let complete = AmbientStorage.segmentsBackwardFromAnchor(
-            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
-        XCTAssertFalse(complete.reachedCap,
-                       "no retained data older than the cap — retrieval is complete")
+        // (a) a pre-cap segment exists -> truncated, EVEN though its file's mtime
+        // is recent (written just now). Determined by capturedAt, not mtime.
+        try writeSession("ctx-old", [seg("古い", at: base - 3 * 3600)], under: root) // 3h before, < 1h cap
+        let s2 = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertTrue(s2.truncatedBeforeCoverage,
+                      "a pre-cap capturedAt marks truncation regardless of a recent mtime")
+        XCTAssertEqual(s2.window.map(\.text), within.map(\.text),
+                       "the pre-cap segment is reported as truncation, not placed in the window")
     }
 
-    /// D20: the no-decode extension — a session file last written before the cap
-    /// (its content therefore entirely pre-cap) marks retrieval incomplete even
-    /// when it falls OUTSIDE the 3-day decode scan window, so old retained
-    /// archives are never silently treated as absent.
-    func testRetrievalReachedCapFromPreCapSessionFileOutsideScanWindow() throws {
+    /// D153: an OLD file mtime does NOT imply truncation — only capturedAt does.
+    /// A session last written long ago but holding only within-cap segments is
+    /// not truncated (mtime is a cache hint, never the truncation signal).
+    func testScanBackwardOldMtimeWithinCapIsNotTruncated() throws {
         let root = makeTempSessionsRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
         var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
         let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
         let anchor = Date(timeIntervalSince1970: base)
-        let capEpoch = base - 3600  // 1h cap
 
-        // A recent in-window session (so the window is non-empty and, on its own,
-        // complete).
-        var recent: [TranscriptSegment] = []
-        var t = base - 1800
-        while t < base { recent.append(seg("r\(Int(t))", at: t)); t += 300 }
-        try writeSession("ctx-recent", recent, under: root)
-        let beforeArchive = AmbientStorage.segmentsBackwardFromAnchor(
-            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
-        XCTAssertFalse(beforeArchive.reachedCap, "recent in-window data alone is complete")
-
-        // An archive whose data sits days before the scan window AND whose file
-        // was last written before the cap — undetectable by the decode scan, but
-        // its stale mtime proves pre-cap history exists.
-        try writeSession("ctx-archive", [seg("old", at: base - 6 * 86400)], under: root)
-        let archiveRaw = root.appendingPathComponent("ctx-archive/transcripts/raw.jsonl")
+        try writeSession("ctx-w", [seg("直近", at: base - 600)], under: root) // 10 min before, in cap
+        let raw = root.appendingPathComponent("ctx-w/transcripts/raw.jsonl")
         try FileManager.default.setAttributes(
-            [.modificationDate: Date(timeIntervalSince1970: capEpoch - 1000)],
-            ofItemAtPath: archiveRaw.path)
+            [.modificationDate: Date(timeIntervalSince1970: base - 10 * 86400)], // stale mtime
+            ofItemAtPath: raw.path)
 
-        let withArchive = AmbientStorage.segmentsBackwardFromAnchor(
-            anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
-        XCTAssertTrue(withArchive.reachedCap,
-                      "a pre-cap session file outside the scan window still marks retrieval incomplete")
+        let scan = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertFalse(scan.truncatedBeforeCoverage,
+                       "a stale mtime with only within-cap capturedAt is NOT truncated")
+        XCTAssertEqual(scan.window.map(\.text), ["直近"])
     }
 
     /// D20: midnight alone never splits a contiguous run.

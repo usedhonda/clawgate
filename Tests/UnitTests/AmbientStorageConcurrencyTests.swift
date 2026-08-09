@@ -59,8 +59,8 @@ final class AmbientStorageConcurrencyTests: XCTestCase {
             let poll = AmbientStorage.segments(forDay: startOfDayJST(day), timeZone: jst, sessionsRoot: root)
             // The whole day is one contiguous run (1s apart), within the 48h
             // window, so the backward window from a post-tail anchor equals the day.
-            let query = AmbientStorage.segmentsBackwardFromAnchor(
-                anchor: anchor, timeZone: jst, sessionsRoot: root).segments
+            let query = AmbientStorage.scanBackward(
+                anchor: anchor, timeZone: jst, sessionsRoot: root).window
             if poll.count != expected || query.count != expected {
                 lock.lock(); mismatches.add("i=\(i) poll=\(poll.count) query=\(query.count) exp=\(expected)"); lock.unlock()
             }

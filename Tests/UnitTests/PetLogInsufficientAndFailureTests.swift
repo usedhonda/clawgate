@@ -4,6 +4,25 @@ import XCTest
 /// D3 (insufficient-evidence + fail-fast) and D72 (parser-failure metadata
 /// retention). Abstract synthetic data only.
 final class PetLogInsufficientAndFailureTests: XCTestCase {
+    private var originalLogStoreDir = ""
+
+    // A dispatched (accepted) Log request persists a log_user entry through
+    // PetLogStore — redirect it to a throwaway temp dir so a test never writes
+    // to the user's real ~/.clawgate/logs/*.json (2026-07-14 data-loss incident).
+    override func setUp() {
+        super.setUp()
+        PetLogStore.testIsolationSemaphore.wait()
+        originalLogStoreDir = PetLogStore.dir
+        PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
+    }
+
+    override func tearDown() {
+        try? FileManager.default.removeItem(atPath: PetLogStore.dir)
+        PetLogStore.dir = originalLogStoreDir
+        PetLogStore.testIsolationSemaphore.signal()
+        super.tearDown()
+    }
+
     private func segment(_ id: String) -> PetLogRawSegment {
         PetLogRawSegment(id: id, capturedAt: nil, startSeconds: 0, endSeconds: 1, speaker: nil, text: "x")
     }
@@ -18,13 +37,30 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
 
     /// An insufficient reply: typed discriminator + null answer. Included is []
     /// for automatic, the exact-all echo for explicit (D145).
-    private func insufficientReply(included: [String], confidence: String = "high") -> String {
+    private func insufficientReply(included: [String], confidence: String = "high",
+                                   historyComplete: Bool = true) -> String {
         let idList = included.map { "\"\($0)\"" }.joined(separator: ",")
         let range = included.isEmpty ? "null" : "{\"startSegmentId\":\"\(included.first!)\",\"endSegmentId\":\"\(included.last!)\"}"
         return """
         {"outcome":"insufficientEvidence","answer":null,"contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
         "includedSegmentIds":[\(idList)],"includedRange":\(range),"excludedAdjacentRange":null,
-        "boundaryReasonCodes":[],"boundaryConfidence":"\(confidence)","historyComplete":true,"correctionCounts":{}}}
+        "boundaryReasonCodes":[],"boundaryConfidence":"\(confidence)","historyComplete":\(historyComplete),"correctionCounts":{}}}
+        """
+    }
+
+    /// A truncated-before-coverage automatic ANSWER that trims a real leading
+    /// prefix. `included` is the kept backward suffix; `excluded` the dropped
+    /// prefix range; `reasonCodes` the boundary justification.
+    private func truncatedAnswer(included: [String], excluded: (String, String)?,
+                                 reasonCodes: [String], confidence: String = "high") -> String {
+        let idList = included.map { "\"\($0)\"" }.joined(separator: ",")
+        let range = included.isEmpty ? "null" : "{\"startSegmentId\":\"\(included.first!)\",\"endSegmentId\":\"\(included.last!)\"}"
+        let ex = excluded.map { "{\"startSegmentId\":\"\($0.0)\",\"endSegmentId\":\"\($0.1)\"}" } ?? "null"
+        let reasons = reasonCodes.map { "\"\($0)\"" }.joined(separator: ",")
+        return """
+        {"outcome":"answer","answer":"ok","contextDecision":{"policyVersion":"\(PetLogPromptBuilder.policyVersion)",
+        "includedSegmentIds":[\(idList)],"includedRange":\(range),"excludedAdjacentRange":\(ex),
+        "boundaryReasonCodes":[\(reasons)],"boundaryConfidence":"\(confidence)","historyComplete":false,"correctionCounts":{}}}
         """
     }
 
@@ -135,10 +171,11 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
     }
 
-    /// A retrieval-incomplete envelope (sanity cap truncated an ongoing
-    /// conversation) refuses fail-closed — the same path as over-budget, before
-    /// any side-effect. The model is never handed partial history.
-    func testRetrievalIncompleteRefusesFailClosedWithoutDispatch() {
+    /// D153: an automatic query truncated before its coverage is DISPATCHED with
+    /// the wire flag set — it is NOT refused. The model, seeing the flag, decides
+    /// answer-with-boundary vs insufficient. Only over-budget / the
+    /// explicit-truncated invariant refuse.
+    func testAutomaticTruncatedDispatchesWithFlagNotRefused() {
         let model = PetModel()
         model.connectionState = .connected
         model.setSessionKeyForTesting("test-session")
@@ -149,27 +186,105 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
             requestId: requestId, actionId: "free", instruction: "まとめて",
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
             coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
-            segments: [segment("a"), segment("b")], retrievalComplete: false)
-        model.sendLogInstruction(envelope: env)
+            segments: [segment("a"), segment("b")], retrievalTruncatedBeforeCoverage: true)
+        let accepted = model.sendLogInstruction(envelope: env)
 
-        XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId),
-                       "a sanity-cap-truncated history refuses fail-closed, same path as over-budget")
-        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
-                       "refuse must not create a log_user entry or dispatch")
-        XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
+        XCTAssertTrue(accepted, "a truncated automatic query dispatches, it is not refused")
+        XCTAssertTrue(model.logReplies.contains { $0.source == "log_user" },
+                      "the send reaches the dispatch path (a log_user entry is created)")
+        XCTAssertNil(model.logDispatchStatus, "no refusal status for a dispatched truncated query")
     }
 
-    /// D16 refusal position: an incomplete request refuses fail-closed BEFORE the
-    /// busy admission check — the typed incomplete status wins, and no busy
-    /// "Error" marker entry is appended, so nothing side-effects while a prior
-    /// summon is in flight (the slot is left untouched).
-    func testIncompleteRefusesBeforeBusyAdmissionWithNoSideEffect() {
+    /// D153 client invariant: an EXPLICIT scope can never be truncated (it is
+    /// day-scoped exact-all). A truncated explicit envelope is a client bug —
+    /// refused before dispatch with no side effect.
+    func testExplicitTruncatedRefusesAsInvariantViolation() {
         let model = PetModel()
         model.connectionState = .connected
         model.setSessionKeyForTesting("test-session")
         model.suppressLogSendForTesting = true
-        // A prior summon is already in flight — the model is busy.
-        model.pendingSummonSource = "scene"
+
+        let requestId = UUID().uuidString
+        let env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "slot-0", instruction: "このシーン",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: ["scene-1"],
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [segment("a"), segment("b")], retrievalTruncatedBeforeCoverage: true)
+        let accepted = model.sendLogInstruction(envelope: env)
+
+        XCTAssertFalse(accepted, "explicit + truncated is an invariant violation, refused")
+        XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId))
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
+                       "refuse creates no log_user entry")
+    }
+
+    // MARK: - D153 truncated-before-coverage parser branches
+
+    /// A truncated automatic answer must TRIM a real leading prefix — full
+    /// inclusion (the model "found no boundary" yet answered) is rejected.
+    func testTruncatedAnswerRejectsFullInclusion() {
+        let reply = truncatedAnswer(included: ["a", "b", "c"], excluded: nil, reasonCodes: ["x"])
+        XCTAssertEqual(PetLogResultParser.parse(reply, allowedSegmentIds: ["a", "b", "c"],
+                                                selectionMode: .automaticBackward, truncatedBeforeCoverage: true),
+                       .failure(.truncatedAnswerRequiresBoundaryTrim))
+    }
+
+    /// A truncated automatic answer must justify the boundary with reason codes.
+    func testTruncatedAnswerRejectsMissingReasonCodes() {
+        let reply = truncatedAnswer(included: ["b", "c"], excluded: ("a", "a"), reasonCodes: [])
+        XCTAssertEqual(PetLogResultParser.parse(reply, allowedSegmentIds: ["a", "b", "c"],
+                                                selectionMode: .automaticBackward, truncatedBeforeCoverage: true),
+                       .failure(.truncatedAnswerRequiresReasonCodes))
+    }
+
+    /// A truncated automatic answer with a real boundary trim + reason codes +
+    /// high confidence is accepted.
+    func testTruncatedAnswerAcceptedWithBoundary() {
+        let reply = truncatedAnswer(included: ["b", "c"], excluded: ("a", "a"), reasonCodes: ["scene-change"])
+        switch PetLogResultParser.parse(reply, allowedSegmentIds: ["a", "b", "c"],
+                                        selectionMode: .automaticBackward, truncatedBeforeCoverage: true) {
+        case .success(let res): XCTAssertEqual(res.outcome, .answer)
+        case .failure(let e): XCTFail("a boundary-trimmed truncated answer must be accepted, got \(e)")
+        }
+    }
+
+    /// A truncated automatic insufficient must assert incomplete history — the
+    /// case where earlier context is missing. historyComplete=true is rejected.
+    func testTruncatedInsufficientRequiresIncompleteHistory() {
+        let bad = insufficientReply(included: [], historyComplete: true)
+        XCTAssertEqual(PetLogResultParser.parse(bad, allowedSegmentIds: ["a", "b", "c"],
+                                                selectionMode: .automaticBackward, truncatedBeforeCoverage: true),
+                       .failure(.truncatedInsufficientRequiresIncompleteHistory))
+
+        let good = insufficientReply(included: [], historyComplete: false)
+        switch PetLogResultParser.parse(good, allowedSegmentIds: ["a", "b", "c"],
+                                        selectionMode: .automaticBackward, truncatedBeforeCoverage: true) {
+        case .success(let res): XCTAssertEqual(res.outcome, .insufficientEvidence)
+        case .failure(let e): XCTFail("truncated insufficient with historyComplete=false must be accepted, got \(e)")
+        }
+    }
+
+    /// Non-truncated automatic replies are unchanged by the D153 branch (a full
+    /// answer with no trim is still valid when the request wasn't truncated).
+    func testNonTruncatedAnswerUnaffectedByTruncatedRules() {
+        let reply = answerReply(answer: "まとめ", ids: ["a", "b", "c"])
+        switch PetLogResultParser.parse(reply, allowedSegmentIds: ["a", "b", "c"],
+                                        selectionMode: .automaticBackward, truncatedBeforeCoverage: false) {
+        case .success(let res): XCTAssertEqual(res.outcome, .answer)
+        case .failure(let e): XCTFail("a non-truncated full answer must still be accepted, got \(e)")
+        }
+    }
+
+    /// D16 refusal position: an over-budget request refuses fail-closed BEFORE the
+    /// busy admission check — the typed status wins, and no busy "Error" marker
+    /// is appended, so nothing side-effects while a prior summon is in flight.
+    func testOverBudgetRefusesBeforeBusyAdmissionWithNoSideEffect() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+        model.petLogRequestBudgetForTesting = 100  // below the prefix alone
+        model.pendingSummonSource = "scene"        // a prior summon is in flight (busy)
         let priorReplyCount = model.logReplies.count
 
         let requestId = UUID().uuidString
@@ -177,25 +292,26 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
             requestId: requestId, actionId: "free", instruction: "まとめて",
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
             coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
-            segments: [segment("a"), segment("b")], retrievalComplete: false)
+            segments: [segment("a"), segment("b")])
         let accepted = model.sendLogInstruction(envelope: env)
 
-        XCTAssertFalse(accepted, "an incomplete request is refused, never dispatched")
+        XCTAssertFalse(accepted, "an over-budget request is refused, never dispatched")
         XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId),
-                       "incomplete is evaluated before busy — the typed incomplete status wins")
+                       "over-budget is evaluated before busy — the typed status wins")
         XCTAssertEqual(model.logReplies.count, priorReplyCount,
-                       "no log_user entry and no 'Error: busy' marker for an incomplete refusal")
+                       "no log_user entry and no 'Error: busy' marker for an over-budget refusal")
         XCTAssertEqual(model.pendingSummonSource, "scene",
-                       "the incomplete refusal never claims or disturbs the in-flight summon slot")
+                       "the over-budget refusal never disturbs the in-flight summon slot")
     }
 
-    /// D16 refusal position: an incomplete request refuses fail-closed BEFORE the
-    /// not-connected admission check too — no "Error: not connected" marker is
-    /// appended, so the draft is left intact even while offline.
-    func testIncompleteRefusesBeforeNotConnectedAdmissionWithNoSideEffect() {
+    /// D16 refusal position: an over-budget request refuses BEFORE the
+    /// not-connected admission check too — no "Error: not connected" marker, so
+    /// the draft is left intact even while offline.
+    func testOverBudgetRefusesBeforeNotConnectedAdmissionWithNoSideEffect() {
         let model = PetModel()
         model.connectionState = .disconnected
         model.suppressLogSendForTesting = true
+        model.petLogRequestBudgetForTesting = 100
         let priorReplyCount = model.logReplies.count
 
         let requestId = UUID().uuidString
@@ -203,14 +319,14 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
             requestId: requestId, actionId: "free", instruction: "まとめて",
             queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
             coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
-            segments: [segment("a"), segment("b")], retrievalComplete: false)
+            segments: [segment("a"), segment("b")])
         let accepted = model.sendLogInstruction(envelope: env)
 
-        XCTAssertFalse(accepted, "an incomplete request is refused, never dispatched")
+        XCTAssertFalse(accepted, "an over-budget request is refused, never dispatched")
         XCTAssertEqual(model.logDispatchStatus, .historyIncompleteRefused(requestId: requestId),
-                       "incomplete is evaluated before the not-connected check")
+                       "over-budget is evaluated before the not-connected check")
         XCTAssertEqual(model.logReplies.count, priorReplyCount,
-                       "no 'Error: not connected' marker is appended for an incomplete refusal")
+                       "no 'Error: not connected' marker is appended for an over-budget refusal")
     }
 
     // MARK: - D72 parser-failure metadata retention

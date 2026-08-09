@@ -220,80 +220,73 @@ enum AmbientStorage {
         return parts.isEmpty ? "empty" : parts.joined(separator: "|")
     }
 
-    /// D20: the automatic-scope retrieval source. Returns ALL segments in the
-    /// window `[anchor - sanityCapHours, anchor)`, crossing calendar days — the
-    /// calendar day is a display/navigation boundary, not a context boundary.
-    /// Retrieval does NOT stop at a time gap: a lunch gap must not permanently
-    /// drop the morning, and a mere gap is not a scene change. Deciding which
-    /// leading run to exclude is the MODEL's job (the shipped automaticBackward
-    /// suffix-trim contract); retrieval only supplies the cross-day ordered
-    /// history it trims from.
-    ///
-    /// The only bound is the sanity cap (default 48h, or the storage retention
-    /// window, whichever is smaller — callers pass the smaller). `reachedCap` is
-    /// the client-side "history incomplete" signal — callers fail closed on it
-    /// (D16) rather than letting the model assume it saw the whole conversation.
-    /// It is conservatively true whenever ANY retained data older than the cap
-    /// exists: the storage layer cannot prove that a time gap is a semantic
-    /// conversation boundary (that trimming is the model's job), so a gap inside
-    /// the window does NOT make retrieval complete — the conversation the user
-    /// is asking about may extend into what the cap truncated. Retrieval is
-    /// complete only when there is no older retained data at all. No new
-    /// wire/prefix field is added.
-    static func segmentsBackwardFromAnchor(anchor: Date,
-                                           sanityCapHours: Double = 48,
-                                           timeZone: TimeZone,
-                                           sessionsRoot: URL) -> (segments: [TranscriptSegment], reachedCap: Bool) {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = timeZone
-        let anchorEpoch = anchor.timeIntervalSince1970
-        let capEpoch = anchorEpoch - sanityCapHours * 3600
-        let anchorDay = cal.startOfDay(for: anchor)
-        // The 48h window spans up to three calendar days; scan one extra day
-        // back so we can also see whether data continues just before the cap.
-        var candidates: [TranscriptSegment] = []
-        for offset in [-3, -2, -1, 0] {
-            guard let d = cal.date(byAdding: .day, value: offset, to: anchorDay) else { continue }
-            candidates += segments(forDay: d, timeZone: timeZone, sessionsRoot: sessionsRoot)
-        }
-        let sorted = candidates.sorted { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
-        let window = sorted.filter { seg in
-            guard let at = seg.capturedAt else { return false }
-            return at >= capEpoch && at < anchorEpoch
-        }
-        guard !window.isEmpty else { return ([], false) }
-
-        // Conservative incompleteness: any scanned segment older than the cap
-        // proves retained history the window truncated.
-        let hasPreCapSegment = sorted.contains { seg in
-            guard let at = seg.capturedAt else { return false }
-            return at < capEpoch
-        }
-        // Cheap no-decode extension beyond the 3-day scan: a non-empty session
-        // file last written before the cap can only hold pre-cap data, so its
-        // presence proves older retained history exists even when it falls
-        // outside the scanned days.
-        let reachedCap = hasPreCapSegment || sessionFileWrittenBefore(capEpoch, sessionsRoot: sessionsRoot)
-        return (window, reachedCap)
+    /// Result of a single backward scan of the retained sessions relative to an
+    /// anchor — the in-window segments plus typed completeness signals gathered
+    /// in the SAME pass (no extra I/O). D153/D159/D163 all consume this.
+    struct BackwardScan {
+        /// Segments captured in `[anchor - cap, anchor)`, ordered by capturedAt.
+        let window: [TranscriptSegment]
+        /// D153: true when retained data OLDER than the cap exists — the
+        /// automatic window may have cut off the start of the conversation. The
+        /// model, not storage, decides whether that older run is the same
+        /// conversation; this only reports that older history exists. Determined
+        /// from `capturedAt` (never file mtime).
+        let truncatedBeforeCoverage: Bool
+        /// D163: segments (in-window or older) whose `capturedAt` is missing — an
+        /// undated real utterance the anchor cutoff can't be verified against.
+        let missingTimestampCount: Int
+        /// D159: `ctx-` sessions whose raw transcript could not be stat/read at
+        /// all (distinct from an absent sessions root = "no records").
+        let readFailureCount: Int
     }
 
-    /// No-decode check: does any session's `raw.jsonl` have a last-write time
-    /// before `epoch` (and non-empty content)? Such a file can only hold
-    /// segments captured at/before that write, i.e. entirely older than `epoch`.
-    private static func sessionFileWrittenBefore(_ epoch: Double, sessionsRoot: URL) -> Bool {
+    /// D153: the automatic-scope retrieval source — a SINGLE pass over every
+    /// retained session's raw transcript, partitioned by `capturedAt` (never
+    /// file mtime). Returns the in-window segments and `truncatedBeforeCoverage`
+    /// (older retained data exists). Storage never treats a time gap as a
+    /// semantic boundary — deciding which leading run to exclude is the model's
+    /// job; storage only reports whether history exists beyond the returned
+    /// window. Source issues (missing timestamps, unreadable sessions) are
+    /// collected here for callers to gate on (D159/D163).
+    static func scanBackward(anchor: Date,
+                             sanityCapHours: Double = 48,
+                             timeZone: TimeZone,
+                             sessionsRoot: URL = AmbientStorage.sessionsRoot) -> BackwardScan {
+        let anchorEpoch = anchor.timeIntervalSince1970
+        let capEpoch = anchorEpoch - sanityCapHours * 3600
         let fm = FileManager.default
         guard let dirs = try? fm.contentsOfDirectory(
             at: sessionsRoot, includingPropertiesForKeys: [.contentModificationDateKey]) else {
-            return false
+            // A missing/unreadable sessions ROOT is "no records" (typed empty),
+            // distinct from a session whose raw can't be read (a read failure).
+            return BackwardScan(window: [], truncatedBeforeCoverage: false,
+                                missingTimestampCount: 0, readFailureCount: 0)
         }
+        var window: [TranscriptSegment] = []
+        var truncated = false
+        var missingTimestamp = 0
+        var readFailures = 0
         for dir in dirs where dir.lastPathComponent.hasPrefix("ctx-") {
             let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
-            guard let attrs = try? fm.attributesOfItem(atPath: raw.path),
-                  let mod = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970,
-                  let size = (attrs[.size] as? NSNumber)?.uint64Value, size > 0 else { continue }
-            if mod < epoch { return true }
+            guard let attrs = try? fm.attributesOfItem(atPath: raw.path) else {
+                readFailures += 1
+                continue
+            }
+            let fileSize = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+            let mod = attrs[.modificationDate] as? Date
+            let decoded = cachedSessionSegments(rawPath: raw.path, modificationDate: mod, fileSize: fileSize)
+            for seg in decoded {
+                guard let at = seg.capturedAt else { missingTimestamp += 1; continue }
+                if at < capEpoch {
+                    truncated = true
+                } else if at < anchorEpoch {
+                    window.append(seg)
+                }
+            }
         }
-        return false
+        window.sort { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
+        return BackwardScan(window: window, truncatedBeforeCoverage: truncated,
+                            missingTimestampCount: missingTimestamp, readFailureCount: readFailures)
     }
 
     /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune
