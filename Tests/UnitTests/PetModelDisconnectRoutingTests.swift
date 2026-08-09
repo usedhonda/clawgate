@@ -135,7 +135,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         let logEntries = model.logReplies.filter { $0.source == "log" }
         XCTAssertEqual(logEntries.count, 1,
                         "a visible marker must be recorded so the user isn't left with silent nothing")
-        XCTAssertTrue(logEntries.first?.text.contains("no reply received") ?? false)
+        XCTAssertTrue(logEntries.first?.text.contains("応答を確認できませんでした") ?? false)
     }
 
     /// Practical catch-seam test for Log dispatch: without a live WS connection,

@@ -154,7 +154,7 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
     /// Log summon (which never arms it), and the Log path keeps its own separate
     /// watchdog. Shared=0.1s, log=0.5s: at t≈0.2s the Log summon is still busy
     /// (shared watchdog didn't touch it); after the Log watchdog fires it
-    /// releases with its own "no reply received" marker as before.
+    /// releases with its own neutral "応答を確認できませんでした" marker as before.
     func testSharedAndLogWatchdogsAreIndependent() async throws {
         PetModel.logAwaitingReplyTimeoutSeconds = 0.5 // longer than the 0.1s shared timeout
 
@@ -182,7 +182,7 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
         XCTAssertFalse(model.logAwaitingReply)
         let logEntries = model.logReplies.filter { $0.source == "log" }
         XCTAssertEqual(logEntries.count, 1, "exactly the Log watchdog's marker, no shared-path marker")
-        XCTAssertTrue(logEntries.first?.text.contains("no reply received") ?? false)
+        XCTAssertTrue(logEntries.first?.text.contains("応答を確認できませんでした") ?? false)
     }
 
     private enum SummonTestError: Error { case deadSocket }
@@ -256,5 +256,89 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
         XCTAssertEqual(askEntries.count, 1, "exactly one error marker for the owning summon")
         XCTAssertTrue(askEntries.first?.text.contains("Error:") ?? false,
                       "the surfaced marker carries the error text")
+    }
+
+    // MARK: - Incident mitigation: Log reply deadline 180s -> 600s + neutral marker
+
+    /// The 2026-08-09 incident: a 9m9s answer was dropped by the old 180s
+    /// deadline. The production default must be long enough (>=600s) that a
+    /// multi-minute reply fits within the window. Captured pre-override in setUp.
+    func testLogReplyDeadlineIsAtLeast600s() {
+        XCTAssertGreaterThanOrEqual(originalLogAwaitingReplyTimeoutSeconds, 600,
+            "a multi-minute Log answer must fit within the reply deadline (incident mitigation)")
+    }
+
+    /// A reply arriving before the deadline is accepted and clears the awaiting
+    /// state — the watchdog never fires for it (549s-equivalent: within 600s).
+    func testLogReplyBeforeDeadlineIsAccepted() async throws {
+        PetModel.logAwaitingReplyTimeoutSeconds = 5.0 // comfortably longer than the reply below
+
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        model.sendLogInstruction(envelope: logEnvelope())
+        XCTAssertTrue(model.logAwaitingReply, "the reply watchdog is armed")
+
+        // A reply well before the 5s deadline resolves the request.
+        model.addSummonResult(text: "まとめ完了", source: "log", parseAsStructured: false)
+        XCTAssertFalse(model.logAwaitingReply, "a pre-deadline reply clears the awaiting state")
+        XCTAssertFalse(model.logReplies.contains { $0.text.contains("応答を確認できませんでした") },
+                       "no timeout marker for a reply accepted before the deadline")
+    }
+
+    /// A stale Log reply timeout (its request already superseded by a newer one)
+    /// must no-op — the token guard prevents it from clearing the new owner.
+    func testStaleLogTimeoutDoesNotClearNewerLogRequest() async throws {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        // Request A armed with the shrunk 0.1s deadline.
+        model.sendLogInstruction(envelope: logEnvelope(instruction: "A"))
+        // A resolves (its awaiting token is retired); simulate the slot release
+        // the WS terminal path performs so a new request can be admitted.
+        model.addSummonResult(text: "A done", source: "log", parseAsStructured: false)
+        model.pendingSummonSource = nil
+        XCTAssertFalse(model.logAwaitingReply, "A's awaiting token is retired")
+
+        // Request B takes over with a longer deadline so only A's stale 0.1s fires.
+        PetModel.logAwaitingReplyTimeoutSeconds = 5.0
+        model.sendLogInstruction(envelope: logEnvelope(instruction: "B"))
+        XCTAssertTrue(model.logAwaitingReply, "B is the new awaiting owner")
+        let replyCountBefore = model.logReplies.count
+
+        // Past A's 0.1s deadline: A's stale closure must no-op (token mismatch).
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertTrue(model.logAwaitingReply, "B's awaiting state survives A's stale timeout")
+        XCTAssertEqual(model.pendingSummonSource, "log", "B's slot is untouched")
+        XCTAssertEqual(model.logReplies.count, replyCountBefore,
+                       "A's stale timeout appends no marker")
+    }
+
+    /// The timeout marker is D110-neutral: with the connection UP (no transport
+    /// evidence), it must NOT claim a connection problem — a slow-but-fine reply
+    /// isn't mislabeled. It carries the requestId and the neutral phrasing.
+    func testLogTimeoutMarkerHasNoConnectionWordingWhenConnected() async throws {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let env = logEnvelope()
+        model.sendLogInstruction(envelope: env)
+        XCTAssertTrue(model.logAwaitingReply, "the reply watchdog is armed")
+
+        try await Task.sleep(nanoseconds: 300_000_000) // past the shrunk 0.1s deadline
+
+        XCTAssertFalse(model.logAwaitingReply, "the watchdog fired")
+        let marker = try XCTUnwrap(model.logReplies.last { $0.source == "log" })
+        XCTAssertTrue(marker.text.contains("応答を確認できませんでした"), "neutral D110 wording")
+        XCTAssertTrue(marker.text.contains(String(env.requestId.prefix(8))), "carries the requestId")
+        XCTAssertFalse(marker.text.contains("接続"),
+                       "no connection wording is asserted without transport evidence")
     }
 }

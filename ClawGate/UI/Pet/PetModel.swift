@@ -274,8 +274,10 @@ final class PetModel: NSObject, ObservableObject {
     static var deltaIdleTimeoutNanos: UInt64 = 5_000_000_000
 
     /// How long to wait for a "質問まとめ" (Log summarize) reply before giving up.
-    /// Overridable for tests.
-    static var logAwaitingReplyTimeoutSeconds: TimeInterval = 180
+    /// 600s (mitigation): a real answer can take many minutes (2026-08-09
+    /// incident: a 9m9s reply was dropped by the old 180s deadline). This is a
+    /// provisional mitigation, NOT a D61/D62 completion. Overridable for tests.
+    static var logAwaitingReplyTimeoutSeconds: TimeInterval = 600
 
     /// Structured, retroactively-queryable telemetry for Pet Log envelope
     /// dispatch. Body-free: request/action ids, sizes, and policy only — never
@@ -2106,7 +2108,15 @@ final class PetModel: NSObject, ObservableObject {
                 self.pendingSummonRunId = nil
                 self.pendingLogRequest = nil
             }
-            self.appendSummonEntry(text: "Error: no reply received within \(Int(Self.logAwaitingReplyTimeoutSeconds))s (connection may have been unstable)", source: "log")
+            // D110-neutral: no answer was observed within the deadline. Do NOT
+            // assert a transport cause unless there is actual evidence (the
+            // connection is currently down); a slow-but-fine reply must not be
+            // mislabeled as a connection problem.
+            let transportDown = self.connectionState != .connected
+            let connectionNote = transportDown ? "（接続が不安定な可能性があります）" : ""
+            self.appendSummonEntry(
+                text: "応答を確認できませんでした（requestId: \(envelope.requestId.prefix(8))）\(connectionNote)",
+                source: "log")
         }
         guard let message = try? PetLogPromptBuilder.buildMessage(envelope: envelope) else {
             logAwaitingReply = false
