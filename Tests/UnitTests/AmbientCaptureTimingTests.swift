@@ -242,8 +242,9 @@ final class AmbientCaptureTimingTests: XCTestCase {
         XCTAssertEqual(ordered[0].actualPrimedFrames, 0)
         XCTAssertFalse(ordered[0].provenOverlap)
         let expectedSecondStart = secondTap.timeIntervalSince1970 - Double(primedFrames) / sampleRate
+        let secondStartedAt = try! XCTUnwrap(ordered[1].startedAt)
         XCTAssertEqual(
-            ordered[1].startedAt!.timeIntervalSince1970,
+            secondStartedAt.timeIntervalSince1970,
             expectedSecondStart,
             accuracy: 1e-9
         )
@@ -255,12 +256,26 @@ final class AmbientCaptureTimingTests: XCTestCase {
     }
 
     func testShortChunkFinalizeResetsTimingStateBeforeNextOpen() {
-        let expectation = expectation(description: "short chunk callback should not be emitted")
+        let validChunkExpectation = expectation(description: "short-2.wav callback is emitted")
+        let shortChunkExpectation = expectation(description: "short-1.wav callback is not emitted")
+        shortChunkExpectation.isInverted = true
+        var callbackURLs: [URL] = []
+        let callbackLock = NSLock()
         let manager = makeManager(writeAudioFile: { file, buffer in
             try file.write(from: buffer)
             return buffer.frameLength
         })
-        manager.onChunkReady = { _ in expectation.fulfill() }
+        manager.onChunkReady = { chunk in
+            callbackLock.lock()
+            callbackURLs.append(chunk.url)
+            callbackLock.unlock()
+
+            if chunk.url.lastPathComponent == "short-2.wav" {
+                validChunkExpectation.fulfill()
+            } else {
+                shortChunkExpectation.fulfill()
+            }
+        }
 
         _ = try! manager.testOpenChunk(at: tempURL("short-1.wav"))
         manager.testSetOverlapTail([0.1, 0.2, 0.3, 0.4])
@@ -280,8 +295,15 @@ final class AmbientCaptureTimingTests: XCTestCase {
         manager.testWriteBuffer(buffer(frames: 17_001), firstLiveSampleDate: nextTap)
 
         let nextChunk = manager.testFinalizeCurrentChunk()
-        waitForExpectations(timeout: 0.1)
+        waitForExpectations(timeout: 1)
         XCTAssertNotNil(nextChunk)
+        callbackLock.lock()
+        let urls = callbackURLs
+        callbackLock.unlock()
+
+        XCTAssertEqual(urls.count, 1)
+        XCTAssertEqual(urls.map(\.lastPathComponent), ["short-2.wav"])
+
         if let nextChunk {
             XCTAssertEqual(nextChunk.actualPrimedFrames, 0)
             XCTAssertFalse(nextChunk.provenOverlap)
