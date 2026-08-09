@@ -164,6 +164,46 @@ enum AmbientStorage {
         return out
     }
 
+    /// D20: the automatic-scope retrieval source. Returns the backward-contiguous
+    /// run of segments ending strictly before `anchor`, crossing calendar days —
+    /// the calendar day is a display/navigation boundary, not a context boundary.
+    /// Walking backward from the newest segment, the run stops at the first
+    /// inter-segment gap greater than `gapSeconds` (the same 900s that defines
+    /// scene identity). The gap between the anchor and the newest segment never
+    /// splits the run, so a question asked minutes after a meeting still captures
+    /// it. Candidates span at least the previous day, so a midnight-straddling
+    /// conversation is not cut at 00:00. (A conversation contiguous for more than
+    /// a day without a 15-minute gap does not occur in practice; the gap boundary
+    /// is the real stopper, so a two-day candidate window is sufficient.)
+    static func segmentsBackwardFromAnchor(anchor: Date,
+                                           gapSeconds: Double = 900,
+                                           timeZone: TimeZone,
+                                           sessionsRoot: URL) -> [TranscriptSegment] {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let anchorEpoch = anchor.timeIntervalSince1970
+        let anchorDay = cal.startOfDay(for: anchor)
+        var candidates: [TranscriptSegment] = []
+        for offset in [-1, 0] {
+            guard let d = cal.date(byAdding: .day, value: offset, to: anchorDay) else { continue }
+            candidates += segments(forDay: d, timeZone: timeZone, sessionsRoot: sessionsRoot)
+        }
+        let before = candidates
+            .filter { ($0.capturedAt ?? 0) < anchorEpoch }
+            .sorted { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
+        guard !before.isEmpty else { return [] }
+        var startIdx = 0
+        for i in stride(from: before.count - 1, to: 0, by: -1) {
+            let cur = before[i].capturedAt ?? 0
+            let prev = before[i - 1].capturedAt ?? 0
+            if cur - prev > gapSeconds {
+                startIdx = i
+                break
+            }
+        }
+        return Array(before[startIdx...])
+    }
+
     /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune
     /// emptied day directories. Sessions under sessions/ are intentionally NOT
     /// touched — they are kept until explicit deletion (design retention policy).

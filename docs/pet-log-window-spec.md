@@ -139,6 +139,26 @@ impossible:
   same full-day (automatic) scope — never a display-only widen with an empty
   send. `scopeOverride` reflects the reconciled ids (or nil when cleared).
 
+### Cross-day backward context (D20)
+
+Automatic scope (no explicit scene selection) retrieves the conversation the
+user is in, not the calendar day:
+
+- The retrieval source is the backward-contiguous run of segments ending
+  strictly before the anchor, walking back across calendar days. The calendar
+  day is a display/navigation boundary, not a context boundary.
+- The run stops at the first inter-segment gap greater than 900s (the same
+  threshold that defines scene identity) — a clear semantic boundary. The gap
+  between the anchor and the newest segment never splits the run (a question
+  asked minutes after a meeting still captures it).
+- A conversation straddling midnight with a <15m gap is one context (both days
+  included); a >15m gap before midnight excludes the prior day's separate
+  meeting; midnight alone never splits a run.
+- Explicit scene selection stays day-scoped exact-all (unchanged).
+- `coverageStart`/`coverageEnd`/`completeBeforeAnchor` reflect the actual
+  cross-day retrieved range. No new envelope field is added (truncation
+  visibility under a budget is a later concern, tracked in Target).
+
 ### Transport privacy (D59)
 
 The WebSocket transport logs only BOUNDED, body-free structural metadata about a

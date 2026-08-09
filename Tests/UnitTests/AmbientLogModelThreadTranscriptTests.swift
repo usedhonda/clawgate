@@ -259,4 +259,73 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         XCTAssertEqual(texts, ["before anchor"],
                        "only segments strictly before the anchor survive the same-day cutoff")
     }
+
+    // MARK: - D20 cross-day backward context (automatic scope)
+
+    /// D20: a conversation whose two turns straddle midnight with a <15m gap is
+    /// ONE context — the automatic scope crosses the calendar boundary and
+    /// includes the previous day's tail.
+    func testAutomaticScopeCrossesMidnightForOneContiguousMeeting() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 15; c.timeZone = jst
+        let day = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(day).timeIntervalSince1970
+        try writeSession("ctx-mid", [
+            seg("前日の続き", at: dayStart - 5 * 60),      // 23:55 (previous day)
+            seg("日付をまたいで継続", at: dayStart + 5 * 60), // 00:05 (selected day)
+        ], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(day)
+        let env = model.buildQueryEnvelope(actionId: "free", instruction: "まとめて",
+                                           now: Date(), sessionsRoot: root)
+        XCTAssertEqual(env.segments.map(\.text), ["前日の続き", "日付をまたいで継続"],
+                       "a <15m gap across midnight is one conversation — both days included")
+    }
+
+    /// D20: a >15m gap is a semantic boundary — the automatic backward run stops
+    /// there, excluding the prior day's separate meeting.
+    func testAutomaticScopeStopsAtHighBoundaryExcludingPriorMeeting() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 16; c.timeZone = jst
+        let day = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(day).timeIntervalSince1970
+        try writeSession("ctx-brk", [
+            seg("前日の別会議", at: dayStart - 30 * 60),    // 23:30 (previous day) — ends
+            seg("今日の新しい会議", at: dayStart + 5 * 60),  // 00:05 (selected day) — new meeting
+        ], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(day)
+        let env = model.buildQueryEnvelope(actionId: "free", instruction: "まとめて",
+                                           now: Date(), sessionsRoot: root)
+        XCTAssertEqual(env.segments.map(\.text), ["今日の新しい会議"],
+                       "a >15m gap is a scene boundary — the prior day's meeting is excluded")
+    }
+
+    /// D20: midnight alone never splits a contiguous run.
+    func testAutomaticScopeDoesNotSplitAtPlainMidnight() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 17; c.timeZone = jst
+        let day = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(day).timeIntervalSince1970
+        try writeSession("ctx-plain", [
+            seg("23時58分", at: dayStart - 2 * 60),
+            seg("0時01分", at: dayStart + 1 * 60),
+            seg("0時04分", at: dayStart + 4 * 60),
+        ], under: root)
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(day)
+        let env = model.buildQueryEnvelope(actionId: "free", instruction: "まとめて",
+                                           now: Date(), sessionsRoot: root)
+        XCTAssertEqual(env.segments.map(\.text), ["23時58分", "0時01分", "0時04分"],
+                       "midnight alone never splits a contiguous run")
+    }
 }

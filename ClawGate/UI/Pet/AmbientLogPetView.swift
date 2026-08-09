@@ -492,8 +492,19 @@ final class AmbientLogModel: ObservableObject {
         let resolved = AmbientLogGrouping.resolveScope(
             selection: selectedSceneIDs, scenes: daysScenes, daySegments: daySegments)
         if resolved.selection != selectedSceneIDs { selectedSceneIDs = resolved.selection }
-        let candidateSegments = resolved.segments
-        let scopeOverride = resolved.scopeIDs
+        let candidateSegments: [TranscriptSegment]
+        let scopeOverride: [String]?
+        if let ids = resolved.scopeIDs {
+            // Explicit scene selection stays day-scoped exact-all.
+            candidateSegments = resolved.segments
+            scopeOverride = ids
+        } else {
+            // D20: automatic scope is the cross-day backward run ending at the
+            // anchor — the conversation you are in, not the calendar day.
+            candidateSegments = AmbientStorage.segmentsBackwardFromAnchor(
+                anchor: anchor, timeZone: timeZone, sessionsRoot: sessionsRoot)
+            scopeOverride = nil
+        }
 
         // Every segment here is expected to already carry a capturedAt
         // (AmbientStorage.segments only returns timestamped segments). If
