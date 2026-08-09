@@ -118,6 +118,27 @@ The parser validates a reply against the exact ids sent, under a REQUIRED
   huge payload is never fully deserialized. An over-limit reply is a dedicated
   parse failure, never truncated.
 
+### Scene identity & selection scope (D17/D45)
+
+The envelope's scope is resolved from ONE source of truth shared by the display
+and the query, so "visible on screen but 0 segments sent" is structurally
+impossible:
+
+- **Single-source scene identity (D17)**: scene identity is generated from the
+  UNCAPPED day segments — the same source the query reads. The display path may
+  cap RENDERING (newest 2000 segments) but never derives scene ids from a capped
+  set. A giant scene straddling the display cap therefore has ONE id across the
+  chip and the query; selecting its chip sends the whole scene as an exact
+  scope, never zero.
+- **Selection reconcile-or-clear (D45)**: `Scene.id` is the integer first-epoch,
+  which shifts when an earlier late/backfill segment joins the scene. A stale
+  selection is reconciled to the unique current scene whose `[startEpoch,
+  endEpoch]` contains the stale epoch (the id migrates, and the chip follows).
+  If it maps to no scene, an ambiguous set, or a non-numeric id, the WHOLE
+  selection is EXPLICITLY cleared and both the UI and the query fall back to the
+  same full-day (automatic) scope — never a display-only widen with an empty
+  send. `scopeOverride` reflects the reconciled ids (or nil when cleared).
+
 ### Transport privacy (D59)
 
 The WebSocket transport logs only BOUNDED, body-free structural metadata about a

@@ -148,10 +148,13 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
                        "the envelope must carry the true full-day count, not a clamped 2000")
     }
 
-    /// A stale/non-matching explicit scene selection is a HARD scope: no silent
-    /// fallback to the full day — segments stays empty, scopeOverride reflects
-    /// the (unmatched) selection.
-    func testBuildQueryEnvelopeStaleSceneSelectionYieldsEmptyNotFullDay() throws {
+    /// D45: an explicit selection that reconciles to NO current scene is
+    /// EXPLICITLY cleared — UI and query fall back to the SAME full-day scope.
+    /// This supersedes the A2 stopgap (hard scope, `segments` empty,
+    /// `scopeOverride` still set), which WAS the "visible full day / send 0"
+    /// divergence this Wave removes: display fell back to the full day while the
+    /// query sent zero. Now both share one scope.
+    func testBuildQueryEnvelopeStaleIrreconcilableSelectionClearsToFullDay() throws {
         let root = makeTempSessionsRoot()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -168,10 +171,70 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         model.selectedSceneIDs = ["stale-scene-id-that-does-not-exist"]
         let envelope = model.buildQueryEnvelope(actionId: "slot-0", instruction: "このシーンだけ",
                                                 now: Date(), sessionsRoot: root)
-        XCTAssertTrue(envelope.segments.isEmpty,
-                      "no scene matched the explicit selection — must not fall back to the full day")
-        XCTAssertEqual(envelope.scopeOverride, ["stale-scene-id-that-does-not-exist"],
-                       "the honored (unmatched) scope must still be reported")
+        XCTAssertEqual(envelope.segments.map(\.text), ["real content A", "real content B"],
+                       "an irreconcilable stale selection clears to the full day, not an empty send")
+        XCTAssertNil(envelope.scopeOverride, "a cleared selection is automatic (full-day) scope")
+        XCTAssertTrue(model.selectedSceneIDs.isEmpty,
+                      "the UI selection is explicitly cleared so the chip and the query agree")
+    }
+
+    /// D17: a single giant scene straddling the old 2000 display cap keeps ONE
+    /// identity across display and query. Selecting its chip sends the WHOLE
+    /// scene as an exact scope — never the "visible on screen but 0 sent" path
+    /// that arose when the capped display scene id differed from the uncapped
+    /// query scene id.
+    func testGiantSceneChipSelectionSendsExactFullScopeNotZero() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 12; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        // 2001 contiguous segments (1s apart, well under the 15m scene gap) => one scene.
+        let count = 2001
+        let segs = (1...count).map { seg("utterance \($0)", at: dayStart + Double($0)) }
+        try writeSession("ctx-giant", segs, under: root)
+
+        // The chip id is the scene id derived from the UNCAPPED day.
+        let sceneID = AmbientLogGrouping.scenes(from: segs, timeZone: jst)[0].id
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        model.selectedSceneIDs = [sceneID]
+        let envelope = model.buildQueryEnvelope(actionId: "slot-0", instruction: "このシーン",
+                                                now: Date(), sessionsRoot: root)
+        XCTAssertEqual(envelope.segments.count, count,
+                       "the whole giant scene is in scope — not truncated, and never 0")
+        XCTAssertEqual(envelope.scopeOverride, [sceneID],
+                       "the honored explicit scope is the single reconciled scene id")
+    }
+
+    /// D45: an earlier backfill segment shifts a scene's first epoch (its id).
+    /// A selection holding the OLD id reconciles to the scene's new id — display
+    /// and query stay on the same scene, and the chip follows the migrated id.
+    func testEarlierBackfillReconcilesStaleSceneIdToNewId() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 13; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        let original = [seg("A", at: dayStart + 100), seg("B", at: dayStart + 110)]
+        let oldID = AmbientLogGrouping.scenes(from: original, timeZone: jst)[0].id
+        // A backfilled earlier segment (+50, same scene: gap < 900s) shifts the first epoch.
+        let backfilled = [seg("pre", at: dayStart + 50)] + original
+        try writeSession("ctx-bf", backfilled, under: root)
+        let newID = AmbientLogGrouping.scenes(from: backfilled, timeZone: jst)[0].id
+        XCTAssertNotEqual(oldID, newID, "precondition: the backfill changed the scene id")
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        model.selectedSceneIDs = [oldID]
+        let envelope = model.buildQueryEnvelope(actionId: "slot-0", instruction: "このシーン",
+                                                now: Date(), sessionsRoot: root)
+        XCTAssertEqual(envelope.segments.map(\.text), ["pre", "A", "B"],
+                       "the reconciled scene includes the backfilled earlier segment")
+        XCTAssertEqual(envelope.scopeOverride, [newID], "scope migrated to the new scene id")
+        XCTAssertEqual(model.selectedSceneIDs, [newID], "the chip selection follows the migrated id")
     }
 
     /// Same-day query: a segment at/after the anchor instant is excluded.

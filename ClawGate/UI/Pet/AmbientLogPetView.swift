@@ -290,6 +290,42 @@ enum AmbientLogGrouping {
         closeScene()
         return result
     }
+
+    /// D17/D45 single source of truth for a scene selection. Both the display
+    /// path and the query path resolve a (possibly stale) `selection` against
+    /// the SAME current, uncapped `scenes`, so "visible on screen but 0 sent"
+    /// is structurally impossible.
+    ///
+    /// A stale id (`Scene.id = String(Int(firstEpoch))` shifts when an older
+    /// late/backfill segment joins the scene) is reconciled to the unique
+    /// current scene whose `[startEpoch, endEpoch]` now contains that epoch;
+    /// if it maps to no scene, an ambiguous set, or is non-numeric, the WHOLE
+    /// selection is dropped (explicit clear) so display and query fall back to
+    /// the SAME full-day scope — never a display-only widen.
+    ///
+    /// Returns the reconciled selection (migrated ids, or empty when cleared),
+    /// the scope ids for `scopeOverride` (nil = full-day automatic), and the
+    /// in-scope segments (`daySegments` when full-day; a non-empty scene union
+    /// otherwise).
+    static func resolveScope(selection: Set<String>,
+                             scenes: [Scene],
+                             daySegments: [TranscriptSegment])
+        -> (selection: Set<String>, scopeIDs: [String]?, segments: [TranscriptSegment]) {
+        guard !selection.isEmpty else { return ([], nil, daySegments) }
+        var reconciled: Set<String> = []
+        for id in selection {
+            if scenes.contains(where: { $0.id == id }) {
+                reconciled.insert(id)
+                continue
+            }
+            guard let epoch = Double(id) else { return ([], nil, daySegments) }
+            let containing = scenes.filter { $0.startEpoch <= epoch && epoch <= $0.endEpoch }
+            guard containing.count == 1 else { return ([], nil, daySegments) }
+            reconciled.insert(containing[0].id)
+        }
+        let inScope = scenes.filter { reconciled.contains($0.id) }
+        return (reconciled, reconciled.sorted(), inScope.flatMap(\.segments))
+    }
 }
 
 // internal (not private): test seam for AmbientLogModelThreadTranscriptTests.
@@ -313,8 +349,11 @@ final class AmbientLogModel: ObservableObject {
         cal.timeZone = timeZone
         return cal
     }()
-    private var cachedBlocksByDay: [Date: [AmbientLogGrouping.Block]] = [:]
+    // Past days cache uncapped scenes + raw segments so scene identity stays
+    // the SAME single source as the query path (D17). Blocks are re-derived
+    // from these per load (a display cap is applied then, not to identity).
     private var cachedScenesByDay: [Date: [AmbientLogGrouping.Scene]] = [:]
+    private var cachedRawSegmentsByDay: [Date: [TranscriptSegment]] = [:]
     private var cachedTranscriptFontSize: CGFloat
     private var cachedThreadSignature = ""
     private var timer: Timer?
@@ -443,23 +482,18 @@ final class AmbientLogModel: ObservableObject {
         }
         let anchorEpoch = anchor.timeIntervalSince1970
 
+        // D17/D45: display and query share one scope resolution. A stale
+        // selection is reconciled to the current scene it belongs to, or — if
+        // irreconcilable — explicitly cleared so BOTH the chip/UI and this
+        // envelope fall back to the same full-day scope. This replaces the old
+        // "hard scope, segments empty, scopeOverride still set" stopgap, which
+        // was the "visible full day / send 0" divergence D45 targets.
         let daysScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: timeZone)
-        let selectedScenes = daysScenes.filter { selectedSceneIDs.contains($0.id) }
-        let candidateSegments: [TranscriptSegment]
-        let scopeOverride: [String]?
-        if !selectedSceneIDs.isEmpty {
-            // Explicit scope is a hard filter: even when none of the
-            // selected scene ids match a current scene (stale selection),
-            // this does NOT fall back to the full day. `segments` stays
-            // empty and `scopeOverride` still reflects the explicit
-            // selection, so the model (or a Phase-A caller) can see the
-            // scope was honored rather than silently widened.
-            candidateSegments = selectedScenes.flatMap(\.segments)
-            scopeOverride = selectedSceneIDs.sorted()
-        } else {
-            candidateSegments = daySegments
-            scopeOverride = nil
-        }
+        let resolved = AmbientLogGrouping.resolveScope(
+            selection: selectedSceneIDs, scenes: daysScenes, daySegments: daySegments)
+        if resolved.selection != selectedSceneIDs { selectedSceneIDs = resolved.selection }
+        let candidateSegments = resolved.segments
+        let scopeOverride = resolved.scopeIDs
 
         // Every segment here is expected to already carry a capturedAt
         // (AmbientStorage.segments only returns timestamped segments). If
@@ -516,32 +550,35 @@ final class AmbientLogModel: ObservableObject {
     private func load() {
         let day = clampedDay(selectedDay)
         if day != selectedDay { selectedDay = day }
-        let allBlocks: [AmbientLogGrouping.Block]
+        // D17: scene identity is generated from the UNCAPPED day segments — the
+        // same source the query path reads — so a chip's id always exists in the
+        // query-side scenes. The 2000 cap below is a display-only render cut.
+        let daySegments: [TranscriptSegment]
         let newScenes: [AmbientLogGrouping.Scene]
         if day == today {
-            var segs = AmbientStorage.segments(forDay: day, timeZone: timeZone)
-            if segs.count > 2000 { segs = Array(segs.suffix(2000)) }
-            newScenes = AmbientLogGrouping.scenes(from: segs, timeZone: timeZone)
-            allBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
-        } else if let cached = cachedBlocksByDay[day] {
-            allBlocks = cached
-            newScenes = cachedScenesByDay[day] ?? []
+            daySegments = AmbientStorage.segments(forDay: day, timeZone: timeZone)
+            newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: timeZone)
+        } else if let cachedScenes = cachedScenesByDay[day],
+                  let cachedRaw = cachedRawSegmentsByDay[day] {
+            daySegments = cachedRaw
+            newScenes = cachedScenes
         } else {
-            let segs = AmbientStorage.segments(forDay: day, timeZone: timeZone)
-            newScenes = AmbientLogGrouping.scenes(from: segs, timeZone: timeZone)
-            allBlocks = AmbientLogGrouping.blocks(from: segs, timeZone: timeZone)
-            cachedBlocksByDay[day] = allBlocks
+            daySegments = AmbientStorage.segments(forDay: day, timeZone: timeZone)
+            newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: timeZone)
+            cachedRawSegmentsByDay[day] = daySegments
             cachedScenesByDay[day] = newScenes
         }
+        // D45: reconcile a stale selection against the current scenes so the
+        // display path and the query path agree on one scope (migrate or clear).
+        let resolved = AmbientLogGrouping.resolveScope(
+            selection: selectedSceneIDs, scenes: newScenes, daySegments: daySegments)
+        if resolved.selection != selectedSceneIDs { selectedSceneIDs = resolved.selection }
         if newScenes != scenes { scenes = newScenes }
-        let newBlocks: [AmbientLogGrouping.Block]
-        let selectedScenes = newScenes.filter { selectedSceneIDs.contains($0.id) }
-        if !selectedSceneIDs.isEmpty, !selectedScenes.isEmpty {
-            let selectedSegments = selectedScenes.flatMap(\.segments)
-            newBlocks = AmbientLogGrouping.blocks(from: selectedSegments, timeZone: timeZone)
-        } else {
-            newBlocks = allBlocks
-        }
+        // Display cap: render at most the newest 2000 in-scope segments. This
+        // never affects scene identity (already generated uncapped above).
+        let scopeSegments = resolved.segments
+        let displaySegments = scopeSegments.count > 2000 ? Array(scopeSegments.suffix(2000)) : scopeSegments
+        let newBlocks = AmbientLogGrouping.blocks(from: displaySegments, timeZone: timeZone)
         let blocksChanged = newBlocks != blocks
         let fontSizeChanged = cachedTranscriptFontSize != fontSize
         if blocksChanged {
