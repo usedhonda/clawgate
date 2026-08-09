@@ -357,6 +357,11 @@ final class AmbientLogModel: ObservableObject {
     private var cachedTranscriptFontSize: CGFloat
     private var cachedThreadSignature = ""
     private var timer: Timer?
+    // D21: heavy load work (storage scan, scene/block rebuild, transcript
+    // render) runs on this serial background queue; only the publish returns to
+    // main. `lastLoadedFingerprint` lets an unchanged poll skip the rebuild.
+    private let loadQueue = DispatchQueue(label: "com.clawgate.ambientlog.load", qos: .userInitiated)
+    private var lastLoadedFingerprint: String?
 
     init() {
         var cal = Calendar(identifier: .gregorian)
@@ -566,48 +571,80 @@ final class AmbientLogModel: ObservableObject {
         threadScrollRevision += 1
     }
 
+    /// D21: the 3-second poll (and any triggered reload) must not scan storage,
+    /// rebuild scenes/blocks, or render the transcript on the main thread. The
+    /// main thread only snapshots the inputs and enqueues; the heavy work runs
+    /// on a serial background queue; only the final publish returns to main. A
+    /// fingerprint of the inputs skips the rebuild entirely when nothing changed.
     private func load() {
         let day = clampedDay(selectedDay)
         if day != selectedDay { selectedDay = day }
-        // D17: scene identity is generated from the UNCAPPED day segments — the
-        // same source the query path reads — so a chip's id always exists in the
-        // query-side scenes. The 2000 cap below is a display-only render cut.
-        let daySegments: [TranscriptSegment]
-        let newScenes: [AmbientLogGrouping.Scene]
-        if day == today {
-            daySegments = AmbientStorage.segments(forDay: day, timeZone: timeZone)
-            newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: timeZone)
-        } else if let cachedScenes = cachedScenesByDay[day],
-                  let cachedRaw = cachedRawSegmentsByDay[day] {
-            daySegments = cachedRaw
-            newScenes = cachedScenes
-        } else {
-            daySegments = AmbientStorage.segments(forDay: day, timeZone: timeZone)
-            newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: timeZone)
-            cachedRawSegmentsByDay[day] = daySegments
-            cachedScenesByDay[day] = newScenes
-        }
-        // D45: reconcile a stale selection against the current scenes so the
-        // display path and the query path agree on one scope (migrate or clear).
-        let resolved = AmbientLogGrouping.resolveScope(
-            selection: selectedSceneIDs, scenes: newScenes, daySegments: daySegments)
-        if resolved.selection != selectedSceneIDs { selectedSceneIDs = resolved.selection }
-        if newScenes != scenes { scenes = newScenes }
-        // Display cap: render at most the newest 2000 in-scope segments. This
-        // never affects scene identity (already generated uncapped above).
-        let scopeSegments = resolved.segments
-        let displaySegments = scopeSegments.count > 2000 ? Array(scopeSegments.suffix(2000)) : scopeSegments
-        let newBlocks = AmbientLogGrouping.blocks(from: displaySegments, timeZone: timeZone)
-        let blocksChanged = newBlocks != blocks
-        let fontSizeChanged = cachedTranscriptFontSize != fontSize
-        if blocksChanged {
-            blocks = newBlocks
-            transcriptScrollRevision += 1
-        }
-        if blocksChanged || fontSizeChanged {
-            cachedTranscript = AmbientLogPetView.nsAttributedTranscript(newBlocks, fontSize: fontSize)
-            cachedTranscriptFontSize = fontSize
-            transcriptRevision += 1
+        // Snapshot the main-thread inputs (selection, font, per-day cache) so the
+        // background closure never touches published/instance state directly.
+        let selectionSnapshot = selectedSceneIDs
+        let font = fontSize
+        let isToday = (day == today)
+        let cachedScenes = isToday ? nil : cachedScenesByDay[day]
+        let cachedRaw = isToday ? nil : cachedRawSegmentsByDay[day]
+        let previousFingerprint = lastLoadedFingerprint
+        let tz = timeZone
+
+        loadQueue.async { [weak self] in
+            guard let self else { return }
+            // D17: scene identity is generated from the UNCAPPED day segments —
+            // the same source the query path reads — off the main thread.
+            let daySegments: [TranscriptSegment]
+            let newScenes: [AmbientLogGrouping.Scene]
+            if let cachedScenes, let cachedRaw {
+                daySegments = cachedRaw
+                newScenes = cachedScenes
+            } else {
+                daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
+                newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
+            }
+            // D45: reconcile a stale selection against the current scenes so the
+            // display and query paths agree (migrate or clear).
+            let resolved = AmbientLogGrouping.resolveScope(
+                selection: selectionSnapshot, scenes: newScenes, daySegments: daySegments)
+            // Cheap input fingerprint — ambient segments are append/backfill only,
+            // so count + first/last capturedAt + selection + font fully identifies
+            // the output. Unchanged fingerprint => skip the rebuild and publish.
+            let firstAt = daySegments.first?.capturedAt ?? 0
+            let lastAt = daySegments.last?.capturedAt ?? 0
+            let fingerprint = "\(Int(day.timeIntervalSince1970))|\(daySegments.count)|\(firstAt)|\(lastAt)|\(resolved.selection.sorted().joined(separator: ","))|\(font)"
+            if fingerprint == previousFingerprint {
+                return
+            }
+            // Display cap: render at most the newest 2000 in-scope segments. This
+            // never affects scene identity (generated uncapped above).
+            let scopeSegments = resolved.segments
+            let displaySegments = scopeSegments.count > 2000 ? Array(scopeSegments.suffix(2000)) : scopeSegments
+            let newBlocks = AmbientLogGrouping.blocks(from: displaySegments, timeZone: tz)
+            let attributed = AmbientLogPetView.nsAttributedTranscript(newBlocks, fontSize: font)
+
+            DispatchQueue.main.async {
+                // Discard if the day changed while this build was in flight — a
+                // newer load() for the current day will publish the right result.
+                guard self.clampedDay(self.selectedDay) == day else { return }
+                if !isToday {
+                    self.cachedRawSegmentsByDay[day] = daySegments
+                    self.cachedScenesByDay[day] = newScenes
+                }
+                self.lastLoadedFingerprint = fingerprint
+                if resolved.selection != self.selectedSceneIDs { self.selectedSceneIDs = resolved.selection }
+                if newScenes != self.scenes { self.scenes = newScenes }
+                let blocksChanged = newBlocks != self.blocks
+                let fontSizeChanged = self.cachedTranscriptFontSize != font
+                if blocksChanged {
+                    self.blocks = newBlocks
+                    self.transcriptScrollRevision += 1
+                }
+                if blocksChanged || fontSizeChanged {
+                    self.cachedTranscript = attributed
+                    self.cachedTranscriptFontSize = font
+                    self.transcriptRevision += 1
+                }
+            }
         }
     }
 

@@ -187,6 +187,22 @@ token count is a heuristic, not a contract.
   i.e. not one pass) is out of scope and surfaces as refuse rather than a silent
   lossy compression.
 
+### Background load & cache safety (D21/D42)
+
+- **Off-main load (D21)**: the 3-second poll (and any triggered reload) never
+  scans storage, rebuilds scenes/blocks, or renders the transcript on the main
+  thread. The main thread only snapshots inputs (day, selection, font, per-day
+  cache) and enqueues onto a serial background queue; the heavy work runs there;
+  only the final publish returns to main (guarded by the still-current day). A
+  cheap input fingerprint (day + segment count + first/last capturedAt +
+  selection + font) skips the rebuild entirely when nothing changed — an idle
+  poll does a cached storage read off-main and returns.
+- **Cache thread-safety (D42)**: the process-global session-segments cache is
+  guarded by a lock, with the heavy decode I/O OUTSIDE the lock (check under
+  lock, decode unlocked, re-store under lock). Parallel poll+query reads across
+  the same or different roots, and reads during a late write, stay consistent
+  (each read sees a whole pre- or post-write snapshot, never a partial count).
+
 ### Transport privacy (D59)
 
 The WebSocket transport logs only BOUNDED, body-free structural metadata about a

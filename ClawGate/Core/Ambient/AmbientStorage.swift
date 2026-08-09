@@ -18,6 +18,50 @@ enum AmbientStorage {
     }
 
     private static var sessionSegmentsCache: [String: SessionSegmentsCache] = [:]
+    // D42: `segments(forDay:)` now runs off the main thread (D21) and can be
+    // called concurrently for different days/roots, so the process-global cache
+    // needs synchronization. The lock guards only the dictionary; the heavy
+    // decode I/O runs OUTSIDE it (two-phase: check under lock, decode unlocked,
+    // re-store under lock).
+    private static let cacheLock = NSLock()
+
+    /// Returns the decoded segments for one session's `raw.jsonl`, served from
+    /// the shared cache when the (path, mod-date, size) fingerprint still
+    /// matches. The decode happens outside the lock so a slow read never blocks
+    /// a concurrent reader of a different session.
+    private static func cachedSessionSegments(rawPath: String,
+                                              modificationDate: Date?,
+                                              fileSize: UInt64) -> [TranscriptSegment] {
+        cacheLock.lock()
+        if let cached = sessionSegmentsCache[rawPath],
+           cached.rawPath == rawPath,
+           cached.modificationDate == modificationDate,
+           cached.fileSize == fileSize {
+            let segs = cached.segments
+            cacheLock.unlock()
+            return segs
+        }
+        cacheLock.unlock()
+
+        // Heavy decode, off-lock.
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: rawPath)),
+              let text = String(data: data, encoding: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        var segs: [TranscriptSegment] = []
+        for line in text.split(separator: "\n") {
+            guard let d = line.data(using: .utf8),
+                  let seg = try? decoder.decode(TranscriptSegment.self, from: d) else { continue }
+            segs.append(seg)
+        }
+
+        cacheLock.lock()
+        // Another thread may have populated an equal entry meanwhile; the
+        // (mod,size) fingerprint decides validity, so overwriting is safe.
+        sessionSegmentsCache[rawPath] = SessionSegmentsCache(
+            rawPath: rawPath, modificationDate: modificationDate, fileSize: fileSize, segments: segs)
+        cacheLock.unlock()
+        return segs
+    }
 
     static var appSupportRoot: URL {
         FileManager.default
@@ -119,7 +163,6 @@ enum AmbientStorage {
             at: sessionsRoot, includingPropertiesForKeys: [.contentModificationDateKey]) else {
             return []
         }
-        let decoder = JSONDecoder()
         var out: [TranscriptSegment] = []
         for dir in dirs where dir.lastPathComponent.hasPrefix("ctx-") {
             let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
@@ -130,29 +173,7 @@ enum AmbientStorage {
             // started: they cannot hold segments from it. A session that crossed
             // midnight keeps a newer mod time, so it is still read (safe side).
             if let mod, mod < dayStart { continue }
-            let decoded: [TranscriptSegment]
-            if let cached = sessionSegmentsCache[raw.path],
-               cached.rawPath == raw.path,
-               cached.modificationDate == mod,
-               cached.fileSize == fileSize {
-                decoded = cached.segments
-            } else {
-                guard let data = try? Data(contentsOf: raw),
-                      let text = String(data: data, encoding: .utf8) else { continue }
-                var segs: [TranscriptSegment] = []
-                for line in text.split(separator: "\n") {
-                    guard let d = line.data(using: .utf8),
-                          let seg = try? decoder.decode(TranscriptSegment.self, from: d) else { continue }
-                    segs.append(seg)
-                }
-                sessionSegmentsCache[raw.path] = SessionSegmentsCache(
-                    rawPath: raw.path,
-                    modificationDate: mod,
-                    fileSize: fileSize,
-                    segments: segs
-                )
-                decoded = segs
-            }
+            let decoded = cachedSessionSegments(rawPath: raw.path, modificationDate: mod, fileSize: fileSize)
             for seg in decoded {
                 guard let at = seg.capturedAt else { continue }
                 if at >= startEpoch && at < endEpoch {
