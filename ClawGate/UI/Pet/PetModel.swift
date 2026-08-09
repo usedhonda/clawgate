@@ -1739,17 +1739,22 @@ final class PetModel: NSObject, ObservableObject {
     /// STT, or any error body.
     private func recordPetLogAdmissionEvent(_ event: PetLogAdmissionEvent) {
         let log = Self.petLogTelemetry
+        // D139: the request lifecycle events (received/accepted/attempted/sent)
+        // are logged at .notice, not .info — .info is not retained in the unified
+        // log by default, so a live incident could not be reconstructed after the
+        // fact (2026-08-09: a 180s timeout left zero retrievable local records).
+        // .notice persists and stays body-free (ids/counts only).
         switch event {
         case let .actionReceived(requestId, actionId, segmentCount):
-            log.info("actionReceived request=\(requestId, privacy: .public) action=\(actionId, privacy: .public) segments=\(segmentCount, privacy: .public)")
+            log.notice("actionReceived request=\(requestId, privacy: .public) action=\(actionId, privacy: .public) segments=\(segmentCount, privacy: .public)")
         case let .busyRefused(requestId):
             log.notice("actionBusyRefused request=\(requestId, privacy: .public)")
         case let .disconnectedRefused(requestId):
             log.notice("actionDisconnectedRefused request=\(requestId, privacy: .public)")
         case let .envelopeAccepted(requestId):
-            log.info("envelopeAccepted request=\(requestId, privacy: .public)")
+            log.notice("envelopeAccepted request=\(requestId, privacy: .public)")
         case let .dispatchAttempted(requestId):
-            log.info("dispatchAttempted request=\(requestId, privacy: .public)")
+            log.notice("dispatchAttempted request=\(requestId, privacy: .public)")
         case let .persistenceFailure(file, requestId):
             log.error("persistenceFailure file=\(file, privacy: .public) request=\(requestId ?? "unknown", privacy: .public)")
         case let .historyIncompleteRefused(requestId, reason):
@@ -2136,6 +2141,11 @@ final class PetModel: NSObject, ObservableObject {
                 self.pendingSummonRunId = nil
                 self.pendingLogRequest = nil
             }
+            // D139: body-free .notice so the Log reply timeout is retroactively
+            // reconstructable from the unified log (the shared summon path already
+            // emits summonReplyTimeout; the Log path previously emitted nothing).
+            Self.petLogTelemetry.notice(
+                "logReplyTimeout request=\(envelope.requestId, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) deadlineSeconds=\(Int(Self.logAwaitingReplyTimeoutSeconds), privacy: .public) transportDown=\(self.connectionState != .connected, privacy: .public)")
             // D110-neutral: no answer was observed within the deadline. Do NOT
             // assert a transport cause unless there is actual evidence (the
             // connection is currently down); a slow-but-fine reply must not be
@@ -2154,8 +2164,9 @@ final class PetModel: NSObject, ObservableObject {
         }
         // Envelope telemetry: structured, queryable, and body-free (never the
         // instruction or any transcript text). os.Logger — NSLog is not
-        // retroactively queryable via `log show`.
-        Self.petLogTelemetry.info(
+        // retroactively queryable via `log show`. D139: .notice (not .info) so it
+        // is retained in the unified log for post-hoc incident reconstruction.
+        Self.petLogTelemetry.notice(
             "envelopeSent request=\(envelope.requestId, privacy: .public) action=\(envelope.actionId, privacy: .public) bytes=\(message.utf8.count, privacy: .public) segments=\(envelope.segments.count, privacy: .public) selection=\(selectionMode, privacy: .public) policyVersion=\(PetLogPromptBuilder.policyVersion, privacy: .public) fingerprint=\(sourceFingerprint, privacy: .public)"
         )
         pendingLogRequest = PendingLogRequest(
