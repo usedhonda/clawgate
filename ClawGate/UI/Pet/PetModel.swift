@@ -369,7 +369,8 @@ final class PetModel: NSObject, ObservableObject {
                     self.showNotification(msg)
                 }
 
-            case .delta(let messageId, let text):
+            case .delta(let eventId, let text):
+                let messageId = eventId.runId
                 if let expectedRunId = self.pendingSummonRunId, expectedRunId != messageId {
                     // Delta from a stale/different run — drop it rather than
                     // let it pollute the pending summon's accumulation or
@@ -410,7 +411,8 @@ final class PetModel: NSObject, ObservableObject {
                     }
                 }
 
-            case .messageComplete(let messageId):
+            case .messageComplete(let eventId):
+                let messageId = eventId.runId
                 NSLog("[Pet] messageComplete: %@", messageId)
                 if let expectedRunId = self.pendingSummonRunId,
                    expectedRunId != messageId {

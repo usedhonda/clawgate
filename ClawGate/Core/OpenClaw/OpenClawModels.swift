@@ -13,11 +13,49 @@ extension Notification.Name {
 enum OpenClawEvent {
     case connected(sessionId: String, sessionKey: String)
     case message(OpenClawChatMessage)
-    case delta(messageId: String, text: String)
-    case messageComplete(messageId: String)
+    case delta(messageId: OpenClawEventOwnerIdentity, text: String)
+    case messageComplete(messageId: OpenClawEventOwnerIdentity)
     case history([OpenClawChatMessage])
     case error(OpenClawError)
     case disconnected(reason: String?)
+}
+
+struct OpenClawEventOwnerIdentity: Equatable, Hashable {
+    let runId: String
+    let sessionKey: String?
+
+    init(runId: String, sessionKey: String? = nil) {
+        self.runId = runId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let normalizedSessionKey = sessionKey?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !normalizedSessionKey.isEmpty {
+            self.sessionKey = normalizedSessionKey
+        } else {
+            self.sessionKey = nil
+        }
+    }
+
+    static func fromPayload(runId: String?, sessionKey: String?) -> OpenClawEventOwnerIdentity? {
+        let normalizedRunId = runId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let runId = normalizedRunId, !runId.isEmpty else { return nil }
+        return OpenClawEventOwnerIdentity(runId: runId, sessionKey: sessionKey)
+    }
+
+    var hasSessionKey: Bool { sessionKey != nil }
+}
+
+extension OpenClawEventOwnerIdentity: ExpressibleByStringLiteral {
+    init(stringLiteral value: String) {
+        self.init(runId: value, sessionKey: nil)
+    }
+
+    init(extendedGraphemeClusterLiteral value: String) {
+        self.init(stringLiteral: value)
+    }
+
+    init(unicodeScalarLiteral value: String) {
+        self.init(stringLiteral: value)
+    }
 }
 
 /// Chat message for pet bubble display
@@ -28,6 +66,7 @@ struct OpenClawChatMessage: Identifiable, Equatable {
     let timestamp: Date
     var isStreaming: Bool
     var isProactive: Bool
+    let owner: OpenClawEventOwnerIdentity?
 
     enum Role: String {
         case user
@@ -35,13 +74,15 @@ struct OpenClawChatMessage: Identifiable, Equatable {
     }
 
     init(id: String = UUID().uuidString, role: Role, text: String,
-         timestamp: Date = Date(), isStreaming: Bool = false, isProactive: Bool = false) {
+         timestamp: Date = Date(), isStreaming: Bool = false, isProactive: Bool = false,
+         owner: OpenClawEventOwnerIdentity? = nil) {
         self.id = id
         self.role = role
         self.text = text
         self.timestamp = timestamp
         self.isStreaming = isStreaming
         self.isProactive = isProactive
+        self.owner = owner
     }
 }
 

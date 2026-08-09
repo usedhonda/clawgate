@@ -513,34 +513,44 @@ actor OpenClawWSClient {
         case "agent":
             guard payload?.stream == "assistant",
                   let delta = payload?.data?.delta,
-                  let runId = payload?.runId else { return }
-            continuation?.yield(.delta(messageId: runId, text: delta))
+                  let runId = payload?.runId,
+                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: runId, sessionKey: payload?.sessionKey) else { return }
+            continuation?.yield(.delta(messageId: owner, text: delta))
 
         case "chat":
-            guard let state = payload?.state, let runId = payload?.runId else { return }
+            guard let state = payload?.state,
+                  let runId = payload?.runId,
+                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: runId, sessionKey: payload?.sessionKey) else { return }
             if state == "final" {
                 let text = payload?.message?.content?
                     .compactMap { $0.type == "text" ? $0.text : nil }
                     .joined(separator: "\n\n")
                 if let text, !text.isEmpty {
                     let isProactive = payload?.sessionKey?.contains("proactive") == true
-                    let msg = OpenClawChatMessage(id: runId, role: .assistant, text: text, isProactive: isProactive)
+                    let msg = OpenClawChatMessage(
+                        id: runId, role: .assistant, text: text, isProactive: isProactive, owner: owner
+                    )
                     continuation?.yield(.message(msg))
                 }
             }
 
         case "assistant.message":
-            guard let id = payload?.messageId, let content = payload?.content else { return }
-            let msg = OpenClawChatMessage(id: id, role: .assistant, text: content)
+            guard let id = payload?.messageId,
+                  let content = payload?.content,
+                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey) else { return }
+            let msg = OpenClawChatMessage(id: id, role: .assistant, text: content, owner: owner)
             continuation?.yield(.message(msg))
 
         case "assistant.delta":
-            guard let id = payload?.messageId, let delta = payload?.delta else { return }
-            continuation?.yield(.delta(messageId: id, text: delta))
+            guard let id = payload?.messageId,
+                  let delta = payload?.delta,
+                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey) else { return }
+            continuation?.yield(.delta(messageId: owner, text: delta))
 
         case "assistant.message_complete":
-            guard let id = payload?.messageId else { return }
-            continuation?.yield(.messageComplete(messageId: id))
+            guard let id = payload?.messageId,
+                  let owner = OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey) else { return }
+            continuation?.yield(.messageComplete(messageId: owner))
 
         case "health", "tick", "presence", "telemetry.ack":
             break

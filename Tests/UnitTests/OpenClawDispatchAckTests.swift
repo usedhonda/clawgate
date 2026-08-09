@@ -129,6 +129,88 @@ final class OpenClawDispatchAckTests: XCTestCase {
             .path
     }
 
+    func testEventOwnerIdentityPreservesRunIdAndSessionKeyWithoutCollapsingByRunId() throws {
+        let sameRunPrimary = OpenClawEventOwnerIdentity(runId: "run-1", sessionKey: "agent:main:main")
+        let sameRunProactive = OpenClawEventOwnerIdentity(runId: "run-1", sessionKey: "agent:main:proactive:heartbeat")
+
+        XCTAssertNotEqual(sameRunPrimary, sameRunProactive)
+        XCTAssertEqual(sameRunPrimary.runId, sameRunProactive.runId)
+        XCTAssertNotEqual(sameRunPrimary.sessionKey, sameRunProactive.sessionKey)
+
+        let canonicalDelta = OpenClawEvent.delta(messageId: sameRunPrimary, text: "typing")
+        guard case .delta(let owner, _) = canonicalDelta else {
+            XCTFail("delta event should carry owner identity")
+            return
+        }
+        XCTAssertEqual(owner.runId, "run-1")
+        XCTAssertEqual(owner.sessionKey, "agent:main:main")
+        XCTAssertTrue(owner.hasSessionKey)
+
+        let incomplete = OpenClawEvent.delta(messageId: OpenClawEventOwnerIdentity(runId: "run-1"), text: "typing")
+        guard case .delta(let incompleteOwner, _) = incomplete else {
+            XCTFail("incomplete delta should still carry identity")
+            return
+        }
+        XCTAssertNil(incompleteOwner.sessionKey)
+    }
+
+    func testIncomingPayloadPreservesCanonicalFinalIdentityAndNoInference() throws {
+        let payloadJSON = """
+        {
+          "type": "chat",
+          "state": "final",
+          "runId": "run-1",
+          "sessionKey": "agent:main:main",
+          "message": {
+            "role": "assistant",
+            "content": [
+              { "type": "text", "text": "hello" }
+            ]
+          }
+        }
+        """
+        let message = try decodeIncomingPayload(payloadJSON)
+        XCTAssertEqual(message.runId, "run-1")
+        XCTAssertEqual(message.sessionKey, "agent:main:main")
+
+        let ownerFromPayload = OpenClawEventOwnerIdentity.fromPayload(
+            runId: message.runId, sessionKey: message.sessionKey
+        )
+        XCTAssertNotNil(ownerFromPayload)
+        XCTAssertEqual(ownerFromPayload?.runId, "run-1")
+        XCTAssertEqual(ownerFromPayload?.sessionKey, "agent:main:main")
+
+        let missingSessionPayload = try decodeIncomingPayload("""
+        {
+          "type": "chat",
+          "state": "final",
+          "runId": "run-2",
+          "message": {
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "hello" }]
+          }
+        }
+        """)
+        let missingSession = OpenClawEventOwnerIdentity.fromPayload(
+            runId: missingSessionPayload.runId, sessionKey: missingSessionPayload.sessionKey
+        )
+        XCTAssertNotNil(missingSession)
+        XCTAssertNil(missingSession?.sessionKey)
+    }
+
+    func testWsClientEventCaseUsesWireSessionKeyAndDoesNotSynthesizeSessionKey() throws {
+        let root = sourceRoot()
+        let wsClient = try String(contentsOfFile: "\(root)/ClawGate/Core/OpenClaw/OpenClawWSClient.swift", encoding: .utf8)
+
+        XCTAssertTrue(wsClient.contains("case \"chat\""))
+        XCTAssertTrue(wsClient.contains("OpenClawEventOwnerIdentity.fromPayload(runId: runId, sessionKey: payload?.sessionKey)"))
+        XCTAssertTrue(wsClient.contains("case \"assistant.delta\""))
+        XCTAssertTrue(wsClient.contains("case \"assistant.message_complete\""))
+        XCTAssertTrue(wsClient.contains("OpenClawEventOwnerIdentity.fromPayload(runId: id, sessionKey: payload?.sessionKey)"))
+        XCTAssertFalse(wsClient.contains("payload?.sessionKey ?? self.sessionKey"))
+        XCTAssertFalse(wsClient.contains("if let currentSessionKey = self.sessionKey"))
+    }
+
     func testValidNormalSolDispatchAckPassesValidation() throws {
         let payload = try decodeIncomingPayload("""
         {
