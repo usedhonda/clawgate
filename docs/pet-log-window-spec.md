@@ -56,6 +56,20 @@ invariant violation refused before dispatch. Only an over-budget request (either
 mode) still refuses fail-closed. `retrievalTruncatedBeforeCoverage` is persisted
 to entry metadata as `Bool?` (nil for pre-v3 records).
 
+### Source completeness fail-closed (D159/D163)
+
+The backward scan reports source-completeness issues gathered in the same pass:
+unreadable/undecodable session files (D159 — malformed JSONL lines or bytes that
+can't be read; an ABSENT sessions root is "no records", NOT an issue) and real
+utterances with no `capturedAt` (D163 — the anchor cutoff can't be verified
+against them). If any issue is present for an automatic query, the envelope's
+client-side `sourceReadIncomplete` is set and `sendLogInstruction` refuses before
+dispatch with a typed `sourceReadIncompleteRefused` status (no `log_user` entry,
+no slot claim, no watchdog, draft preserved, body-free telemetry). Valid
+segments may still render in the UI, but the query fails closed rather than
+sending a silently partial/undated view. `sourceReadIncomplete` is never encoded
+to the wire.
+
 ### Prefix v3 contract (D1/D6/D3/D153 prefix text)
 
 The universal prefix instructs the model as follows:

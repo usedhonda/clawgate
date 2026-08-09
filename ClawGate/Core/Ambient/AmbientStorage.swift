@@ -15,6 +15,10 @@ enum AmbientStorage {
         let modificationDate: Date?
         let fileSize: UInt64
         let segments: [TranscriptSegment]
+        // D159: lines/files that could not be read or decoded (malformed JSONL,
+        // unreadable bytes) — a source-completeness signal the caller fails
+        // closed on. Cached alongside the segments so a re-read is consistent.
+        let decodeFailures: Int
     }
 
     private static var sessionSegmentsCache: [String: SessionSegmentsCache] = [:]
@@ -31,26 +35,37 @@ enum AmbientStorage {
     /// a concurrent reader of a different session.
     private static func cachedSessionSegments(rawPath: String,
                                               modificationDate: Date?,
-                                              fileSize: UInt64) -> [TranscriptSegment] {
+                                              fileSize: UInt64) -> (segments: [TranscriptSegment], decodeFailures: Int) {
         cacheLock.lock()
         if let cached = sessionSegmentsCache[rawPath],
            cached.rawPath == rawPath,
            cached.modificationDate == modificationDate,
            cached.fileSize == fileSize {
-            let segs = cached.segments
+            let result = (cached.segments, cached.decodeFailures)
             cacheLock.unlock()
-            return segs
+            return result
         }
         cacheLock.unlock()
 
         // Heavy decode, off-lock.
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: rawPath)),
-              let text = String(data: data, encoding: .utf8) else { return [] }
+              let text = String(data: data, encoding: .utf8) else {
+            // The file was stat'd by the caller but its bytes can't be read or
+            // decoded as UTF-8 — a source read failure (D159), not "no records".
+            let entry = SessionSegmentsCache(rawPath: rawPath, modificationDate: modificationDate,
+                                             fileSize: fileSize, segments: [], decodeFailures: 1)
+            cacheLock.lock(); sessionSegmentsCache[rawPath] = entry; cacheLock.unlock()
+            return ([], 1)
+        }
         let decoder = JSONDecoder()
         var segs: [TranscriptSegment] = []
-        for line in text.split(separator: "\n") {
+        var decodeFailures = 0
+        for line in text.split(separator: "\n") where !line.isEmpty {
             guard let d = line.data(using: .utf8),
-                  let seg = try? decoder.decode(TranscriptSegment.self, from: d) else { continue }
+                  let seg = try? decoder.decode(TranscriptSegment.self, from: d) else {
+                decodeFailures += 1
+                continue
+            }
             segs.append(seg)
         }
 
@@ -58,9 +73,10 @@ enum AmbientStorage {
         // Another thread may have populated an equal entry meanwhile; the
         // (mod,size) fingerprint decides validity, so overwriting is safe.
         sessionSegmentsCache[rawPath] = SessionSegmentsCache(
-            rawPath: rawPath, modificationDate: modificationDate, fileSize: fileSize, segments: segs)
+            rawPath: rawPath, modificationDate: modificationDate, fileSize: fileSize,
+            segments: segs, decodeFailures: decodeFailures)
         cacheLock.unlock()
-        return segs
+        return (segs, decodeFailures)
     }
 
     static var appSupportRoot: URL {
@@ -173,7 +189,7 @@ enum AmbientStorage {
             // started: they cannot hold segments from it. A session that crossed
             // midnight keeps a newer mod time, so it is still read (safe side).
             if let mod, mod < dayStart { continue }
-            let decoded = cachedSessionSegments(rawPath: raw.path, modificationDate: mod, fileSize: fileSize)
+            let decoded = cachedSessionSegments(rawPath: raw.path, modificationDate: mod, fileSize: fileSize).segments
             for seg in decoded {
                 guard let at = seg.capturedAt else { continue }
                 if at >= startEpoch && at < endEpoch {
@@ -238,6 +254,15 @@ enum AmbientStorage {
         /// D159: `ctx-` sessions whose raw transcript could not be stat/read at
         /// all (distinct from an absent sessions root = "no records").
         let readFailureCount: Int
+        /// D159: raw lines/files that failed to read or JSON-decode (malformed
+        /// JSONL, unreadable bytes) — counted during the same decode pass.
+        let decodeFailureCount: Int
+
+        /// D159/D163: any source-completeness issue that must fail the query
+        /// closed rather than silently sending a partial/undated view.
+        var hasSourceIssue: Bool {
+            missingTimestampCount > 0 || readFailureCount > 0 || decodeFailureCount > 0
+        }
     }
 
     /// D153: the automatic-scope retrieval source — a SINGLE pass over every
@@ -260,12 +285,13 @@ enum AmbientStorage {
             // A missing/unreadable sessions ROOT is "no records" (typed empty),
             // distinct from a session whose raw can't be read (a read failure).
             return BackwardScan(window: [], truncatedBeforeCoverage: false,
-                                missingTimestampCount: 0, readFailureCount: 0)
+                                missingTimestampCount: 0, readFailureCount: 0, decodeFailureCount: 0)
         }
         var window: [TranscriptSegment] = []
         var truncated = false
         var missingTimestamp = 0
         var readFailures = 0
+        var decodeFailures = 0
         for dir in dirs where dir.lastPathComponent.hasPrefix("ctx-") {
             let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
             guard let attrs = try? fm.attributesOfItem(atPath: raw.path) else {
@@ -275,7 +301,8 @@ enum AmbientStorage {
             let fileSize = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
             let mod = attrs[.modificationDate] as? Date
             let decoded = cachedSessionSegments(rawPath: raw.path, modificationDate: mod, fileSize: fileSize)
-            for seg in decoded {
+            decodeFailures += decoded.decodeFailures
+            for seg in decoded.segments {
                 guard let at = seg.capturedAt else { missingTimestamp += 1; continue }
                 if at < capEpoch {
                     truncated = true
@@ -286,7 +313,8 @@ enum AmbientStorage {
         }
         window.sort { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
         return BackwardScan(window: window, truncatedBeforeCoverage: truncated,
-                            missingTimestampCount: missingTimestamp, readFailureCount: readFailures)
+                            missingTimestampCount: missingTimestamp, readFailureCount: readFailures,
+                            decodeFailureCount: decodeFailures)
     }
 
     /// Delete rolling-buffer chunks older than `seconds` (default 6h) and prune

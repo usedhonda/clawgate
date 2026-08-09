@@ -218,6 +218,30 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
                        "refuse creates no log_user entry")
     }
 
+    /// D159/D163: a source-read-incomplete envelope refuses before dispatch with
+    /// a typed status — no log_user entry, no slot claim, draft preserved.
+    func testSourceReadIncompleteRefusesBeforeDispatch() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let requestId = UUID().uuidString
+        var env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "free", instruction: "まとめて",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [segment("a"), segment("b")])
+        env.sourceReadIncomplete = true
+        let accepted = model.sendLogInstruction(envelope: env)
+
+        XCTAssertFalse(accepted, "a source-read-incomplete query is refused, never dispatched")
+        XCTAssertEqual(model.logDispatchStatus, .sourceReadIncompleteRefused(requestId: requestId))
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
+                       "refuse creates no log_user entry")
+        XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
+    }
+
     // MARK: - D153 truncated-before-coverage parser branches
 
     /// A truncated automatic answer must TRIM a real leading prefix — full

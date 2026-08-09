@@ -179,6 +179,11 @@ struct PetLogQueryEnvelope: Codable, Equatable {
     /// answer only when it can find a high-confidence semantic boundary inside the
     /// window (else typed insufficient). Always false for explicit scope.
     var retrievalTruncatedBeforeCoverage: Bool = false
+    /// D159/D163: the backward source scan hit a completeness issue — an
+    /// unreadable session, a malformed line, or a real utterance with no
+    /// timestamp. Client-side ONLY (never encoded to the wire): the client fails
+    /// closed on it rather than sending a silently partial/undated view.
+    var sourceReadIncomplete: Bool = false
 }
 
 extension PetLogQueryEnvelope {
@@ -238,7 +243,8 @@ extension PetLogQueryEnvelope {
             coverageEnd: epochs.max().map { Date(timeIntervalSince1970: $0) },
             completeBeforeAnchor: completeBeforeAnchor,
             segments: newSegments,
-            retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage
+            retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage,
+            sourceReadIncomplete: sourceReadIncomplete
         )
     }
 }
@@ -570,6 +576,10 @@ enum PetLogDispatchStatus: Equatable {
     /// with the wire flag, D153). These refusals surface a typed status +
     /// telemetry only, before any side-effect.
     case historyIncompleteRefused(requestId: String)
+    /// D159/D163: the source could not be read completely (unreadable session,
+    /// malformed line, or a real utterance missing a timestamp) — refused before
+    /// dispatch rather than sending a silently partial/undated view.
+    case sourceReadIncompleteRefused(requestId: String)
 }
 
 enum PetLogSelectionMode: Equatable {

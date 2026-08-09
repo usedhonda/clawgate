@@ -514,6 +514,56 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         XCTAssertEqual(scan.window.map(\.text), ["直近"])
     }
 
+    /// D163: an undated real utterance is counted as a source issue — the anchor
+    /// cutoff cannot be verified against it, so the query must fail closed rather
+    /// than silently drop it. Dated segments still form the window.
+    func testScanBackwardCountsMissingTimestamp() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+        let anchor = Date(timeIntervalSince1970: base)
+
+        var undated = TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "no timestamp")
+        undated.capturedAt = nil
+        try writeSession("ctx-x", [seg("A", at: base - 600), seg("B", at: base - 300), undated], under: root)
+
+        let scan = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertEqual(scan.missingTimestampCount, 1, "the undated line is counted as a source issue")
+        XCTAssertTrue(scan.hasSourceIssue)
+        XCTAssertEqual(scan.window.map(\.text), ["A", "B"], "dated segments still form the window")
+    }
+
+    /// D159: a malformed transcript line is counted as a decode failure — the
+    /// scan reports the source is incomplete rather than silently dropping it.
+    func testScanBackwardCountsDecodeFailure() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+        let anchor = Date(timeIntervalSince1970: base)
+
+        try writeSession("ctx-m", [seg("valid", at: base - 600)], under: root)
+        let raw = root.appendingPathComponent("ctx-m/transcripts/raw.jsonl")
+        let existing = try String(contentsOf: raw, encoding: .utf8)
+        try (existing + "{ this is not json\n").write(to: raw, atomically: true, encoding: .utf8)
+
+        let scan = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertEqual(scan.decodeFailureCount, 1, "the malformed line is counted")
+        XCTAssertTrue(scan.hasSourceIssue)
+        XCTAssertEqual(scan.window.map(\.text), ["valid"], "the valid segment is still returned")
+    }
+
+    /// D159: an ABSENT sessions root is "no records" (typed empty), NOT a source
+    /// issue — distinct from an unreadable session.
+    func testScanBackwardAbsentRootIsNotASourceIssue() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clawgate-absent-\(UUID().uuidString)", isDirectory: true)
+        let scan = AmbientStorage.scanBackward(anchor: Date(), sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertFalse(scan.hasSourceIssue, "an absent root is empty, not a source issue")
+        XCTAssertTrue(scan.window.isEmpty)
+    }
+
     /// D20: midnight alone never splits a contiguous run.
     func testAutomaticScopeDoesNotSplitAtPlainMidnight() throws {
         let root = makeTempSessionsRoot()

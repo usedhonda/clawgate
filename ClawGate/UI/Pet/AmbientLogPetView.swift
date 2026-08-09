@@ -555,10 +555,13 @@ final class AmbientLogModel: ObservableObject {
         // answers only with a high-confidence boundary. Explicit scope is always
         // non-truncated (day-scoped exact-all).
         let retrievalTruncatedBeforeCoverage: Bool
+        // D159/D163: source-completeness issue found by the backward scan.
+        let sourceReadIncomplete: Bool
         if let ids = resolved.scopeIDs {
             candidateSegments = resolved.segments
             scopeOverride = ids
             retrievalTruncatedBeforeCoverage = false
+            sourceReadIncomplete = false
         } else if day != today && daySegments.isEmpty {
             // D155: a non-today automatic query needs a coverage-tail anchor from
             // the SELECTED day itself. An empty past day has none — do NOT fall
@@ -568,12 +571,14 @@ final class AmbientLogModel: ObservableObject {
             candidateSegments = []
             scopeOverride = nil
             retrievalTruncatedBeforeCoverage = false
+            sourceReadIncomplete = false
         } else {
             let scan = AmbientStorage.scanBackward(
                 anchor: anchor, timeZone: timeZone, sessionsRoot: sessionsRoot)
             candidateSegments = scan.window
             scopeOverride = nil
             retrievalTruncatedBeforeCoverage = scan.truncatedBeforeCoverage
+            sourceReadIncomplete = scan.hasSourceIssue
         }
 
         // Every segment here is expected to already carry a capturedAt
@@ -624,7 +629,8 @@ final class AmbientLogModel: ObservableObject {
             coverageEnd: coverageEnd,
             completeBeforeAnchor: completeBeforeAnchor,
             segments: rawSegments,
-            retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage
+            retrievalTruncatedBeforeCoverage: retrievalTruncatedBeforeCoverage,
+            sourceReadIncomplete: sourceReadIncomplete
         )
     }
 
@@ -1365,6 +1371,8 @@ struct AmbientLogPetView: View {
         case .emptyScopeRefused: return "対象のログがありません"
         case .historyIncompleteRefused:
             return "対象の履歴が大きすぎる/古すぎるため送信できません。シーン選択や対象範囲を狭めてください"
+        case .sourceReadIncompleteRefused:
+            return "ログの一部を読み取れなかったため送信できません（破損・タイムスタンプ欠落）"
         }
     }
 

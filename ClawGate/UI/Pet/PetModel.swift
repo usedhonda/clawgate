@@ -1994,6 +1994,18 @@ final class PetModel: NSObject, ObservableObject {
             logDispatchStatus = .emptyScopeRefused(requestId: requestedEnvelope.requestId)
             return false
         }
+        // D159/D163 fail-closed — the backward source scan hit a completeness
+        // issue (unreadable session, malformed line, or an undated real
+        // utterance). Refuse before any side-effect rather than sending a
+        // silently partial/undated view (typed status + body-free telemetry,
+        // draft preserved).
+        guard !requestedEnvelope.sourceReadIncomplete else {
+            logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(
+                .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: "sourceReadIncomplete"))
+            logDispatchStatus = .sourceReadIncompleteRefused(requestId: requestedEnvelope.requestId)
+            return false
+        }
         // D153 client invariant — before any admission side-effect. Explicit
         // scope is always non-truncated (day-scoped exact-all); a truncated
         // explicit envelope is a client bug, so refuse it before dispatch rather
