@@ -199,6 +199,7 @@ final class AmbientCaptureTimingTests: XCTestCase {
         }
 
         _ = try! manager.testOpenChunk(at: tempURL("seq-1.wav"))
+        XCTAssertEqual(manager.testCurrentChunkSequence(), 1)
         manager.testMarkCurrentChunkFirstLiveSample(date(1_700_000_700))
         manager.testWriteBuffer(buffer(frames: 17_001), firstLiveSampleDate: date(1_700_000_700))
         let first = manager.testFinalizeCurrentChunk()
@@ -206,6 +207,7 @@ final class AmbientCaptureTimingTests: XCTestCase {
         XCTAssertNil(manager.testFinalizeCurrentChunk())
 
         _ = try! manager.testOpenChunk(at: tempURL("seq-2.wav"))
+        XCTAssertEqual(manager.testCurrentChunkSequence(), 2)
         manager.testMarkCurrentChunkFirstLiveSample(date(1_700_000_900))
         manager.testWriteBuffer(buffer(frames: 17_001), firstLiveSampleDate: date(1_700_000_900))
         let second = manager.testFinalizeCurrentChunk()
@@ -233,6 +235,25 @@ final class AmbientCaptureTimingTests: XCTestCase {
         let metaZero = state.completedChunk(url: URL(fileURLWithPath: "/tmp/ambient-zero.wav"), sampleRate: 0)
         XCTAssertNil(metaZero.startedAt)
         XCTAssertFalse(metaZero.provenOverlap)
+    }
+
+    func testNilCurrentChunkCannotMarkPrimeSuccess() {
+        var wrotePrime = false
+        let manager = makeManager(writeAudioFile: { _, _ in
+            wrotePrime = true
+            throw CaptureError.writeFailed
+        })
+        manager.testSetOverlapTail([0.1, 0.2, 0.3, 0.4])
+
+        let primed = manager.testPrimeAndMark()
+        let timing = manager.testCurrentChunkTiming()
+
+        XCTAssertEqual(primed, 0)
+        XCTAssertFalse(wrotePrime)
+        XCTAssertEqual(timing.actualPrimedFrames, 0)
+        XCTAssertFalse(timing.provenOverlap)
+        XCTAssertEqual(timing.sequence, 0)
+        XCTAssertNil(manager.testFinalizeCurrentChunk())
     }
 
     func testOriginalChunkTimingSequenceAndMonotonicity() {
