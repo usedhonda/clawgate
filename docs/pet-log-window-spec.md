@@ -203,6 +203,21 @@ token count is a heuristic, not a contract.
   the same or different roots, and reads during a late write, stay consistent
   (each read sees a whole pre- or post-write snapshot, never a partial count).
 
+### Past-day cache invalidation & poll timer (D38/D92)
+
+- **Past-day invalidation (D38)**: "past days are static" is only an
+  optimization hint. Each past-day load compares the day's on-disk fingerprint
+  (session file names/sizes/mod-times, no decode) against the cached one; a
+  change (late STT write, recovery, backfill) invalidates the cache and
+  re-reads, so a late write to a past day is never hidden behind the cache. A
+  content update while a past day is being read refreshes in place — the day
+  stays selected and the scroll is not yanked to the bottom (only today follows
+  live capture, and a day change scrolls once on navigation).
+- **Poll timer idempotency (D92)**: `start()` is idempotent — a duplicate
+  `start()` (e.g. a repeated `onAppear`) keeps the same single 3-second timer
+  rather than leaking a second one that `stop()` can't reach; `stop()` clears
+  it and `deinit` invalidates it.
+
 ### Transport privacy (D59)
 
 The WebSocket transport logs only BOUNDED, body-free structural metadata about a

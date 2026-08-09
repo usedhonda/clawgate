@@ -352,8 +352,12 @@ final class AmbientLogModel: ObservableObject {
     // Past days cache uncapped scenes + raw segments so scene identity stays
     // the SAME single source as the query path (D17). Blocks are re-derived
     // from these per load (a display cap is applied then, not to identity).
+    // D38: the cache is keyed alongside the day's on-disk fingerprint so a late
+    // write to a past day invalidates it instead of being hidden.
     private var cachedScenesByDay: [Date: [AmbientLogGrouping.Scene]] = [:]
     private var cachedRawSegmentsByDay: [Date: [TranscriptSegment]] = [:]
+    private var cachedDayFingerprintByDay: [Date: String] = [:]
+    private var lastPublishedDay: Date?
     private var cachedTranscriptFontSize: CGFloat
     private var cachedThreadSignature = ""
     private var timer: Timer?
@@ -376,6 +380,10 @@ final class AmbientLogModel: ObservableObject {
 
     func start() {
         load()
+        // D92: idempotent — a second start() (e.g. a duplicate onAppear) must not
+        // leave a second 3-second Timer running that stop() can't reach. Arm only
+        // when not already polling.
+        guard timer == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.load()
         }
@@ -385,6 +393,16 @@ final class AmbientLogModel: ObservableObject {
         timer?.invalidate()
         timer = nil
     }
+
+    deinit {
+        timer?.invalidate()
+    }
+
+    #if DEBUG
+    /// Test seam: the current poll timer (private), so a test can assert start()
+    /// is idempotent (repeated start keeps the SAME single timer, D92).
+    var pollTimerForTesting: Timer? { timer }
+    #endif
 
     func moveDay(by days: Int) {
         guard let day = calendar.date(byAdding: .day, value: days, to: selectedDay) else { return }
@@ -586,7 +604,9 @@ final class AmbientLogModel: ObservableObject {
         let isToday = (day == today)
         let cachedScenes = isToday ? nil : cachedScenesByDay[day]
         let cachedRaw = isToday ? nil : cachedRawSegmentsByDay[day]
+        let cachedDayFingerprint = isToday ? nil : cachedDayFingerprintByDay[day]
         let previousFingerprint = lastLoadedFingerprint
+        let previousDay = lastPublishedDay
         let tz = timeZone
 
         loadQueue.async { [weak self] in
@@ -595,9 +615,19 @@ final class AmbientLogModel: ObservableObject {
             // the same source the query path reads — off the main thread.
             let daySegments: [TranscriptSegment]
             let newScenes: [AmbientLogGrouping.Scene]
-            if let cachedScenes, let cachedRaw {
-                daySegments = cachedRaw
-                newScenes = cachedScenes
+            var dayFingerprintToStore: String?
+            if !isToday {
+                // D38: only trust the past-day cache while the day's on-disk
+                // fingerprint is unchanged; a late write invalidates it.
+                let currentDayFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
+                if let cachedScenes, let cachedRaw, cachedDayFingerprint == currentDayFingerprint {
+                    daySegments = cachedRaw
+                    newScenes = cachedScenes
+                } else {
+                    daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
+                    newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
+                    dayFingerprintToStore = currentDayFingerprint
+                }
             } else {
                 daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
                 newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
@@ -629,15 +659,26 @@ final class AmbientLogModel: ObservableObject {
                 if !isToday {
                     self.cachedRawSegmentsByDay[day] = daySegments
                     self.cachedScenesByDay[day] = newScenes
+                    if let dayFingerprintToStore {
+                        self.cachedDayFingerprintByDay[day] = dayFingerprintToStore
+                    }
                 }
                 self.lastLoadedFingerprint = fingerprint
                 if resolved.selection != self.selectedSceneIDs { self.selectedSceneIDs = resolved.selection }
                 if newScenes != self.scenes { self.scenes = newScenes }
                 let blocksChanged = newBlocks != self.blocks
                 let fontSizeChanged = self.cachedTranscriptFontSize != font
+                // D38: only auto-scroll to bottom for today (follow live capture)
+                // or when the day just changed (navigation). A past-day content
+                // update (late append while reading) refreshes without yanking
+                // the scroll position.
+                let dayChanged = (previousDay != day)
+                self.lastPublishedDay = day
                 if blocksChanged {
                     self.blocks = newBlocks
-                    self.transcriptScrollRevision += 1
+                    if isToday || dayChanged {
+                        self.transcriptScrollRevision += 1
+                    }
                 }
                 if blocksChanged || fontSizeChanged {
                     self.cachedTranscript = attributed

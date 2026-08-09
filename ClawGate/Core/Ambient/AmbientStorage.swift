@@ -185,6 +185,35 @@ enum AmbientStorage {
         return out
     }
 
+    /// D38: a cheap fingerprint of a day's on-disk state — the (name, size,
+    /// mod-time) of every session file that could hold this day, with NO decode.
+    /// A cached past day is invalidated when this changes, so a late STT write,
+    /// recovery, or backfill that grows a past day's raw is picked up instead of
+    /// being hidden behind the "past days are static" cache.
+    static func dayFingerprint(forDay day: Date, timeZone: TimeZone,
+                               sessionsRoot: URL = AmbientStorage.sessionsRoot) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let dayStartEpoch = cal.startOfDay(for: day).timeIntervalSince1970
+        let fm = FileManager.default
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: sessionsRoot, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return "empty"
+        }
+        var parts: [String] = []
+        for dir in dirs.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        where dir.lastPathComponent.hasPrefix("ctx-") {
+            let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
+            let attrs = try? fm.attributesOfItem(atPath: raw.path)
+            let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+            let mod = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+            // Same "could this session hold this day" rule as segments(forDay:).
+            if mod < dayStartEpoch { continue }
+            parts.append("\(dir.lastPathComponent):\(size):\(Int(mod))")
+        }
+        return parts.isEmpty ? "empty" : parts.joined(separator: "|")
+    }
+
     /// D20: the automatic-scope retrieval source. Returns the backward-contiguous
     /// run of segments ending strictly before `anchor`, crossing calendar days —
     /// the calendar day is a display/navigation boundary, not a context boundary.
