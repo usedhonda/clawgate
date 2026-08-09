@@ -142,6 +142,9 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertEqual(sameRunPrimary.runId, sameRunProactive.runId)
         XCTAssertNotEqual(sameRunPrimary.sessionKey, sameRunProactive.sessionKey)
         XCTAssertNotEqual(sameRunPrimary.completeOwnerKey, sameRunProactive.completeOwnerKey)
+        XCTAssertEqual(sameRunPrimary.completeOwnerKey?.sessionKey, "agent:main:main")
+        XCTAssertEqual(sameRunPrimary.completeOwnerKey?.runId, "run-1")
+        XCTAssertEqual(sameRunProactive.completeOwnerKey?.sessionKey, "agent:main:proactive:heartbeat")
         XCTAssertEqual(sameRunPrimary.messageId, "run-1")
         XCTAssertTrue(sameRunPrimary.hasCompleteOwnerKey)
 
@@ -188,7 +191,8 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertEqual(msg.owner?.messageId, "run-1")
         XCTAssertEqual(msg.owner?.runId, "run-1")
         XCTAssertEqual(msg.owner?.sessionKey, "agent:main:main")
-        XCTAssertEqual(msg.owner?.completeOwnerKey, "agent:main:main#run-1")
+        XCTAssertEqual(msg.owner?.completeOwnerKey?.sessionKey, "agent:main:main")
+        XCTAssertEqual(msg.owner?.completeOwnerKey?.runId, "run-1")
     }
 
     func testCanonicalProactiveChatFinalKeepsProactiveFlag() throws {
@@ -234,7 +238,8 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertEqual(owner.messageId, "run-1")
         XCTAssertEqual(owner.runId, "run-1")
         XCTAssertEqual(owner.sessionKey, "agent:main:main")
-        XCTAssertEqual(owner.completeOwnerKey, "agent:main:main#run-1")
+        XCTAssertEqual(owner.completeOwnerKey?.sessionKey, "agent:main:main")
+        XCTAssertEqual(owner.completeOwnerKey?.runId, "run-1")
         XCTAssertEqual(delta, "typing")
     }
 
@@ -290,7 +295,8 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertEqual(msg.owner?.messageId, "message-id-2")
         XCTAssertEqual(msg.owner?.runId, "run-3")
         XCTAssertEqual(msg.owner?.sessionKey, "agent:main:main")
-        XCTAssertEqual(msg.owner?.completeOwnerKey, "agent:main:main#run-3")
+        XCTAssertEqual(msg.owner?.completeOwnerKey?.sessionKey, "agent:main:main")
+        XCTAssertEqual(msg.owner?.completeOwnerKey?.runId, "run-3")
     }
 
     func testMissingSessionKeyIsNotInferred() throws {
@@ -340,9 +346,78 @@ final class OpenClawDispatchAckTests: XCTestCase {
             XCTFail("assistant.message should map to .message")
             return
         }
-        XCTAssertEqual(primaryMessage.owner?.completeOwnerKey, "agent:main:main#run-5")
-        XCTAssertEqual(secondaryMessage.owner?.completeOwnerKey, "agent:main:proactive:heartbeat#run-5")
+        XCTAssertEqual(primaryMessage.owner?.completeOwnerKey?.sessionKey, "agent:main:main")
+        XCTAssertEqual(primaryMessage.owner?.completeOwnerKey?.runId, "run-5")
+        XCTAssertEqual(secondaryMessage.owner?.completeOwnerKey?.sessionKey, "agent:main:proactive:heartbeat")
+        XCTAssertEqual(secondaryMessage.owner?.completeOwnerKey?.runId, "run-5")
         XCTAssertNotEqual(primaryMessage.owner?.completeOwnerKey, secondaryMessage.owner?.completeOwnerKey)
+    }
+
+    func testPetModelMessageFinalCorrelatesPendingSummonByOwnerRunIdNotMessageId() throws {
+        let model = PetModel()
+
+        model.pendingSummonSource = "manual"
+        model.pendingSummonRunId = "run-A"
+        let beforeSummonResultsCount = model.summonResults.count
+
+        let acceptedMessage = try XCTUnwrap(try routeIncomingEvents("assistant.message", payloadJSON: """
+        {
+          "type": "assistant.message",
+          "messageId": "msg-1",
+          "runId": "run-A",
+          "sessionKey": "agent:main:main",
+          "content": "accepted reply"
+        }
+        """).first)
+        guard case .message(let msg) = acceptedMessage else {
+            XCTFail("assistant.message should map to .message")
+            return
+        }
+        model.handleEvent(.message(msg))
+
+        XCTAssertNil(model.pendingSummonSource)
+        XCTAssertNil(model.pendingSummonRunId)
+        XCTAssertEqual(model.summonResults.count, beforeSummonResultsCount + 1)
+        XCTAssertEqual(model.messages.last?.text, "accepted reply")
+
+        let staleModel = PetModel()
+        staleModel.pendingSummonSource = "manual"
+        staleModel.pendingSummonRunId = "run-A"
+        let staleSummonResultsCount = staleModel.summonResults.count
+
+        let ignoredByRunId = try XCTUnwrap(try routeIncomingEvents("assistant.message", payloadJSON: """
+        {
+          "type": "assistant.message",
+          "messageId": "msg-2",
+          "runId": "run-B",
+          "sessionKey": "agent:main:main",
+          "content": "ignored because run id mismatched"
+        }
+        """).first)
+        let ignoredByMissingRunId = try XCTUnwrap(try routeIncomingEvents("assistant.message", payloadJSON: """
+        {
+          "type": "assistant.message",
+          "messageId": "msg-3",
+          "sessionKey": "agent:main:main",
+          "content": "ignored because run id absent"
+        }
+        """).first)
+        guard case .message(let runMismatchMessage) = ignoredByRunId else {
+            XCTFail("assistant.message should map to .message for run mismatch case")
+            return
+        }
+        guard case .message(let absentRunMessage) = ignoredByMissingRunId else {
+            XCTFail("assistant.message should map to .message for missing runId case")
+            return
+        }
+        staleModel.handleEvent(.message(runMismatchMessage))
+        staleModel.handleEvent(.message(absentRunMessage))
+
+        XCTAssertEqual(staleModel.pendingSummonSource, "manual")
+        XCTAssertEqual(staleModel.pendingSummonRunId, "run-A")
+        XCTAssertEqual(staleModel.summonResults.count, staleSummonResultsCount)
+        XCTAssertFalse(staleModel.messages.contains(where: { $0.text == "ignored because run id mismatched" }))
+        XCTAssertFalse(staleModel.messages.contains(where: { $0.text == "ignored because run id absent" }))
     }
 
     func testValidNormalSolDispatchAckPassesValidation() throws {

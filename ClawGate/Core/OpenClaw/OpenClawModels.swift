@@ -60,10 +60,15 @@ struct OpenClawEventOwnerIdentity: Equatable, Hashable {
     }
 
     var hasSessionKey: Bool { sessionKey != nil }
-    var completeOwnerKey: String? {
+    var completeOwnerKey: OpenClawEventOwnerIdentityKey? {
         guard let runId, let sessionKey else { return nil }
-        return "\(sessionKey)#\(runId)"
+        return OpenClawEventOwnerIdentityKey(sessionKey: sessionKey, runId: runId)
     }
+}
+
+struct OpenClawEventOwnerIdentityKey: Equatable, Hashable {
+    let sessionKey: String
+    let runId: String
 }
 
 extension OpenClawEventOwnerIdentity {

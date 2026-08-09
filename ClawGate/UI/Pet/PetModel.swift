@@ -339,7 +339,8 @@ final class PetModel: NSObject, ObservableObject {
                 // including isStreaming/streamingText — so this check runs
                 // before any state mutation, not after.
                 if msg.role == .assistant, let source = self.pendingSummonSource {
-                    if let expectedRunId = self.pendingSummonRunId, expectedRunId != msg.id {
+                    if let expectedRunId = self.pendingSummonRunId,
+                       msg.owner?.runId != expectedRunId {
                         break
                     }
                     self.isStreaming = false
