@@ -383,6 +383,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         updateGhosttyFollowInterval()
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         panel.makeKeyAndOrderFront(nil)
+        // Keep settings close/reveal behavior unchanged: only revive chat when it is already visible.
         petWindowController?.bringChatToFrontIfVisible()
     }
 

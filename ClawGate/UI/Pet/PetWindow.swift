@@ -11,6 +11,28 @@ private func logThreadPaneExpandedWidth(forBaseWidth baseWidth: CGFloat) -> CGFl
     max(baseWidth, min(baseWidth + petLogThreadPaneExpansionWidth, petLogThreadPaneMaxAutoExpandedWidth))
 }
 
+enum PetChatWindowPolicy {
+    static let chatWindowStyleMask: NSWindow.StyleMask = [
+        .titled, .closable, .resizable, .fullSizeContentView
+    ]
+    static let chatWindowCollectionBehavior: NSWindow.CollectionBehavior = [
+        .managed, .moveToActiveSpace
+    ]
+
+    static func shouldRevealChatWindow(_ chatWindow: NSWindow?) -> Bool {
+        shouldRevealChatWindow(isVisible: chatWindow?.isVisible ?? false, isMiniaturized: chatWindow?.isMiniaturized ?? false)
+    }
+
+    static func shouldRevealChatWindow(isVisible: Bool, isMiniaturized: Bool) -> Bool {
+        isVisible && !isMiniaturized
+    }
+
+    static func routeClose(_ cleanup: () -> Void) -> Bool {
+        cleanup()
+        return false
+    }
+}
+
 /// Transparent always-on-top window for the pet character
 final class PetWindowController {
     private var window: NSWindow?
@@ -150,7 +172,7 @@ final class PetWindowController {
 
 // MARK: - Content View (sprite + click handling + bubble)
 
-private final class PetContentView: NSView {
+private final class PetContentView: NSView, NSWindowDelegate {
     private let spriteView: PetSpriteView
     private let model: PetModel
     private let characterSize: CGFloat
@@ -619,13 +641,13 @@ private final class PetContentView: NSView {
 
         let bw = KeyableWindow(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
-            styleMask: [.titled, .resizable, .fullSizeContentView, .nonactivatingPanel],
+            styleMask: PetChatWindowPolicy.chatWindowStyleMask,
             backing: .buffered,
             defer: false
         )
         bw.titleVisibility = .hidden
         bw.titlebarAppearsTransparent = true
-        bw.standardWindowButton(.closeButton)?.isHidden = true
+        bw.standardWindowButton(.closeButton)?.isHidden = false
         bw.standardWindowButton(.miniaturizeButton)?.isHidden = true
         bw.standardWindowButton(.zoomButton)?.isHidden = true
         bw.isOpaque = false
@@ -637,8 +659,10 @@ private final class PetContentView: NSView {
         // user reopens the menu bar panel — see MenuBarApp.toggleMainPanel().
         bw.level = .normal
         bw.hasShadow = true
+        bw.collectionBehavior = PetChatWindowPolicy.chatWindowCollectionBehavior
         bw.isMovable = true
         bw.isMovableByWindowBackground = true
+        bw.delegate = self
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
         bw.minSize = NSSize(width: 360, height: 420)
@@ -747,15 +771,27 @@ private final class PetContentView: NSView {
         refreshPetPanelDismissMonitor()
     }
 
-    /// Brings the full chat window back in front of other apps if it's
-    /// currently open. No-op if chat is closed/not yet created — called
-    /// unconditionally from the menu bar left-click path (MenuBarApp).
+    /// Brings the full chat window to the current active space/front if it's
+    /// already visible. No-op if chat is closed, minimized, or not yet
+    /// created — called from menu bar left-click settings open path.
     func bringChatWindowToFrontIfVisible() {
-        guard let cw = chatWindow, cw.isVisible else { return }
+        guard PetChatWindowPolicy.shouldRevealChatWindow(chatWindow),
+              let cw = chatWindow else { return }
+        NSApp.activate(ignoringOtherApps: true)
         cw.makeKeyAndOrderFront(nil)
     }
 
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === chatWindow else { return true }
+        return PetChatWindowPolicy.routeClose { [weak self] in
+            self?.hideChatWindow()
+        }
+    }
+
     private func hideChatWindow() {
+        if model.stateMachine.isChatOpen {
+            model.stateMachine.isChatOpen = false
+        }
         if let cw = chatWindow {
             var frameToSave = cw.frame
             if model.logThreadPaneOpen {
