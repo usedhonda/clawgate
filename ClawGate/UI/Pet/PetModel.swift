@@ -1718,6 +1718,12 @@ final class PetModel: NSObject, ObservableObject {
         case envelopeAccepted(requestId: String)
         case dispatchAttempted(requestId: String)
         case persistenceFailure(file: String, requestId: String?)
+        /// D16: automatic scope exceeded the request budget, so the oldest
+        /// segments were structurally elided (id range recorded) before dispatch.
+        case historyTrimmed(requestId: String, droppedFirstId: String, droppedLastId: String)
+        /// D16: the request exceeded the budget and could not be safely trimmed
+        /// (explicit scope, or an unfittable minimum) — refused before dispatch.
+        case budgetRefused(requestId: String, reason: String)
     }
 
     /// Emits admission-lifecycle events through the same os.Logger as
@@ -1740,6 +1746,10 @@ final class PetModel: NSObject, ObservableObject {
             log.info("dispatchAttempted request=\(requestId, privacy: .public)")
         case let .persistenceFailure(file, requestId):
             log.error("persistenceFailure file=\(file, privacy: .public) request=\(requestId ?? "unknown", privacy: .public)")
+        case let .historyTrimmed(requestId, droppedFirstId, droppedLastId):
+            log.notice("historyTrimmed request=\(requestId, privacy: .public) droppedFirst=\(droppedFirstId, privacy: .public) droppedLast=\(droppedLastId, privacy: .public)")
+        case let .budgetRefused(requestId, reason):
+            log.notice("budgetRefused request=\(requestId, privacy: .public) reason=\(reason, privacy: .public)")
         }
     }
 
@@ -1754,6 +1764,9 @@ final class PetModel: NSObject, ObservableObject {
     /// watchdogs ("send succeeded, reply never arrived") can be exercised
     /// deterministically without a live-or-failing socket racing the watchdog.
     var suppressLogSendForTesting = false
+    /// Test seam: force a small D16 request budget so the enforcer engages on a
+    /// tiny envelope (production always uses `PetLogRequestBudget.maxRequestBytes`).
+    var petLogRequestBudgetForTesting: Int?
     /// Test seam: drive the shared-path summon claim (`sendSummon`) with an
     /// arbitrary source, exercising the real slot-claim + watchdog-arming path
     /// (`sendSummon` is otherwise private). Pair with `suppressLogSendForTesting`
@@ -1960,20 +1973,20 @@ final class PetModel: NSObject, ObservableObject {
     /// `selectedDay` is the Ambient-log day the query was scoped to — sourced
     /// from the caller rather than derived from the anchor (an empty past day's
     /// anchor lands on the next day's start), and persisted for forensics.
-    func sendLogInstruction(envelope: PetLogQueryEnvelope, selectedDay: Date? = nil) {
+    func sendLogInstruction(envelope requestedEnvelope: PetLogQueryEnvelope, selectedDay: Date? = nil) {
         recordPetLogAdmissionEvent(
             .actionReceived(
-                requestId: envelope.requestId,
-                actionId: envelope.actionId,
-                segmentCount: envelope.segments.count
+                requestId: requestedEnvelope.requestId,
+                actionId: requestedEnvelope.actionId,
+                segmentCount: requestedEnvelope.segments.count
             )
         )
         // D3 fail-fast: an empty-scope envelope (e.g. a stale explicit scene
         // selection) has nothing to summarize — refuse before building/dispatch
         // as a TYPED status, never a conversation entry or a fake watchdog wait.
-        guard !envelope.segments.isEmpty else {
+        guard !requestedEnvelope.segments.isEmpty else {
             logThreadPaneOpen = true
-            logDispatchStatus = .emptyScopeRefused(requestId: envelope.requestId)
+            logDispatchStatus = .emptyScopeRefused(requestId: requestedEnvelope.requestId)
             return
         }
         // Admission control comes first, before any user-visible entry, save,
@@ -1988,27 +2001,56 @@ final class PetModel: NSObject, ObservableObject {
         //    immediately instead.
         guard !isSummonBusy else {
             logThreadPaneOpen = true
-            recordPetLogAdmissionEvent(.busyRefused(requestId: envelope.requestId))
+            recordPetLogAdmissionEvent(.busyRefused(requestId: requestedEnvelope.requestId))
             appendLogErrorEntry("Error: busy — a previous Chi request is still in progress")
             return
         }
         guard connectionState == .connected else {
             logThreadPaneOpen = true
-            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: envelope.requestId))
+            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: requestedEnvelope.requestId))
             appendLogErrorEntry("Error: not connected")
             return
         }
         guard sessionKey != nil else {
             logThreadPaneOpen = true
-            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: envelope.requestId))
+            recordPetLogAdmissionEvent(.disconnectedRefused(requestId: requestedEnvelope.requestId))
             appendLogErrorEntry("Error: not connected")
             return
         }
-        recordPetLogAdmissionEvent(.envelopeAccepted(requestId: envelope.requestId))
+        recordPetLogAdmissionEvent(.envelopeAccepted(requestId: requestedEnvelope.requestId))
         // D3: a newly accepted Log request supersedes any prior dispatch status
         // (e.g. a previous "ログ不足"). Owner-scoped clear — unrelated summon
         // successes never touch it.
         logDispatchStatus = nil
+
+        // D16: request budget enforcement (deterministic whole-segment elision,
+        // never text truncation). Automatic over-budget drops the oldest whole
+        // segments to fit and dispatches with a visible trimmed-history status;
+        // explicit over-budget (trimming a user scope would look exact-scope
+        // while covering less) or an unfittable minimum refuses visibly.
+        let requestBudget: Int
+        #if DEBUG
+        requestBudget = petLogRequestBudgetForTesting ?? PetLogRequestBudget.maxRequestBytes
+        #else
+        requestBudget = PetLogRequestBudget.maxRequestBytes
+        #endif
+        let envelope: PetLogQueryEnvelope
+        switch PetLogRequestEnforcer.enforce(requestedEnvelope, budget: requestBudget) {
+        case .fits(let e):
+            envelope = e
+        case .compressed(let e, let droppedFirstId, let droppedLastId):
+            envelope = e
+            recordPetLogAdmissionEvent(
+                .historyTrimmed(requestId: e.requestId,
+                                droppedFirstId: droppedFirstId, droppedLastId: droppedLastId))
+            logDispatchStatus = .historyTrimmed(requestId: e.requestId)
+        case .refused(let reason):
+            logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(
+                .budgetRefused(requestId: requestedEnvelope.requestId, reason: reason.rawValue))
+            logDispatchStatus = .overBudgetRefused(requestId: requestedEnvelope.requestId)
+            return
+        }
 
         let selectionMode = envelope.scopeOverride == nil ? "automatic" : "explicit"
         let sourceFingerprint = PetLogSourceFingerprint.make(

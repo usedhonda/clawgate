@@ -113,6 +113,29 @@ enum PetLogSegmentReducer {
         }
         return out
     }
+
+    /// D16(a): drop OVERLAP duplicates — same speaker and same trimmed text
+    /// whose capture windows intersect (an STT re-emit of the same utterance),
+    /// keeping the EARLIER. A legitimate repeat at DISJOINT times is kept (the
+    /// same "はい said twice a minute apart is two utterances" philosophy as
+    /// `reduce`). Input is assumed sorted by `capturedAt` (as AmbientStorage
+    /// returns), so a single forward pass suffices and is deterministic.
+    static func dedupOverlap(_ segments: [TranscriptSegment]) -> [TranscriptSegment] {
+        var out: [TranscriptSegment] = []
+        var lastWindowEndByKey: [String: Double] = [:]
+        for seg in segments {
+            guard let at = seg.capturedAt else { out.append(seg); continue }
+            let trimmed = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = (seg.speaker ?? "") + "\u{1}" + trimmed
+            let windowEnd = at + max(0, seg.endSeconds - seg.startSeconds)
+            if let lastEnd = lastWindowEndByKey[key], at <= lastEnd {
+                continue  // intersecting same-content window → re-emit, drop it
+            }
+            out.append(seg)
+            lastWindowEndByKey[key] = windowEnd
+        }
+        return out
+    }
 }
 
 // MARK: - Query envelope (client -> model)
@@ -185,6 +208,91 @@ extension PetLogQueryEnvelope {
         }
         try container.encode(completeBeforeAnchor, forKey: .completeBeforeAnchor)
         try container.encode(segments, forKey: .segments)
+    }
+
+    /// Returns a copy carrying `newSegments`, with `coverageStart`/`coverageEnd`
+    /// recomputed from them (so a budget trim is reflected in the existing
+    /// coverage metadata without any new field). All other fields are preserved.
+    func withSegments(_ newSegments: [PetLogRawSegment]) -> PetLogQueryEnvelope {
+        let epochs = newSegments.compactMap(\.capturedAt)
+        return PetLogQueryEnvelope(
+            requestId: requestId,
+            actionId: actionId,
+            instruction: instruction,
+            queryTimestamp: queryTimestamp,
+            anchorTimestamp: anchorTimestamp,
+            scopeOverride: scopeOverride,
+            coverageStart: epochs.min().map { Date(timeIntervalSince1970: $0) },
+            coverageEnd: epochs.max().map { Date(timeIntervalSince1970: $0) },
+            completeBeforeAnchor: completeBeforeAnchor,
+            segments: newSegments
+        )
+    }
+}
+
+// MARK: - Request budget (D16)
+
+enum PetLogRequestBudget {
+    /// Contract cap on the WHOLE built request (universal prefix + JSON
+    /// envelope), in UTF-8 bytes. Bytes are the contract unit: without the
+    /// model's exact tokenizer a token count is a heuristic, not a contract, so
+    /// the budget is expressed and enforced in bytes. Sized well above a full
+    /// uncapped day/scene of ambient transcript (the canonical model's context
+    /// window is large); the enforcer only ever engages on a pathological
+    /// multi-day run.
+    static let maxRequestBytes = 1_000_000
+}
+
+enum PetLogBudgetRefusal: String, Equatable {
+    /// An explicit user-selected scope over budget: trimming it client-side and
+    /// letting the model echo the trimmed set as "exact-all" would look like an
+    /// exact scope while covering less — the incident class this project exists
+    /// to kill. Exact-or-refuse.
+    case explicitScopeOverBudget
+    /// Even the minimal request (instruction + the single newest segment)
+    /// exceeds the cap — nothing can be safely dropped to make it fit.
+    case minimalRequestOverBudget
+}
+
+enum PetLogBudgetOutcome: Equatable {
+    case fits(PetLogQueryEnvelope)
+    case compressed(PetLogQueryEnvelope, droppedFirstId: String, droppedLastId: String)
+    case refused(PetLogBudgetRefusal)
+}
+
+enum PetLogRequestEnforcer {
+    /// D16 request-budget enforcement. Deterministic whole-segment structural
+    /// elision — never fixed-text truncation. If the built request already fits
+    /// the envelope is returned unchanged. Over budget:
+    ///  - explicit scope → refuse (`explicitScopeOverBudget`): a user scope is
+    ///    exact-or-refuse, never silently narrowed.
+    ///  - automatic scope → drop OLDEST whole segments one at a time until it
+    ///    fits, keeping the anchor-nearest, recording the dropped id range.
+    ///  - if even the newest single segment can't fit → refuse
+    ///    (`minimalRequestOverBudget`).
+    static func enforce(_ envelope: PetLogQueryEnvelope,
+                        budget: Int = PetLogRequestBudget.maxRequestBytes) -> PetLogBudgetOutcome {
+        func requestBytes(_ e: PetLogQueryEnvelope) -> Int {
+            guard let message = try? PetLogPromptBuilder.buildMessage(envelope: e) else { return Int.max }
+            return message.utf8.count
+        }
+        if requestBytes(envelope) <= budget { return .fits(envelope) }
+        if envelope.scopeOverride != nil { return .refused(.explicitScopeOverBudget) }
+
+        var kept = envelope.segments
+        var droppedFirst: String?
+        var droppedLast: String?
+        while kept.count > 1 {
+            let dropped = kept.removeFirst()  // oldest is first (sorted ascending)
+            if droppedFirst == nil { droppedFirst = dropped.id }
+            droppedLast = dropped.id
+            let trimmed = envelope.withSegments(kept)
+            if requestBytes(trimmed) <= budget {
+                return .compressed(trimmed, droppedFirstId: droppedFirst!, droppedLastId: droppedLast!)
+            }
+        }
+        // Only the newest segment remains and it still doesn't fit.
+        return .refused(.minimalRequestOverBudget)
     }
 }
 
@@ -444,6 +552,12 @@ enum PetLogDispatchStatus: Equatable {
     case emptyScopeRefused(requestId: String)
     /// Segments were sent but the model kept none — "ログ不足".
     case insufficientEvidence(requestId: String)
+    /// D16: automatic scope exceeded the request budget, so the oldest segments
+    /// were structurally elided before dispatch — the sent history is partial.
+    case historyTrimmed(requestId: String)
+    /// D16: the request exceeded the budget and could not be safely trimmed
+    /// (explicit scope, or an unfittable minimum) — refused before dispatch.
+    case overBudgetRefused(requestId: String)
 }
 
 enum PetLogSelectionMode: Equatable {

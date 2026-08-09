@@ -159,6 +159,34 @@ user is in, not the calendar day:
   cross-day retrieved range. No new envelope field is added (truncation
   visibility under a budget is a later concern, tracked in Target).
 
+### Context budget (D16)
+
+The whole built request (universal prefix + JSON envelope) is bounded before
+dispatch. The budget is a named contract constant in UTF-8 BYTES
+(`PetLogRequestBudget.maxRequestBytes`) — without the model's exact tokenizer a
+token count is a heuristic, not a contract.
+
+- **Dedup (a)**: duplicates are removed deterministically regardless of budget —
+  noise/exact-adjacent (reduce), overlap re-emits (same speaker + same trimmed
+  text + intersecting capture window → keep the earlier; a disjoint-time repeat
+  is kept), and a keep-first id dedup (two segments must never share an id, or
+  the parser's duplicate-id rule would reject the envelope's own scope).
+- **Fits**: a request under budget is dispatched unchanged (no transformation).
+- **Automatic over budget**: the OLDEST whole segments are elided one at a time
+  until the request fits, keeping the anchor-nearest; the dropped id range is
+  recorded (telemetry + a visible one-line `historyTrimmed` status). This is
+  structural whole-segment elision — never fixed-text truncation.
+- **Explicit over budget**: refused visibly (`overBudgetRefused`). A user-selected
+  scope is exact-or-refuse: trimming it and letting the model echo the trimmed
+  set as "exact-all" would look like an exact scope while covering less — the
+  incident class this project exists to kill.
+- **Unfittable minimum**: if even the newest single segment exceeds the budget,
+  refuse visibly (both modes). An over-limit request is never dispatched.
+- `coverageStart`/`coverageEnd` follow the trimmed (sent) set; no new envelope
+  field is added. Summarizing an elided region (which needs a second model call,
+  i.e. not one pass) is out of scope and surfaces as refuse rather than a silent
+  lossy compression.
+
 ### Transport privacy (D59)
 
 The WebSocket transport logs only BOUNDED, body-free structural metadata about a

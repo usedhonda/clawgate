@@ -520,10 +520,18 @@ final class AmbientLogModel: ObservableObject {
             }
             return at < anchorEpoch
         }
-        let reduced = PetLogSegmentReducer.reduce(anchorFiltered)
-        let rawSegments = reduced.map { seg in
-            PetLogRawSegment(
-                id: PetLogSegmentID.make(for: seg),
+        // D16(a): remove noise/exact-adjacent (reduce) then overlap re-emits
+        // (dedupOverlap). Both are deterministic and independent of the budget.
+        let reduced = PetLogSegmentReducer.dedupOverlap(PetLogSegmentReducer.reduce(anchorFiltered))
+        // D16(a)/D41 safety: two segments must never share an id — the parser
+        // rejects duplicate allowed ids, so an envelope carrying a dup would fail
+        // its own parse. Deterministic keep-first id dedup guards that.
+        var seenIDs = Set<String>()
+        let rawSegments = reduced.compactMap { seg -> PetLogRawSegment? in
+            let id = PetLogSegmentID.make(for: seg)
+            guard seenIDs.insert(id).inserted else { return nil }
+            return PetLogRawSegment(
+                id: id,
                 capturedAt: seg.capturedAt,
                 startSeconds: seg.startSeconds,
                 endSeconds: seg.endSeconds,
@@ -531,7 +539,7 @@ final class AmbientLogModel: ObservableObject {
                 text: seg.text
             )
         }
-        let coverageEpochs = reduced.compactMap(\.capturedAt)
+        let coverageEpochs = rawSegments.compactMap(\.capturedAt)
         let coverageStart = coverageEpochs.min().map { Date(timeIntervalSince1970: $0) }
         let coverageEnd = coverageEpochs.max().map { Date(timeIntervalSince1970: $0) }
 
@@ -1132,6 +1140,8 @@ struct AmbientLogPetView: View {
         switch status {
         case .insufficientEvidence: return "根拠となるログが不足しています"
         case .emptyScopeRefused: return "対象のログがありません"
+        case .historyTrimmed: return "履歴が長いため古い部分を省いて送信しました"
+        case .overBudgetRefused: return "対象範囲が大きすぎるため送信できません"
         }
     }
 

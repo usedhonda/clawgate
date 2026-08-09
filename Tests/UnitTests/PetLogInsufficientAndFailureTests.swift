@@ -109,6 +109,30 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         XCTAssertFalse(model.isSummonBusy, "no slot is claimed for an empty-scope query")
     }
 
+    // MARK: - D16 over-budget refuse is fail-visible, never dispatched
+
+    func testExplicitOverBudgetRefusesVisiblyWithoutDispatch() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+        model.petLogRequestBudgetForTesting = 100  // below any real request (prefix alone is larger)
+
+        let requestId = UUID().uuidString
+        let env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "slot-0", instruction: "このシーン",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: ["scene-1"],
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [segment("a"), segment("b")])
+        model.sendLogInstruction(envelope: env)
+
+        XCTAssertEqual(model.logDispatchStatus, .overBudgetRefused(requestId: requestId),
+                       "an explicit over-budget scope refuses visibly (exact-or-refuse)")
+        XCTAssertFalse(model.logReplies.contains { $0.source == "log_user" },
+                       "over-budget refuse must not create a log_user entry or dispatch")
+        XCTAssertFalse(model.isSummonBusy, "no summon slot is claimed for a refused query")
+    }
+
     // MARK: - D72 parser-failure metadata retention
 
     func testMalformedReplyRetainsRequestCorrelationMetadata() {
