@@ -15,6 +15,90 @@ import AudioToolbox
 final class AmbientCaptureManager {
     enum CaptureState: String { case idle, capturing, paused }
 
+    struct CompletedChunk {
+        let url: URL
+        let sequence: Int
+        let rms: Float
+        /// Wall-clock chunk start for transcript attribution.
+        let startedAt: Date
+        /// Actual number of overlap frames written to this chunk.
+        let actualPrimedFrames: AVAudioFrameCount
+        /// Rate of the on-disk file (16_000).
+        let sampleRate: Double
+        /// Whether overlap was proven by a successful overlap write.
+        let provenOverlap: Bool
+    }
+
+    struct ChunkTimingState {
+        var firstLiveSampleAt: Date?
+        var actualPrimedFrames: AVAudioFrameCount = 0
+        var provenOverlap: Bool = false
+        let sequence: Int
+
+        init(sequence: Int) {
+            self.sequence = sequence
+        }
+
+        mutating func markFirstLiveSample(at date: Date?) {
+            guard firstLiveSampleAt == nil, let date else { return }
+            firstLiveSampleAt = date
+        }
+
+        mutating func markPrimeResult(_ actualPrimedFrames: AVAudioFrameCount) {
+            self.actualPrimedFrames = actualPrimedFrames
+            provenOverlap = actualPrimedFrames > 0
+        }
+
+        mutating func reset(for sequence: Int) {
+            self = Self.init(sequence: sequence)
+        }
+
+        func startedAt(sampleRate: Double) -> Date? {
+            guard let firstLiveSampleAt else { return nil }
+            return AmbientCaptureManager.startedAt(
+                firstLiveSampleAt: firstLiveSampleAt,
+                actualPrimedFrames: actualPrimedFrames,
+                sampleRate: sampleRate,
+                provenOverlap: provenOverlap
+            )
+        }
+
+        func completedChunk(url: URL, sampleRate: Double, rms: Float = 0) -> CompletedChunk? {
+            guard let startedAt = startedAt(sampleRate: sampleRate) else { return nil }
+            return CompletedChunk(
+                url: url,
+                sequence: sequence,
+                rms: rms,
+                startedAt: startedAt,
+                actualPrimedFrames: actualPrimedFrames,
+                sampleRate: sampleRate,
+                provenOverlap: provenOverlap
+            )
+        }
+    }
+
+    /// Test seam for AVAudioTime -> Date conversion. Production uses host
+    /// clock math; tests can inject a deterministic mapping.
+    static var tapTimeToDate: (AVAudioTime) -> Date? = { tapTime in
+        guard tapTime.isHostTimeValid else { return nil }
+        let nowNanos = AudioConvertHostTimeToNanos(AudioGetCurrentHostTime())
+        let sampleNanos = AudioConvertHostTimeToNanos(tapTime.hostTime)
+        let nowWall = Date().timeIntervalSince1970
+        let nowHost = TimeInterval(nowNanos) / 1_000_000_000.0
+        let sampleWall = TimeInterval(sampleNanos) / 1_000_000_000.0
+        return Date(timeIntervalSince1970: nowWall - (nowHost - sampleWall))
+    }
+
+    static func startedAt(
+        firstLiveSampleAt: Date,
+        actualPrimedFrames: AVAudioFrameCount,
+        sampleRate: Double,
+        provenOverlap: Bool
+    ) -> Date {
+        guard provenOverlap, actualPrimedFrames > 0 else { return firstLiveSampleAt }
+        return firstLiveSampleAt - TimeInterval(actualPrimedFrames) / sampleRate
+    }
+
     /// `var` so a wedge recovery can swap in a fresh AVAudioEngine object — the
     /// only reliable in-process reset when the engine stops delivering buffers.
     private var engine = AVAudioEngine()
@@ -38,8 +122,7 @@ final class AmbientCaptureManager {
     /// read immediately after the writer is released can race the header flush
     /// and fail — which silently disabled the silence gate (fail-open).
     private var sumSquaresInCurrentChunk: Double = 0
-    /// Wall-clock time the current chunk started (for absolute segment times).
-    private var chunkStartedAt = Date()
+    private var currentChunkTiming: ChunkTimingState
     private var chunkSeq = 0
     private var overlapTail: [Float] = []
 
@@ -107,9 +190,8 @@ final class AmbientCaptureManager {
 
     let chunkSeconds: Int
     /// Called (off the audio thread) when a chunk file is finalized and ready.
-    /// Arguments: file URL, RMS level (0…1, measured during capture so the
-    /// silence gate never re-reads the file), and the chunk's wall-clock start.
-    var onChunkReady: ((URL, Float, Date) -> Void)?
+    /// Arguments: completed metadata for transcript attribution + silence gate.
+    var onChunkReady: ((CompletedChunk) -> Void)?
     private let log: (String) -> Void
 
     init(chunkSeconds: Int = 30,
@@ -138,6 +220,7 @@ final class AmbientCaptureManager {
             AVLinearPCMIsNonInterleaved: false,
         ]
         self.chunkFrameLimit = AVAudioFrameCount(self.chunkSeconds * 16_000)
+        self.currentChunkTiming = ChunkTimingState(sequence: 0)
     }
 
     // MARK: - Permission
@@ -269,8 +352,8 @@ final class AmbientCaptureManager {
         converter = conv
         try openNewChunkLocked()
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
-            self?.handleTap(buffer)
+        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
+            self?.handleTap(buffer, at: time)
         }
         engine.prepare()
         try engine.start()
@@ -332,37 +415,58 @@ final class AmbientCaptureManager {
         currentChunkURL = url
         framesInCurrentChunk = 0
         sumSquaresInCurrentChunk = 0
-        chunkStartedAt = Date()
+        currentChunkTiming.reset(for: chunkSeq)
     }
 
-    private func finalizeChunkLocked() {
-        guard let url = currentChunkURL else { return }
+    private func finalizeChunkLocked() -> CompletedChunk? {
+        guard let url = currentChunkURL else { return nil }
         let frames = framesInCurrentChunk
         let sumSquares = sumSquaresInCurrentChunk
-        let startedAt = chunkStartedAt
         currentFile = nil
         currentChunkURL = nil
         framesInCurrentChunk = 0
         sumSquaresInCurrentChunk = 0
+        let sampleRate = recordFormat.sampleRate
+        let metadata = currentChunkTiming.completedChunk(url: url, sampleRate: sampleRate)
+        currentChunkTiming.reset(for: chunkSeq)
         // Only surface chunks with real audio (skip empty stubs).
         guard frames > 16_000 else {  // < ~1s of audio
             try? FileManager.default.removeItem(at: url)
-            return
+            return nil
+        }
+        guard let metadata else {
+            try? FileManager.default.removeItem(at: url)
+            return nil
         }
         let rms = Float((sumSquares / Double(frames)).squareRoot())
         recordChunkReady()   // a real chunk was finalized (incl. silence chunks — silence-safe liveness)
         let cb = onChunkReady
         let retain = retentionSeconds
         DispatchQueue.global(qos: .utility).async {
-            cb?(url, rms, startedAt)
+            cb?(CompletedChunk(
+                url: metadata.url,
+                sequence: metadata.sequence,
+                rms: rms,
+                startedAt: metadata.startedAt,
+                actualPrimedFrames: metadata.actualPrimedFrames,
+                sampleRate: sampleRate,
+                provenOverlap: metadata.provenOverlap
+            ))
             AmbientStorage.pruneRolling(olderThan: retain)
         }
+        return metadata
     }
 
     // MARK: - Audio thread
 
-    private func handleTap(_ buffer: AVAudioPCMBuffer) {
+    private func firstLiveSampleDate(from tapTime: AVAudioTime?) -> Date? {
+        guard let tapTime else { return nil }
+        return Self.tapTimeToDate(tapTime)
+    }
+
+    private func handleTap(_ buffer: AVAudioPCMBuffer, at tapTime: AVAudioTime?) {
         recordTap()   // engine delivered a buffer — liveness proof, even before conversion
+        let firstLiveSampleDate = firstLiveSampleDate(from: tapTime)
         guard let converter else { return }
         let ratio = recordFormat.sampleRate / buffer.format.sampleRate
         let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
@@ -383,22 +487,24 @@ final class AmbientCaptureManager {
 
         lock.lock(); defer { lock.unlock() }
         guard currentFile != nil else { return }
-        writeBufferLocked(outBuf)
+        writeBufferLocked(outBuf, firstLiveSampleDate: firstLiveSampleDate)
     }
 
     // MARK: - Write + overlap (lock held)
 
-    private func writeBufferLocked(_ buf: AVAudioPCMBuffer) {
+    private func writeBufferLocked(_ buf: AVAudioPCMBuffer, firstLiveSampleDate: Date?) {
         guard let file = currentFile else { return }
         do {
             try file.write(from: buf)
             framesInCurrentChunk += buf.frameLength
+            currentChunkTiming.markFirstLiveSample(at: firstLiveSampleDate)
             accumulateSumSquares(buf)
             appendOverlapTail(buf)
             if framesInCurrentChunk >= chunkFrameLimit {
-                finalizeChunkLocked()
+                _ = finalizeChunkLocked()
                 try openNewChunkLocked()
-                primeOverlapLocked()
+                let primedFrames = primeOverlapLocked()
+                currentChunkTiming.markPrimeResult(primedFrames)
             }
         } catch {
             log("ambient capture write error: \(error)")
@@ -425,11 +531,11 @@ final class AmbientCaptureManager {
     }
 
     /// Prepend the retained tail to a freshly opened chunk (3s overlap).
-    private func primeOverlapLocked() {
+    private func primeOverlapLocked() -> AVAudioFrameCount {
         guard overlapFrames > 0, !overlapTail.isEmpty,
               let buf = AVAudioPCMBuffer(pcmFormat: recordFormat,
                                          frameCapacity: AVAudioFrameCount(overlapTail.count)),
-              let ch = buf.floatChannelData else { return }
+              let ch = buf.floatChannelData else { return 0 }
         let n = overlapTail.count
         for i in 0..<n { ch[0][i] = overlapTail[i] }
         buf.frameLength = AVAudioFrameCount(n)
@@ -437,8 +543,10 @@ final class AmbientCaptureManager {
             try currentFile?.write(from: buf)
             framesInCurrentChunk += buf.frameLength
             accumulateSumSquares(buf)
+            return buf.frameLength
         } catch {
             log("ambient overlap prime error: \(error)")
         }
+        return 0
     }
 }

@@ -80,8 +80,8 @@ final class AmbientController {
         self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.transcriber = AmbientTranscriber()
         self.diarizer = AmbientDiarizer(log: log)
-        self.capture.onChunkReady = { [weak self] url, rms, startedAt in
-            self?.handleChunk(url, rms: rms, startedAt: startedAt)
+        self.capture.onChunkReady = { [weak self] chunk in
+            self?.handleChunk(chunk)
         }
         self.capture.setPreferredDevice(uid: configStore.load().ambientMicDeviceUID)
     }
@@ -292,7 +292,7 @@ final class AmbientController {
 
     // MARK: - Chunk handling
 
-    private func handleChunk(_ url: URL, rms: Float, startedAt: Date) {
+    private func handleChunk(_ chunk: AmbientCaptureManager.CompletedChunk) {
         work.async { [weak self] in
             guard let self else { return }
             let shouldRun = self.state.sync { self.streaming }
@@ -300,6 +300,7 @@ final class AmbientController {
             self.state.sync { self.pendingChunks += 1 }
             defer { self.state.sync { self.pendingChunks = max(0, self.pendingChunks - 1) } }
             do {
+                let rms = chunk.rms
                 // Zero-capture gate: skip only chunks with no signal at all
                 // (e.g. a muted/disconnected input). Actual speech-vs-silence
                 // judgment belongs to Whisper + Silero VAD (see
@@ -317,16 +318,16 @@ final class AmbientController {
                     self.state.sync { self.skippedTotal += 1 }
                     return
                 }
-                let result = try self.transcriber.transcribe(chunk: url)
+                let result = try self.transcriber.transcribe(chunk: chunk.url)
                 // Speaker labels (self/other) — fail-soft: nil turns leave
                 // segments unlabeled, transcription is never blocked.
-                let turns = result.kept.isEmpty ? nil : self.diarizer.diarize(chunk: url)
+                let turns = result.kept.isEmpty ? nil : self.diarizer.diarize(chunk: chunk.url)
                 let labeled = turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
                     ?? result.kept
                 // Stamp absolute utterance time: chunk start + in-chunk offset.
                 let stamped = labeled.map { seg -> TranscriptSegment in
                     var s = seg
-                    s.capturedAt = startedAt.timeIntervalSince1970 + seg.startSeconds
+                    s.capturedAt = chunk.startedAt.timeIntervalSince1970 + seg.startSeconds
                     return s
                 }
                 var kept: [TranscriptSegment] = []
