@@ -321,9 +321,6 @@ function requestImageDataURL(url) {
         if (typeof response?.sandboxUrl === 'string' && response.sandboxUrl) {
           _cachedSandboxURL = response.sandboxUrl;
         }
-        if (typeof response?.sandboxOrigin === 'string' && response.sandboxOrigin) {
-          _cachedSandboxOrigin = response.sandboxOrigin;
-        }
         if (!response?.ok || !response?.dataUrl) {
           finishReject(new Error(response?.error || 'Image fetch failed'));
           return;
@@ -361,8 +358,8 @@ let extensionContextInvalidated = false;
 let windowMessageListenerAttached = false;
 let windowErrorListenerAttached = false;
 let ocrSandboxFrame = null;
+let ocrSandboxFrameReady = false;
 let _cachedSandboxURL = null;
-let _cachedSandboxOrigin = null;
 const CONTENT_RUNTIME_HANDLER_KEY = '__clawgateContentRuntimeHandler';
 
 function makeInvalidationError() {
@@ -403,6 +400,7 @@ function teardownExtensionBindings() {
     ocrSandboxFrame.remove();
   }
   ocrSandboxFrame = null;
+  ocrSandboxFrameReady = false;
   ocrSandboxFramePromise = null;
 }
 
@@ -496,9 +494,12 @@ function getLastRuntimeErrorOrInvalidate() {
   }
 }
 
-function getSandboxOrigin() {
-  if (extensionContextInvalidated) return null;
-  return _cachedSandboxOrigin;
+function isOwnedReadyOCRFrame(frame = ocrSandboxFrame) {
+  return frame instanceof HTMLIFrameElement
+    && frame === ocrSandboxFrame
+    && ocrSandboxFrameReady
+    && frame.isConnected
+    && Boolean(frame.contentWindow);
 }
 
 function ensureOCRSandbox() {
@@ -515,16 +516,19 @@ function ensureOCRSandbox() {
       return;
     }
 
-    const existing = document.getElementById('clawgate-ocr-sandbox');
-    if (existing instanceof HTMLIFrameElement && existing.contentWindow) {
-      ocrSandboxFrame = existing;
-      resolve(existing);
-      return;
-    }
-
     const iframe = document.createElement('iframe');
     iframe.id = 'clawgate-ocr-sandbox';
     ocrSandboxFrame = iframe;
+    ocrSandboxFrameReady = false;
+    iframe.addEventListener('load', () => {
+      if (ocrSandboxFrame === iframe && iframe.isConnected && iframe.contentWindow) {
+        ocrSandboxFrameReady = true;
+        resolve(iframe);
+      } else {
+        reject(new Error(OCR_UNAVAILABLE_REASON));
+      }
+    }, { once: true });
+    iframe.addEventListener('error', () => reject(new Error(OCR_UNAVAILABLE_REASON)), { once: true });
     try {
       iframe.src = _cachedSandboxURL;
     } catch (error) {
@@ -533,8 +537,6 @@ function ensureOCRSandbox() {
     }
     iframe.style.display = 'none';
     iframe.setAttribute('aria-hidden', 'true');
-    iframe.addEventListener('load', () => resolve(iframe), { once: true });
-    iframe.addEventListener('error', () => reject(new Error(OCR_UNAVAILABLE_REASON)), { once: true });
     (document.documentElement || document.body).appendChild(iframe);
   });
 
@@ -552,12 +554,14 @@ function handleSandboxMessage(event) {
     return;
   }
 
-  const origin = getSandboxOrigin();
-  if (!origin || event.origin !== origin) {
+  if (!isOwnedReadyOCRFrame() || event.source !== ocrSandboxFrame.contentWindow) {
     return;
   }
   const data = event.data;
-  if (!data || data.type !== 'clawgate_ocr_result' || typeof data.id !== 'string') {
+  if (!data
+    || data.type !== 'clawgate_ocr_result'
+    || typeof data.id !== 'string'
+    || typeof data.ok !== 'boolean') {
     return;
   }
 
@@ -609,8 +613,7 @@ async function extractOCRText(imageURL) {
       },
     });
 
-    const targetOrigin = getSandboxOrigin();
-    if (!targetOrigin || !iframe.contentWindow) {
+    if (!isOwnedReadyOCRFrame(iframe)) {
       pendingOCRRequests.delete(requestId);
       window.clearTimeout(timeout);
       reject(extensionContextInvalidated ? makeInvalidationError() : new Error(OCR_UNAVAILABLE_REASON));
@@ -621,7 +624,7 @@ async function extractOCRText(imageURL) {
       type: 'clawgate_ocr_request',
       id: requestId,
       imageDataUrl: dataUrl,
-    }, targetOrigin);
+    }, '*');
   });
 }
 

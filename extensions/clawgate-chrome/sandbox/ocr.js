@@ -41,11 +41,28 @@ async function runOCR(imageDataUrl) {
   return OCRAD(canvas) || '';
 }
 
+function isValidOCRRequest(data) {
+  return Boolean(data)
+    && data.type === 'clawgate_ocr_request'
+    && typeof data.id === 'string'
+    && data.id.length > 0
+    && data.id.length <= 256
+    && typeof data.imageDataUrl === 'string'
+    && data.imageDataUrl.length > 0;
+}
+
+function parentTargetOrigin(event) {
+  return typeof event.origin === 'string' && event.origin && event.origin !== 'null'
+    ? event.origin
+    : '*';
+}
+
 window.addEventListener('message', async (event) => {
-  const data = event.data;
-  if (!data || data.type !== 'clawgate_ocr_request' || typeof data.id !== 'string') {
+  if (event.source !== window.parent || !isValidOCRRequest(event.data)) {
     return;
   }
+
+  const data = event.data;
 
   try {
     const text = await runOCR(data.imageDataUrl);
@@ -54,13 +71,13 @@ window.addEventListener('message', async (event) => {
       id: data.id,
       ok: true,
       text,
-    }, event.origin);
+    }, parentTargetOrigin(event));
   } catch (error) {
     event.source?.postMessage({
       type: 'clawgate_ocr_result',
       id: data.id,
       ok: false,
       error: error instanceof Error ? error.message : String(error),
-    }, event.origin);
+    }, parentTargetOrigin(event));
   }
 });
