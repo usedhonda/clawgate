@@ -54,8 +54,8 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
 
         // Two deltas for the same messageId: the first starts the stream, the
         // second is what actually (re)schedules the delta-idle finalize timer.
-        model.handleEvent(.delta(messageId: "m1", text: "partial fragment"))
-        model.handleEvent(.delta(messageId: "m1", text: " / 狙い:"))
+        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "m1"), text: "partial fragment"))
+        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "m1"), text: " / 狙い:"))
         model.handleEvent(.disconnected(reason: "ping timeout"))
 
         // Let the (shortened) delta-idle window fully elapse — proves the
@@ -176,7 +176,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         // Real partial from OUR run accumulates into the stream. A single delta
         // starts the stream without arming the delta-idle finalize timer (only
         // a same-id follow-up delta does), so nothing here finalizes on its own.
-        model.handleEvent(.delta(messageId: "run-A", text: "partial real answer"))
+        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(runId: "run-A"), text: "partial real answer"))
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(model.streamingText, "partial real answer")
         XCTAssertTrue(model.isStreaming)
@@ -201,9 +201,9 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         let model = PetModel()
         model.pendingSummonSource = "log"
         model.pendingSummonRunId = "run-A"
-        model.handleEvent(.delta(messageId: "run-A", text: "partial real answer"))
+        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(runId: "run-A"), text: "partial real answer"))
 
-        model.handleEvent(.messageComplete(messageId: "run-B"))
+        model.handleEvent(.messageComplete(messageId: OpenClawEventOwnerIdentity(runId: "run-B")))
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertEqual(model.pendingSummonSource, "log", "mismatched completion must not clear summon source")
@@ -218,7 +218,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         let model = PetModel()
         model.pendingSummonSource = "log"
         model.pendingSummonRunId = "run-A"
-        model.handleEvent(.delta(messageId: "run-A", text: "partial real answer"))
+        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(runId: "run-A"), text: "partial real answer"))
         try await Task.sleep(nanoseconds: 20_000_000)
 
         let proactive = OpenClawChatMessage(
