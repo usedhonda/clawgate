@@ -2,6 +2,105 @@ import AppKit
 import Combine
 import SwiftUI
 
+internal struct PetWindowGeometryContract {
+    static let petWindowContentPadding: CGFloat = 20
+
+    static func visibleFrameForWindow(
+        parentWindowFrame: NSRect?,
+        parentWindowScreenFrame: NSRect?,
+        screenVisibleFrames: [NSRect],
+        mainScreenVisibleFrame: NSRect?
+    ) -> NSRect? {
+        if let parentWindowScreenFrame = parentWindowScreenFrame {
+            return parentWindowScreenFrame
+        }
+        if let parentWindowFrame = parentWindowFrame,
+           let intersected = screenVisibleFrames.first(where: { $0.intersects(parentWindowFrame) }) {
+            return intersected
+        }
+        return mainScreenVisibleFrame
+    }
+
+    static func clampWindowFrame(
+        _ frame: NSRect,
+        to visibleFrame: NSRect?,
+        minimumSize: NSSize = .zero,
+        anchorPoint: NSPoint? = nil
+    ) -> NSRect {
+        guard let visibleFrame = visibleFrame else { return frame }
+
+        let minWidth = min(max(minimumSize.width, 0), visibleFrame.width)
+        let minHeight = min(max(minimumSize.height, 0), visibleFrame.height)
+
+        var clamped = frame
+        clamped.size.width = min(max(frame.width, minWidth), visibleFrame.width)
+        clamped.size.height = min(max(frame.height, minHeight), visibleFrame.height)
+
+        if let anchorPoint = anchorPoint {
+            clamped.origin.x = anchorPoint.x - (clamped.width / 2)
+            clamped.origin.y = anchorPoint.y - (clamped.height / 2)
+        }
+
+        let maxX = max(visibleFrame.minX, visibleFrame.maxX - clamped.width)
+        let maxY = max(visibleFrame.minY, visibleFrame.maxY - clamped.height)
+        clamped.origin.x = min(max(clamped.origin.x, visibleFrame.minX), maxX)
+        clamped.origin.y = min(max(clamped.origin.y, visibleFrame.minY), maxY)
+        return clamped
+    }
+
+    static func clampFrameForResize(
+        from frame: NSRect,
+        resizedTo newSize: NSSize,
+        to visibleFrame: NSRect?,
+        minimumSize: NSSize = .zero,
+        anchorPoint: NSPoint? = nil
+    ) -> NSRect {
+        return clampWindowFrame(
+            NSRect(
+                origin: frame.origin,
+                size: newSize
+            ),
+            to: visibleFrame,
+            minimumSize: minimumSize,
+            anchorPoint: anchorPoint ?? frame.center
+        )
+    }
+
+    static func characterWindowContentSize(
+        requested: CGFloat,
+        visibleFrame: NSRect?,
+        borderPadding: CGFloat = petWindowContentPadding
+    ) -> CGFloat {
+        let visibleLimit = max(
+            min(
+                visibleFrame?.width ?? CGFloat.infinity,
+                visibleFrame?.height ?? CGFloat.infinity
+            ) - borderPadding,
+            0
+        )
+        return max(0, min(requested, visibleLimit))
+    }
+
+    static func clampedMinimumSize(
+        requested: NSSize,
+        visibleFrame: NSRect?
+    ) -> NSSize {
+        guard let visibleFrame else {
+            return requested
+        }
+        return NSSize(
+            width: max(0, min(requested.width, visibleFrame.width)),
+            height: max(0, min(requested.height, visibleFrame.height))
+        )
+    }
+}
+
+private extension NSRect {
+    var center: NSPoint {
+        .init(x: midX, y: midY)
+    }
+}
+
 private let petChatWindowFrameKey = "PetChatWindowFrame"
 private let petLogThreadPaneExpansionWidth: CGFloat = 360
 private let petLogThreadPaneMaxAutoExpandedWidth: CGFloat = 960
@@ -12,6 +111,7 @@ private func logThreadPaneExpandedWidth(forBaseWidth baseWidth: CGFloat) -> CGFl
 }
 
 enum PetChatWindowPolicy {
+    static let minimumChatWindowSize: NSSize = .init(width: 360, height: 420)
     static let chatWindowStyleMask: NSWindow.StyleMask = [
         .titled, .closable, .resizable, .fullSizeContentView
     ]
@@ -51,15 +151,39 @@ final class PetWindowController {
         guard window == nil else { return }
 
         let characterSize = model.characterSize
-        let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 800, height: 600)
-        let windowSize = NSSize(width: characterSize + 20, height: characterSize + 20)
-        let origin = NSPoint(
-            x: screenFrame.maxX - windowSize.width - 40,
-            y: screenFrame.minY + 40
+        let screenFrame = PetWindowGeometryContract.visibleFrameForWindow(
+            parentWindowFrame: nil,
+            parentWindowScreenFrame: nil,
+            screenVisibleFrames: NSScreen.screens.map(\.visibleFrame),
+            mainScreenVisibleFrame: NSScreen.main?.visibleFrame
+        )
+        guard let screenFrame = screenFrame else { return }
+        let effectiveCharacterSize = PetWindowGeometryContract.characterWindowContentSize(
+            requested: characterSize,
+            visibleFrame: screenFrame
+        )
+        let windowSize = NSSize(width: effectiveCharacterSize + 20, height: effectiveCharacterSize + 20)
+        let frame = NSRect(
+            origin: NSPoint(
+                x: screenFrame.maxX - windowSize.width - 40,
+                y: screenFrame.minY + 40
+            ),
+            size: windowSize
+        )
+        let clampedWindow = PetWindowGeometryContract.clampWindowFrame(
+            frame,
+            to: screenFrame,
+            minimumSize: .zero,
+            anchorPoint: frame.center
+        )
+        let clampedContentLength = max(0, min(clampedWindow.width, clampedWindow.height) - 20)
+        let contentSize = NSSize(
+            width: clampedContentLength,
+            height: clampedContentLength
         )
 
         let w = NSWindow(
-            contentRect: NSRect(origin: origin, size: windowSize),
+            contentRect: clampedWindow,
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -74,14 +198,15 @@ final class PetWindowController {
         w.isReleasedWhenClosed = false
 
         // Sprite view
-        let sprite = PetSpriteView(frame: NSRect(origin: .zero, size: NSSize(width: characterSize, height: characterSize)))
+        let sprite = PetSpriteView(frame: NSRect(origin: .zero, size: contentSize))
         sprite.translatesAutoresizingMaskIntoConstraints = false
 
-        let contentView = PetContentView(spriteView: sprite, model: model, characterSize: characterSize)
+        let contentView = PetContentView(spriteView: sprite, model: model, characterSize: contentSize.width)
         w.contentView = contentView
 
         window = w
         spriteView = sprite
+        sprite.frame = NSRect(origin: .zero, size: contentSize)
         w.orderFront(nil)
         model.moveController.bind(window: w)
 
@@ -109,11 +234,33 @@ final class PetWindowController {
         sizeObservation = model.$characterSize.sink { [weak self] newSize in
             guard let self, let w = self.window, let sprite = self.spriteView else { return }
             DispatchQueue.main.async {
-                let winSize = NSSize(width: newSize + 20, height: newSize + 20)
-                var frame = w.frame
-                frame.size = winSize
-                w.setFrame(frame, display: true)
-                sprite.frame = NSRect(origin: .zero, size: NSSize(width: newSize, height: newSize))
+                let visibleFrame = PetWindowGeometryContract.visibleFrameForWindow(
+                    parentWindowFrame: w.frame,
+                    parentWindowScreenFrame: w.screen?.visibleFrame,
+                    screenVisibleFrames: NSScreen.screens.map(\.visibleFrame),
+                    mainScreenVisibleFrame: NSScreen.main?.visibleFrame
+                )
+                let effectiveCharacterSize = PetWindowGeometryContract.characterWindowContentSize(
+                    requested: newSize,
+                    visibleFrame: visibleFrame
+                )
+                let winSize = NSSize(width: effectiveCharacterSize + 20, height: effectiveCharacterSize + 20)
+                let resizedFrame: NSRect
+                if let visibleFrame {
+                    resizedFrame = PetWindowGeometryContract.clampFrameForResize(
+                        from: w.frame,
+                        resizedTo: winSize,
+                        to: visibleFrame
+                    )
+                } else {
+                    // With no screen target, preserve the requested local resize rather than
+                    // treating the current window frame as a fake visible frame.
+                    resizedFrame = NSRect(origin: w.frame.origin, size: winSize)
+                }
+                w.setFrame(resizedFrame, display: true)
+                let effectiveLength = max(0, min(resizedFrame.width, resizedFrame.height) - 20)
+                let effectiveSize = NSSize(width: effectiveLength, height: effectiveLength)
+                sprite.frame = NSRect(origin: .zero, size: effectiveSize)
             }
         }
 
@@ -344,6 +491,52 @@ private final class PetContentView: NSView, NSWindowDelegate {
         isDragging = false
     }
 
+    private func visibleFrame(for parentWindow: NSWindow) -> NSRect? {
+        return PetWindowGeometryContract.visibleFrameForWindow(
+            parentWindowFrame: parentWindow.frame,
+            parentWindowScreenFrame: parentWindow.screen?.visibleFrame,
+            screenVisibleFrames: NSScreen.screens.map(\.visibleFrame),
+            mainScreenVisibleFrame: NSScreen.main?.visibleFrame
+        )
+    }
+
+    private func clampFrame(
+        _ frame: NSRect,
+        parentWindow: NSWindow,
+        minimumSize: NSSize = .zero,
+        anchorPoint: NSPoint? = nil
+    ) -> NSRect {
+        PetWindowGeometryContract.clampWindowFrame(
+            frame,
+            to: visibleFrame(for: parentWindow),
+            minimumSize: minimumSize,
+            anchorPoint: anchorPoint
+        )
+    }
+
+    private func clampFrameForResize(
+        baseFrame: NSRect,
+        size: NSSize,
+        parentWindow: NSWindow,
+        minimumSize: NSSize,
+        anchorPoint: NSPoint? = nil
+    ) -> NSRect {
+        PetWindowGeometryContract.clampFrameForResize(
+            from: baseFrame,
+            resizedTo: size,
+            to: visibleFrame(for: parentWindow),
+            minimumSize: minimumSize,
+            anchorPoint: anchorPoint
+        )
+    }
+
+    private func chatWindowEffectiveMinimumSize(for parentWindow: NSWindow) -> NSSize {
+        PetWindowGeometryContract.clampedMinimumSize(
+            requested: PetChatWindowPolicy.minimumChatWindowSize,
+            visibleFrame: visibleFrame(for: parentWindow)
+        )
+    }
+
     // MARK: - Right-Click Summon Menu
 
     private var summonMenuWindow: NSWindow?
@@ -466,10 +659,25 @@ private final class PetContentView: NSView, NSWindowDelegate {
         // Position: pointer sits on the first action row center.
         let mouseScreen = NSEvent.mouseLocation
         let firstItemOffsetFromTop = outerPadding + headerHeight + separatorHeight + itemHeight / 2
-        bw.setFrameOrigin(NSPoint(
+        let rawFrame = NSRect(
             x: mouseScreen.x - panelWidth / 2,
-            y: mouseScreen.y - panelHeight + firstItemOffsetFromTop
-        ))
+            y: mouseScreen.y - panelHeight + firstItemOffsetFromTop,
+            width: panelWidth,
+            height: panelHeight
+        )
+        if let parentWindow = window {
+            bw.setFrame(
+                clampFrame(
+                    rawFrame,
+                    parentWindow: parentWindow,
+                    minimumSize: .zero,
+                    anchorPoint: rawFrame.center
+                ),
+                display: false
+            )
+        } else {
+            bw.setFrame(rawFrame, display: false)
+        }
 
         bw.makeKeyAndOrderFront(nil)
         summonMenuWindow = bw
@@ -574,10 +782,13 @@ private final class PetContentView: NSView, NSWindowDelegate {
 
         // Position above pet
         let parentFrame = parentWindow.frame
-        bw.setFrameOrigin(NSPoint(
+        let rawFrame = NSRect(
             x: parentFrame.midX - 130,
-            y: parentFrame.maxY + 4
-        ))
+            y: parentFrame.maxY + 4,
+            width: 260,
+            height: 56
+        )
+        bw.setFrame(clampFrame(rawFrame, parentWindow: parentWindow), display: false)
 
         bw.makeKeyAndOrderFront(nil)
         bw.makeFirstResponder(field)
@@ -592,7 +803,7 @@ private final class PetContentView: NSView, NSWindowDelegate {
     // MARK: - Bubble Window (Layer 2: notification / Layer 3: full chat)
 
     private func showNotification() {
-        guard notificationWindow == nil, let parentWindow = window else { return }
+        guard let parentWindow = window else { return }
         let notifView = PetNotificationBubble(model: model)
         let hosting = NSHostingView(rootView: AnyView(notifView))
 
@@ -601,6 +812,28 @@ private final class PetContentView: NSView, NSWindowDelegate {
         let w = min(max(fitSize.width, 120), 260)
         let h = min(max(fitSize.height, 30), 200)
         hosting.frame = NSRect(x: 0, y: 0, width: w, height: h)
+
+        let parentFrame = parentWindow.frame
+        let contentSize = NSSize(width: w, height: h)
+
+        if let nw = notificationWindow, nw.parent === parentWindow {
+            nw.contentView = hosting
+            let clampedFrame = clampFrameForResize(
+                baseFrame: nw.frame,
+                size: contentSize,
+                parentWindow: parentWindow,
+                minimumSize: .zero,
+                anchorPoint: nw.frame.center
+            )
+            nw.setFrame(clampedFrame, display: true)
+            return
+        }
+
+        if let oldWindow = notificationWindow {
+            oldWindow.parent?.removeChildWindow(oldWindow)
+            oldWindow.orderOut(nil)
+            notificationWindow = nil
+        }
 
         let bw = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: w, height: h),
@@ -616,22 +849,25 @@ private final class PetContentView: NSView, NSWindowDelegate {
         bw.isReleasedWhenClosed = false
 
         // Position: extend away from tracked window based on pet's placement side
-        let parentFrame = parentWindow.frame
-        var bubbleX: CGFloat
+        let bubbleX: CGFloat
         if model.lastPlacementSide == .right {
             bubbleX = parentFrame.minX
         } else {
             bubbleX = parentFrame.maxX - w
         }
-        // Screen-edge clamp
-        if let screen = parentWindow.screen ?? NSScreen.main {
-            let sf = screen.visibleFrame
-            bubbleX = max(sf.minX, min(bubbleX, sf.maxX - w))
-        }
-        bw.setFrameOrigin(NSPoint(
+        let preferredFrame = NSRect(
             x: bubbleX,
-            y: parentFrame.maxY + 4
-        ))
+            y: parentFrame.maxY + 4,
+            width: w,
+            height: h
+        )
+
+        let childFrame = clampFrame(
+            preferredFrame,
+            parentWindow: parentWindow,
+            anchorPoint: preferredFrame.center
+        )
+        bw.setFrame(childFrame, display: false)
 
         parentWindow.addChildWindow(bw, ordered: .above)
         notificationWindow = bw
@@ -670,22 +906,42 @@ private final class PetContentView: NSView, NSWindowDelegate {
         bw.delegate = self
         bw.contentView = hosting
         bw.isReleasedWhenClosed = false
-        bw.minSize = NSSize(width: 360, height: 420)
+        let effectiveMinimumSize = chatWindowEffectiveMinimumSize(for: parentWindow)
+        bw.minSize = effectiveMinimumSize
 
         let parentFrame = parentWindow.frame
         var restoredFrame = false
         if let savedFrameString = UserDefaults.standard.string(forKey: petChatWindowFrameKey) {
             let savedFrame = NSRectFromString(savedFrameString)
             if savedFrame.width > 0, savedFrame.height > 0 {
-                bw.setFrame(clampedChatFrame(savedFrame, relativeTo: parentWindow), display: false)
+                bw.setFrame(
+                    clampFrame(
+                        savedFrame,
+                        parentWindow: parentWindow,
+                        minimumSize: effectiveMinimumSize,
+                        anchorPoint: savedFrame.center
+                    ),
+                    display: false
+                )
                 restoredFrame = true
             }
         }
         if !restoredFrame {
-            bw.setFrameOrigin(NSPoint(
+            let rawFrame = NSRect(
                 x: parentFrame.midX - 240,
-                y: parentFrame.maxY + 8
-            ))
+                y: parentFrame.maxY + 8,
+                width: 480,
+                height: 640
+            )
+            bw.setFrame(
+                clampFrame(
+                    rawFrame,
+                    parentWindow: parentWindow,
+                    minimumSize: effectiveMinimumSize,
+                    anchorPoint: rawFrame.center
+                ),
+                display: false
+            )
         }
 
         chatWindow = bw
@@ -698,17 +954,31 @@ private final class PetContentView: NSView, NSWindowDelegate {
 
     private func setLogThreadPaneOpen(_ open: Bool) {
         guard let cw = chatWindow, let parentWindow = window else { return }
+        let effectiveMinimumSize = chatWindowEffectiveMinimumSize(for: parentWindow)
+        if cw.minSize != effectiveMinimumSize {
+            cw.minSize = effectiveMinimumSize
+        }
         if open {
             let rawBaseWidth = chatBaseWidth ?? cw.frame.width
             let baseWidth = min(rawBaseWidth, petLogThreadPaneMaxAutoBaseWidth)
             chatBaseWidth = baseWidth
-            var frame = cw.frame
-            frame.size.width = logThreadPaneExpandedWidth(forBaseWidth: baseWidth)
-            cw.setFrame(clampedChatFrame(frame, relativeTo: parentWindow), display: true)
+            let frame = clampFrameForResize(
+                baseFrame: cw.frame,
+                size: NSSize(width: logThreadPaneExpandedWidth(forBaseWidth: baseWidth), height: cw.frame.height),
+                parentWindow: parentWindow,
+                minimumSize: effectiveMinimumSize,
+                anchorPoint: cw.frame.center
+            )
+            cw.setFrame(frame, display: true)
         } else if let baseWidth = chatBaseWidth {
-            var frame = cw.frame
-            frame.size.width = baseWidth
-            cw.setFrame(clampedChatFrame(frame, relativeTo: parentWindow), display: true)
+            let frame = clampFrameForResize(
+                baseFrame: cw.frame,
+                size: NSSize(width: baseWidth, height: cw.frame.height),
+                parentWindow: parentWindow,
+                minimumSize: effectiveMinimumSize,
+                anchorPoint: cw.frame.center
+            )
+            cw.setFrame(frame, display: true)
             chatBaseWidth = nil
         }
     }
@@ -832,6 +1102,12 @@ private final class PetContentView: NSView, NSWindowDelegate {
 
     private func chatWindowFrameForSave(from cw: NSWindow) -> NSRect {
         var frameToSave = cw.frame
+        if let parentWindow = window {
+            let effectiveMinimumSize = chatWindowEffectiveMinimumSize(for: parentWindow)
+            if cw.minSize != effectiveMinimumSize {
+                cw.minSize = effectiveMinimumSize
+            }
+        }
         if model.logThreadPaneOpen {
             if let baseWidth = chatBaseWidth {
                 frameToSave.size.width = baseWidth
@@ -839,22 +1115,20 @@ private final class PetContentView: NSView, NSWindowDelegate {
                 frameToSave.size.width = max(cw.minSize.width, cw.frame.width - petLogThreadPaneExpansionWidth)
             }
             if let parentWindow = window {
-                frameToSave = clampedChatFrame(frameToSave, relativeTo: parentWindow)
+                frameToSave = clampFrameForResize(
+                    baseFrame: frameToSave,
+                    size: frameToSave.size,
+                    parentWindow: parentWindow,
+                    minimumSize: cw.minSize,
+                    anchorPoint: frameToSave.center
+                )
             }
         }
         return frameToSave
     }
 
     private func clampedChatFrame(_ frame: NSRect, relativeTo parentWindow: NSWindow) -> NSRect {
-        guard let visibleFrame = (NSScreen.screens.first { $0.visibleFrame.intersects(frame) } ?? parentWindow.screen ?? NSScreen.main)?.visibleFrame else {
-            return frame
-        }
-        var clamped = frame
-        let maxX = max(visibleFrame.minX, visibleFrame.maxX - frame.width)
-        let maxY = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
-        clamped.origin.x = min(max(frame.minX, visibleFrame.minX), maxX)
-        clamped.origin.y = min(max(frame.minY, visibleFrame.minY), maxY)
-        return clamped
+        return clampFrame(frame, parentWindow: parentWindow)
     }
 
     // MARK: - Whisper Window (Layer 1)
@@ -871,7 +1145,7 @@ private final class PetContentView: NSView, NSWindowDelegate {
 
     private func whisperOrigin(for text: String, parentWindow: NSWindow, bubbleSize: NSSize) -> NSPoint {
         let parentFrame = parentWindow.frame
-        let screenFrame = parentWindow.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? parentFrame
+        let frame = visibleFrame(for: parentWindow) ?? parentFrame
         let isHideSleepWhisper = (text == "zzz…" || text == "mm…") && model.isHiding && model.stateMachine.expression == .hideClaw
 
         if isHideSleepWhisper {
@@ -892,15 +1166,22 @@ private final class PetContentView: NSView, NSWindowDelegate {
             }
 
             var originY = clawTopY + 2
-            let clampedX = min(max(originX, screenFrame.minX), screenFrame.maxX - bubbleSize.width)
+            let clampedX = min(max(originX, frame.minX), frame.maxX - bubbleSize.width)
             if abs(clampedX - originX) > 0.5 {
                 // When the screen edge prevents a pure side placement, raise the
                 // bubble so it still avoids covering the active window body.
                 originY = max(originY, parentFrame.maxY + 6)
             }
             originX = clampedX
-            originY = min(max(originY, screenFrame.minY), screenFrame.maxY - bubbleSize.height)
-            return NSPoint(x: originX, y: originY)
+            return clampFrame(
+                NSRect(
+                    x: originX,
+                    y: min(max(originY, frame.minY), frame.maxY - bubbleSize.height),
+                    width: bubbleSize.width,
+                    height: bubbleSize.height
+                ),
+                parentWindow: parentWindow
+            ).origin
         }
 
         // All non-claw whispers target Chi's head area, including visible peek poses.
@@ -908,9 +1189,15 @@ private final class PetContentView: NSView, NSWindowDelegate {
         let headY = parentFrame.minY + parentFrame.height * 0.88
         var originX = headX - bubbleSize.width / 2
         var originY = headY
-        originX = min(max(originX, screenFrame.minX), screenFrame.maxX - bubbleSize.width)
-        originY = min(max(originY, screenFrame.minY), screenFrame.maxY - bubbleSize.height)
-        return NSPoint(x: originX, y: originY)
+        return clampFrame(
+            NSRect(
+                x: originX,
+                y: originY,
+                width: bubbleSize.width,
+                height: bubbleSize.height
+            ),
+            parentWindow: parentWindow
+        ).origin
     }
 
     private func showWhisper(_ text: String) {
@@ -943,7 +1230,11 @@ private final class PetContentView: NSView, NSWindowDelegate {
             parentWindow: parentWindow,
             bubbleSize: NSSize(width: w, height: h)
         )
-        ww.setFrameOrigin(origin)
+        let clamped = clampFrame(
+            NSRect(x: origin.x, y: origin.y, width: w, height: h),
+            parentWindow: parentWindow
+        )
+        ww.setFrame(clamped, display: false)
 
         parentWindow.addChildWindow(ww, ordered: .above)
         whisperWindow = ww

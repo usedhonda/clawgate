@@ -11,6 +11,27 @@ This document is the Normative contract for the Pet floating chat experience onl
 
 ## Normative (shipped)
 
+### Geometry contract
+
+- All pet windows (chat, notification, ask, summon menu, whisper) use a shared
+  geometry contract that:
+  - chooses visibility target in this order:
+    1. parent `screen` visible frame when available
+    2. any screen whose visible frame intersects the parent window frame
+    3. main visible frame as typed fallback
+- selection returns `.some(visibleFrame)` or `.none` when no screen target exists
+- uses a common clamp path that can shrink oversize windows to fit the visible frame
+- keeps pet character windows square by clamping content size to
+  `min(requested, visible.width-20, visible.height-20)` and adding 20-point chrome
+  before window sizing
+- applies minimum-size floors when clamping so geometry is still valid
+- keeps resize anchors stable for content-initiated resizes (center-anchor behavior)
+- keeps every visible frame inside the selected visible frame even when content
+  grows after initial render
+- avoids assumptions about `NSScreen.screens[0]`; no force unwrap when target lists are empty
+- when no target screen exists, character creation skips and content-driven resizes use an
+  explicit local safe fallback; child-window placement preserves its local frame
+
 ### Activation and focus
 
 - `showFullChat()` must create the full chat window as an activating macOS window.
@@ -45,6 +66,7 @@ This document is the Normative contract for the Pet floating chat experience onl
 - `windowShouldClose` must route close through `hideChatWindow()` cleanup path and return `false`, so the close action:
   - saves the current frame
   - hides pane/monitor state
+  - stores an effective minimum size that fits the selected visible frame
   - sets `chatWindow` to `nil`
 - The next explicit chat-open action can recreate the chat if requested; settings left-click remains no-op when the chat is absent.
 - Closing full chat must not change settings panel close semantics.
@@ -67,6 +89,20 @@ This document is the Normative contract for the Pet floating chat experience onl
   - not create a chat window
   - not call any reveal path that raises a non-visible chat
 - When settings is already open and chat exists/visible, settings flow may bring chat forward.
+
+### D55 / D64 regression guard expectations
+
+- D55: notification bubble must rerun intrinsic content fit on every content refresh and
+  re-clamp the existing bubble with shared contract when owned by this pet window.
+- notification owner mismatch must remove stale bubble child from prior parent before replacing
+- D64: content-driven resize operations (character-size and pane resize) must preserve
+  the requested anchor and use the shared clamp helper to keep geometry inside screen.
+
+### Saved-frame and close regression guard expectations
+
+- chat open restores a valid saved frame through the shared clamp and minimum-size rules
+- chat close saves the effective frame and clears the owned chat-window reference
+- normal-level chat windows keep the standard close button visible
 
 ### Keyboard expectations
 
