@@ -8,6 +8,7 @@ struct OmakaseContext {
     let appName: String
     let pid: pid_t
     let isMessagingApp: Bool
+    let target: AXAppWindow.WindowIdentity?
 }
 
 /// Places AI-generated draft text into a target app's input field.
@@ -46,14 +47,20 @@ enum DraftPlacer {
         // Browser AX trees are deep — increase search depth
         let maxDepth = isBrowser ? 8 : 6
         let maxNodes = isBrowser ? 1200 : 500
+        guard let target = context.target else {
+            NSLog("[DraftPlacer] Missing captured target, falling back")
+            return .fallback
+        }
 
         do {
             var placed = false
             try AXAppWindow.withWindow(
-                bundleIdentifier: context.bundleId,
+                target: target,
                 maxDepth: maxDepth,
                 maxNodes: maxNodes
             ) { winCtx in
+                guard let app = NSRunningApplication(processIdentifier: target.pid),
+                      AXAppWindow.isCurrentTarget(target, app: app, window: winCtx.window) else { return }
                 let selectors = GenericInputSelectors.selectors(for: context.bundleId)
 
                 // Try all selectors in order (don't stop on first candidate failure)
@@ -61,6 +68,8 @@ enum DraftPlacer {
                     guard let candidate = SelectorResolver.resolve(
                         selector: selector, in: winCtx.nodes, windowFrame: winCtx.frame
                     ) else { continue }
+
+                    guard AXAppWindow.isCurrentTarget(target, app: app, window: winCtx.window) else { continue }
 
                     // Strategy 1: setValue (Native/Qt apps)
                     if AXActions.setValue(text, on: candidate.node.element) {
@@ -77,12 +86,12 @@ enum DraftPlacer {
                     //   3. System focused element PID matches target app
                     //   4. Focused element frame matches candidate frame (fail-closed)
 
-                    guard let app = NSRunningApplication.runningApplications(
-                        withBundleIdentifier: context.bundleId
-                    ).first, app.isActive else { continue }
-
                     guard AXActions.setFocused(candidate.node.element) else { continue }
                     usleep(100_000)
+
+                    // Focus may change while AX focus is settling. Revalidate the
+                    // exact captured process/window immediately before paste.
+                    guard AXAppWindow.isCurrentTarget(target, app: app, window: winCtx.window) else { continue }
 
                     guard let focused = AXQuery.systemFocusedElement(),
                           let focusedPid = AXQuery.pid(of: focused),
@@ -117,4 +126,27 @@ enum DraftPlacer {
             return .fallback
         }
     }
+
+    #if DEBUG
+    static func attemptPlacementForTesting(
+        target: AXAppWindow.WindowIdentity,
+        current: AXAppWindow.WindowIdentity,
+        frontmostPID: pid_t?,
+        focused: Bool,
+        minimized: Bool,
+        activate: () -> Void,
+        paste: () -> Void
+    ) -> PlaceResult {
+        guard AXAppWindow.targetMatchesForTesting(
+            target: target,
+            current: current,
+            frontmostPID: frontmostPID,
+            focused: focused,
+            minimized: minimized
+        ) else { return .fallback }
+        activate()
+        paste()
+        return .placed
+    }
+    #endif
 }

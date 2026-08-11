@@ -60,6 +60,16 @@ This document is the Normative contract for the Pet floating chat experience onl
   preserved and the restore is skipped.
 - Starting or stopping the watcher clears stale owned and observed transaction state.
 
+### Draft target ownership
+
+- Omakase captures the exact target PID, bundle identity, AX window identity, frame, and title
+  before the asynchronous draft placement begins.
+- Placement resolves that PID directly and fails closed if the process, bundle, window identity,
+  frame, title, frontmost app, focus, or minimized state no longer matches the capture.
+- The target is revalidated immediately before `safePaste`; a mismatch never activates or pastes
+  into another process/window and returns the Summon fallback instead.
+- `AXActions.surface` reports failure when both direct AX surfacing and fallback activation fail.
+
 ### Z-order and Space behavior
 
 - The full chat must use normal level (`.normal`) so it is not pinned above all apps.

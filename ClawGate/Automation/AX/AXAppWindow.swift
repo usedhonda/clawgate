@@ -5,6 +5,25 @@ import Foundation
 /// Generic helper for accessing an application's focused window via AX API.
 /// Extracts common logic: AX permission check -> app lookup -> activate -> window -> frame -> descendants
 enum AXAppWindow {
+    struct WindowIdentity: Equatable {
+        let pid: pid_t
+        let bundleIdentifier: String
+        let windowIdentifier: String?
+        let frame: CGRect
+        let title: String?
+
+        func matches(_ other: WindowIdentity) -> Bool {
+            pid == other.pid
+                && bundleIdentifier == other.bundleIdentifier
+                && windowIdentifier == other.windowIdentifier
+                && title == other.title
+                && abs(frame.minX - other.frame.minX) < 1
+                && abs(frame.minY - other.frame.minY) < 1
+                && abs(frame.width - other.frame.width) < 1
+                && abs(frame.height - other.frame.height) < 1
+        }
+    }
+
     /// Context passed to the body closure with window information.
     struct WindowContext {
         let window: AXUIElement
@@ -18,6 +37,85 @@ enum AXAppWindow {
         case appNotRunning(bundleIdentifier: String)
         case windowNotFound(bundleIdentifier: String)
         case frameNotFound
+        case targetMismatch
+    }
+
+    /// Executes a closure against the exact captured process/window without
+    /// activating a different instance that shares the same bundle identifier.
+    static func withWindow<T>(
+        target: WindowIdentity,
+        maxDepth: Int = 6,
+        maxNodes: Int = 500,
+        body: (WindowContext) throws -> T
+    ) throws -> T {
+        guard AXIsProcessTrusted() else {
+            throw WindowError.axPermissionMissing
+        }
+
+        guard let app = NSRunningApplication(processIdentifier: target.pid),
+              app.bundleIdentifier == target.bundleIdentifier else {
+            throw WindowError.targetMismatch
+        }
+
+        let appElement = AXQuery.applicationElement(pid: target.pid)
+        guard let window = AXQuery.windows(appElement: appElement).first(where: {
+            identity(for: $0, pid: target.pid, bundleIdentifier: target.bundleIdentifier)?.matches(target) == true
+        }),
+        let frame = AXQuery.copyFrameAttribute(window) else {
+            throw WindowError.targetMismatch
+        }
+
+        let nodes = AXQuery.descendants(of: window, maxDepth: maxDepth, maxNodes: maxNodes)
+        return try body(WindowContext(window: window, frame: frame, nodes: nodes))
+    }
+
+    static func isCurrentTarget(
+        _ target: WindowIdentity,
+        app: NSRunningApplication,
+        window: AXUIElement
+    ) -> Bool {
+        guard app.processIdentifier == target.pid,
+              app.bundleIdentifier == target.bundleIdentifier,
+              app.isActive,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
+              let identity = identity(for: window, pid: target.pid, bundleIdentifier: target.bundleIdentifier),
+              identity.matches(target),
+              AXQuery.copyBoolAttribute(
+                AXQuery.applicationElement(pid: target.pid),
+                attribute: kAXFrontmostAttribute as String
+              ) == true,
+              AXQuery.copyBoolAttribute(window, attribute: kAXMinimizedAttribute as String) != true,
+              let focused = AXQuery.focusedWindow(appElement: AXQuery.applicationElement(pid: target.pid)) else {
+            return false
+        }
+        return CFEqual(focused, window)
+    }
+
+    #if DEBUG
+    static func targetMatchesForTesting(
+        target: WindowIdentity,
+        current: WindowIdentity,
+        frontmostPID: pid_t?,
+        focused: Bool,
+        minimized: Bool
+    ) -> Bool {
+        target.matches(current) && frontmostPID == target.pid && focused && !minimized
+    }
+    #endif
+
+    private static func identity(
+        for window: AXUIElement,
+        pid: pid_t,
+        bundleIdentifier: String
+    ) -> WindowIdentity? {
+        guard let frame = AXQuery.copyFrameAttribute(window) else { return nil }
+        return WindowIdentity(
+            pid: pid,
+            bundleIdentifier: bundleIdentifier,
+            windowIdentifier: AXQuery.copyStringAttribute(window, attribute: "AXIdentifier"),
+            frame: frame,
+            title: AXQuery.copyStringAttribute(window, attribute: kAXTitleAttribute as String)
+        )
     }
 
     /// Executes a closure with the focused window of an application.

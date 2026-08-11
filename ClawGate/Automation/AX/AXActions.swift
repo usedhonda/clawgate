@@ -487,10 +487,12 @@ enum AXActions {
         AXUIElementSetAttributeValue(window, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
 
         // 2. Set app as frontmost
-        AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        let directFrontResult = AXUIElementSetAttributeValue(
+            app, kAXFrontmostAttribute as CFString, kCFBooleanTrue
+        )
 
         // 3. Raise the window
-        AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        let directRaiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
 
         // 4. Poll to confirm: frontmost == true AND minimized == false
         let success = poll(intervalMs: 15, timeoutMs: 500) {
@@ -499,18 +501,33 @@ enum AXActions {
             return isFront && !isMinimized
         }
 
-        if success {
+        let directSucceeded = directFrontResult == .success
+            && directRaiseResult == .success
+            && success
+        if directSucceeded {
             NSLog("[AXActions] surface OK")
-        } else {
-            // Fallback: activate with empty options (no toggle behavior)
-            NSLog("[AXActions] surface: AX attributes insufficient, fallback to activate(options:[])")
-            if let pid = AXQuery.pid(of: app) {
-                let apps = NSWorkspace.shared.runningApplications.filter { $0.processIdentifier == pid }
-                apps.first?.activate(options: [])
-            }
+            return true
         }
-        return true
+
+        // Fallback: activate with empty options (no toggle behavior)
+        NSLog("[AXActions] surface: AX attributes insufficient, fallback to activate(options:[])")
+        guard let pid = AXQuery.pid(of: app),
+              let runningApp = NSRunningApplication(processIdentifier: pid),
+              runningApp.activate(options: []) else {
+            return false
+        }
+        return poll(intervalMs: 15, timeoutMs: 500) {
+            let isFront = AXQuery.copyBoolAttribute(app, attribute: kAXFrontmostAttribute as String) ?? false
+            let isMinimized = AXQuery.copyBoolAttribute(window, attribute: kAXMinimizedAttribute as String) ?? true
+            return isFront && !isMinimized
+        }
     }
+
+    #if DEBUG
+    static func surfaceResultForTesting(directSucceeded: Bool, fallbackSucceeded: Bool) -> Bool {
+        directSucceeded || fallbackSucceeded
+    }
+    #endif
 
     /// Click at the center of an AXUIElement using CGEvent mouse events.
     /// Used for Qt elements that lack AXPress action (e.g. LINE search result rows).

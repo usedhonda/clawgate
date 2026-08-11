@@ -1431,6 +1431,8 @@ final class PetModel: NSObject, ObservableObject {
         let isBrowser = DraftPlacer.browserBundles.contains(bundleId)
 
         var windowTitle = ""
+        var windowIdentifier: String?
+        var windowFrame: CGRect?
         var visibleText = ""
 
         if let pid = app?.processIdentifier {
@@ -1439,6 +1441,8 @@ final class PetModel: NSObject, ObservableObject {
             let targetWin = lastTrackedWindow ?? AXQuery.focusedWindow(appElement: appElement)
             if let focusedWin = targetWin {
                 windowTitle = AXQuery.copyStringAttribute(focusedWin, attribute: kAXTitleAttribute as String) ?? ""
+                windowIdentifier = AXQuery.copyStringAttribute(focusedWin, attribute: "AXIdentifier")
+                windowFrame = AXQuery.copyFrameAttribute(focusedWin)
 
                 // Browser AX trees are deeper — increase search depth for Gmail etc.
                 let maxDepth = isBrowser ? 7 : 3
@@ -1499,7 +1503,8 @@ final class PetModel: NSObject, ObservableObject {
         return ScreenContext(
             appName: appName, bundleId: bundleId,
             windowTitle: windowTitle, visibleText: visibleText,
-            isTerminal: isTerminal, paneCwd: paneCwd
+            isTerminal: isTerminal, paneCwd: paneCwd,
+            windowIdentifier: windowIdentifier, windowFrame: windowFrame
         )
     }
 
@@ -1609,7 +1614,16 @@ final class PetModel: NSObject, ObservableObject {
                 bundleId: ctx.bundleId,
                 appName: ctx.appName,
                 pid: app.processIdentifier,
-                isMessagingApp: isMessaging
+                isMessagingApp: isMessaging,
+                target: ctx.windowFrame.map { frame in
+                    AXAppWindow.WindowIdentity(
+                        pid: app.processIdentifier,
+                        bundleIdentifier: ctx.bundleId,
+                        windowIdentifier: ctx.windowIdentifier,
+                        frame: frame,
+                        title: ctx.windowTitle
+                    )
+                }
             )
         } else {
             omakaseContext = nil
@@ -2866,6 +2880,8 @@ struct ScreenContext {
     let visibleText: String
     let isTerminal: Bool
     var paneCwd: String = ""
+    var windowIdentifier: String? = nil
+    var windowFrame: CGRect? = nil
 }
 
 struct NotificationEntry: Identifiable, Codable {
