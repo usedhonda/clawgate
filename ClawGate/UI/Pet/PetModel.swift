@@ -1305,10 +1305,6 @@ final class PetModel: NSObject, ObservableObject {
         sessionKey = nil
     }
 
-    deinit {
-        cleanup()
-    }
-
     // MARK: - Hide Behind Window
 
     func noteActivity(unhideIfNeeded: Bool = true) {
