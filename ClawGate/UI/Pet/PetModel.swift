@@ -2065,7 +2065,11 @@ final class PetModel: NSObject, ObservableObject {
             }
             return runId == expectedRunId
         }
-        guard let expectedRunId = pendingSummonRunId else { return true }
+        // Log requests do not use SharedSummonOwner. Until the Gateway ACK
+        // assigns their runId, no event can prove ownership and must be dropped.
+        guard let expectedRunId = pendingSummonRunId else {
+            return pendingSummonSource == nil
+        }
         return runId == expectedRunId
     }
 
