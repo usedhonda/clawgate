@@ -1876,6 +1876,7 @@ final class PetModel: NSObject, ObservableObject {
     /// watchdogs ("send succeeded, reply never arrived") can be exercised
     /// deterministically without a live-or-failing socket racing the watchdog.
     var suppressLogSendForTesting = false
+    private var sharedSummonDispatchCount = 0
     /// Test seam: force a small D16 request budget so the enforcer engages on a
     /// tiny envelope (production always uses `PetLogRequestBudget.maxRequestBytes`).
     var petLogRequestBudgetForTesting: Int?
@@ -1884,14 +1885,51 @@ final class PetModel: NSObject, ObservableObject {
     /// (`sendSummon` is otherwise private). Pair with `suppressLogSendForTesting`
     /// and a session key to make the shared watchdog the sole release mechanism.
     func claimSharedSummonForTesting(source: String) {
+        _ = startSharedSummonForTesting(source: source)
+    }
+
+    /// Test seam: start one network-free shared summon through the same
+    /// admission path used by Ask, Omakase, and Draft PR.
+    func startSharedSummonForTesting(source: String) -> UUID? {
+        guard sharedSummonOwner == nil, pendingSummonSource == nil else { return nil }
         sendSummon("test prompt", source: source)
-        // This legacy seam models the pre-existing watchdog tests' already
-        // dispatched request. Production sends remain awaiting-ACK until the
-        // real `sendMessageAwaitingRunId` result arrives.
-        if suppressLogSendForTesting, var owner = sharedSummonOwner {
+        guard var owner = sharedSummonOwner else { return nil }
+        // This seam models an already-dispatched request for the legacy
+        // watchdog tests. Production sends remain awaiting-ACK until the real
+        // `sendMessageAwaitingRunId` result arrives.
+        if suppressLogSendForTesting {
             owner.phase = .running
             sharedSummonOwner = owner
         }
+        return owner.token
+    }
+
+    var sharedSummonDispatchCountForTesting: Int { sharedSummonDispatchCount }
+
+    func releaseSharedSummonForTesting(token: UUID) {
+        releaseSharedSummonIfCurrent(token)
+    }
+
+    /// Test seam for a prepared Draft PR worker completing after its owner has
+    /// potentially been replaced. It uses the production owner-token guard at
+    /// the actual dispatch boundary.
+    func completeDraftPRWorkerForTesting(token: UUID) {
+        guard isCurrentSharedSummon(token) else { return }
+        sendSummon("test draft prompt", source: "draft_pr", ownerToken: token)
+    }
+
+    /// Test seam for the Omakase placement handoff after the summon itself has
+    /// finished. The real placement callback uses the same token guard.
+    func beginOmakaseDraftPlacementForTesting(token: UUID) {
+        guard let owner = sharedSummonOwner, owner.token == token else { return }
+        draftPlacementOwnerToken = token
+        releaseSharedSummon(owner)
+    }
+
+    func completeOmakaseDraftPlacementForTesting(token: UUID) {
+        guard draftPlacementOwnerToken == token else { return }
+        draftPlacementOwnerToken = nil
+        handleDraftResult(.placed, fullText: "test draft", appName: "Test", source: "omakase")
     }
     /// Test seam for the actual pre-ACK state used by shared summon routing.
     func beginSharedSummonAwaitingAckForTesting(source: String) -> UUID? {
@@ -2034,6 +2072,9 @@ final class PetModel: NSObject, ObservableObject {
             }
             token = acquired
         }
+        #if DEBUG
+        sharedSummonDispatchCount += 1
+        #endif
         showWhisper("Working on it...")
 
         // Arm a self-release watchdog: if the send succeeds but no terminal WS

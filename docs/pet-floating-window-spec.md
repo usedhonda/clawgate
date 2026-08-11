@@ -96,8 +96,9 @@ This document is the Normative contract for the Pet floating chat experience onl
 ### Ask input lifecycle
 
 - Ask-only input installs a dedicated outside-click monitor after its child
-  window is attached. A click outside Ask or Ask losing key status detaches the
-  Ask child and releases both local/global Ask monitors.
+  window is attached, with `PetContentView` as the child window delegate. A
+  click outside Ask or Ask losing key status detaches the Ask child and
+  releases both local/global Ask monitors.
 - Ask teardown is idempotent and must not change the general chat focus policy
   or its panel dismiss monitor.
 

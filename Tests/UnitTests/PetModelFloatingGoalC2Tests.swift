@@ -69,4 +69,83 @@ final class PetModelFloatingGoalC2Tests: XCTestCase {
         model.cleanup()
     }
 
+    func testWrongRunAfterAckLeavesOwnerUntouchedThenMatchingRunFinalizesOnce() async throws {
+        let model = PetModel()
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+        let token = try XCTUnwrap(model.startSharedSummonForTesting(source: "ask"))
+        model.pendingSummonRunId = "run-A"
+
+        model.handleEvent(.delta(
+            messageId: OpenClawEventOwnerIdentity(messageId: "wrong-message", runId: "run-B"),
+            text: "wrong"))
+        model.handleEvent(.messageComplete(
+            messageId: OpenClawEventOwnerIdentity(messageId: "wrong-message", runId: "run-B")))
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(model.pendingSummonSource, "ask")
+        XCTAssertEqual(model.summonWatchdogTokenForTesting, token)
+        XCTAssertTrue(model.summonResults.isEmpty)
+        XCTAssertTrue(model.streamingText.isEmpty)
+
+        model.handleEvent(.delta(
+            messageId: OpenClawEventOwnerIdentity(messageId: "real-message", runId: "run-A"),
+            text: "right"))
+        model.handleEvent(.messageComplete(
+            messageId: OpenClawEventOwnerIdentity(messageId: "real-message", runId: "run-A")))
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(model.summonResults.filter { $0.source == "ask" }.count, 1)
+        XCTAssertFalse(model.isSummonBusy)
+        model.cleanup()
+    }
+
+    func testAskOmakaseDraftAdmissionDispatchesOnlyCurrentOwner() throws {
+        let model = PetModel()
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let owner = try XCTUnwrap(model.startSharedSummonForTesting(source: "ask"))
+        XCTAssertNil(model.startSharedSummonForTesting(source: "omakase"))
+        XCTAssertNil(model.startSharedSummonForTesting(source: "draft_pr"))
+        XCTAssertEqual(model.sharedSummonDispatchCountForTesting, 1)
+        XCTAssertEqual(model.pendingSummonSource, "ask")
+        XCTAssertEqual(model.summonWatchdogTokenForTesting, owner)
+        model.cleanup()
+    }
+
+    func testDelayedDraftWorkerCompletionCannotDispatchAfterOwnerChanges() throws {
+        let model = PetModel()
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let draftOwner = try XCTUnwrap(model.startSharedSummonForTesting(source: "draft_pr"))
+        model.releaseSharedSummonForTesting(token: draftOwner)
+        _ = try XCTUnwrap(model.startSharedSummonForTesting(source: "ask"))
+        let dispatchCount = model.sharedSummonDispatchCountForTesting
+
+        model.completeDraftPRWorkerForTesting(token: draftOwner)
+
+        XCTAssertEqual(model.sharedSummonDispatchCountForTesting, dispatchCount)
+        XCTAssertEqual(model.pendingSummonSource, "ask")
+        model.cleanup()
+    }
+
+    func testLateOmakasePlacementCannotMutateOrReleaseNewOwner() throws {
+        let model = PetModel()
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let omakaseOwner = try XCTUnwrap(model.startSharedSummonForTesting(source: "omakase"))
+        model.beginOmakaseDraftPlacementForTesting(token: omakaseOwner)
+        _ = try XCTUnwrap(model.startSharedSummonForTesting(source: "ask"))
+        let resultCount = model.summonResults.count
+
+        model.completeOmakaseDraftPlacementForTesting(token: omakaseOwner)
+
+        XCTAssertEqual(model.summonResults.count, resultCount)
+        XCTAssertEqual(model.pendingSummonSource, "ask")
+        model.cleanup()
+    }
+
 }

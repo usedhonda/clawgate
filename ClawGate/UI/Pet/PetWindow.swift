@@ -795,6 +795,7 @@ private final class PetContentView: NSView, NSWindowDelegate {
         bw.backgroundColor = .clear
         bw.level = .floating + 1
         bw.hasShadow = true
+        bw.delegate = self
         bw.contentView = container
         bw.isReleasedWhenClosed = false
 
