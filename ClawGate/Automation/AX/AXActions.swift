@@ -80,16 +80,18 @@ enum AXActions {
     /// This triggers Qt's "user edit" path (textEdited signal) unlike AX setValue
     /// which only triggers the programmatic textChanged path.
     static func pasteText(_ text: String) {
-        // Save current clipboard
         let pasteboard = NSPasteboard.general
-        let oldContents = pasteboard.string(forType: .string)
+        let savedItems = captureClipboardItems(from: pasteboard)
 
-        // Set clipboard to our text
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        let ownedChangeCount = writeTemporaryClipboard(text, to: pasteboard)
 
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             NSLog("[AXActions] pasteText: no CGEventSource")
+            _ = restoreClipboardIfUnchanged(
+                pasteboard: pasteboard,
+                savedItems: savedItems,
+                expectedChangeCount: ownedChangeCount
+            )
             return
         }
 
@@ -114,10 +116,11 @@ enum AXActions {
 
         // Restore clipboard after a short delay
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
-            pasteboard.clearContents()
-            if let old = oldContents {
-                pasteboard.setString(old, forType: .string)
-            }
+            _ = restoreClipboardIfUnchanged(
+                pasteboard: pasteboard,
+                savedItems: savedItems,
+                expectedChangeCount: ownedChangeCount
+            )
         }
     }
 
@@ -128,23 +131,17 @@ enum AXActions {
         let pasteboard = NSPasteboard.general
 
         // Save ALL clipboard items (not just string — preserve images, files, RTF etc.)
-        let savedItems = pasteboard.pasteboardItems?.map { item -> [NSPasteboard.PasteboardType: Data] in
-            var dict: [NSPasteboard.PasteboardType: Data] = [:]
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    dict[type] = data
-                }
-            }
-            return dict
-        }
+        let savedItems = captureClipboardItems(from: pasteboard)
 
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        let ownedChangeCount = writeTemporaryClipboard(text, to: pasteboard)
 
         guard let source = CGEventSource(stateID: .combinedSessionState) else {
             NSLog("[AXActions] safePaste: no CGEventSource, restoring clipboard")
-            // Restore clipboard even on failure
-            restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
+            _ = restoreClipboardIfUnchanged(
+                pasteboard: pasteboard,
+                savedItems: savedItems,
+                expectedChangeCount: ownedChangeCount
+            )
             return
         }
 
@@ -160,8 +157,48 @@ enum AXActions {
 
         // Restore clipboard after a short delay
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
-            restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
+            _ = restoreClipboardIfUnchanged(
+                pasteboard: pasteboard,
+                savedItems: savedItems,
+                expectedChangeCount: ownedChangeCount
+            )
         }
+    }
+
+    private static func captureClipboardItems(
+        from pasteboard: NSPasteboard
+    ) -> [[NSPasteboard.PasteboardType: Data]]? {
+        pasteboard.pasteboardItems?.map { item -> [NSPasteboard.PasteboardType: Data] in
+            var dict: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    dict[type] = data
+                }
+            }
+            return dict
+        }
+    }
+
+    private static func writeTemporaryClipboard(
+        _ text: String,
+        to pasteboard: NSPasteboard
+    ) -> Int {
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        let changeCount = pasteboard.changeCount
+        ClipboardWatcher.shared.registerOwnedChangeCount(changeCount)
+        return changeCount
+    }
+
+    @discardableResult
+    private static func restoreClipboardIfUnchanged(
+        pasteboard: NSPasteboard,
+        savedItems: [[NSPasteboard.PasteboardType: Data]]?,
+        expectedChangeCount: Int
+    ) -> Bool {
+        guard pasteboard.changeCount == expectedChangeCount else { return false }
+        restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
+        return true
     }
 
     /// Restore clipboard from saved items (all types, all items in one call).
@@ -170,7 +207,10 @@ enum AXActions {
         savedItems: [[NSPasteboard.PasteboardType: Data]]?
     ) {
         pasteboard.clearContents()
-        guard let saved = savedItems, !saved.isEmpty else { return }
+        guard let saved = savedItems, !saved.isEmpty else {
+            ClipboardWatcher.shared.registerOwnedCurrentChange()
+            return
+        }
         let restoredItems: [NSPasteboardItem] = saved.map { itemDict in
             let newItem = NSPasteboardItem()
             for (type, data) in itemDict {
@@ -179,7 +219,38 @@ enum AXActions {
             return newItem
         }
         pasteboard.writeObjects(restoredItems)
+        ClipboardWatcher.shared.registerOwnedCurrentChange()
     }
+
+    #if DEBUG
+    static func writeTemporaryClipboardForTesting(
+        _ text: String,
+        pasteboard: NSPasteboard
+    ) -> Int {
+        writeTemporaryClipboard(text, to: pasteboard)
+    }
+
+    static func restoreClipboardIfUnchangedForTesting(
+        savedText: String?,
+        expectedChangeCount: Int,
+        pasteboard: NSPasteboard
+    ) -> Bool {
+        let savedItems: [[NSPasteboard.PasteboardType: Data]]? = savedText.map { text in
+            let item = NSPasteboardItem()
+            item.setString(text, forType: .string)
+            var values: [NSPasteboard.PasteboardType: Data] = [:]
+            if let data = item.data(forType: .string) {
+                values[.string] = data
+            }
+            return [values]
+        }
+        return restoreClipboardIfUnchanged(
+            pasteboard: pasteboard,
+            savedItems: savedItems,
+            expectedChangeCount: expectedChangeCount
+        )
+    }
+    #endif
 
     // MARK: - Window discovery
 

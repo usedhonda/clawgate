@@ -826,9 +826,9 @@ struct LocalEntryView: View {
     }
 
     private func copyToPasteboard() {
-        ClipboardWatcher.shared.suppress()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(entry.text, forType: .string)
+        ClipboardWatcher.shared.registerOwnedCurrentChange()
         justCopied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
             justCopied = false

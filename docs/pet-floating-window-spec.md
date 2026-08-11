@@ -49,6 +49,17 @@ This document is the Normative contract for the Pet floating chat experience onl
 - Main-menu close control must expose standard semantics through a menu item that sends
   `performClose(_:)` with `Cmd+W` so key-window close dispatch follows first-responder chain.
 
+### Clipboard ownership
+
+- Every ClawGate clipboard write, temporary AX/Pet paste, and conditional restore registers
+  the resulting `NSPasteboard.changeCount` as an owned transaction.
+- The watcher consumes each owned change count once without emitting a clipboard offer; a
+  genuine user change count emits at most one offer.
+- Temporary clipboard restoration is conditional on the pasteboard still having the exact
+  owned change count. If the user copies during the temporary write, the user's clipboard is
+  preserved and the restore is skipped.
+- Starting or stopping the watcher clears stale owned and observed transaction state.
+
 ### Z-order and Space behavior
 
 - The full chat must use normal level (`.normal`) so it is not pinned above all apps.
