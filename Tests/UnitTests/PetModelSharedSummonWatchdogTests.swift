@@ -89,6 +89,22 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
                       "the Log summon must reach the send path, not be refused")
     }
 
+    func testUserLogActionPreemptsBackgroundSceneNaming() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        model.requestSceneNaming(scenes: [(id: "s1", timeLabel: "10:00–10:05", excerpt: "x")])
+        XCTAssertEqual(model.pendingSummonSource, "log_scene_naming")
+
+        XCTAssertTrue(model.sendLogInstruction(envelope: logEnvelope()))
+        XCTAssertEqual(model.pendingSummonSource, "log")
+        XCTAssertTrue(model.pendingSceneNamingIDsForTesting.isEmpty)
+        XCTAssertFalse(model.logReplies.contains { $0.text.contains("busy") })
+        XCTAssertTrue(model.logReplies.contains { $0.source == "log_user" })
+    }
+
     /// A stale watchdog firing late must never release a NEWER summon that reused
     /// the slot. Token+source double match is what prevents cross-release.
     func testStaleSharedWatchdogDoesNotReleaseNewerSummon() async throws {

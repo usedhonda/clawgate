@@ -2306,6 +2306,14 @@ final class PetModel: NSObject, ObservableObject {
             logDispatchStatus = .historyIncompleteRefused(requestId: requestedEnvelope.requestId)
             return false
         }
+        // Scene naming is a background nicety triggered shortly after the Log
+        // pane opens. A deliberate user Log action must take priority rather
+        // than waiting for that background request's watchdog.
+        if let owner = sharedSummonOwner, owner.source == "log_scene_naming" {
+            Self.petLogTelemetry.notice(
+                "sharedSummonPreempted source=log_scene_naming owner=\(owner.token.uuidString.prefix(8), privacy: .public) by=log")
+            releaseSharedSummon(owner)
+        }
         // Admission control follows the envelope-level fail-closed checks, before
         // any user-visible entry, save, or watchdog timer is created:
         //  - Busy: a previous Chi summon (scene naming or anything else) is
