@@ -284,14 +284,8 @@ struct ChatSendParams: Encodable {
     let idempotencyKey: String
 }
 
-/// Pet Log-only `chat.send` params: the canonical contract (oc-general
-/// b1f0719, Gateway 688b9e37+f60543e) requires `model`/`thinking` on the
-/// wire for the Gateway to route to Sol/max — a bare prefix marker in the
-/// message text is not sufficient (confirmed by a live E2E where the ACK
-/// came back `resolvedThinking: "medium"` because these were never sent).
-/// `model`/`thinking` are fixed canonical constants, never caller-supplied,
-/// so no other summon path can accidentally acquire them. Ordinary
-/// `ChatSendParams`/`sendMessage`/`sendMessageAwaitingRunId` are unchanged.
+/// Pet Log-only `chat.send` params. Model routing and request-local delivery
+/// are typed Gateway contracts; the message prefix is model-facing only.
 struct PetLogChatSendParams: Encodable {
     static let canonicalModel = "openai/gpt-5.6-sol"
     static let canonicalThinking = "max"
@@ -301,6 +295,9 @@ struct PetLogChatSendParams: Encodable {
     let idempotencyKey: String
     let model: String
     let thinking: String
+    let requestLocalContext: Bool
+    let nonprojection: Bool
+    let retainTerminalResult: Bool
 
     init(sessionKey: String, message: String, idempotencyKey: String) {
         self.sessionKey = sessionKey
@@ -308,6 +305,9 @@ struct PetLogChatSendParams: Encodable {
         self.idempotencyKey = idempotencyKey
         self.model = Self.canonicalModel
         self.thinking = Self.canonicalThinking
+        self.requestLocalContext = true
+        self.nonprojection = true
+        self.retainTerminalResult = true
     }
 }
 
@@ -345,6 +345,9 @@ struct IncomingPayload: Decodable {
     let resolvedThinking: String?
     let degraded: Bool?
     let fallbackReason: String?
+    let isolationApplied: Bool?
+    let nonprojectionApplied: Bool?
+    let resultRetentionExpiresAt: String?
     let stream: String?
     let data: AgentDataPayload?
     let state: String?
@@ -358,6 +361,7 @@ struct IncomingPayload: Decodable {
     /// ambient.ingest response: per-event receipts (eventId/status/dedup).
     let events: [AmbientEventReceipt]?
     let hasFallbackReason: Bool
+    let hasResultRetentionExpiresAt: Bool
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -371,6 +375,9 @@ struct IncomingPayload: Decodable {
         case resolvedThinking
         case degraded
         case fallbackReason
+        case isolationApplied
+        case nonprojectionApplied
+        case resultRetentionExpiresAt
         case stream
         case data
         case state
@@ -396,6 +403,9 @@ struct IncomingPayload: Decodable {
         resolvedThinking = try container.decodeIfPresent(String.self, forKey: .resolvedThinking)
         degraded = try container.decodeIfPresent(Bool.self, forKey: .degraded)
         fallbackReason = try container.decodeIfPresent(String.self, forKey: .fallbackReason)
+        isolationApplied = try container.decodeIfPresent(Bool.self, forKey: .isolationApplied)
+        nonprojectionApplied = try container.decodeIfPresent(Bool.self, forKey: .nonprojectionApplied)
+        resultRetentionExpiresAt = try container.decodeIfPresent(String.self, forKey: .resultRetentionExpiresAt)
         stream = try container.decodeIfPresent(String.self, forKey: .stream)
         data = try container.decodeIfPresent(AgentDataPayload.self, forKey: .data)
         state = try container.decodeIfPresent(String.self, forKey: .state)
@@ -407,6 +417,7 @@ struct IncomingPayload: Decodable {
         stateAccepted = try container.decodeIfPresent(Bool.self, forKey: .stateAccepted)
         events = try container.decodeIfPresent([AmbientEventReceipt].self, forKey: .events)
         hasFallbackReason = container.contains(.fallbackReason)
+        hasResultRetentionExpiresAt = container.contains(.resultRetentionExpiresAt)
     }
 }
 
@@ -467,10 +478,13 @@ enum PetLogDispatchAckValidationError: Error, Equatable {
 /// dispatch metadata fails closed and surfaces through existing Log error path.
 struct PetLogDispatchAck: Equatable {
     let runId: String
+    let sessionKey: String
     let resolvedModel: String
     let resolvedThinking: String
     let degraded: Bool
     let fallbackReason: String?
+    let isolationApplied: Bool
+    let nonprojectionApplied: Bool
 
     private static let fallbackPattern = try! NSRegularExpression(pattern: "^[A-Za-z0-9._-]{1,128}$")
 
@@ -481,6 +495,20 @@ struct PetLogDispatchAck: Equatable {
         guard let runId = payload.runId?.trimmingCharacters(in: .whitespacesAndNewlines),
               !runId.isEmpty else {
             throw PetLogDispatchAckValidationError.missingField("runId")
+        }
+        guard let sessionKey = payload.sessionKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionKey.isEmpty else {
+            throw PetLogDispatchAckValidationError.missingField("sessionKey")
+        }
+        guard payload.isolationApplied == true else {
+            throw PetLogDispatchAckValidationError.missingField("isolationApplied")
+        }
+        guard payload.nonprojectionApplied == true else {
+            throw PetLogDispatchAckValidationError.missingField("nonprojectionApplied")
+        }
+        guard payload.hasResultRetentionExpiresAt,
+              payload.resultRetentionExpiresAt == nil else {
+            throw PetLogDispatchAckValidationError.missingField("resultRetentionExpiresAt")
         }
 
         guard let model = payload.resolvedModel?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -512,10 +540,13 @@ struct PetLogDispatchAck: Equatable {
             }
             return PetLogDispatchAck(
                 runId: runId,
+                sessionKey: sessionKey,
                 resolvedModel: model,
                 resolvedThinking: thinking,
                 degraded: degraded,
-                fallbackReason: nil
+                fallbackReason: nil,
+                isolationApplied: true,
+                nonprojectionApplied: true
             )
         case "openai/gpt-5.6-terra":
             guard degraded else {
@@ -534,10 +565,13 @@ struct PetLogDispatchAck: Equatable {
             }
             return PetLogDispatchAck(
                 runId: runId,
+                sessionKey: sessionKey,
                 resolvedModel: model,
                 resolvedThinking: thinking,
                 degraded: degraded,
-                fallbackReason: reason
+                fallbackReason: reason,
+                isolationApplied: true,
+                nonprojectionApplied: true
             )
         default:
             throw PetLogDispatchAckValidationError.invalidModel(model)

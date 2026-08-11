@@ -63,10 +63,13 @@ final class OpenClawDispatchAckTests: XCTestCase {
     private func makeValidTerraAck() -> PetLogDispatchAck {
         PetLogDispatchAck(
             runId: "run-terra",
+            sessionKey: "agent:main:main",
             resolvedModel: "openai/gpt-5.6-terra",
             resolvedThinking: "max",
             degraded: true,
-            fallbackReason: "rate_limited"
+            fallbackReason: "rate_limited",
+            isolationApplied: true,
+            nonprojectionApplied: true
         )
     }
 
@@ -87,17 +90,23 @@ final class OpenClawDispatchAckTests: XCTestCase {
     /// carried `model`/`thinking` — a bare prefix marker in the message text
     /// was not sufficient for the Gateway to route to Sol/max. This is the
     /// exact-key/canonical-value regression guard for the fix.
-    func testPetLogChatSendParamsEncodesExactFiveKeysWithCanonicalModelAndThinking() throws {
+    func testPetLogChatSendParamsEncodesExactEightKeysWithRequestLocalDelivery() throws {
         let params = PetLogChatSendParams(sessionKey: "session", message: "ping", idempotencyKey: "id")
         let data = try JSONEncoder().encode(params)
         let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: data, options: []) as? [String: Any])
 
-        XCTAssertEqual(Set(decoded.keys), Set(["sessionKey", "message", "idempotencyKey", "model", "thinking"]))
+        XCTAssertEqual(Set(decoded.keys), Set([
+            "sessionKey", "message", "idempotencyKey", "model", "thinking",
+            "requestLocalContext", "nonprojection", "retainTerminalResult"
+        ]))
         XCTAssertEqual(decoded["model"] as? String, "openai/gpt-5.6-sol")
         XCTAssertEqual(decoded["thinking"] as? String, "max")
         XCTAssertEqual(decoded["sessionKey"] as? String, "session")
         XCTAssertEqual(decoded["message"] as? String, "ping")
         XCTAssertEqual(decoded["idempotencyKey"] as? String, "id")
+        XCTAssertEqual(decoded["requestLocalContext"] as? Bool, true)
+        XCTAssertEqual(decoded["nonprojection"] as? Bool, true)
+        XCTAssertEqual(decoded["retainTerminalResult"] as? Bool, true)
     }
 
     /// Static guard against the exact failure class this task fixes: an ACK
@@ -474,34 +483,46 @@ final class OpenClawDispatchAckTests: XCTestCase {
         let payload = try decodeIncomingPayload("""
         {
           "runId": "run-1",
+          "sessionKey": "agent:main:main",
           "resolvedModel": "openai/gpt-5.6-sol",
           "resolvedThinking": "max",
           "degraded": false,
-          "fallbackReason": null
+          "fallbackReason": null,
+          "isolationApplied": true,
+          "nonprojectionApplied": true,
+          "resultRetentionExpiresAt": null
         }
         """)
 
         let ack = try PetLogDispatchAck.validate(from: payload)
         XCTAssertEqual(ack.runId, "run-1")
+        XCTAssertEqual(ack.sessionKey, "agent:main:main")
         XCTAssertEqual(ack.resolvedModel, "openai/gpt-5.6-sol")
         XCTAssertEqual(ack.resolvedThinking, "max")
         XCTAssertEqual(ack.degraded, false)
         XCTAssertNil(ack.fallbackReason)
+        XCTAssertTrue(ack.isolationApplied)
+        XCTAssertTrue(ack.nonprojectionApplied)
     }
 
     func testValidTerraDispatchAckPassesValidation() throws {
         let payload = try decodeIncomingPayload("""
         {
           "runId": "run-2",
+          "sessionKey": "agent:main:main",
           "resolvedModel": "openai/gpt-5.6-terra",
           "resolvedThinking": "max",
           "degraded": true,
-          "fallbackReason": "rate_limited"
+          "fallbackReason": "rate_limited",
+          "isolationApplied": true,
+          "nonprojectionApplied": true,
+          "resultRetentionExpiresAt": null
         }
         """)
 
         let ack = try PetLogDispatchAck.validate(from: payload)
         XCTAssertEqual(ack.runId, "run-2")
+        XCTAssertEqual(ack.sessionKey, "agent:main:main")
         XCTAssertEqual(ack.resolvedModel, "openai/gpt-5.6-terra")
         XCTAssertEqual(ack.resolvedThinking, "max")
         XCTAssertEqual(ack.degraded, true)
