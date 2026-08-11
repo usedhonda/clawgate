@@ -183,10 +183,7 @@ enum AXActions {
         _ text: String,
         to pasteboard: NSPasteboard
     ) -> Int {
-        ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-        }
+        ClipboardWatcher.shared.writeOwnedString(text, to: pasteboard)
     }
 
     @discardableResult

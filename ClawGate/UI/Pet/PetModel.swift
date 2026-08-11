@@ -2801,11 +2801,7 @@ final class PetModel: NSObject, ObservableObject {
         // Try local execution first
         if let result = ClipboardExecutor.executeLocal(action.type, text: offer.text) {
             // Write result to clipboard
-            let pasteboard = NSPasteboard.general
-            _ = ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
-                pasteboard.clearContents()
-                pasteboard.setString(result, forType: .string)
-            }
+            _ = ClipboardWatcher.shared.writeOwnedString(result)
             showWhisper("Done — copied to clipboard", duration: 3.0)
             return
         }
@@ -2836,11 +2832,7 @@ final class PetModel: NSObject, ObservableObject {
         switch action {
         case .copyMention:
             ScreenshotWatcher.shared.suppress()
-            let pasteboard = NSPasteboard.general
-            _ = ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
-                pasteboard.clearContents()
-                pasteboard.setString(offer.mentionText, forType: .string)
-            }
+            _ = ClipboardWatcher.shared.writeOwnedString(offer.mentionText)
             showWhisper("Copied \(offer.mentionText)", duration: 3.0)
         }
 

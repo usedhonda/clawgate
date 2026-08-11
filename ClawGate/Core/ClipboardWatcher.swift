@@ -52,6 +52,18 @@ final class ClipboardWatcher {
         return changeCount
     }
 
+    /// Write one owned string without exposing mutation details to callers.
+    @discardableResult
+    func writeOwnedString(
+        _ text: String,
+        to pasteboard: NSPasteboard = .general
+    ) -> Int {
+        performOwnedMutation(on: pasteboard) {
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
+    }
+
     /// Restore only while the expected owned transaction is still current.
     /// The check and restore are serialized with the watcher and registration.
     @discardableResult

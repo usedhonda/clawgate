@@ -160,7 +160,10 @@ final class ClipboardOwnershipTests: XCTestCase {
                 contentsOf: root.appendingPathComponent(relativePath),
                 encoding: .utf8
             )
-            XCTAssertTrue(source.contains("performOwnedMutation"), "missing atomic API in \(relativePath)")
+            XCTAssertTrue(
+                source.contains("performOwnedMutation") || source.contains("writeOwnedString"),
+                "missing atomic API in \(relativePath)"
+            )
             XCTAssertFalse(source.contains("registerOwnedCurrentChange"), "registration gap remains in \(relativePath)")
         }
     }
@@ -171,19 +174,26 @@ final class ClipboardOwnershipTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("ClawGate")
+        let allowedFiles: Set<String> = [
+            "ClawGate/Core/ClipboardWatcher.swift",
+            "ClawGate/Automation/AX/AXActions.swift",
+        ]
         let mutationTokens = [
-            "NSPasteboard.general.clearContents(",
-            "NSPasteboard.general.setString(",
-            "NSPasteboard.general.setData(",
-            "NSPasteboard.general.writeObjects(",
-            "NSPasteboard.general.declareTypes(",
+            "clearContents(",
+            "setString(",
+            "setData(",
+            "writeObjects(",
+            "declareTypes(",
         ]
         let files = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: nil
         )?.compactMap { $0 as? URL }
             .filter { $0.pathExtension == "swift" } ?? []
-        let offenders = files.flatMap { file -> [String] in
+        let offenders = files.filter { file in
+            let relative = file.path.replacingOccurrences(of: root.deletingLastPathComponent().path + "/", with: "")
+            return !allowedFiles.contains(relative)
+        }.flatMap { file -> [String] in
             guard let source = try? String(contentsOf: file, encoding: .utf8) else { return [] }
             return source.split(separator: "\n").enumerated().compactMap { index, line in
                 mutationTokens.contains { line.contains($0) }

@@ -1399,11 +1399,7 @@ struct AmbientLogPetView: View {
     private func copyThreadTranscript() {
         let text = logModel.threadTranscript.string
         guard !text.isEmpty else { return }
-        let pasteboard = NSPasteboard.general
-        _ = ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
-            pasteboard.clearContents()
-            pasteboard.setString(text, forType: .string)
-        }
+        _ = ClipboardWatcher.shared.writeOwnedString(text)
     }
 
     private var customActionBar: some View {

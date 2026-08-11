@@ -176,11 +176,7 @@ struct QRCodeView: View {
 
     private func copyURL() {
         guard let url = connectionURL else { return }
-        let pasteboard = NSPasteboard.general
-        _ = ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
-            pasteboard.clearContents()
-            pasteboard.setString(url, forType: .string)
-        }
+        _ = ClipboardWatcher.shared.writeOwnedString(url)
 
         copied = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
