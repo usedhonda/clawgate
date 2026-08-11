@@ -2,6 +2,16 @@ import AppKit
 import Combine
 import SwiftUI
 
+enum MenuBarPanelRevealPolicy {
+    static func shouldCloseVisiblePanel(
+        isVisible: Bool,
+        isKeyWindow: Bool,
+        applicationIsActive: Bool
+    ) -> Bool {
+        isVisible && (isKeyWindow || applicationIsActive)
+    }
+}
+
 private extension NSColor {
     /// Bright light-gray for default log text — always readable on a dark panel background.
     static let logDefault = NSColor(white: 0.82, alpha: 1.0)
@@ -333,8 +343,19 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         guard let panel = mainPanel else { return }
 
-        if panel.isVisible {
+        if MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
+            isVisible: panel.isVisible,
+            isKeyWindow: panel.isKeyWindow,
+            applicationIsActive: NSApp.isActive
+        ) {
             closeMainPanel(sender)
+            return
+        }
+
+        if panel.isVisible {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(sender)
+            petWindowController?.bringChatToFrontIfVisible()
             return
         }
 

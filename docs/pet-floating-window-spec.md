@@ -77,6 +77,8 @@ This document is the Normative contract for the Pet floating chat experience onl
 - Menu-bar left-click reveal may only touch an existing chat window instance.
 - Existing chat reveal must skip if not visible or if minimized.
 - Existing chat reveal from menu-bar left-click must surface a visible chat onto the active app front.
+- A visible main panel closes only when ClawGate is already active or the panel is key; if it is
+  behind another app, the click activates ClawGate and surfaces the existing panel instead.
 - No synthetic reveal path may run if the chat window is already closed or hidden.
 
 ### Close and reveal behavior
