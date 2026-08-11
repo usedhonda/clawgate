@@ -539,7 +539,12 @@ private final class PetTabButton: NSButton {
 
 struct PetChatContainerView: View {
     @ObservedObject var model: PetModel
-    @State private var selectedTab = "log"
+    @State private var selectedTab: String
+
+    init(model: PetModel) {
+        self.model = model
+        _selectedTab = State(initialValue: model.pendingTabRequests.last?.target ?? "log")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -579,11 +584,14 @@ struct PetChatContainerView: View {
         .frame(minWidth: 280, idealWidth: 360, minHeight: 300, idealHeight: 480)
         .background(PetColors.mainBg)
         .clipShape(RoundedRectangle(cornerRadius: 16))
-        .onChange(of: model.showSummonTab) { show in
-            if show {
-                selectedTab = "summon"
-                model.showSummonTab = false
-            }
+        .onAppear { consumePendingTabRequests() }
+        .onChange(of: model.pendingTabRequests) { _ in consumePendingTabRequests() }
+    }
+
+    private func consumePendingTabRequests() {
+        for request in model.pendingTabRequests {
+            selectedTab = request.target
+            model.acknowledgeTabRequest(generation: request.generation)
         }
     }
 }
@@ -619,7 +627,7 @@ struct SummonResultsView: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                 }
-                .onChange(of: model.summonResults.count) { _ in
+                .onChange(of: model.summonScrollGeneration) { _ in
                     if let last = model.summonResults.last {
                         withAnimation(.easeOut(duration: 0.15)) {
                             proxy.scrollTo(last.id, anchor: .bottom)

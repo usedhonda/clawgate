@@ -137,7 +137,9 @@ final class PetModel: NSObject, ObservableObject {
     /// "warnings survive until acknowledged" guarantee is currently degraded.
     @Published var recoveryWarningPersistenceDegraded: Bool = false
     @Published var localResults: [NotificationEntry] = []
-    @Published var showSummonTab: Bool = false  // Auto-open summon tab on response
+    @Published private(set) var pendingTabRequests: [PetTabRequest] = []
+    @Published private(set) var summonScrollGeneration: UInt64 = 0
+    private var nextTabRequestGeneration: UInt64 = 0
 
     let stateMachine = PetStateMachine()
     let characterManager = CharacterManager()
@@ -1302,6 +1304,7 @@ final class PetModel: NSObject, ObservableObject {
         summonWatchdogToken = nil
         pendingLogRequest = nil
         pendingSceneNamingIDs = []
+        pendingTabRequests = []
         sessionKey = nil
     }
 
@@ -2697,7 +2700,17 @@ final class PetModel: NSObject, ObservableObject {
             summonResults.removeFirst(summonResults.count - 100)
         }
         persistStore(summonResults, file: "summon.json")
-        showSummonTab = true
+        summonScrollGeneration &+= 1
+        requestTab("summon")
+    }
+
+    func requestTab(_ target: String) {
+        nextTabRequestGeneration &+= 1
+        pendingTabRequests.append(PetTabRequest(target: target, generation: nextTabRequestGeneration))
+    }
+
+    func acknowledgeTabRequest(generation: UInt64) {
+        pendingTabRequests.removeAll { $0.generation == generation }
     }
 
     private static func isLocalSource(_ source: String) -> Bool {
@@ -2872,6 +2885,13 @@ final class PetModel: NSObject, ObservableObject {
 }
 
 // MARK: - Supporting Types
+
+struct PetTabRequest: Equatable, Identifiable {
+    let target: String
+    let generation: UInt64
+
+    var id: UInt64 { generation }
+}
 
 struct ScreenContext {
     let appName: String

@@ -70,6 +70,15 @@ This document is the Normative contract for the Pet floating chat experience onl
   into another process/window and returns the Summon fallback instead.
 - `AXActions.surface` reports failure when both direct AX surfacing and fallback activation fail.
 
+### Tab request protocol
+
+- Pet tab navigation uses queued target-tab requests with monotonically increasing generations;
+  it does not use a Boolean edge that can be coalesced or consumed before cold-open.
+- A cold-open chat container initializes from the newest pending target, and each pending request
+  is acknowledged by generation exactly once.
+- Repeated requests for the same Summon tab remain distinct, while each appended result advances
+  the Summon scroll generation once and preserves existing result storage/navigation behavior.
+
 ### Z-order and Space behavior
 
 - The full chat must use normal level (`.normal`) so it is not pinned above all apps.

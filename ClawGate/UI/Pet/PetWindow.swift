@@ -427,15 +427,15 @@ private final class PetContentView: NSView, NSWindowDelegate {
             }
         }
 
-        // Observe summon tab auto-open
-        summonObservation = model.$showSummonTab.sink { [weak self] show in
+        // Observe lossless tab requests (including repeated requests for the same tab).
+        summonObservation = model.$pendingTabRequests.sink { [weak self] requests in
             DispatchQueue.main.async {
-                guard let self, show else { return }
+                guard let self, !requests.isEmpty else { return }
                 // Open chat window if not already open
                 if !self.model.stateMachine.isChatOpen {
                     self.model.stateMachine.isChatOpen = true
                 }
-                // showSummonTab is consumed by PetChatContainerView's onChange
+                // PetChatContainerView consumes each generation after it is visible.
             }
         }
 
