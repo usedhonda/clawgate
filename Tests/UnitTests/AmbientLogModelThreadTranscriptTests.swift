@@ -572,6 +572,28 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         XCTAssertEqual(scan.window.map(\.text), ["A", "B"], "dated segments still form the window")
     }
 
+    func testScanBackwardIgnoresProvablyOldUndatedRowsAndMissingRawSessions() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var undated = TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "legacy")
+        undated.capturedAt = nil
+        try writeSession("ctx-2098-01-01T00-00-00Z", [undated], under: root)
+        try writeSession("ctx-2099-01-01T00-00-00Z", [], under: root)
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("ctx-2099-06-01T00-00-00Z"),
+            withIntermediateDirectories: true)
+
+        let anchor = ISO8601DateFormatter().date(from: "2100-01-01T00:00:00Z")!
+        let scan = AmbientStorage.scanBackward(
+            anchor: anchor, sanityCapHours: 48, timeZone: jst, sessionsRoot: root)
+
+        XCTAssertEqual(scan.missingTimestampCount, 0)
+        XCTAssertEqual(scan.readFailureCount, 0)
+        XCTAssertFalse(scan.hasSourceIssue)
+        XCTAssertTrue(scan.truncatedBeforeCoverage)
+    }
+
     /// D159: a malformed transcript line is counted as a decode failure — the
     /// scan reports the source is incomplete rather than silently dropping it.
     func testScanBackwardCountsDecodeFailure() throws {

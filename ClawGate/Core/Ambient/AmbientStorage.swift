@@ -265,6 +265,37 @@ enum AmbientStorage {
         }
     }
 
+    private static func sessionStart(from id: String) -> Date? {
+        guard id.hasPrefix("ctx-") else { return nil }
+        let stamp = String(id.dropFirst(4))
+        guard let timeSeparator = stamp.firstIndex(of: "T") else { return nil }
+        let date = stamp[..<timeSeparator]
+        let time = stamp[stamp.index(after: timeSeparator)...].replacingOccurrences(of: "-", with: ":")
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(identifier: "UTC")
+        return formatter.date(from: "\(date)T\(time)")
+    }
+
+    /// Legacy undated rows predate persisted capture policy. Only the two
+    /// production presets proven by repository history have precise margins.
+    private static func undatedLowerMargin(for sessionDir: URL) -> TimeInterval {
+        struct Preset: Decodable { let chunkSeconds: Int }
+        let preset = sessionDir.appendingPathComponent("preset.json")
+        guard let data = try? Data(contentsOf: preset),
+              let metadata = try? JSONDecoder().decode(Preset.self, from: data) else { return 63 }
+        switch metadata.chunkSeconds {
+        case 20: return 20
+        case 30: return 33
+        default: return 63
+        }
+    }
+
+    private static func attributeModificationDate(of path: String) -> Date? {
+        (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.attributeModificationDateKey]))?
+            .attributeModificationDate
+    }
+
     /// D153: the automatic-scope retrieval source — a SINGLE pass over every
     /// retained session's raw transcript, partitioned by `capturedAt` (never
     /// file mtime). Returns the in-window segments and `truncatedBeforeCoverage`
@@ -287,6 +318,11 @@ enum AmbientStorage {
             return BackwardScan(window: [], truncatedBeforeCoverage: false,
                                 missingTimestampCount: 0, readFailureCount: 0, decodeFailureCount: 0)
         }
+        let sessionStarts = dirs.compactMap { dir -> (id: String, start: Double)? in
+            guard dir.lastPathComponent.hasPrefix("ctx-"),
+                  let start = sessionStart(from: dir.lastPathComponent)?.timeIntervalSince1970 else { return nil }
+            return (dir.lastPathComponent, start)
+        }.sorted { $0.start < $1.start }
         var window: [TranscriptSegment] = []
         var truncated = false
         var missingTimestamp = 0
@@ -294,6 +330,9 @@ enum AmbientStorage {
         var decodeFailures = 0
         for dir in dirs where dir.lastPathComponent.hasPrefix("ctx-") {
             let raw = dir.appendingPathComponent("transcripts/raw.jsonl")
+            // A newly-created session may not have emitted a transcript yet.
+            // Absence is zero records, not a read failure.
+            guard fm.fileExists(atPath: raw.path) else { continue }
             guard let attrs = try? fm.attributesOfItem(atPath: raw.path) else {
                 readFailures += 1
                 continue
@@ -302,13 +341,37 @@ enum AmbientStorage {
             let mod = attrs[.modificationDate] as? Date
             let decoded = cachedSessionSegments(rawPath: raw.path, modificationDate: mod, fileSize: fileSize)
             decodeFailures += decoded.decodeFailures
+            var fileUndated = 0
             for seg in decoded.segments {
-                guard let at = seg.capturedAt else { missingTimestamp += 1; continue }
+                guard let at = seg.capturedAt else { fileUndated += 1; continue }
                 if at < capEpoch {
                     truncated = true
                 } else if at < anchorEpoch {
                     window.append(seg)
                 }
+            }
+            guard fileUndated > 0 else { continue }
+
+            // Bound legacy undated rows by their capture session. A bound is
+            // trusted only when the raw file's mtime and st_ctime both predate
+            // the next session; otherwise it remains unknown and fails closed.
+            let start = sessionStarts.first { $0.id == dir.lastPathComponent }?.start
+            let next = start.flatMap { value in sessionStarts.first { $0.start > value }?.start }
+            let ctime = attributeModificationDate(of: raw.path)?.timeIntervalSince1970
+            let deterministic = next.map { upper in
+                start != nil
+                    && (mod?.timeIntervalSince1970).map { $0 <= upper } == true
+                    && ctime.map { $0 <= upper } == true
+            } ?? false
+            guard deterministic, let start, let upper = next else {
+                missingTimestamp += fileUndated
+                continue
+            }
+            let lower = start - undatedLowerMargin(for: dir)
+            if upper <= capEpoch {
+                truncated = true
+            } else if upper > capEpoch && lower < anchorEpoch {
+                missingTimestamp += fileUndated
             }
         }
         window.sort { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
