@@ -277,8 +277,23 @@ final class PetWindowController {
         sizeObservation = nil
     }
 
-    deinit {
+    /// Permanently releases the pet window and every child window. This is
+    /// intentionally idempotent so application termination can converge with
+    /// an earlier hide/deallocation path without double-detaching children.
+    func teardown() {
         (window?.contentView as? PetContentView)?.detachForLifecycle(preserveChatState: true)
+        model.moveController.stop()
+        window?.orderOut(nil)
+        window = nil
+        spriteView = nil
+        bubbleHostingView = nil
+        stateObservation = nil
+        opacityObservation = nil
+        sizeObservation = nil
+    }
+
+    deinit {
+        teardown()
     }
 
     /// Forwards to the full chat window, if one is currently open, so the
@@ -342,6 +357,8 @@ private final class PetContentView: NSView, NSWindowDelegate {
     private var summonMenuGlobalMonitor: Any?
     private var bubbleLocalMonitor: Any?
     private var bubbleGlobalMonitor: Any?
+    private var askDismissMonitor: Any?
+    private var askDismissGlobalMonitor: Any?
 
     // Drag state
     private var dragStartScreenPos: NSPoint?
@@ -653,6 +670,7 @@ private final class PetContentView: NSView, NSWindowDelegate {
         bw.backgroundColor = .clear
         bw.level = .floating + 1
         bw.hasShadow = true
+        bw.delegate = self
         bw.contentView = container
         bw.isReleasedWhenClosed = false
 
@@ -790,9 +808,11 @@ private final class PetContentView: NSView, NSWindowDelegate {
         )
         bw.setFrame(clampFrame(rawFrame, parentWindow: parentWindow), display: false)
 
+        parentWindow.addChildWindow(bw, ordered: .above)
         bw.makeKeyAndOrderFront(nil)
         bw.makeFirstResponder(field)
         askWindow = bw
+        installAskDismissMonitor()
     }
 
     @objc private func summonDraftPR(_ sender: NSMenuItem) {
@@ -992,6 +1012,35 @@ private final class PetContentView: NSView, NSWindowDelegate {
         }
     }
 
+    private func installAskDismissMonitor() {
+        guard askDismissMonitor == nil else { return }
+        askDismissMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            guard let self else { return event }
+            if event.window !== self.askWindow {
+                self.detachAskWindow()
+            }
+            return event
+        }
+        askDismissGlobalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown]
+        ) { [weak self] _ in
+            self?.detachAskWindow()
+        }
+    }
+
+    private func removeAskDismissMonitor() {
+        if let monitor = askDismissMonitor {
+            NSEvent.removeMonitor(monitor)
+            askDismissMonitor = nil
+        }
+        if let monitor = askDismissGlobalMonitor {
+            NSEvent.removeMonitor(monitor)
+            askDismissGlobalMonitor = nil
+        }
+    }
+
     private func installPetPanelDismissMonitor() {
         guard bubbleLocalMonitor == nil else { return }
         bubbleLocalMonitor = NSEvent.addLocalMonitorForEvents(
@@ -1047,8 +1096,10 @@ private final class PetContentView: NSView, NSWindowDelegate {
     }
 
     private func detachAskWindow() {
+        removeAskDismissMonitor()
         if let aw = askWindow {
             window?.removeChildWindow(aw)
+            aw.delegate = nil
             aw.orderOut(nil)
             askWindow = nil
         }
@@ -1071,7 +1122,15 @@ private final class PetContentView: NSView, NSWindowDelegate {
         }
     }
 
+    func windowDidResignKey(_ notification: Notification) {
+        guard let ask = askWindow,
+              notification.object as AnyObject? === ask else { return }
+        detachAskWindow()
+    }
+
     func detachForLifecycle(preserveChatState: Bool) {
+        singleClickTask?.cancel()
+        singleClickTask = nil
         detachChatWindow(preserveState: preserveChatState)
         hideNotificationBubble()
         dismissSummonMenu()

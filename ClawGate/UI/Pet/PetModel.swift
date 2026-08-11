@@ -153,7 +153,10 @@ final class PetModel: NSObject, ObservableObject {
     private var speakTimeoutTask: Task<Void, Never>?
     private var deltaIdleTask: Task<Void, Never>?
     private var idleTimer: Timer?
+    private var reconnectTimer: Timer?
     private var windowTrackingTimer: Timer?
+    private var notificationObserver: NSObjectProtocol?
+    private var didCleanup = false
     private var trackingTickCount = 0
     @Published var isPinned: Bool = false
     private(set) var lastTrackedApp: NSRunningApplication?
@@ -1200,6 +1203,7 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func start() {
+        guard !didCleanup else { return }
         // Restore persisted logs. Each goes through the hardened outcome API so
         // an unreadable file surfaces as a durable recovery warning (and holds
         // its writes fail-closed) instead of silently loading as [] and letting
@@ -1217,8 +1221,9 @@ final class PetModel: NSObject, ObservableObject {
         startHideCheck()
 
         // Listen for bubble_notify from bridge
-        NotificationCenter.default.addObserver(forName: .petBubbleNotify, object: nil, queue: .main) { [weak self] notif in
-            guard let self, let text = notif.userInfo?["text"] as? String else {
+        notificationObserver = NotificationCenter.default.addObserver(forName: .petBubbleNotify, object: nil, queue: .main) { [weak self] notif in
+            guard let self, !self.didCleanup else { return }
+            guard let text = notif.userInfo?["text"] as? String else {
                 NSLog("[Pet] bubble_notify: missing text")
                 return
             }
@@ -1234,7 +1239,8 @@ final class PetModel: NSObject, ObservableObject {
     /// Retry connection every 15s if not connected (handles Gateway-after-ClawGate startup
     /// and recovers from stuck .error states after transient failures like /ready timeout).
     private func startReconnectTimer() {
-        Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        reconnectTimer?.invalidate()
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self else { return }
             switch self.connectionState {
             case .connected, .connecting:
@@ -1246,8 +1252,12 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func cleanup() {
+        guard !didCleanup else { return }
+        didCleanup = true
         disconnect()
         moveController.stop()
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
         idleTimer?.invalidate()
         idleTimer = nil
         cycleWorkItem?.cancel()
@@ -1258,7 +1268,45 @@ final class PetModel: NSObject, ObservableObject {
         hideCheckTimer = nil
         clawWaveTimer?.invalidate()
         clawWaveTimer = nil
+        zzzTimer?.invalidate()
+        zzzTimer = nil
+        whisperDismissTask?.cancel()
+        whisperDismissTask = nil
+        notificationDismissTask?.cancel()
+        notificationDismissTask = nil
+        speakTimeoutTask?.cancel()
+        speakTimeoutTask = nil
+        deltaIdleTask?.cancel()
+        deltaIdleTask = nil
+        streamingMessageId = nil
+        streamingRunId = nil
+        isStreaming = false
+        streamingText = ""
+        whisperText = nil
+        notificationMessage = nil
+        pendingClipboardOffer = nil
+        pendingScreenshotOffer = nil
+        if let notificationObserver {
+            NotificationCenter.default.removeObserver(notificationObserver)
+            self.notificationObserver = nil
+        }
+        ClipboardWatcher.shared.onOffer = nil
+        ClipboardWatcher.shared.stop()
+        ScreenshotWatcher.shared.onScreenshot = nil
         ScreenshotWatcher.shared.stop()
+        releaseSharedSummonIfPresent()
+        sharedSummonOwner = nil
+        draftPlacementOwnerToken = nil
+        pendingSummonSource = nil
+        pendingSummonRunId = nil
+        summonWatchdogToken = nil
+        pendingLogRequest = nil
+        pendingSceneNamingIDs = []
+        sessionKey = nil
+    }
+
+    deinit {
+        cleanup()
     }
 
     // MARK: - Hide Behind Window
@@ -2640,7 +2688,7 @@ final class PetModel: NSObject, ObservableObject {
     private func startClipboardWatcher() {
         ClipboardWatcher.shared.onOffer = { [weak self] offer in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, !self.didCleanup else { return }
                 // Enrich with source app context
                 var enriched = offer
                 enriched = ClipboardOffer(
@@ -2660,7 +2708,7 @@ final class PetModel: NSObject, ObservableObject {
     private func startScreenshotWatcher() {
         ScreenshotWatcher.shared.onScreenshot = { [weak self] offer in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, !self.didCleanup else { return }
                 let enriched = ScreenshotOffer(
                     id: offer.id,
                     sourceKind: offer.sourceKind,

@@ -82,6 +82,24 @@ This document is the Normative contract for the Pet floating chat experience onl
 - Hide/deactivate must preserve chat-frame and thread pane preference state so re-show can
   restore size behavior without duplicates.
 - `hideChatWindow` should invoke `detachChatWindow(preserveState: false)` so pane-open state is cleared on explicit close.
+- `PetWindowController.teardown()` is the idempotent permanent visual teardown
+  path and uses the same detach coordinator; repeated calls must not re-order,
+  remove, or otherwise mutate an already detached child.
+- `MenuBarAppDelegate.quit()` and `applicationWillTerminate(_:)` must converge
+  on one idempotent teardown that stops menu-bar timers/observers, detaches the
+  Pet controller, cleans the PetModel, stops the local runtime, and closes the
+  panel.
+- `PetModel.cleanup()` owns cancellation of its reconnect/idle/hide/zzz/task
+  resources, notification observer, shared summon owner/watchdog, and watcher
+  callbacks. It is safe to call more than once.
+
+### Ask input lifecycle
+
+- Ask-only input installs a dedicated outside-click monitor after its child
+  window is attached. A click outside Ask or Ask losing key status detaches the
+  Ask child and releases both local/global Ask monitors.
+- Ask teardown is idempotent and must not change the general chat focus policy
+  or its panel dismiss monitor.
 
 ### Shared summon ownership
 

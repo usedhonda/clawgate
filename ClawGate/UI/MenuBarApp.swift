@@ -44,6 +44,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private static let collapsedWidth: CGFloat = 14
     private var activationObserver: NSObjectProtocol?
     private var petVisibilityObserver: AnyCancellable?
+    private var didTeardown = false
     private var lastAppliedPanelLevel: NSWindow.Level?
     private let mainPanelLogLimit = 30
     private let ghosttyBundleID = "com.mitchellh.ghostty"
@@ -106,6 +107,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     self.petWindowController?.hide()
                 }
             }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        performTeardown()
     }
 
     private func configureStatusButton() {
@@ -1232,12 +1237,36 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    @objc private func quit() {
-        closeMainPanel(nil)
+    private func performTeardown() {
+        guard !didTeardown else { return }
+        didTeardown = true
+
+        saveCurrentFrame()
+        mainPanel?.orderOut(nil)
         refreshTimer?.invalidate()
         refreshTimer = nil
         stopGhosttyFollow()
+        petVisibilityObserver?.cancel()
+        petVisibilityObserver = nil
+        petWindowController?.teardown()
+        petWindowController = nil
+        petModel.cleanup()
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+            self.activationObserver = nil
+        }
         runtime.stopServer()
+        if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+            self.statusItem = nil
+        }
+        mainPanel?.delegate = nil
+        mainPanel = nil
+        mainPanelHost = nil
+    }
+
+    @objc private func quit() {
+        performTeardown()
         NSApplication.shared.terminate(nil)
     }
 
