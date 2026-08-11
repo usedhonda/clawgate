@@ -164,10 +164,12 @@ final class ScreenshotWatcher {
 
     private func checkClipboard() {
         let pasteboard = NSPasteboard.general
-        let current = pasteboard.changeCount
+        let ownership = ClipboardWatcher.shared.ownershipSnapshot(on: pasteboard)
+        let current = ownership.changeCount
         guard current != lastClipboardChangeCount else { return }
         lastClipboardChangeCount = current
 
+        guard !ownership.isOwned else { return }
         if let until = suppressUntil, Date() < until { return }
         guard let image = NSImage(pasteboard: pasteboard) else { return }
 
@@ -179,6 +181,12 @@ final class ScreenshotWatcher {
 
         emitCandidate(from: image, sourceKind: .clipboardImage, originalPath: nil)
     }
+
+    #if DEBUG
+    func checkClipboardForTesting() {
+        checkClipboard()
+    }
+    #endif
 
     private func configureDirectoryWatch() {
         let directory = ScreenshotSaveLocationResolver.resolve()

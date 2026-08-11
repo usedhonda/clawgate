@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import AppKit
 @testable import ClawGate
 
 final class ScreenshotWatcherTests: XCTestCase {
@@ -47,5 +48,40 @@ final class ScreenshotWatcherTests: XCTestCase {
         XCTAssertEqual(url.pathExtension, "png")
         XCTAssertTrue(url.lastPathComponent.hasPrefix("chi-shot-"))
         XCTAssertTrue(url.path.hasPrefix("/tmp/"))
+    }
+
+    func testOwnedSafePasteAndDelayedRestoreDoNotReemitPreexistingClipboardImage() async {
+        let pasteboard = NSPasteboard.general
+        let image = NSImage(size: NSSize(width: 120, height: 120))
+        image.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSRect(origin: .zero, size: NSSize(width: 120, height: 120)).fill()
+        image.unlockFocus()
+
+        let watcher = ScreenshotWatcher.shared
+        watcher.stop()
+        watcher.onScreenshot = nil
+        pasteboard.clearContents()
+        pasteboard.writeObjects([image])
+        var offers = 0
+        watcher.onScreenshot = { _ in offers += 1 }
+        watcher.start()
+
+        AXActions.safePaste("temporary text")
+        watcher.checkClipboardForTesting()
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        watcher.checkClipboardForTesting()
+
+        XCTAssertNotNil(NSImage(pasteboard: pasteboard), "the original image should be restored")
+        XCTAssertEqual(offers, 0, "owned temporary write and restore must not emit clipboard_image")
+
+        pasteboard.clearContents()
+        pasteboard.writeObjects([image])
+        watcher.checkClipboardForTesting()
+        XCTAssertEqual(offers, 1, "an external image clipboard mutation must still emit")
+
+        watcher.stop()
+        watcher.onScreenshot = nil
+        pasteboard.clearContents()
     }
 }

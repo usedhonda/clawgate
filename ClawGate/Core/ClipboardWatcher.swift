@@ -84,6 +84,19 @@ final class ClipboardWatcher {
         return changeCount
     }
 
+    /// Read the pasteboard change count and its ownership marker under the
+    /// same lock used by app-owned mutations. This prevents another watcher
+    /// from observing a half-finished clear/write transaction.
+    func ownershipSnapshot(
+        on pasteboard: NSPasteboard = .general
+    ) -> (changeCount: Int, isOwned: Bool) {
+        stateLock.lock()
+        let changeCount = pasteboard.changeCount
+        let isOwned = ownedChangeCount == changeCount
+        stateLock.unlock()
+        return (changeCount, isOwned)
+    }
+
     private func check() {
         let pb = NSPasteboard.general
         let text: String?
@@ -98,7 +111,6 @@ final class ClipboardWatcher {
         lastChangeCount = current
 
         if ownedChangeCount == current {
-            ownedChangeCount = nil
             stateLock.unlock()
             return
         }
