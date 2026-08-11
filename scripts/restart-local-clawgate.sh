@@ -155,17 +155,17 @@ else
 fi
 
 echo "[5/5] Restart app + local gateway"
-pkill -f "$APP_BIN" >/dev/null 2>&1 || true
-pkill -f "/projects/Mac/clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
+APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
+pkill -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
 
 # Wait for old process to fully exit (up to 5s, then SIGKILL)
 for ((w=1; w<=5; w++)); do
-  if ! pgrep -f "clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1; then
+  if ! pgrep -f "$APP_PROCESS_PAT" >/dev/null 2>&1; then
     break
   fi
   if [[ $w -eq 5 ]]; then
     echo "Old process still alive after 5s, sending SIGKILL"
-    pkill -9 -f "clawgate/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
+    pkill -9 -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
     sleep 1
   fi
   sleep 1
