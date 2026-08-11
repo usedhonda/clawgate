@@ -5,26 +5,29 @@ final class MenuBarRevealTests: XCTestCase {
     func testVisibleFrontmostPanelCloses() {
         XCTAssertTrue(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
             isVisible: true,
-            isKeyWindow: true,
-            applicationIsActive: false
+            isKeyWindow: true
         ))
         XCTAssertTrue(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
             isVisible: true,
-            isKeyWindow: false,
-            applicationIsActive: true
+            isKeyWindow: true
         ))
     }
 
     func testVisiblePanelBehindAnotherAppIsRevealed() {
         XCTAssertFalse(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
             isVisible: true,
-            isKeyWindow: false,
-            applicationIsActive: false
+            isKeyWindow: false
         ))
         XCTAssertFalse(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
             isVisible: false,
-            isKeyWindow: true,
-            applicationIsActive: true
+            isKeyWindow: true
+        ))
+    }
+
+    func testActivationTransitionDoesNotCloseNonKeyPanel() {
+        XCTAssertFalse(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
+            isVisible: true,
+            isKeyWindow: false
         ))
     }
 }

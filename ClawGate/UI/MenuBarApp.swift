@@ -5,10 +5,9 @@ import SwiftUI
 enum MenuBarPanelRevealPolicy {
     static func shouldCloseVisiblePanel(
         isVisible: Bool,
-        isKeyWindow: Bool,
-        applicationIsActive: Bool
+        isKeyWindow: Bool
     ) -> Bool {
-        isVisible && (isKeyWindow || applicationIsActive)
+        isVisible && isKeyWindow
     }
 }
 
@@ -345,8 +344,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
         if MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
             isVisible: panel.isVisible,
-            isKeyWindow: panel.isKeyWindow,
-            applicationIsActive: NSApp.isActive
+            isKeyWindow: panel.isKeyWindow
         ) {
             closeMainPanel(sender)
             return

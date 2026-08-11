@@ -13,10 +13,14 @@ enum AXAppWindow {
         let title: String?
 
         func matches(_ other: WindowIdentity) -> Bool {
-            pid == other.pid
-                && bundleIdentifier == other.bundleIdentifier
-                && windowIdentifier == other.windowIdentifier
-                && title == other.title
+            guard pid == other.pid, bundleIdentifier == other.bundleIdentifier else {
+                return false
+            }
+            if let windowIdentifier, let otherIdentifier = other.windowIdentifier {
+                return windowIdentifier == otherIdentifier
+            }
+            guard windowIdentifier == nil, other.windowIdentifier == nil else { return false }
+            return title == other.title
                 && abs(frame.minX - other.frame.minX) < 1
                 && abs(frame.minY - other.frame.minY) < 1
                 && abs(frame.width - other.frame.width) < 1
@@ -77,31 +81,34 @@ enum AXAppWindow {
         guard app.processIdentifier == target.pid,
               app.bundleIdentifier == target.bundleIdentifier,
               app.isActive,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier == target.pid,
               let identity = identity(for: window, pid: target.pid, bundleIdentifier: target.bundleIdentifier),
-              identity.matches(target),
-              AXQuery.copyBoolAttribute(
-                AXQuery.applicationElement(pid: target.pid),
-                attribute: kAXFrontmostAttribute as String
-              ) == true,
-              AXQuery.copyBoolAttribute(window, attribute: kAXMinimizedAttribute as String) != true,
               let focused = AXQuery.focusedWindow(appElement: AXQuery.applicationElement(pid: target.pid)) else {
             return false
         }
-        return CFEqual(focused, window)
+        let appElement = AXQuery.applicationElement(pid: target.pid)
+        return isValidCurrentTarget(
+            target: target,
+            current: identity,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            focused: CFEqual(focused, window)
+                && AXQuery.copyBoolAttribute(appElement, attribute: kAXFrontmostAttribute as String) == true,
+            minimized: AXQuery.copyBoolAttribute(window, attribute: kAXMinimizedAttribute as String) == true
+        )
     }
 
-    #if DEBUG
-    static func targetMatchesForTesting(
+    /// Pure target decision shared by production revalidation and deterministic tests.
+    static func isValidCurrentTarget(
         target: WindowIdentity,
         current: WindowIdentity,
         frontmostPID: pid_t?,
         focused: Bool,
         minimized: Bool
     ) -> Bool {
-        target.matches(current) && frontmostPID == target.pid && focused && !minimized
+        target.matches(current)
+            && frontmostPID == target.pid
+            && focused
+            && !minimized
     }
-    #endif
 
     private static func identity(
         for window: AXUIElement,

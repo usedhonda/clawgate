@@ -44,4 +44,37 @@ final class PetTabRequestTests: XCTestCase {
         XCTAssertEqual(model.pendingTabRequests.map(\.generation).count, 2)
         model.cleanup()
     }
+
+    func testDelayedConsumerIsBoundedAndRetainsNewestGeneration() {
+        let model = PetModel()
+
+        for index in 0..<40 {
+            model.requestTab(index.isMultiple(of: 2) ? "log" : "summon")
+        }
+
+        XCTAssertEqual(model.pendingTabRequests.count, 32)
+        XCTAssertEqual(model.pendingTabRequests.first?.generation, 9)
+        XCTAssertEqual(model.pendingTabRequests.last?.generation, 40)
+        XCTAssertEqual(model.pendingTabRequests.last?.target, "summon")
+
+        for request in model.pendingTabRequests {
+            model.acknowledgeTabRequest(generation: request.generation)
+        }
+        XCTAssertTrue(model.pendingTabRequests.isEmpty)
+        model.cleanup()
+    }
+
+    func testTabConsumerResubscribesAcrossAppearAndPendingChanges() throws {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ClawGate/UI/Pet/PetBubbleView.swift")
+            .path
+        let source = try String(contentsOfFile: path, encoding: .utf8)
+
+        XCTAssertTrue(source.contains(".onAppear { consumePendingTabRequests() }"))
+        XCTAssertTrue(source.contains(".onChange(of: model.pendingTabRequests)"))
+        XCTAssertTrue(source.contains("for request in model.pendingTabRequests"))
+    }
 }

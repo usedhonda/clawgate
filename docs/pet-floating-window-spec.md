@@ -67,8 +67,10 @@ This document is the Normative contract for the Pet floating chat experience onl
 
 - Omakase captures the exact target PID, bundle identity, AX window identity, frame, and title
   before the asynchronous draft placement begins.
-- Placement resolves that PID directly and fails closed if the process, bundle, window identity,
-  frame, title, frontmost app, focus, or minimized state no longer matches the capture.
+- Placement resolves that PID directly. PID, bundle, and stable AX window identifier are primary;
+  title and frame changes are allowed when that identifier remains equal. Without a stable
+  identifier, title and frame remain a conservative fallback identity.
+- Identifier mismatch, process termination, frontmost/focus loss, or minimized state fails closed.
 - The target is revalidated immediately before `safePaste`; a mismatch never activates or pastes
   into another process/window and returns the Summon fallback instead.
 - `AXActions.surface` reports failure when both direct AX surfacing and fallback activation fail.
@@ -89,9 +91,11 @@ This document is the Normative contract for the Pet floating chat experience onl
 - Menu-bar left-click reveal may only touch an existing chat window instance.
 - Existing chat reveal must skip if not visible or if minimized.
 - Existing chat reveal from menu-bar left-click must surface a visible chat onto the active app front.
-- A visible main panel closes only when ClawGate is already active or the panel is key; if it is
-  behind another app, the click activates ClawGate and surfaces the existing panel instead.
+- A visible main panel closes only when that panel is already key; app activation timing does not
+  change this decision. A non-key panel is activated and surfaced instead.
 - No synthetic reveal path may run if the chat window is already closed or hidden.
+- Pending tab requests retain at most 32 generations, dropping only the oldest requests while
+  preserving the newest target and generation acknowledgements.
 
 ### Close and reveal behavior
 

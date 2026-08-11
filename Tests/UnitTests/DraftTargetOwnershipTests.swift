@@ -15,8 +15,6 @@ final class DraftTargetOwnershipTests: XCTestCase {
         let mismatches = [
             target.with(pid: 202),
             target.with(windowIdentifier: "other-window"),
-            target.with(frame: CGRect(x: 21, y: 30, width: 800, height: 600)),
-            target.with(title: "Other"),
         ]
 
         for mismatch in mismatches {
@@ -72,6 +70,54 @@ final class DraftTargetOwnershipTests: XCTestCase {
         XCTAssertEqual(result, .placed)
         XCTAssertEqual(activateCount, 1)
         XCTAssertEqual(pasteCount, 1)
+    }
+
+    func testStableIdentifierAllowsRenameAndResize() {
+        var activateCount = 0
+        var pasteCount = 0
+        let current = target.with(
+            frame: CGRect(x: 80, y: 90, width: 1024, height: 720),
+            title: "Renamed draft"
+        )
+        let result = DraftPlacer.attemptPlacementForTesting(
+            target: target,
+            current: current,
+            frontmostPID: target.pid,
+            focused: true,
+            minimized: false,
+            activate: { activateCount += 1 },
+            paste: { pasteCount += 1 }
+        )
+
+        XCTAssertEqual(result, .placed)
+        XCTAssertEqual(activateCount, 1)
+        XCTAssertEqual(pasteCount, 1)
+    }
+
+    func testMissingStableIdentifierRequiresConservativePresentationMatch() {
+        let targetWithoutIdentifier = AXAppWindow.WindowIdentity(
+            pid: target.pid,
+            bundleIdentifier: target.bundleIdentifier,
+            windowIdentifier: nil,
+            frame: target.frame,
+            title: target.title
+        )
+        let changedPresentation = targetWithoutIdentifier.with(title: "Renamed draft")
+        var activateCount = 0
+        var pasteCount = 0
+        let result = DraftPlacer.attemptPlacementForTesting(
+            target: targetWithoutIdentifier,
+            current: changedPresentation,
+            frontmostPID: target.pid,
+            focused: true,
+            minimized: false,
+            activate: { activateCount += 1 },
+            paste: { pasteCount += 1 }
+        )
+
+        XCTAssertEqual(result, .fallback)
+        XCTAssertEqual(activateCount, 0)
+        XCTAssertEqual(pasteCount, 0)
     }
 
     func testSurfaceFailureDoesNotReportSuccess() {

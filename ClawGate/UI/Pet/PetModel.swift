@@ -140,6 +140,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published private(set) var pendingTabRequests: [PetTabRequest] = []
     @Published private(set) var summonScrollGeneration: UInt64 = 0
     private var nextTabRequestGeneration: UInt64 = 0
+    static let maxPendingTabRequests = 32
 
     let stateMachine = PetStateMachine()
     let characterManager = CharacterManager()
@@ -2707,6 +2708,9 @@ final class PetModel: NSObject, ObservableObject {
     func requestTab(_ target: String) {
         nextTabRequestGeneration &+= 1
         pendingTabRequests.append(PetTabRequest(target: target, generation: nextTabRequestGeneration))
+        if pendingTabRequests.count > Self.maxPendingTabRequests {
+            pendingTabRequests.removeFirst(pendingTabRequests.count - Self.maxPendingTabRequests)
+        }
     }
 
     func acknowledgeTabRequest(generation: UInt64) {
@@ -2797,9 +2801,10 @@ final class PetModel: NSObject, ObservableObject {
         // Try local execution first
         if let result = ClipboardExecutor.executeLocal(action.type, text: offer.text) {
             // Write result to clipboard
-            _ = ClipboardWatcher.shared.performOwnedMutation(on: NSPasteboard.general) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(result, forType: .string)
+            let pasteboard = NSPasteboard.general
+            _ = ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
+                pasteboard.clearContents()
+                pasteboard.setString(result, forType: .string)
             }
             showWhisper("Done — copied to clipboard", duration: 3.0)
             return
@@ -2831,9 +2836,10 @@ final class PetModel: NSObject, ObservableObject {
         switch action {
         case .copyMention:
             ScreenshotWatcher.shared.suppress()
-            _ = ClipboardWatcher.shared.performOwnedMutation(on: NSPasteboard.general) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(offer.mentionText, forType: .string)
+            let pasteboard = NSPasteboard.general
+            _ = ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
+                pasteboard.clearContents()
+                pasteboard.setString(offer.mentionText, forType: .string)
             }
             showWhisper("Copied \(offer.mentionText)", duration: 3.0)
         }

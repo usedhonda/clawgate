@@ -137,7 +137,7 @@ enum DraftPlacer {
         activate: () -> Void,
         paste: () -> Void
     ) -> PlaceResult {
-        guard AXAppWindow.targetMatchesForTesting(
+        guard AXAppWindow.isValidCurrentTarget(
             target: target,
             current: current,
             frontmostPID: frontmostPID,

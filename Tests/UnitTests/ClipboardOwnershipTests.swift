@@ -164,4 +164,33 @@ final class ClipboardOwnershipTests: XCTestCase {
             XCTAssertFalse(source.contains("registerOwnedCurrentChange"), "registration gap remains in \(relativePath)")
         }
     }
+
+    func testProductionGeneralPasteboardWritesUseAtomicOwnership() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("ClawGate")
+        let mutationTokens = [
+            "NSPasteboard.general.clearContents(",
+            "NSPasteboard.general.setString(",
+            "NSPasteboard.general.setData(",
+            "NSPasteboard.general.writeObjects(",
+            "NSPasteboard.general.declareTypes(",
+        ]
+        let files = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: nil
+        )?.compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" } ?? []
+        let offenders = files.flatMap { file -> [String] in
+            guard let source = try? String(contentsOf: file, encoding: .utf8) else { return [] }
+            return source.split(separator: "\n").enumerated().compactMap { index, line in
+                mutationTokens.contains { line.contains($0) }
+                    ? "\(file.path):\(index + 1)"
+                    : nil
+            }
+        }
+        XCTAssertTrue(offenders.isEmpty, "direct general pasteboard writes: \(offenders)")
+    }
 }
