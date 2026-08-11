@@ -88,4 +88,80 @@ final class ClipboardOwnershipTests: XCTestCase {
 
         XCTAssertEqual(offers, 1)
     }
+
+    func testOwnedMutationBlocksConcurrentCheckUntilRegistration() {
+        var offers = 0
+        watcher.onOffer = { _ in offers += 1 }
+        watcher.start()
+
+        let mutationStarted = DispatchSemaphore(value: 0)
+        let allowMutation = DispatchSemaphore(value: 0)
+        let mutationFinished = DispatchSemaphore(value: 0)
+        let checkFinished = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            _ = self.watcher.performOwnedMutation(on: self.pasteboard) {
+                self.pasteboard.clearContents()
+                mutationStarted.signal()
+                _ = allowMutation.wait(timeout: .now() + 2)
+                self.pasteboard.setString("https://example.com/atomic", forType: .string)
+            }
+            mutationFinished.signal()
+        }
+
+        XCTAssertEqual(mutationStarted.wait(timeout: .now() + 2), .success)
+        DispatchQueue.global().async {
+            self.watcher.checkForTesting()
+            checkFinished.signal()
+        }
+        XCTAssertEqual(checkFinished.wait(timeout: .now() + 0.1), .timedOut)
+
+        allowMutation.signal()
+        XCTAssertEqual(mutationFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(checkFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(offers, 0)
+    }
+
+    func testConcurrentOwnedMutationAndCheckStressRemainsOfferFree() {
+        watcher.start()
+        let group = DispatchGroup()
+
+        for index in 0..<100 {
+            group.enter()
+            DispatchQueue.global().async {
+                _ = self.watcher.performOwnedMutation(on: self.pasteboard) {
+                    self.pasteboard.clearContents()
+                    self.pasteboard.setString("https://example.com/owned-\(index)", forType: .string)
+                }
+                group.leave()
+            }
+            group.enter()
+            DispatchQueue.global().async {
+                self.watcher.checkForTesting()
+                group.leave()
+            }
+        }
+
+        XCTAssertEqual(group.wait(timeout: .now() + 5), .success)
+        watcher.checkForTesting()
+    }
+
+    func testC3OwnedCallsitesUseAtomicMutationWithoutRegisterGap() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        for relativePath in [
+            "ClawGate/Automation/AX/AXActions.swift",
+            "ClawGate/UI/Pet/PetModel.swift",
+            "ClawGate/UI/Pet/PetBubbleView.swift",
+        ] {
+            let source = try String(
+                contentsOf: root.appendingPathComponent(relativePath),
+                encoding: .utf8
+            )
+            XCTAssertTrue(source.contains("performOwnedMutation"), "missing atomic API in \(relativePath)")
+            XCTAssertFalse(source.contains("registerOwnedCurrentChange"), "registration gap remains in \(relativePath)")
+        }
+    }
 }

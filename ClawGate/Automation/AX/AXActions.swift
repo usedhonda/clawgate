@@ -183,11 +183,10 @@ enum AXActions {
         _ text: String,
         to pasteboard: NSPasteboard
     ) -> Int {
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        let changeCount = pasteboard.changeCount
-        ClipboardWatcher.shared.registerOwnedChangeCount(changeCount)
-        return changeCount
+        ClipboardWatcher.shared.performOwnedMutation(on: pasteboard) {
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+        }
     }
 
     @discardableResult
@@ -196,21 +195,21 @@ enum AXActions {
         savedItems: [[NSPasteboard.PasteboardType: Data]]?,
         expectedChangeCount: Int
     ) -> Bool {
-        guard pasteboard.changeCount == expectedChangeCount else { return false }
-        restoreClipboard(pasteboard: pasteboard, savedItems: savedItems)
-        return true
+        ClipboardWatcher.shared.performOwnedMutationIfCurrentChangeCount(
+            expectedChangeCount,
+            on: pasteboard
+        ) {
+            restoreClipboardContents(pasteboard: pasteboard, savedItems: savedItems)
+        } != nil
     }
 
     /// Restore clipboard from saved items (all types, all items in one call).
-    private static func restoreClipboard(
+    private static func restoreClipboardContents(
         pasteboard: NSPasteboard,
         savedItems: [[NSPasteboard.PasteboardType: Data]]?
     ) {
         pasteboard.clearContents()
-        guard let saved = savedItems, !saved.isEmpty else {
-            ClipboardWatcher.shared.registerOwnedCurrentChange()
-            return
-        }
+        guard let saved = savedItems, !saved.isEmpty else { return }
         let restoredItems: [NSPasteboardItem] = saved.map { itemDict in
             let newItem = NSPasteboardItem()
             for (type, data) in itemDict {
@@ -219,7 +218,6 @@ enum AXActions {
             return newItem
         }
         pasteboard.writeObjects(restoredItems)
-        ClipboardWatcher.shared.registerOwnedCurrentChange()
     }
 
     #if DEBUG

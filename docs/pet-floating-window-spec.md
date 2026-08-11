@@ -51,14 +51,17 @@ This document is the Normative contract for the Pet floating chat experience onl
 
 ### Clipboard ownership
 
-- Every ClawGate clipboard write, temporary AX/Pet paste, and conditional restore registers
-  the resulting `NSPasteboard.changeCount` as an owned transaction.
-- The watcher consumes each owned change count once without emitting a clipboard offer; a
-  genuine user change count emits at most one offer.
-- Temporary clipboard restoration is conditional on the pasteboard still having the exact
-  owned change count. If the user copies during the temporary write, the user's clipboard is
-  preserved and the restore is skipped.
-- Starting or stopping the watcher clears stale owned and observed transaction state.
+- Every ClawGate clipboard write, temporary AX/Pet paste, and conditional restore performs the
+  full pasteboard mutation and final `NSPasteboard.changeCount` registration as one synchronized
+  owned transaction; watcher checks cannot observe the mutation halfway through.
+- The watcher serializes the last observed change count and one bounded owned change count. It
+  consumes an owned transition without emitting a clipboard offer; a genuine user transition
+  emits at most one offer, and callbacks run after synchronization is released.
+- Temporary clipboard restoration is conditionally serialized on the pasteboard still having
+  the exact owned change count. If the user copies during the temporary write, the user's
+  clipboard is preserved and the restore is skipped.
+- Starting or stopping the watcher clears stale owned and observed transaction state under the
+  same synchronization.
 
 ### Draft target ownership
 
