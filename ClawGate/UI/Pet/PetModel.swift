@@ -147,6 +147,7 @@ final class PetModel: NSObject, ObservableObject {
     private var sessionKey: String?
     private var eventTask: Task<Void, Never>?
     private var streamingMessageId: String?
+    private var streamingRunId: String?
     private var whisperDismissTask: Task<Void, Never>?
     private var notificationDismissTask: Task<Void, Never>?
     private var speakTimeoutTask: Task<Void, Never>?
@@ -289,6 +290,22 @@ final class PetModel: NSObject, ObservableObject {
     /// may wait for a reply before its slot is reclaimed. Overridable for tests.
     static var summonReplyTimeoutSeconds: TimeInterval = 180
 
+    private enum SharedSummonPhase {
+        case awaitingRunId
+        case running
+    }
+
+    private struct SharedSummonOwner {
+        let token: UUID
+        let source: String
+        var phase: SharedSummonPhase
+        var runId: String?
+        let omakaseContext: OmakaseContext?
+    }
+
+    private var sharedSummonOwner: SharedSummonOwner?
+    private var draftPlacementOwnerToken: UUID?
+
     func handleEvent(_ event: OpenClawEvent) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -339,16 +356,24 @@ final class PetModel: NSObject, ObservableObject {
                 // including isStreaming/streamingText — so this check runs
                 // before any state mutation, not after.
                 if msg.role == .assistant, let source = self.pendingSummonSource {
-                    if let expectedRunId = self.pendingSummonRunId,
-                       msg.owner?.runId != expectedRunId {
+                    if !self.summonEventMatchesCurrentOwner(runId: msg.owner?.runId) {
                         break
                     }
+                    let owner = self.sharedSummonOwner
                     self.isStreaming = false
                     self.streamingText = ""
-                    self.summonWatchdogToken = nil
-                    self.pendingSummonSource = nil
-                    self.pendingSummonRunId = nil
-                    self.addSummonResult(text: msg.text, source: source, parseAsStructured: source == "log")
+                    if let owner {
+                        self.releaseSharedSummon(owner)
+                    } else {
+                        self.summonWatchdogToken = nil
+                        self.pendingSummonSource = nil
+                        self.pendingSummonRunId = nil
+                    }
+                    self.addSummonResult(
+                        text: msg.text,
+                        source: source,
+                        parseAsStructured: source == "log",
+                        owner: owner)
                     self.stateMachine.handle(.assistantFinished)
                     break
                 }
@@ -372,8 +397,8 @@ final class PetModel: NSObject, ObservableObject {
 
             case .delta(let eventId, let text):
                 let messageId = eventId.messageId
-                if let expectedRunId = self.pendingSummonRunId,
-                   eventId.runId != expectedRunId {
+                if self.pendingSummonSource != nil,
+                   !self.summonEventMatchesCurrentOwner(runId: eventId.runId) {
                     // Delta from a stale/different run — drop it rather than
                     // let it pollute the pending summon's accumulation or
                     // leak into the plain chat pane.
@@ -382,6 +407,7 @@ final class PetModel: NSObject, ObservableObject {
                 let isSummon = self.pendingSummonSource != nil
                 if self.streamingMessageId != messageId {
                     self.streamingMessageId = messageId
+                    self.streamingRunId = eventId.runId
                     self.streamingText = text
                     self.isStreaming = true
                     if !isSummon {
@@ -407,7 +433,7 @@ final class PetModel: NSObject, ObservableObject {
                             self.isStreaming = false
                             let mid = self.streamingMessageId
                             self.streamingMessageId = nil
-                            self.finishStreamingMessage(messageId: mid)
+                            self.finishStreamingMessage(messageId: mid, runId: self.streamingRunId)
                             self.stateMachine.handle(.assistantFinished)
                         }
                     }
@@ -416,13 +442,13 @@ final class PetModel: NSObject, ObservableObject {
             case .messageComplete(let eventId):
                 let messageId = eventId.messageId
                 NSLog("[Pet] messageComplete: %@", messageId)
-                if let expectedRunId = self.pendingSummonRunId,
-                   eventId.runId != expectedRunId {
+                if self.pendingSummonSource != nil,
+                   !self.summonEventMatchesCurrentOwner(runId: eventId.runId) {
                     break
                 }
                 self.isStreaming = false
                 self.streamingMessageId = nil
-                self.finishStreamingMessage(messageId: messageId)
+                self.finishStreamingMessage(messageId: messageId, runId: eventId.runId)
                 self.stateMachine.handle(.assistantFinished)
 
             case .history(let msgs):
@@ -458,8 +484,10 @@ final class PetModel: NSObject, ObservableObject {
                 self.deltaIdleTask = nil
                 self.isStreaming = false
                 self.streamingMessageId = nil
+                self.streamingRunId = nil
                 self.streamingText = ""
                 if self.pendingSummonSource != "log" {
+                    self.releaseSharedSummonIfPresent()
                     self.summonWatchdogToken = nil
                     self.pendingSummonSource = nil
                     self.pendingSummonRunId = nil
@@ -1519,7 +1547,8 @@ final class PetModel: NSObject, ObservableObject {
         Do NOT use this tag for summaries, explanations, or code suggestions.
         """
 
-        // Capture target app context for post-response draft placement
+        // Capture target app context for post-response draft placement.
+        let omakaseContext: OmakaseContext?
         if let app = lastTrackedApp ?? NSWorkspace.shared.frontmostApplication {
             let isMessaging: Bool = {
                 if Self.messagingBundles.contains(ctx.bundleId) { return true }
@@ -1532,15 +1561,17 @@ final class PetModel: NSObject, ObservableObject {
                 }
                 return false
             }()
-            pendingOmakaseContext = OmakaseContext(
+            omakaseContext = OmakaseContext(
                 bundleId: ctx.bundleId,
                 appName: ctx.appName,
                 pid: app.processIdentifier,
                 isMessagingApp: isMessaging
             )
+        } else {
+            omakaseContext = nil
         }
 
-        sendSummon(prompt, source: "omakase")
+        sendSummon(prompt, source: "omakase", omakaseContext: omakaseContext)
     }
 
     func summonAsk(instruction: String) {
@@ -1574,12 +1605,20 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
 
+        // Claim before starting the blocking worker. A late worker completion
+        // must not overwrite a newer summon owner.
+        guard let ownerToken = acquireSharedSummon(source: "draft_pr", omakaseContext: nil) else { return }
+
         // Get tmux pane cwd via tty mapping
         BlockingWork.queue.async { [weak self] in
             guard let self else { return }
             let cwd = self.detectTmuxPaneCwd()
             guard let cwd, !cwd.isEmpty else {
-                DispatchQueue.main.async { self.showWhisper("No git repo found") }
+                DispatchQueue.main.async {
+                    guard self.isCurrentSharedSummon(ownerToken) else { return }
+                    self.releaseSharedSummonIfCurrent(ownerToken)
+                    self.showWhisper("No git repo found")
+                }
                 return
             }
 
@@ -1592,7 +1631,11 @@ final class PetModel: NSObject, ObservableObject {
             try? gitCheck.run()
             gitCheck.waitUntilExit()
             guard gitCheck.terminationStatus == 0 else {
-                DispatchQueue.main.async { self.showWhisper("Not a git repo") }
+                DispatchQueue.main.async {
+                    guard self.isCurrentSharedSummon(ownerToken) else { return }
+                    self.releaseSharedSummonIfCurrent(ownerToken)
+                    self.showWhisper("Not a git repo")
+                }
                 return
             }
 
@@ -1610,7 +1653,11 @@ final class PetModel: NSObject, ObservableObject {
             if diffText.count > 4000 { diffText = String(diffText.prefix(4000)) }
 
             guard !diffText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                DispatchQueue.main.async { self.showWhisper("No changes to diff") }
+                DispatchQueue.main.async {
+                    guard self.isCurrentSharedSummon(ownerToken) else { return }
+                    self.releaseSharedSummonIfCurrent(ownerToken)
+                    self.showWhisper("No changes to diff")
+                }
                 return
             }
 
@@ -1629,31 +1676,39 @@ final class PetModel: NSObject, ObservableObject {
             """
 
             DispatchQueue.main.async {
-                self.sendSummon(prompt, source: "draft_pr")
+                guard self.isCurrentSharedSummon(ownerToken) else { return }
+                self.sendSummon(prompt, source: "draft_pr", ownerToken: ownerToken)
             }
         }
     }
 
     /// Handle streaming message completion — route to summon or regular chat
-    private func finishStreamingMessage(messageId: String?) {
+    private func finishStreamingMessage(messageId: String?, runId: String? = nil) {
         // If this was a summon response, route to summon results — but only
         // if it's actually OUR run. A stale run's late completion (e.g. a
         // superseded/duplicate chat.send) must not resolve a different,
         // still-in-flight summon.
         if let source = pendingSummonSource {
-            if let expectedRunId = pendingSummonRunId, let messageId, expectedRunId != messageId {
-                return
+            guard summonEventMatchesCurrentOwner(runId: runId) else { return }
+            let owner = sharedSummonOwner
+            if let owner {
+                releaseSharedSummon(owner)
+            } else {
+                summonWatchdogToken = nil
+                pendingSummonSource = nil
+                pendingSummonRunId = nil
             }
-            summonWatchdogToken = nil
-            pendingSummonSource = nil
-            pendingSummonRunId = nil
             let text = streamingText.isEmpty ? "(empty response)" : streamingText
             streamingText = ""
             // Remove from messages if it leaked there
             if let messageId, let idx = messages.firstIndex(where: { $0.id == messageId }) {
                 messages.remove(at: idx)
             }
-            addSummonResult(text: text, source: source, parseAsStructured: source == "log")
+            addSummonResult(
+                text: text,
+                source: source,
+                parseAsStructured: source == "log",
+                owner: owner)
             return
         }
 
@@ -1786,6 +1841,17 @@ final class PetModel: NSObject, ObservableObject {
     /// and a session key to make the shared watchdog the sole release mechanism.
     func claimSharedSummonForTesting(source: String) {
         sendSummon("test prompt", source: source)
+        // This legacy seam models the pre-existing watchdog tests' already
+        // dispatched request. Production sends remain awaiting-ACK until the
+        // real `sendMessageAwaitingRunId` result arrives.
+        if suppressLogSendForTesting, var owner = sharedSummonOwner {
+            owner.phase = .running
+            sharedSummonOwner = owner
+        }
+    }
+    /// Test seam for the actual pre-ACK state used by shared summon routing.
+    func beginSharedSummonAwaitingAckForTesting(source: String) -> UUID? {
+        acquireSharedSummon(source: source, omakaseContext: nil)
     }
     /// Test seam: read-only view of the scene-naming in-flight ids (private), so
     /// a test can assert a wedged naming request's ids were reclaimed on timeout.
@@ -1830,7 +1896,6 @@ final class PetModel: NSObject, ObservableObject {
         handleSummonSendFailure(token: token, source: source, error: error)
     }
     #endif
-    private var pendingOmakaseContext: OmakaseContext?
     private var pendingSceneNamingIDs: [String] = []
     private var logAwaitingReplyToken: UUID?
     /// Identity of the CURRENT shared-path summon's watchdog. Regenerated on
@@ -1848,10 +1913,83 @@ final class PetModel: NSObject, ObservableObject {
         "com.hnc.Discord",
     ]
 
-    private func sendSummon(_ prompt: String, source: String) {
-        guard let sessionKey else { return }
-
+    private func acquireSharedSummon(source: String, omakaseContext: OmakaseContext?) -> UUID? {
+        guard sharedSummonOwner == nil, pendingSummonSource == nil else { return nil }
+        // A new owner invalidates a late placement completion from the previous
+        // owner without blocking the new request from being admitted.
+        draftPlacementOwnerToken = nil
+        let token = UUID()
+        sharedSummonOwner = SharedSummonOwner(
+            token: token,
+            source: source,
+            phase: .awaitingRunId,
+            runId: nil,
+            omakaseContext: omakaseContext)
         pendingSummonSource = source
+        pendingSummonRunId = nil
+        summonWatchdogToken = token
+        return token
+    }
+
+    private func isCurrentSharedSummon(_ token: UUID) -> Bool {
+        sharedSummonOwner?.token == token
+    }
+
+    private func releaseSharedSummonIfCurrent(_ token: UUID) {
+        guard let owner = sharedSummonOwner, owner.token == token else { return }
+        releaseSharedSummon(owner)
+    }
+
+    private func releaseSharedSummonIfPresent() {
+        if let owner = sharedSummonOwner {
+            releaseSharedSummon(owner)
+        }
+    }
+
+    private func releaseSharedSummon(_ owner: SharedSummonOwner) {
+        guard sharedSummonOwner?.token == owner.token else { return }
+        sharedSummonOwner = nil
+        summonWatchdogToken = nil
+        pendingSummonSource = nil
+        pendingSummonRunId = nil
+        if owner.source == "log_scene_naming" {
+            pendingSceneNamingIDs = []
+        }
+    }
+
+    private func summonEventMatchesCurrentOwner(runId: String?) -> Bool {
+        if let owner = sharedSummonOwner {
+            let expectedRunId = owner.runId ?? pendingSummonRunId
+            guard let expectedRunId else {
+                return owner.phase == .running && runId == nil
+            }
+            return runId == expectedRunId
+        }
+        guard let expectedRunId = pendingSummonRunId else { return true }
+        return runId == expectedRunId
+    }
+
+    private func sendSummon(
+        _ prompt: String,
+        source: String,
+        omakaseContext: OmakaseContext? = nil,
+        ownerToken: UUID? = nil
+    ) {
+        guard let sessionKey else {
+            if let ownerToken { releaseSharedSummonIfCurrent(ownerToken) }
+            return
+        }
+
+        let token: UUID
+        if let ownerToken {
+            guard isCurrentSharedSummon(ownerToken) else { return }
+            token = ownerToken
+        } else {
+            guard let acquired = acquireSharedSummon(source: source, omakaseContext: omakaseContext) else {
+                return
+            }
+            token = acquired
+        }
         showWhisper("Working on it...")
 
         // Arm a self-release watchdog: if the send succeeds but no terminal WS
@@ -1860,19 +1998,15 @@ final class PetModel: NSObject, ObservableObject {
         // otherwise stay claimed forever and refuse every subsequent Log action.
         // The token+source double match below guarantees a stale watchdog can
         // never release a newer summon that reused the slot.
-        let token = UUID()
-        summonWatchdogToken = token
         // D139: emit the START of a shared summon with the same bounded owner
         // token as the timeout, so started/timeout correlate in log show. Body-
         // free: fixed source + owner prefix only (no prompt/STT).
         Self.petLogTelemetry.info("sharedSummonStarted source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public)")
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.summonReplyTimeoutSeconds) { [weak self] in
             guard let self else { return }
-            guard self.summonWatchdogToken == token,
-                  let currentSource = self.pendingSummonSource, currentSource == source else { return }
-            self.summonWatchdogToken = nil
-            self.pendingSummonSource = nil
-            self.pendingSummonRunId = nil
+            guard let owner = self.sharedSummonOwner,
+                  owner.token == token, owner.source == source else { return }
+            self.releaseSharedSummon(owner)
             if source == "log_scene_naming" {
                 // Scene naming also gates on pendingSceneNamingIDs — a wedged
                 // naming request must not block tomorrow's auto-naming. It is a
@@ -1884,7 +2018,8 @@ final class PetModel: NSObject, ObservableObject {
                 Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) slotReclaimed=1")
                 self.addSummonResult(
                     text: "Error: no reply received within \(Int(Self.summonReplyTimeoutSeconds))s",
-                    source: source)
+                    source: source,
+                    owner: owner)
             }
         }
 
@@ -1898,7 +2033,14 @@ final class PetModel: NSObject, ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                try await wsClient.sendMessage(prompt, sessionKey: sessionKey)
+                let runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
+                await MainActor.run {
+                    guard var owner = self.sharedSummonOwner, owner.token == token else { return }
+                    owner.runId = runId
+                    owner.phase = .running
+                    self.sharedSummonOwner = owner
+                    self.pendingSummonRunId = runId
+                }
             } catch {
                 await MainActor.run {
                     self.handleSummonSendFailure(token: token, source: source, error: error)
@@ -1914,11 +2056,10 @@ final class PetModel: NSObject, ObservableObject {
     /// invariant: only when this send still owns the slot do we release it and
     /// surface the error.
     private func handleSummonSendFailure(token: UUID, source: String, error: Error) {
-        guard summonWatchdogToken == token,
-              pendingSummonSource == source else { return }
-        summonWatchdogToken = nil
-        pendingSummonSource = nil
-        addSummonResult(text: "Error: \(error)", source: source)
+        guard let owner = sharedSummonOwner,
+              owner.token == token, owner.source == source else { return }
+        releaseSharedSummon(owner)
+        addSummonResult(text: "Error: \(error)", source: source, owner: owner)
     }
 
     /// Log-specific summon send. Threads `requestId` through as the
@@ -2284,21 +2425,33 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func addSummonResult(text: String, source: String, parseAsStructured: Bool = false) {
+        addSummonResult(text: text, source: source, parseAsStructured: parseAsStructured, owner: nil)
+    }
+
+    private func addSummonResult(
+        text: String,
+        source: String,
+        parseAsStructured: Bool = false,
+        owner: SharedSummonOwner?
+    ) {
         // Draft reply detection: if messaging app + <draft_reply> tag → place in input field
         if source == "omakase",
-           let ctx = pendingOmakaseContext,
+           let ctx = owner?.omakaseContext,
            ctx.isMessagingApp,
            let draftText = TagExtractor.extractDraftReply(from: text) {
-            pendingOmakaseContext = nil
+            draftPlacementOwnerToken = owner?.token
             BlockingWork.queue.async { [weak self] in
                 let result = DraftPlacer.placeDraft(text: draftText, context: ctx)
                 DispatchQueue.main.async {
-                    self?.handleDraftResult(result, fullText: text, appName: ctx.appName, source: source)
+                    guard let self,
+                          let token = owner?.token,
+                          self.draftPlacementOwnerToken == token else { return }
+                    self.draftPlacementOwnerToken = nil
+                    self.handleDraftResult(result, fullText: text, appName: ctx.appName, source: source)
                 }
             }
             return
         }
-        pendingOmakaseContext = nil
         appendSummonEntry(text: text, source: source, parseAsStructured: parseAsStructured)
     }
 

@@ -83,6 +83,24 @@ This document is the Normative contract for the Pet floating chat experience onl
   restore size behavior without duplicates.
 - `hideChatWindow` should invoke `detachChatWindow(preserveState: false)` so pane-open state is cleared on explicit close.
 
+### Shared summon ownership
+
+- Omakase, Ask, and Draft PR share one admission gate and one owner record. The
+  record contains a unique token, source, phase, optional Omakase placement
+  context, and the Gateway `runId` once the send ACK arrives.
+- A busy owner rejects a new shared summon without replacing the source, token,
+  watchdog, or run correlation. Draft PR claims the owner before starting its
+  blocking worker; a late worker completion is ignored unless its token is
+  still current.
+- Shared sends use `sendMessageAwaitingRunId()`. Until the ACK, delta,
+  message-complete, and assistant-final events are ignored. After the ACK, only
+  an event whose `runId` equals the owner's `runId` may mutate or finalize it;
+  `messageId` is never used as a run substitute.
+- Watchdog, send-failure, disconnect, and normal completion release only the
+  matching owner token. Omakase draft placement carries that same token
+  through its asynchronous placement; a newer owner invalidates a late result.
+- Log summons retain their separate typed dispatch and timeout behavior.
+
 ### Hidden/no-op behavior
 
 - If chat has not been opened yet or is not visible, menu-bar left-click must:
