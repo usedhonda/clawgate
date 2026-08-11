@@ -50,25 +50,61 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         cancellable.cancel()
     }
 
-    /// The fix passes the emitted array straight through — verify the consumer
-    /// (AmbientLogModel.updateThreadTranscript) renders a newly-appended
-    /// response into the transcript in a single call, with no second publish
-    /// needed to "catch up".
-    func testUpdateThreadTranscriptReflectsResponseInSinglePublish() {
+    /// The result pane consumes the emitted array directly, hides the persisted
+    /// request/audit entry, and renders the latest output in one publish.
+    func testUpdateActionResultReflectsOnlyResponseInSinglePublish() {
         let model = AmbientLogModel()
         let question = NotificationEntry(id: "u1", text: "質問まとめ", source: "log_user", timestamp: Date())
         let answer = NotificationEntry(id: "a1", text: "これが06:05の回答です", source: "log", timestamp: Date())
 
-        model.updateThreadTranscript(entries: [question])
-        let revisionAfterQuestion = model.threadTranscriptRevision
-        XCTAssertFalse(model.threadTranscript.string.contains(answer.text))
+        model.updateActionResult(entries: [question])
+        let revisionAfterQuestion = model.actionResultRevision
+        XCTAssertTrue(model.actionResult.string.isEmpty, "a command is audit data, not a chat bubble")
 
         // Single call carrying the full post-append array — exactly what the
         // fixed `.onReceive(model.$logReplies) { entries in ... }` now passes.
-        model.updateThreadTranscript(entries: [question, answer])
+        model.updateActionResult(entries: [question, answer])
 
-        XCTAssertTrue(model.threadTranscript.string.contains(answer.text), "the response must appear after a single update call")
-        XCTAssertGreaterThan(model.threadTranscriptRevision, revisionAfterQuestion)
+        XCTAssertEqual(model.actionResult.string, answer.text)
+        XCTAssertFalse(model.actionResult.string.contains(question.text))
+        XCTAssertGreaterThan(model.actionResultRevision, revisionAfterQuestion)
+    }
+
+    func testActionResultProjectsOnlyLatestCommandOutput() {
+        let entries = [
+            NotificationEntry(id: "u1", text: "最初の指示", source: "log_user", timestamp: Date(timeIntervalSince1970: 1)),
+            NotificationEntry(id: "a1", text: "古い結果", source: "log", timestamp: Date(timeIntervalSince1970: 2)),
+            NotificationEntry(id: "u2", text: "要点", source: "log_user", timestamp: Date(timeIntervalSince1970: 3)),
+            NotificationEntry(id: "a2", text: "最新の結果", source: "log", timestamp: Date(timeIntervalSince1970: 4)),
+        ]
+
+        XCTAssertEqual(LogActionResultProjection.latestResult(in: entries)?.id, "a2")
+        let model = AmbientLogModel()
+        model.updateActionResult(entries: entries)
+        XCTAssertEqual(model.actionResult.string, "最新の結果")
+
+        let nextRequest = NotificationEntry(
+            id: "u3", text: "TODO", source: "log_user", timestamp: Date(timeIntervalSince1970: 5))
+        XCTAssertNil(LogActionResultProjection.latestResult(in: entries + [nextRequest]),
+                     "a new command clears the old output while its own result is pending")
+    }
+
+    func testLegacyBuiltInSummaryMigratesWithoutOverwritingCustomizedAction() {
+        let legacy = LogCustomAction(label: "要点", prompt: """
+            この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
+            単なる要約ではなく、会話の構造を分析して、(1) ご主人様が求めていること、(2) 相手が実際に答えたこと、(3) まだ噛み合っていない点、(4) 次に判断すべき論点、を分けて整理して。
+            出力は3〜5個の箇条書き。各項目は短い見出し + 1文の説明にして、相手の発言に依存する要点は「相手曰く」と分かるように書いて。
+            """)
+        var actions: [LogCustomAction?] = [nil, legacy]
+        let migrated = LogCustomActionStore.migrateBuiltInActions(actions)
+        XCTAssertEqual(migrated[1], LogCustomActionStore.topicSummaryAction)
+        XCTAssertTrue(migrated[1]?.prompt.contains("話題空間") == true)
+        XCTAssertTrue(migrated[1]?.prompt.contains("【全体まとめ】") == true)
+        XCTAssertFalse(migrated[1]?.prompt.contains("3〜5個") == true)
+
+        let customized = LogCustomAction(label: "要点", prompt: "私専用のまとめ方")
+        actions[1] = customized
+        XCTAssertEqual(LogCustomActionStore.migrateBuiltInActions(actions)[1], customized)
     }
 
     /// Static guard: the stale-read pattern must not be reintroduced.
@@ -79,6 +115,16 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             source.contains(".onReceive(model.$logReplies) { _ in"),
             "the .onReceive callback must consume its emitted value, not discard it and re-read model.logReplies (stale by one publish)"
         )
+    }
+
+    func testRightPaneIsAnActionResultSurfaceNotAChatThread() throws {
+        let path = "\(sourceRoot())/ClawGate/UI/Pet/AmbientLogPetView.swift"
+        let source = try String(contentsOfFile: path, encoding: .utf8)
+        XCTAssertTrue(source.contains("Text(\"実行結果\")"))
+        XCTAssertTrue(source.contains("Button(\"結果をコピー\")"))
+        XCTAssertTrue(source.contains("左のボタンまたは入力欄から指示してください"))
+        XCTAssertFalse(source.contains("Text(\"ちーとの対話\")"))
+        XCTAssertFalse(source.contains("Text(\"まだ会話がありません\")"))
     }
 
     private func sourceRoot() -> String {

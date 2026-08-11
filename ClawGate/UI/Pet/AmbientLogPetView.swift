@@ -328,15 +328,41 @@ enum AmbientLogGrouping {
     }
 }
 
+/// Projects the persisted Log audit trail into the single result the right
+/// pane should display. Request entries remain persisted for correlation, but
+/// they are not chat messages and are never rendered in the result pane.
+enum LogActionResultProjection {
+    static func latestResult(in entries: [NotificationEntry]) -> NotificationEntry? {
+        guard let requestIndex = entries.lastIndex(where: { $0.source == "log_user" }) else {
+            return entries.last(where: { $0.source != "log_user" })
+        }
+
+        let requestId = entries[requestIndex].logMetadata?.requestId
+        return entries.suffix(from: entries.index(after: requestIndex)).last(where: { entry in
+            guard entry.source != "log_user" else { return false }
+            guard let entryRequestId = entry.logMetadata?.requestId else {
+                // Synthetic failures (offline, timeout, malformed send) may not
+                // carry correlation metadata, but still are this command's result.
+                return true
+            }
+            return entryRequestId == requestId
+        })
+    }
+
+    static func latestActionId(in entries: [NotificationEntry]) -> String? {
+        entries.last(where: { $0.source == "log_user" })?.logMetadata?.actionId
+    }
+}
+
 // internal (not private): test seam for AmbientLogModelThreadTranscriptTests.
 final class AmbientLogModel: ObservableObject {
     @Published var blocks: [AmbientLogGrouping.Block] = []
     @Published private(set) var cachedTranscript: NSAttributedString
     @Published private(set) var transcriptRevision = 0
     @Published private(set) var transcriptScrollRevision = 0
-    @Published private(set) var threadTranscript: NSAttributedString
-    @Published private(set) var threadTranscriptRevision = 0
-    @Published private(set) var threadScrollRevision = 0
+    @Published private(set) var actionResult: NSAttributedString
+    @Published private(set) var actionResultRevision = 0
+    @Published private(set) var actionResultScrollRevision = 0
     @Published private(set) var fontSize: CGFloat
     @Published var scenes: [AmbientLogGrouping.Scene] = []
     @Published var selectedSceneIDs: Set<String> = []
@@ -396,7 +422,7 @@ final class AmbientLogModel: ObservableObject {
         fontSize = size
         cachedTranscriptFontSize = size
         cachedTranscript = AmbientLogPetView.nsAttributedTranscript([], fontSize: size)
-        threadTranscript = AmbientLogPetView.nsAttributedThreadTranscript([], fontSize: size)
+        actionResult = AmbientLogPetView.nsAttributedActionResult(nil, fontSize: size)
     }
 
     func start() {
@@ -756,13 +782,15 @@ final class AmbientLogModel: ObservableObject {
         return true
     }
 
-    func updateThreadTranscript(entries: [NotificationEntry]) {
-        let signature = entries.map { "\($0.id):\(Int($0.timestamp.timeIntervalSince1970))" }.joined(separator: "|") + "|\(fontSize)"
-        guard signature != cachedThreadSignature else { return }
-        cachedThreadSignature = signature
-        threadTranscript = AmbientLogPetView.nsAttributedThreadTranscript(entries, fontSize: fontSize)
-        threadTranscriptRevision += 1
-        threadScrollRevision += 1
+    func updateActionResult(entries: [NotificationEntry]) {
+        let result = LogActionResultProjection.latestResult(in: entries)
+        let signature = result.map { "\($0.id):\(Int($0.timestamp.timeIntervalSince1970))" } ?? "empty"
+        let renderedSignature = signature + "|\(fontSize)"
+        guard renderedSignature != cachedThreadSignature else { return }
+        cachedThreadSignature = renderedSignature
+        actionResult = AmbientLogPetView.nsAttributedActionResult(result, fontSize: fontSize)
+        actionResultRevision += 1
+        actionResultScrollRevision += 1
     }
 
     /// D21: the 3-second poll (and any triggered reload) must not scan storage,
@@ -919,6 +947,26 @@ enum LogCustomActionStore {
     private static let legacyKey = "pet.logCustomActions"
     private static let legacyAlternateKey = "PetLogCustomActions"
     private static let slotCount = 8
+    private static let legacySummaryAction = LogCustomAction(label: "要点", prompt: """
+        この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
+        単なる要約ではなく、会話の構造を分析して、(1) ご主人様が求めていること、(2) 相手が実際に答えたこと、(3) まだ噛み合っていない点、(4) 次に判断すべき論点、を分けて整理して。
+        出力は3〜5個の箇条書き。各項目は短い見出し + 1文の説明にして、相手の発言に依存する要点は「相手曰く」と分かるように書いて。
+        """)
+    static let topicSummaryAction = LogCustomAction(label: "要点", prompt: """
+        この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
+        選択範囲全体を読み、単に短く削るのではなく、目的・対象・議論の方向が変わる箇所で「話題空間」に分けて再構成して。時間が空いただけで別話題にせず、同じ目的の断片は一つに統合し、音声認識のノイズや言い直しは要点にしないで。
+
+        各話題は「【話題名｜時刻範囲】」（時刻不明なら話題名だけ）を見出しにして、ログから読める範囲で次を整理して:
+        - 何について話していたか
+        - ご主人様が求めていたこと
+        - 相手が実際に答えたこと・実施したこと
+        - 決定事項
+        - 未解決、食い違い、回答不足
+        - 次の行動（担当や条件が不明なら未確定と明記）
+        空の項目は省略してよいが、重要な経緯や判断理由を1文に潰しすぎないで。相手の発言に依存する内容は「相手曰く」と帰属を明示して。
+
+        最後に「【全体まとめ】」を置き、範囲全体の重要な結論、話題をまたぐ共通問題、優先順位つきTODOをまとめて。話題数や行数を固定せず、後から読んで状況・判断・次の手が分かる密度にして。
+        """)
     private static let defaultActions: [LogCustomAction?] = [
         LogCustomAction(label: "質問まとめ", prompt: """
             この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
@@ -926,11 +974,7 @@ enum LogCustomActionStore {
             出力は優先度順に最大7件の箇条書き。各項目は「質問: ... / 狙い: ... / 根拠: 相手のどの発言からそう判断したか」の形にして。
             ご主人様が既に明確に答えている内容は質問にしないで。
             """),
-        LogCustomAction(label: "要点", prompt: """
-            この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
-            単なる要約ではなく、会話の構造を分析して、(1) ご主人様が求めていること、(2) 相手が実際に答えたこと、(3) まだ噛み合っていない点、(4) 次に判断すべき論点、を分けて整理して。
-            出力は3〜5個の箇条書き。各項目は短い見出し + 1文の説明にして、相手の発言に依存する要点は「相手曰く」と分かるように書いて。
-            """),
+        topicSummaryAction,
         LogCustomAction(label: "TODO", prompt: """
             この会話ログでは、話者ラベル「ご主人様」はこちら側、「相手」は会話の相手方として扱って。
             会話から実行すべきTODOを抽出し、担当を「ご主人様」「相手」「未確定」に分けて整理して。相手の発言に依存するTODOは、相手が本当に引き受けたのか、それともこちらが確認すべきなのかを区別して。
@@ -946,7 +990,10 @@ enum LogCustomActionStore {
     static func load() -> [LogCustomAction?] {
         if let data = UserDefaults.standard.data(forKey: key),
            let decoded = try? JSONDecoder().decode([LogCustomAction?].self, from: data) {
-            return normalized(decoded)
+            let normalizedActions = normalized(decoded)
+            let migrated = migrateBuiltInActions(normalizedActions)
+            if migrated != normalizedActions { save(migrated) }
+            return migrated
         }
         if let legacy = loadLegacyActions() {
             var migrated = defaultActions
@@ -967,6 +1014,16 @@ enum LogCustomActionStore {
 
     private static func normalized(_ actions: [LogCustomAction?]) -> [LogCustomAction?] {
         Array(actions.prefix(slotCount)) + Array(repeating: nil, count: max(0, slotCount - actions.count))
+    }
+
+    /// Upgrade only the exact shipped prompt. A user-edited slot — even one
+    /// still labelled "要点" — is preserved byte-for-byte.
+    static func migrateBuiltInActions(_ actions: [LogCustomAction?]) -> [LogCustomAction?] {
+        var migrated = normalized(actions)
+        if migrated[1] == legacySummaryAction {
+            migrated[1] = topicSummaryAction
+        }
+        return migrated
     }
 
     private static func loadLegacyActions() -> [LogCustomAction?]? {
@@ -995,6 +1052,7 @@ struct AmbientLogPetView: View {
     @State private var threadPaneFraction: CGFloat = petLogThreadPaneDefaultFraction
     @State private var threadPaneDragStartFraction: CGFloat?
     @State private var sceneNamingWorkItem: DispatchWorkItem?
+    @State private var requestedActionTitle: String?
 
     /// Opaque panel fill so a sparse log doesn't leave the translucent window
     /// showing the desktop behind it.
@@ -1065,63 +1123,39 @@ struct AmbientLogPetView: View {
             : NSColor.white.withAlphaComponent(0.6)
     }
 
-    static func nsAttributedThreadTranscript(_ entries: [NotificationEntry], fontSize: CGFloat = 16) -> NSAttributedString {
+    static func nsAttributedActionResult(_ entry: NotificationEntry?, fontSize: CGFloat = 16) -> NSAttributedString {
         let out = NSMutableAttributedString()
-        let headerSize = fontSize * 0.75
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 3
-        paragraph.paragraphSpacing = 10
-        for (i, entry) in entries.enumerated() {
-            if i > 0 { out.append(NSAttributedString(string: "\n")) }
-            let header = "\(threadTimeString(entry.timestamp))  \(threadSpeakerName(entry.source))\n"
-            out.append(NSAttributedString(string: header, attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: headerSize, weight: .bold),
-                .foregroundColor: threadSpeakerNSColor(entry.source),
+        paragraph.lineSpacing = 4
+        paragraph.paragraphSpacing = 12
+        guard let entry else { return out }
+
+        out.append(NSAttributedString(string: entry.text, attributes: [
+            .font: NSFont.systemFont(ofSize: fontSize),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.9),
+            .paragraphStyle: paragraph,
+        ]))
+        if entry.logMetadata?.isUncertain == true {
+            let noticeSize = fontSize * 0.8
+            let noticeFont = NSFontManager.shared.convert(
+                NSFont.systemFont(ofSize: noticeSize), toHaveTrait: .italicFontMask)
+            out.append(NSAttributedString(string: "\n\n⚠ 文脈の判定に確信が持てません", attributes: [
+                .font: noticeFont,
+                .foregroundColor: NSColor.white.withAlphaComponent(0.5),
                 .paragraphStyle: paragraph,
             ]))
-            out.append(NSAttributedString(string: entry.text, attributes: [
-                .font: NSFont.systemFont(ofSize: fontSize),
-                .foregroundColor: NSColor.white.withAlphaComponent(0.86),
+        }
+        if entry.logMetadata?.dispatch?.degraded == true {
+            let noticeSize = fontSize * 0.8
+            let noticeFont = NSFontManager.shared.convert(
+                NSFont.systemFont(ofSize: noticeSize), toHaveTrait: .italicFontMask)
+            out.append(NSAttributedString(string: "\n\n⚠ Solを利用できずTerraで処理しました", attributes: [
+                .font: noticeFont,
+                .foregroundColor: NSColor.white.withAlphaComponent(0.5),
                 .paragraphStyle: paragraph,
             ]))
-            if entry.logMetadata?.isUncertain == true {
-                let noticeSize = fontSize * 0.8
-                let noticeFont = NSFontManager.shared.convert(
-                    NSFont.systemFont(ofSize: noticeSize), toHaveTrait: .italicFontMask)
-                out.append(NSAttributedString(string: "\n⚠ 文脈の判定に確信が持てません", attributes: [
-                    .font: noticeFont,
-                    .foregroundColor: NSColor.white.withAlphaComponent(0.5),
-                    .paragraphStyle: paragraph,
-                ]))
-            }
-            if entry.logMetadata?.dispatch?.degraded == true {
-                let noticeSize = fontSize * 0.8
-                let noticeFont = NSFontManager.shared.convert(
-                    NSFont.systemFont(ofSize: noticeSize), toHaveTrait: .italicFontMask)
-                out.append(NSAttributedString(string: "\n⚠ Solを利用できずTerraで処理しました", attributes: [
-                    .font: noticeFont,
-                    .foregroundColor: NSColor.white.withAlphaComponent(0.5),
-                    .paragraphStyle: paragraph,
-                ]))
-            }
         }
         return out
-    }
-
-    static func threadSpeakerName(_ source: String) -> String {
-        source == "log_user" ? "ご主人様" : "ちー"
-    }
-
-    static func threadTimeString(_ date: Date) -> String {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "HH:mm"
-        return fmt.string(from: date)
-    }
-
-    static func threadSpeakerNSColor(_ source: String) -> NSColor {
-        source == "log_user"
-            ? NSColor(calibratedRed: 0.55, green: 0.78, blue: 1.0, alpha: 1)
-            : NSColor(calibratedRed: 1.0, green: 0.82, blue: 0.46, alpha: 1)
     }
 
     var body: some View {
@@ -1145,7 +1179,7 @@ struct AmbientLogPetView: View {
 
                 if model.logThreadPaneOpen {
                     threadPaneResizeHandle(totalWidth: geo.size.width)
-                    threadPane(totalWidth: geo.size.width)
+                    resultPane(totalWidth: geo.size.width)
                 }
             }
         }
@@ -1155,14 +1189,14 @@ struct AmbientLogPetView: View {
             customActions = LogCustomActionStore.load()
             threadPaneFraction = preferredLogThreadPaneFraction()
             logModel.start()
-            syncThreadTranscript()
+            syncActionResult()
             scheduleSceneNamesIfNeeded()
         }
         .onReceive(model.$logReplies) { entries in
-            logModel.updateThreadTranscript(entries: entries)
+            logModel.updateActionResult(entries: entries)
         }
         .onChange(of: logModel.fontSize) { _ in
-            syncThreadTranscript()
+            syncActionResult()
         }
         .onChange(of: logModel.scenes) { _ in
             scheduleSceneNamesIfNeeded()
@@ -1293,20 +1327,25 @@ struct AmbientLogPetView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func threadPane(totalWidth: CGFloat) -> some View {
+    private func resultPane(totalWidth: CGFloat) -> some View {
         VStack(spacing: 0) {
             HStack {
-                Text("ちーとの対話")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.75))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("実行結果")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.82))
+                    Text(actionResultTitle)
+                        .font(.system(size: 10))
+                        .foregroundColor(.white.opacity(0.42))
+                }
                 Spacer()
-                Button("全文コピー") {
-                    copyThreadTranscript()
+                Button("結果をコピー") {
+                    copyActionResult()
                 }
                 .buttonStyle(PetPressableButtonStyle())
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(model.logReplies.isEmpty ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
-                .disabled(model.logReplies.isEmpty)
+                .foregroundColor(logModel.actionResult.string.isEmpty ? .white.opacity(0.25) : Color(red: 0.55, green: 0.78, blue: 1.0))
+                .disabled(logModel.actionResult.string.isEmpty)
                 Button {
                     model.logThreadPaneOpen = false
                 } label: {
@@ -1321,23 +1360,28 @@ struct AmbientLogPetView: View {
             .padding(.vertical, 9)
             Divider().opacity(0.12)
 
-            if model.logReplies.isEmpty {
+            if logModel.actionResult.string.isEmpty {
                 VStack(spacing: 6) {
                     Spacer()
-                    Image(systemName: "bubble.left.and.bubble.right")
+                    Image(systemName: "doc.text.magnifyingglass")
                         .font(.system(size: 22))
                         .foregroundColor(.white.opacity(0.18))
-                    Text("まだ会話がありません")
+                    Text(model.logAwaitingReply ? "結果を作成しています" : "まだ実行結果がありません")
                         .font(.system(size: 12))
                         .foregroundColor(.white.opacity(0.38))
+                    if !model.logAwaitingReply {
+                        Text("左のボタンまたは入力欄から指示してください")
+                            .font(.system(size: 10))
+                            .foregroundColor(.white.opacity(0.28))
+                    }
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 AmbientTranscriptTextView(
-                    attributedTranscript: logModel.threadTranscript,
-                    textRevision: logModel.threadTranscriptRevision,
-                    scrollRevision: logModel.threadScrollRevision
+                    attributedTranscript: logModel.actionResult,
+                    textRevision: logModel.actionResultRevision,
+                    scrollRevision: logModel.actionResultScrollRevision
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -1382,7 +1426,7 @@ struct AmbientLogPetView: View {
         HStack(spacing: 8) {
             ProgressView()
                 .scaleEffect(0.55)
-            Text("ちーが考え中…")
+            Text("\(actionResultTitle)を作成中…")
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.72))
             Spacer()
@@ -1392,12 +1436,31 @@ struct AmbientLogPetView: View {
         .background(Color.white.opacity(0.04))
     }
 
-    private func syncThreadTranscript() {
-        logModel.updateThreadTranscript(entries: model.logReplies)
+    private var actionResultTitle: String {
+        if let requestedActionTitle { return requestedActionTitle }
+        guard let actionId = LogActionResultProjection.latestActionId(in: model.logReplies) else {
+            return "左で指定した内容の出力"
+        }
+        return title(for: actionId)
     }
 
-    private func copyThreadTranscript() {
-        let text = logModel.threadTranscript.string
+    private func title(for actionId: String) -> String {
+        if actionId == "free" { return "入力した指示の結果" }
+        if actionId.hasPrefix("slot-"),
+           let index = Int(actionId.dropFirst("slot-".count)),
+           customActions.indices.contains(index),
+           let label = customActions[index]?.label {
+            return "\(label)の結果"
+        }
+        return "左で指定した内容の出力"
+    }
+
+    private func syncActionResult() {
+        logModel.updateActionResult(entries: model.logReplies)
+    }
+
+    private func copyActionResult() {
+        let text = logModel.actionResult.string
         guard !text.isEmpty else { return }
         _ = ClipboardWatcher.shared.writeOwnedString(text)
     }
@@ -1586,6 +1649,7 @@ struct AmbientLogPetView: View {
     private func sendInstruction(_ instruction: String, actionId: String, onAccepted: (() -> Void)? = nil) {
         let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        requestedActionTitle = title(for: actionId)
         cancelPendingSceneNaming()
         // D21: build the envelope off the main thread; dispatch only if the
         // selection/day hasn't changed since preparation (owner generation).

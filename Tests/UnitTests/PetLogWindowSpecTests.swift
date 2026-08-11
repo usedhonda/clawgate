@@ -56,4 +56,13 @@ final class PetLogWindowSpecTests: XCTestCase {
             XCTAssertFalse(spec.contains(marker), "spec must not contain infra/PII marker: \(marker)")
         }
     }
+
+    func testSpecDefinesActionResultPaneAndTopicSummary() throws {
+        let spec = try String(contentsOfFile: specPath(), encoding: .utf8)
+        let normative = normativeSection(spec)
+        XCTAssertTrue(normative.contains("action result surface"))
+        XCTAssertTrue(normative.contains("not a conversation thread"))
+        XCTAssertTrue(normative.contains("topic spaces"))
+        XCTAssertTrue(normative.contains("fixed 3–5 one-line"))
+    }
 }

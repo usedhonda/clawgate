@@ -178,6 +178,27 @@ impossible:
   into "visible full day / send 0"); only the auto-EXPAND of a hard-scope request
   is withheld until the user clicks again.
 
+### Action result pane and built-in summary
+
+- The right pane is an **action result surface**, not a conversation thread.
+  `log_user` request entries remain persisted for request correlation and audit,
+  but are not rendered there. The pane displays only the latest command's
+  output (or its typed failure), replaces that output when a newer command
+  completes, labels itself `実行結果`, and copies only the rendered result.
+- While the latest command has no output yet, the pane shows a result-generation
+  state rather than retaining a fake user/assistant exchange. Its empty state
+  directs the user to choose an action on the left.
+- The shipped `要点` action reads the selected log range as a whole and groups
+  it into semantic **topic spaces** based on purpose, subject, and direction of
+  discussion — not time gaps alone. Each topic reports the request, actual
+  response/work, decisions, unresolved mismatch, and next action when present;
+  a final cross-topic section gives key conclusions and prioritized TODOs.
+  Topic count and line count are content-driven: the old fixed 3–5 one-line
+  bullet format is not part of the contract.
+- On upgrade, only the byte-for-byte previous built-in `要点` action is migrated
+  to this prompt. A user-customized action is never overwritten merely because
+  its label is `要点`.
+
 ### Cross-day backward context (D20)
 
 Automatic scope (no explicit scene selection) retrieves the conversation the

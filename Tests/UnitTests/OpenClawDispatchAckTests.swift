@@ -778,7 +778,7 @@ final class OpenClawDispatchAckTests: XCTestCase {
         XCTAssertEqual(entries.first?.logMetadata?.dispatch?.degraded, true)
     }
 
-    func testPetLogThreadTranscriptMarksTerraFallbackOnlyForDegradedDispatch() {
+    func testPetLogActionResultMarksTerraFallbackOnlyForDegradedDispatch() {
         let normal = NotificationEntry(
             id: "n1",
             text: "normal",
@@ -814,8 +814,8 @@ final class OpenClawDispatchAckTests: XCTestCase {
             )
         )
 
-        let normalText = AmbientLogPetView.nsAttributedThreadTranscript([normal]).string
-        let degradedText = AmbientLogPetView.nsAttributedThreadTranscript([degraded]).string
+        let normalText = AmbientLogPetView.nsAttributedActionResult(normal).string
+        let degradedText = AmbientLogPetView.nsAttributedActionResult(degraded).string
 
         XCTAssertFalse(normalText.contains("⚠ Solを利用できずTerraで処理しました"))
         XCTAssertTrue(degradedText.contains("⚠ Solを利用できずTerraで処理しました"))
