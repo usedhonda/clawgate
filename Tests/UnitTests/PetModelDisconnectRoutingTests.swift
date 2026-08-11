@@ -47,6 +47,7 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
     func testDisconnectMidStreamDoesNotTruncateOrDropPendingLogReply() async throws {
         let model = PetModel()
         model.pendingSummonSource = "log"
+        model.pendingSummonRunId = "run-A"
         // A structured "log" reply is only parsed when there is a pending
         // request to validate it against (fail-closed contract). Establish the
         // one a real in-flight Log summon would have left behind.
@@ -54,8 +55,12 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
 
         // Two deltas for the same messageId: the first starts the stream, the
         // second is what actually (re)schedules the delta-idle finalize timer.
-        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "m1"), text: "partial fragment"))
-        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "m1"), text: " / 狙い:"))
+        model.handleEvent(.delta(
+            messageId: OpenClawEventOwnerIdentity(messageId: "m1", runId: "run-A"),
+            text: "partial fragment"))
+        model.handleEvent(.delta(
+            messageId: OpenClawEventOwnerIdentity(messageId: "m1", runId: "run-A"),
+            text: " / 狙い:"))
         model.handleEvent(.disconnected(reason: "ping timeout"))
 
         // Let the (shortened) delta-idle window fully elapse — proves the
@@ -66,7 +71,9 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         // Phase A a "log" final is the structured JSON envelope, whose parsed
         // `answer` is what reaches the pane.
         let fullMessage = OpenClawChatMessage(
-            role: .assistant, text: Self.structuredLogReplyJSON(answer: "complete answer text"))
+            role: .assistant,
+            text: Self.structuredLogReplyJSON(answer: "complete answer text"),
+            owner: OpenClawEventOwnerIdentity(messageId: "m1", runId: "run-A"))
         model.handleEvent(.message(fullMessage))
         try await Task.sleep(nanoseconds: 50_000_000)
 
