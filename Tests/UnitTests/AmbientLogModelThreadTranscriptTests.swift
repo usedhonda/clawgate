@@ -968,6 +968,66 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root).window.map(\.text), ["new"])
     }
 
+    func testRewriteAfterDecodeDoesNotPoisonSnapshotWithNewFingerprint() throws {
+        let root = makeTempSessionsRoot()
+        let rawPath = root.appendingPathComponent("ctx-2026-06-09T10-00-00Z/transcripts/raw.jsonl").path
+        defer {
+            AmbientStorage.removeSnapshotPauseHookForTesting(rawPath: rawPath)
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        let anchor = Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z"))
+        let fixedMtime = iso("2026-06-09T10:05:00Z")
+        let at = iso("2026-06-09T10:00:00Z")
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("old", at: at)], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+
+        var fired = false
+        AmbientStorage.setSnapshotPauseHookForTesting(rawPath: rawPath) { [weak self] _ in
+            guard let self, !fired else { return }
+            fired = true
+            try? self.writeSession("ctx-2026-06-09T10-00-00Z", [seg("new", at: at)], under: root)
+            try? self.setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+        }
+        _ = AmbientStorage.scanBackward(
+            anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        AmbientStorage.removeSnapshotPauseHookForTesting(rawPath: rawPath)
+
+        XCTAssertEqual(AmbientStorage.scanBackward(
+            anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root).window.map(\.text), ["new"],
+            "a rewrite after decode is not hidden by labeling old bytes with the newer fingerprint")
+    }
+
+    func testFingerprintCtimeUnavailableFallsBackToContentIdentity() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.fingerprintCtimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        AmbientStorage.fingerprintCtimeProviderForTesting = { _ in nil }
+        let anchor = Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z"))
+        let fixedMtime = iso("2026-06-09T10:05:00Z")
+        let at = iso("2026-06-09T10:00:00Z")
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("old", at: at)], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+        let firstFingerprint = AmbientStorage.dayFingerprint(
+            forDay: Date(timeIntervalSince1970: at), timeZone: utc, sessionsRoot: root)
+
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("new", at: at)], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+        let second = AmbientStorage.scanBackward(
+            anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        let secondFingerprint = AmbientStorage.dayFingerprint(
+            forDay: Date(timeIntervalSince1970: at), timeZone: utc, sessionsRoot: root)
+
+        XCTAssertEqual(second.window.map(\.text), ["new"])
+        XCTAssertNotEqual(firstFingerprint, secondFingerprint,
+                          "without ctime, same-size/same-mtime content still invalidates via settled SHA")
+    }
+
     /// A3-25/#4: a stable (same-fingerprint) file is decoded exactly ONCE across
     /// repeated scans — the canonical index reuses the snapshot (no rebuild) and the
     /// session cache dedups the decode below it.
@@ -1405,9 +1465,27 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         try writeSession("ctx-2026-06-09T11-00-00Z", [seg("mid", at: iso("2026-06-09T11:05:00Z"))], under: root)
         try setRawMtime("ctx-2026-06-09T11-00-00Z", iso("2026-06-09T11:10:00Z"), under: root)
         AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-08-01T00:00:00Z")) }
-        AmbientStorage.clearCanonicalIndexForTesting()
         XCTAssertTrue(sidecarFixtureScan(under: root).hasSourceIssue,
-                      "a changed next-session identity invalidates the record => live ctime>next refuses")
+                      "a changed next-session identity invalidates a live cache hit => live ctime>next refuses")
+    }
+
+    func testSidecarPolicyChangeInvalidatesLiveCanonicalSnapshot() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+        try writePreset("ctx-2026-06-09T10-00-00Z", chunkSeconds: 30, under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue)
+
+        try writePreset("ctx-2026-06-09T10-00-00Z", chunkSeconds: 20, under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-08-01T00:00:00Z")) }
+        XCTAssertTrue(sidecarFixtureScan(under: root).hasSourceIssue,
+                      "a preset policy change invalidates the live canonical snapshot even when raw bytes are unchanged")
     }
 
     /// Sidecar #5 (derived, re-generatable): a CORRUPT record is silently ignored

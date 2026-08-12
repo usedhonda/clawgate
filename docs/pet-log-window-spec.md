@@ -172,8 +172,11 @@ Load-bearing constraints:
   every scan (the persisted values are an identity record, never trusted as
   output), so a later margin-mapping change cannot ship a stale bound.
 - **Consulted only on rebuild.** A `canonicalIndex` hit (unchanged `(size, mtime,
-  ctime)` fingerprint) skips `buildSnapshot` and keeps the prior determinism; the
-  record matters when the index is cold (restart) or the fingerprint changed.
+  ctime)` fingerprint) skips `buildSnapshot` only while the undated bound's
+  non-raw dependencies also match: the next-session identity and versioned policy
+  case. Adding/removing a neighboring session or changing `preset.json` therefore
+  invalidates a live cached bound even when `raw.jsonl` itself is unchanged. The
+  record matters when the index is cold (restart) or any dependency changed.
 - **hash-once-at-decode.** `rawSHA256` is computed inside the decode retry loop,
   so it describes exactly the settled bytes, and is carried on the decode cache — a
   cache hit returns it without re-hashing (no per-scan hash cost). It uses a THIRD
@@ -458,13 +461,19 @@ of incompleteness converge to ONE typed fail-closed path.
     on any write and cannot be backdated (mtime alone would collide). The day
     fingerprint is folded into the cheap input fingerprint for past days AND today
     (D161), so a same-count/same-endpoint rewrite forces a republish.
+    If ctime cannot be read, the entry is not cached: the decode performs a second
+    content check and the canonical fingerprint falls back to the settled SHA-256,
+    so an unknown ctime is never treated as a stable zero-value cache key.
   - **Torn-read safety (D42)**: the canonical decode re-stats after reading; a
     file that changed under the read is retried once and, if still changing, fails
     closed rather than caching a torn snapshot. The settle-check compares
     `(mod, size, ctime)` — ctime is included so a same-mtime+same-size CONCURRENT
     rewrite (A decodes old, B publishes new keeping mtime/size, A resumes) is
     detected on A's post-decode re-stat (B's ctime advanced), forcing A to retry and
-    settle on the new content instead of rolling back to the stale decode. A read
+    settle on the new content instead of rolling back to the stale decode. The
+    snapshot is labeled with the settle-stat returned alongside those decoded
+    bytes; it never re-stats afterward and attaches a later rewrite's fingerprint
+    to older content. A read
     failure is never cached (recovers after a permission repair), and a newer
     fingerprint is never rolled back to an older one.
   - **Bounded residency (A3-N01)**: both in-memory caches (the canonical snapshot

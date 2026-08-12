@@ -30,6 +30,17 @@ enum AmbientStorage {
         let rawSHA256: String
     }
 
+    private struct DecodedSession {
+        let segments: [TranscriptSegment]
+        let decodeFailures: Int
+        let readFailure: Bool
+        let rawSHA256: String
+        let rawByteCount: UInt64
+        /// Fingerprint observed after these exact bytes decoded and settled.
+        let modificationDate: Date?
+        let ctimeBits: UInt64?
+    }
+
     private static let logger = Logger(subsystem: "com.clawgate", category: "AmbientStorage")
 
     /// Sidecar (ctime hygiene): a per-`ctx-` durable, DERIVED (re-generatable) trust
@@ -96,6 +107,7 @@ enum AmbientStorage {
     #if DEBUG
     private static let hookLock = NSLock()
     private static var _decodePauseHooks: [String: (String) -> Void] = [:]
+    private static var _snapshotPauseHooks: [String: (String) -> Void] = [:]
     /// Test seam (D42): invoked after a file's bytes are read but before the decode
     /// is stored, so a test can rewrite the file mid-decode and assert the torn read
     /// is not cached and a newer entry is never rolled back. Keyed by the
@@ -116,11 +128,24 @@ enum AmbientStorage {
         hookLock.lock(); defer { hookLock.unlock() }
         _decodePauseHooks.removeValue(forKey: canonicalTestRawPath(rawPath))
     }
+    static func setSnapshotPauseHookForTesting(rawPath: String, _ hook: @escaping (String) -> Void) {
+        hookLock.lock(); defer { hookLock.unlock() }
+        _snapshotPauseHooks[canonicalTestRawPath(rawPath)] = hook
+    }
+    static func removeSnapshotPauseHookForTesting(rawPath: String) {
+        hookLock.lock(); defer { hookLock.unlock() }
+        _snapshotPauseHooks.removeValue(forKey: canonicalTestRawPath(rawPath))
+    }
+    private static func snapshotPauseHook(forPath path: String) -> ((String) -> Void)? {
+        hookLock.lock(); defer { hookLock.unlock() }
+        return _snapshotPauseHooks[canonicalTestRawPath(path)]
+    }
     private static func decodePauseHook(forPath path: String) -> ((String) -> Void)? {
         hookLock.lock(); defer { hookLock.unlock() }
         return _decodePauseHooks[canonicalTestRawPath(path)]
     }
     private static var _ctimeProvider: ((String) -> Date?)?
+    private static var _fingerprintCtimeProvider: ((String) -> Date?)?
     /// Test seam (A3-25 ctime predicate): st_ctime (attribute-modification time)
     /// CANNOT be backdated by any file API — `FileManager.setAttributes` updates it
     /// to NOW — so an on-disk fixture cannot forge a consistent
@@ -131,6 +156,10 @@ enum AmbientStorage {
     static var ctimeProviderForTesting: ((String) -> Date?)? {
         get { hookLock.lock(); defer { hookLock.unlock() }; return _ctimeProvider }
         set { hookLock.lock(); defer { hookLock.unlock() }; _ctimeProvider = newValue }
+    }
+    static var fingerprintCtimeProviderForTesting: ((String) -> Date?)? {
+        get { hookLock.lock(); defer { hookLock.unlock() }; return _fingerprintCtimeProvider }
+        set { hookLock.lock(); defer { hookLock.unlock() }; _fingerprintCtimeProvider = newValue }
     }
     /// Test seam (#4): number of ACTUAL decodes (cache misses). Reset per test.
     /// hookLock-guarded increment; read/reset on the (serial) test thread.
@@ -159,11 +188,18 @@ enum AmbientStorage {
     /// DISTINCT use and code path from `rawCtime` (the undated determinism
     /// predicate). This one has NO test seam: the fingerprint must reflect the REAL
     /// inode state so a same-size same-mtime content rewrite (whose ctime always
-    /// advances and cannot be backdated) invalidates the cache. Unobtainable ⇒ 0.
-    private static func fingerprintCtimeBits(_ path: String) -> UInt64 {
+    /// advances and cannot be backdated) invalidates the cache. Unobtainable means
+    /// nil: callers bypass both caches and use the settled content SHA instead of
+    /// treating an unknown ctime as a stable zero value.
+    private static func fingerprintCtimeBits(_ path: String) -> UInt64? {
+        #if DEBUG
+        if let provider = fingerprintCtimeProviderForTesting {
+            return provider(path)?.timeIntervalSince1970.bitPattern
+        }
+        #endif
         let ctime = (try? URL(fileURLWithPath: path).resourceValues(forKeys: [.attributeModificationDateKey]))?
             .attributeModificationDate
-        return (ctime?.timeIntervalSince1970 ?? 0).bitPattern
+        return ctime?.timeIntervalSince1970.bitPattern
     }
 
     /// Returns the decoded segments for one session's `raw.jsonl`, served from
@@ -173,9 +209,10 @@ enum AmbientStorage {
     private static func cachedSessionSegments(rawPath: String,
                                               modificationDate: Date?,
                                               fileSize: UInt64,
-                                              ctimeBits: UInt64) -> (segments: [TranscriptSegment], decodeFailures: Int, readFailure: Bool, rawSHA256: String, rawByteCount: UInt64) {
+                                              ctimeBits: UInt64?) -> DecodedSession {
         cacheLock.lock()
-        if let cached = sessionSegmentsCache[rawPath],
+        if let ctimeBits,
+           let cached = sessionSegmentsCache[rawPath],
            cached.rawPath == rawPath,
            cached.modificationDate == modificationDate,
            cached.fileSize == fileSize,
@@ -184,7 +221,11 @@ enum AmbientStorage {
             // read failure. The cached SHA + size let a snapshot rebuild consult the
             // sidecar without re-hashing (hash-once-at-decode); both describe the same
             // settled bytes.
-            let result = (cached.segments, cached.decodeFailures, false, cached.rawSHA256, cached.fileSize)
+            let result = DecodedSession(
+                segments: cached.segments, decodeFailures: cached.decodeFailures,
+                readFailure: false, rawSHA256: cached.rawSHA256,
+                rawByteCount: cached.fileSize, modificationDate: cached.modificationDate,
+                ctimeBits: cached.ctimeBits)
             cacheLock.unlock()
             return result
         }
@@ -211,7 +252,9 @@ enum AmbientStorage {
                 // (D159). Do NOT cache it (a chmod/ACL repair leaves mtime/size
                 // unchanged, so a cached failure would refuse forever); the next
                 // scan retries and recovers.
-                return ([], 0, true, "", 0)
+                return DecodedSession(segments: [], decodeFailures: 0, readFailure: true,
+                                      rawSHA256: "", rawByteCount: 0,
+                                      modificationDate: nil, ctimeBits: nil)
             }
             // Sidecar: SHA-256 of exactly THESE bytes. Computed inside the retry
             // loop so it always describes the bytes this iteration decoded; it only
@@ -251,10 +294,25 @@ enum AmbientStorage {
             guard let postAttrs = try? fm.attributesOfItem(atPath: rawPath),
                   let postMod = postAttrs[.modificationDate] as? Date,
                   let postSize = (postAttrs[.size] as? NSNumber)?.uint64Value else {
-                return ([], 0, true, "", 0)
+                return DecodedSession(segments: [], decodeFailures: 0, readFailure: true,
+                                      rawSHA256: "", rawByteCount: 0,
+                                      modificationDate: nil, ctimeBits: nil)
             }
             let postCtimeBits = fingerprintCtimeBits(rawPath)
-            if postMod != expectedMod || postSize != expectedSize || postCtimeBits != expectedCtimeBits {
+            var contentChangedWithoutCtime = false
+            if postCtimeBits == nil, expectedCtimeBits == nil {
+                // ctime is unavailable, so size+mtime cannot detect a forged
+                // same-size/same-mtime rewrite. Re-read only in this rare path and
+                // compare content identity before accepting the decode as settled.
+                guard let verificationData = try? Data(contentsOf: URL(fileURLWithPath: rawPath)) else {
+                    return DecodedSession(segments: [], decodeFailures: 0, readFailure: true,
+                                          rawSHA256: "", rawByteCount: 0,
+                                          modificationDate: nil, ctimeBits: nil)
+                }
+                contentChangedWithoutCtime = sha256Hex(verificationData) != sha
+            }
+            if postMod != expectedMod || postSize != expectedSize
+                || postCtimeBits != expectedCtimeBits || contentChangedWithoutCtime {
                 // Changed under us — retry once against the settled stat (ctime
                 // catches a same-mtime+same-size concurrent rewrite).
                 expectedMod = postMod
@@ -270,9 +328,11 @@ enum AmbientStorage {
             let existing = sessionSegmentsCache[rawPath]
             let existingIsNewer: Bool = {
                 guard let e = existing, let em = e.modificationDate, let m = expectedMod else { return false }
-                return em > m
+                if em != m { return em > m }
+                guard let expectedCtimeBits else { return false }
+                return e.ctimeBits > expectedCtimeBits
             }()
-            if !existingIsNewer {
+            if !existingIsNewer, let expectedCtimeBits {
                 let isNew = existing == nil
                 sessionSegmentsCache[rawPath] = SessionSegmentsCache(
                     rawPath: rawPath, modificationDate: expectedMod, fileSize: expectedSize,
@@ -283,10 +343,15 @@ enum AmbientStorage {
                 }
             }
             cacheLock.unlock()
-            return (segs, decodeFailures, false, sha, expectedSize)
+            return DecodedSession(
+                segments: segs, decodeFailures: decodeFailures, readFailure: false,
+                rawSHA256: sha, rawByteCount: expectedSize,
+                modificationDate: expectedMod, ctimeBits: expectedCtimeBits)
         }
         // Still changing after the bounded retry — fail closed.
-        return ([], 0, true, "", 0)
+        return DecodedSession(segments: [], decodeFailures: 0, readFailure: true,
+                              rawSHA256: "", rawByteCount: 0,
+                              modificationDate: nil, ctimeBits: nil)
     }
 
     /// Lowercase-hex SHA-256 of `data` (sidecar content identity / collision guard).
@@ -566,7 +631,9 @@ enum AmbientStorage {
         /// undated determinism predicate's `rawCtime` (ctime<=next SID); the two must
         /// never be conflated. A benign ctime flip (chmod/rsync) costs at most one
         /// spurious re-decode here, never a refusal.
-        let ctimeBits: UInt64
+        let ctimeBits: UInt64?
+        /// Content identity used when ctime is unavailable and for sidecar trust.
+        let rawSHA256: String
         /// Dated segments (capturedAt != nil), sorted by capturedAt.
         let dated: [TranscriptSegment]
         let minCapturedAt: Double?
@@ -582,6 +649,10 @@ enum AmbientStorage {
         let undatedLower: Double?
         let undatedUpper: Double?
         let undatedDeterministic: Bool
+        /// Non-raw dependencies that can change an undated bound while the raw
+        /// fingerprint remains identical.
+        let undatedNextSessionId: String?
+        let undatedPolicyCase: String?
 
         /// Does this file's undated bound intersect `[wLo, wHi)`?
         func undatedIntersects(_ wLo: Double, _ wHi: Double) -> Bool {
@@ -596,7 +667,10 @@ enum AmbientStorage {
         /// D42/D38/#7: two snapshots describe the same bytes iff size + mtime + ctime
         /// match. ctime closes the same-size/same-mtime content-rewrite gap; mtime
         /// alone (or size+mtime) could collide on a forged/frozen mtime.
-        var fingerprint: String { "\(size):\(mtimeBits):\(ctimeBits)" }
+        var fingerprint: String {
+            let identity = ctimeBits.map(String.init) ?? "sha256:\(rawSHA256)"
+            return "\(size):\(mtimeBits):\(identity)"
+        }
     }
 
     private static var canonicalIndex: [String: CanonicalSnapshot] = [:]
@@ -639,9 +713,12 @@ enum AmbientStorage {
                 // read-failure snapshot.
                 if isNoSuchFileError(error) { continue }
                 out.append(CanonicalSnapshot(
-                    path: raw.path, size: 0, mtimeBits: 0, ctimeBits: 0, dated: [], minCapturedAt: nil,
+                    path: raw.path, size: 0, mtimeBits: 0, ctimeBits: nil, rawSHA256: "",
+                    dated: [], minCapturedAt: nil,
                     maxCapturedAt: nil, decodeFailures: 0, readFailure: true,
-                    undatedCount: 0, undatedLower: nil, undatedUpper: nil, undatedDeterministic: false))
+                    undatedCount: 0, undatedLower: nil, undatedUpper: nil,
+                    undatedDeterministic: false, undatedNextSessionId: nil,
+                    undatedPolicyCase: nil))
                 continue
             }
             let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
@@ -651,25 +728,48 @@ enum AmbientStorage {
             // content rewrite advances ctime, so its snapshot is rebuilt not reused.
             let ctimeBits = fingerprintCtimeBits(raw.path)
             indexLock.lock()
-            if let cached = canonicalIndex[raw.path], cached.size == size,
+            if let ctimeBits, let cached = canonicalIndex[raw.path], cached.size == size,
                cached.mtimeBits == mtimeBits, cached.ctimeBits == ctimeBits {
+                let provenanceStillMatches: Bool
+                if cached.undatedCount == 0 {
+                    provenanceStillMatches = true
+                } else if let start = parseSessionStart(fromSessionID: dir.lastPathComponent)?.timeIntervalSince1970 {
+                    let nextId = sortedSessions.first { $0.start > start }?.id
+                    let policyCase = undatedMarginAndPolicy(sessionDir: dir).policyCase
+                    provenanceStillMatches = cached.undatedNextSessionId == nextId
+                        && cached.undatedPolicyCase == policyCase
+                } else {
+                    provenanceStillMatches = cached.undatedNextSessionId == nil
+                        && cached.undatedPolicyCase == nil
+                }
+                if provenanceStillMatches {
+                    indexLock.unlock()
+                    out.append(cached)
+                    continue
+                }
                 indexLock.unlock()
-                out.append(cached)
-                continue
+            } else {
+                indexLock.unlock()
             }
-            indexLock.unlock()
             let snap = buildSnapshot(sessionDir: dir, rawPath: raw.path, size: size, mtime: mtime,
-                                     mtimeBits: mtimeBits, ctimeBits: ctimeBits, sortedSessions: sortedSessions)
+                                     ctimeBits: ctimeBits, sortedSessions: sortedSessions)
             indexLock.lock()
             // D42: do not roll a NEWER published fingerprint back to an older one —
             // compare the SETTLED fingerprint a concurrent reader may have stored.
-            if let existing = canonicalIndex[raw.path], existing.mtimeBits > snap.mtimeBits {
+            let existingIsNewer: Bool = {
+                guard let existing = canonicalIndex[raw.path] else { return false }
+                if existing.mtimeBits != snap.mtimeBits { return existing.mtimeBits > snap.mtimeBits }
+                guard let existingCtime = existing.ctimeBits, let snapCtime = snap.ctimeBits else { return false }
+                return existingCtime > snapCtime
+            }()
+            if existingIsNewer {
+                let existing = canonicalIndex[raw.path]!
                 out.append(existing)
             } else {
                 // A3-05: never cache a read-failure snapshot — a chmod/ACL repair
                 // leaves size/mtime unchanged, so a cached failure would refuse
                 // forever. Return it, but re-read it next scan.
-                if !snap.readFailure {
+                if !snap.readFailure, snap.ctimeBits != nil {
                     let isNew = canonicalIndex[raw.path] == nil
                     canonicalIndex[raw.path] = snap
                     enforceCacheCap(raw.path, isNew: isNew, order: &canonicalIndexOrder) {
@@ -687,20 +787,20 @@ enum AmbientStorage {
     /// bounded-retry `cachedSessionSegments`), partition dated/undated, compute
     /// capturedAt min/max, and derive the file-level undated provenance bound.
     private static func buildSnapshot(sessionDir: URL, rawPath: String, size: UInt64,
-                                      mtime: Date?, mtimeBits: UInt64, ctimeBits: UInt64,
+                                      mtime: Date?, ctimeBits: UInt64?,
                                       sortedSessions: [(id: String, start: Double)]) -> CanonicalSnapshot {
         let decoded = cachedSessionSegments(rawPath: rawPath, modificationDate: mtime,
                                             fileSize: size, ctimeBits: ctimeBits)
-        // D42: re-stat for the SETTLED fingerprint — the decode may have retried a
-        // racing rewrite, so the snapshot must be LABELED with the bytes it
-        // actually holds (this is what the newer-guard compares). #7: the settled
-        // ctime is re-read the same way (equality fingerprint, not the determinism
-        // predicate — a separate concern from `rawCtime` below).
-        let post = try? FileManager.default.attributesOfItem(atPath: rawPath)
-        let settledSize = (post?[.size] as? NSNumber)?.uint64Value ?? size
-        let settledMtime = (post?[.modificationDate] as? Date)?.timeIntervalSince1970
+        #if DEBUG
+        snapshotPauseHook(forPath: rawPath)?(rawPath)
+        #endif
+        // The decode helper returns the stat that settled THESE exact bytes. Do
+        // not re-stat here: a rewrite in that gap would label old decoded bytes
+        // with a newer fingerprint and poison both caches.
+        let settledSize = decoded.rawByteCount
+        let settledMtime = decoded.modificationDate?.timeIntervalSince1970
             ?? (mtime?.timeIntervalSince1970 ?? 0)
-        let settledCtimeBits = fingerprintCtimeBits(rawPath)
+        let settledCtimeBits = decoded.ctimeBits
 
         var dated: [TranscriptSegment] = []
         var undatedCount = 0
@@ -721,9 +821,13 @@ enum AmbientStorage {
         var undatedLower: Double?
         var undatedUpper: Double?
         var deterministic = false
+        var undatedNextSessionId: String?
+        var undatedPolicyCase: String?
         if undatedCount > 0, let start = parseSessionStart(fromSessionID: sessionDir.lastPathComponent)?.timeIntervalSince1970 {
             let nextPair = sortedSessions.first { $0.start > start }
             let (margin, policyCase) = undatedMarginAndPolicy(sessionDir: sessionDir)
+            undatedNextSessionId = nextPair?.id
+            undatedPolicyCase = policyCase
             undatedLower = start - margin
             undatedUpper = nextPair?.start
             if let nextPair {
@@ -760,11 +864,13 @@ enum AmbientStorage {
         }
         return CanonicalSnapshot(
             path: rawPath, size: settledSize, mtimeBits: settledMtime.bitPattern,
-            ctimeBits: settledCtimeBits, dated: dated,
+            ctimeBits: settledCtimeBits, rawSHA256: decoded.rawSHA256, dated: dated,
             minCapturedAt: epochs.min(), maxCapturedAt: epochs.max(),
             decodeFailures: decoded.decodeFailures, readFailure: decoded.readFailure,
             undatedCount: undatedCount, undatedLower: undatedLower,
-            undatedUpper: undatedUpper, undatedDeterministic: deterministic)
+            undatedUpper: undatedUpper, undatedDeterministic: deterministic,
+            undatedNextSessionId: undatedNextSessionId,
+            undatedPolicyCase: undatedPolicyCase)
     }
 
     #if DEBUG
