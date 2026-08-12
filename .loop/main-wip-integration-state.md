@@ -19,6 +19,7 @@ iteration cap 6 / no-progress 2 / wall-clock 90min
 | 1 | character sprite metadata validation | `swift test --filter CharacterManifestTests` | 34 pass; invalid bundle count corrected from capped diagnostics count | `b796935` |
 | 2 | Pet Log global test override ordering | isolation ordering + affected PetModel/PetLog classes | isolation classes green; independent A3-04 failure routed to iteration 3 | `3a5490a` |
 | 3 | Pet Log canonical provenance/source completeness | focused Ambient Log/Cache/Day/PetLog classes | 85 pass; sidecar permission follow-up 1 pass; real sessions sidecar count 0 | `83195f6` |
+| 4 | fresh-eyes Pet Log provenance review fixes | 4 focused cache/provenance race and invalidation tests | 4 pass; next-session/policy dependencies invalidate live snapshots; settled bytes retain their own fingerprint; unavailable ctime falls back to content identity | `5c1a04f` |
 
 ## Accounted paths
 
@@ -27,7 +28,7 @@ iteration cap 6 / no-progress 2 / wall-clock 90min
 - Pet Log storage, display/query reader, refusal ordering, focused tests, and normative spec -> `83195f6`.
 - Floating-window test/spec whitespace-only deltas -> restored to existing HEAD content; no behavior discarded.
 
-## Final gate (2026-08-12)
+## Superseded final gate (2026-08-12)
 
 - `git diff --check`: pass.
 - `bash scripts/security-leak-check.sh --all`: pass.
@@ -37,7 +38,20 @@ iteration cap 6 / no-progress 2 / wall-clock 90min
 - `curl -fsS http://127.0.0.1:8765/v1/health`: `{"ok":true,"version":"0.1.0"}`.
 - Worktree was clean after the runtime gate; `stash@{0}` remains preserved.
 
+This gate was valid for `fdfcfc4`, but iteration 4 changed production and test
+inputs afterward. A single replacement final gate is therefore required.
+
+## Fresh-eyes review
+
+- Independent review found three correctness gaps in `83195f6`: live canonical
+  snapshots ignored next-session/policy dependencies, a post-decode re-stat could
+  label old decoded bytes with a newer fingerprint, and unavailable ctime could be
+  cached as a stable zero value.
+- `5c1a04f` closes all three with dependency-aware cache hits, settle-stat labeling,
+  and a settled SHA fallback when ctime is unavailable.
+- The four focused regression tests passed before the fix commit.
+
 ## Next action
 
-Record the immutable-range fresh-eyes review result, verify the final docs-only state commit, and
-finish `FINAL` with a clean worktree. No product/test input changed after the one full gate.
+Complete the independent review of `5c1a04f`, run one replacement final gate,
+record its evidence, and finish `FINAL` with a clean worktree.
