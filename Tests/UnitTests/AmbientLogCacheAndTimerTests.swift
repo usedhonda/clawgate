@@ -95,6 +95,7 @@ final class AmbientLogCacheAndTimerTests: XCTestCase {
 
     func testStartIsIdempotentKeepingASingleTimer() {
         let model = AmbientLogModel()
+        model.sessionsRootOverrideForTesting = makeRoot()
         XCTAssertNil(model.pollTimerForTesting, "not polling before start")
 
         model.start()
@@ -118,6 +119,7 @@ final class AmbientLogCacheAndTimerTests: XCTestCase {
     /// exactly one load happens per polling lifecycle.
     func testDuplicateStartDoesNotReEnqueueLoad() {
         let model = AmbientLogModel()
+        model.sessionsRootOverrideForTesting = makeRoot()
         model.start()
         model.start()
         model.start()

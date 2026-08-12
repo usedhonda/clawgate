@@ -2243,6 +2243,15 @@ final class PetModel: NSObject, ObservableObject {
                 segmentCount: requestedEnvelope.segments.count
             )
         )
+        // D159/D163 fail-closed — source incompleteness wins over stale/empty
+        // scope so corruption is never misreported as "no logs".
+        guard !requestedEnvelope.sourceReadIncomplete else {
+            logThreadPaneOpen = true
+            recordPetLogAdmissionEvent(
+                .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: "sourceReadIncomplete"))
+            logDispatchStatus = .sourceReadIncompleteRefused(requestId: requestedEnvelope.requestId)
+            return false
+        }
         // D156: an explicit selection that went stale was cleared (not silently
         // widened to the full day). Cancel THIS action with a distinct typed
         // status — the chip is already cleared, so the next click is automatic.
@@ -2258,18 +2267,6 @@ final class PetModel: NSObject, ObservableObject {
         guard !requestedEnvelope.segments.isEmpty else {
             logThreadPaneOpen = true
             logDispatchStatus = .emptyScopeRefused(requestId: requestedEnvelope.requestId)
-            return false
-        }
-        // D159/D163 fail-closed — the backward source scan hit a completeness
-        // issue (unreadable session, malformed line, or an undated real
-        // utterance). Refuse before any side-effect rather than sending a
-        // silently partial/undated view (typed status + body-free telemetry,
-        // draft preserved).
-        guard !requestedEnvelope.sourceReadIncomplete else {
-            logThreadPaneOpen = true
-            recordPetLogAdmissionEvent(
-                .historyIncompleteRefused(requestId: requestedEnvelope.requestId, reason: "sourceReadIncomplete"))
-            logDispatchStatus = .sourceReadIncompleteRefused(requestId: requestedEnvelope.requestId)
             return false
         }
         // D153 client invariant — before any admission side-effect. Explicit

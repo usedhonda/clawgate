@@ -461,6 +461,10 @@ final class AmbientLogModel: ObservableObject {
     /// Test seam: how many times `load()` was invoked, so a test can assert a
     /// duplicate start() does NOT re-enqueue a heavy load (D152).
     private(set) var loadCallCountForTesting = 0
+    /// Test seam: redirect the display-path scan (`load()`) at a temp sessions
+    /// root, so a test that triggers `load()` (e.g. via selectAllScenes) never
+    /// reads — or writes provenance sidecars into — the user's real ambient data.
+    var sessionsRootOverrideForTesting: URL?
     #endif
 
     func moveDay(by days: Int) {
@@ -562,7 +566,13 @@ final class AmbientLogModel: ObservableObject {
                             sessionsRoot: URL = AmbientStorage.sessionsRoot) -> PetLogQueryEnvelope {
         let day = day ?? selectedDay
         let selection = selection ?? selectedSceneIDs
-        let daySegments = AmbientStorage.segments(forDay: day, timeZone: timeZone, sessionsRoot: sessionsRoot)
+        // A3-01/D159/D163: the query path reads the day with typed source issues
+        // (not the silent `segments(forDay:)`), so an explicit scene selection
+        // also fails closed on a broken/undated/unreadable source instead of
+        // sending a partial view.
+        let dayRead = AmbientStorage.segmentsForDayWithIssues(
+            forDay: day, timeZone: timeZone, sessionsRoot: sessionsRoot)
+        let daySegments = dayRead.segments
 
         let anchor: Date
         if day == today {
@@ -598,7 +608,17 @@ final class AmbientLogModel: ObservableObject {
         let sourceReadIncomplete: Bool
         // D156: an explicit selection that reconciled to nothing.
         var staleScopeCleared = false
-        if let ids = resolved.scopeIDs {
+        if !selection.isEmpty && dayRead.issues.hasIssue {
+            // A3-01: the user has an EXPLICIT selection and the day's source is
+            // broken (unreadable/malformed/undated). A source failure must NOT
+            // masquerade as scene loss: do NOT reconcile, do NOT clear the
+            // selection — keep it as the scope so the commit re-publishes it
+            // unchanged — and refuse with sourceReadIncomplete (not stale/empty).
+            candidateSegments = []
+            scopeOverride = selection.sorted()  // deterministic order (Set has none)
+            retrievalTruncatedBeforeCoverage = false
+            sourceReadIncomplete = true
+        } else if let ids = resolved.scopeIDs {
             candidateSegments = resolved.segments
             scopeOverride = ids
             retrievalTruncatedBeforeCoverage = false
@@ -620,11 +640,13 @@ final class AmbientLogModel: ObservableObject {
             // the SELECTED day itself. An empty past day has none — do NOT fall
             // back to the day-end anchor and fetch the previous 48h (that would
             // silently send another day's history for a visibly empty day).
-            // Produce an empty scope so admission refuses it (D3 empty-scope).
             candidateSegments = []
             scopeOverride = nil
             retrievalTruncatedBeforeCoverage = false
-            sourceReadIncomplete = false
+            // A3-01/D155: distinguish a GENUINELY empty past day (D3 empty-scope)
+            // from one whose day source is UNREADABLE (a broken source must not be
+            // mis-classified as "no logs" — refuse as sourceReadIncomplete).
+            sourceReadIncomplete = dayRead.issues.hasIssue
         } else {
             let scan = AmbientStorage.scanBackward(
                 anchor: anchor, timeZone: timeZone, sessionsRoot: sessionsRoot)
@@ -815,6 +837,11 @@ final class AmbientLogModel: ObservableObject {
         let previousFingerprint = lastLoadedFingerprint
         let previousDay = lastPublishedDay
         let tz = timeZone
+        #if DEBUG
+        let root = sessionsRootOverrideForTesting ?? AmbientStorage.sessionsRoot
+        #else
+        let root = AmbientStorage.sessionsRoot
+        #endif
 
         loadQueue.async { [weak self] in
             guard let self else { return }
@@ -833,13 +860,13 @@ final class AmbientLogModel: ObservableObject {
             if !isToday {
                 // D38: only trust the past-day cache while the day's on-disk
                 // fingerprint is unchanged; a late write invalidates it.
-                let preFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
+                let preFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz, sessionsRoot: root)
                 if let cachedScenes, let cachedRaw, cachedDayFingerprint == preFingerprint {
                     daySegments = cachedRaw
                     newScenes = cachedScenes
                     dayDiskFingerprint = preFingerprint
                 } else {
-                    daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
+                    daySegments = AmbientStorage.segments(forDay: day, timeZone: tz, sessionsRoot: root)
                     newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
                     // D38 two-phase: re-read the fingerprint AFTER the decode (still
                     // off-main). The just-decoded content is published under the
@@ -847,7 +874,7 @@ final class AmbientLogModel: ObservableObject {
                     // when the on-disk state was stable across the read, so a write
                     // that raced the decode is not cached as authoritative and the
                     // next poll re-reads it.
-                    let postFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
+                    let postFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz, sessionsRoot: root)
                     dayDiskFingerprint = postFingerprint
                     dayFingerprintToStore = (postFingerprint == preFingerprint) ? postFingerprint : nil
                 }
@@ -857,9 +884,9 @@ final class AmbientLogModel: ObservableObject {
                 // must still republish. Read the fingerprint AFTER the decode and
                 // fold it into the input fingerprint (a mid-decode write just
                 // means the next poll re-reads — today has no cache to poison).
-                daySegments = AmbientStorage.segments(forDay: day, timeZone: tz)
+                daySegments = AmbientStorage.segments(forDay: day, timeZone: tz, sessionsRoot: root)
                 newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
-                dayDiskFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz)
+                dayDiskFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz, sessionsRoot: root)
             }
             // D45: reconcile a stale selection against the current scenes so the
             // display and query paths agree (migrate or clear).
@@ -1487,7 +1514,7 @@ struct AmbientLogPetView: View {
         case .sourceReadIncompleteRefused:
             return "ログの一部を読み取れなかったため送信できません（破損・タイムスタンプ欠落）"
         case .staleScopeRefused:
-            return "選択したシーンが見つからないため選択を解除しました。もう一度押すと全日を対象にします"
+            return "選択したシーンが見つからないため選択を解除しました。もう一度押すと自動範囲（直前の文脈を含む）を対象にします"
         }
     }
 

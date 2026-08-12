@@ -42,7 +42,9 @@ rejects a reply whose `contextDecision.policyVersion` does not match.
 Automatic retrieval never refuses on truncation. A single backward scan of the
 retained sessions (partitioned by `capturedAt`, never file mtime) returns the
 in-`[anchor − 48h, anchor)` window plus `truncatedBeforeCoverage` = whether any
-retained segment is older than the cap. The envelope carries
+retained segment is older than the cap — from a dated `capturedAt < cap`, OR from
+an undated file whose deterministic provenance bound is entirely older than the
+cap (see "Canonical file snapshot & undated provenance"). The envelope carries
 `retrievalTruncatedBeforeCoverage` on the WIRE (v3); with the v3 prefix it tells
 the model that history may exist before `coverageStart`. The model may then
 answer ONLY when it can identify a high-confidence semantic boundary inside the
@@ -58,17 +60,137 @@ to entry metadata as `Bool?` (nil for pre-v3 records).
 
 ### Source completeness fail-closed (D159/D163)
 
-The backward scan reports source-completeness issues gathered in the same pass:
-unreadable/undecodable session files (D159 — malformed JSONL lines or bytes that
-can't be read; an ABSENT sessions root is "no records", NOT an issue) and real
-utterances with no `capturedAt` (D163 — the anchor cutoff can't be verified
-against them). If any issue is present for an automatic query, the envelope's
-client-side `sourceReadIncomplete` is set and `sendLogInstruction` refuses before
-dispatch with a typed `sourceReadIncompleteRefused` status (no `log_user` entry,
-no slot claim, no watchdog, draft preserved, body-free telemetry). Valid
-segments may still render in the UI, but the query fails closed rather than
-sending a silently partial/undated view. `sourceReadIncomplete` is never encoded
-to the wire.
+BOTH retrieval paths gather typed source-completeness issues in the same pass —
+the automatic backward scan AND the explicit day read (`segmentsForDayWithIssues`,
+not the silent `segments(forDay:)`), so an explicit scene selection also fails
+closed rather than sending a partial view. Issues:
+
+- **Decode failure** (D159): a malformed JSONL line inside an otherwise-readable
+  raw.
+- **Read failure** (D159): an existing raw whose bytes cannot be read/UTF-8
+  decoded, or an existing raw that cannot be stat'd. A read failure is NOT cached
+  — a permission repair leaves mtime/size unchanged, so caching it would refuse
+  forever; the next scan retries and recovers. A raw file that does not exist yet
+  (a fresh session before its first kept segment) is a normal 0-record state,
+  skipped, NOT a failure.
+- **Missing timestamp** (D163): a real utterance with no `capturedAt` — the
+  anchor cutoff can't be verified against it.
+- **Root**: an ABSENT sessions root is "no records" (no issue); an EXISTING but
+  unreadable root (permission/IO) IS an issue.
+
+When any issue is present, the envelope's client-side `sourceReadIncomplete` is
+set (never encoded to the wire) and `sendLogInstruction` refuses before dispatch
+with a typed `sourceReadIncompleteRefused` status (no `log_user` entry, no slot
+claim, no watchdog, draft preserved, body-free telemetry). This refusal is
+evaluated FIRST — ahead of the stale-scope and empty-scope refusals — so a source
+failure is never mis-reported as "scene lost" or "no logs". For an explicit
+selection, a source failure does NOT reconcile or clear the selection (a source
+failure must not masquerade as scene loss): the selection is preserved. Valid
+segments may still render in the UI.
+
+### Canonical file snapshot & undated provenance (A3-25)
+
+Every retrieval path (automatic scan, explicit day read, DISPLAY, day
+fingerprint) is derived from ONE set of per-file **canonical snapshots**, so
+display and query never diverge (D17). A snapshot holds the file's decoded dated
+segments, its `capturedAt` min/max, decode/read issue counts, and its undated
+records' provenance bound. The index is in-memory only (rebuilt on process start
+— a restart yields the same result; no durable on-disk index). A file's snapshot
+is reused while its `(size, mtime, ctime)` fingerprint is unchanged and re-decoded
+otherwise; **mtime is used ONLY to invalidate a stale snapshot and as a
+consistency check, never to decide coverage or relevance** — coverage is always
+by `capturedAt`. This is what lets a viewed past day stay cached while today's
+session appends (its `capturedAt` min/max does not intersect the past day, so the
+past day's fingerprint does not churn — D151), while a backfill that writes an
+in-day `capturedAt` DOES intersect and invalidate that day.
+
+**Undated records** (a legacy line with no `capturedAt`) are attributed a
+FILE-LEVEL provenance bound, NOT a per-line position — chunk append order is not
+FIFO-guaranteed, so a within-file "previous/next dated line" neighbor bound is
+unsound and is NOT used. The bound is `[sessionStart − lowerMargin,
+nextSessionStart)`, where `sessionStart` is parsed from the `ctx-<ISO8601>` id,
+`lowerMargin` is a commit-derived VERSIONED HISTORICAL mapping (ruling
+(b)-versioned, FINAL — not to be re-derived): `chunkSeconds == 30 → 33s` (commit
+8cf10b25 introduced `chunkSeconds:30 + overlapSeconds:3` in one diff, and no
+production capture call has changed those args since, so the pairing is proven by
+history, not assumed), `chunkSeconds == 20 → 20s` (predates the overlap mechanism,
+b1d2b187), and a missing preset.json, an unknown chunkSeconds, or a decode failure
+→ the CONSERVATIVE 63s fail-closed default (60s no-overlap chunk + 3s = historical
+max). Generalizing "+3 to any chunkSeconds" is FORBIDDEN — only the two
+history-verified values plus the fail-closed default. A future versioned
+capture-policy (Wave S / D35) would persist the real per-file chunk+overlap and
+supersede this fixed mapping. `nextSessionStart` is the next session's start. The bound is DETERMINISTIC only
+when the id parses, a next session exists, order holds, and BOTH `raw mtime ≤
+next sessionStart` AND `raw st_ctime ≤ next sessionStart`. mtime alone is
+forgeable (`setAttributes` backdates it); st_ctime (attribute-modification time,
+read via `URLResourceKey.attributeModificationDateKey` — NOT `creationDate`
+birthtime) cannot be, so it rejects a file whose mtime was backdated onto
+recently-touched bytes. An unobtainable ctime, or either time after next, is a
+consistency failure — the bound is unknown/open and intersects any window
+(fail-closed). Both times are consistency predicates ONLY, never coverage.
+
+An undated file is a source issue for a query ONLY when its bound intersects the
+query window — a global count would refuse every query (the real corpus holds
+hundreds of undated lines). A DETERMINISTIC bound that lies ENTIRELY older than
+the automatic cap (`upper ≤ cap`, half-open) is the exact below-side complement
+of that intersection: it is NOT a source issue and contributes 0 window segments,
+but it IS retained data older than coverage, so it sets `truncatedBeforeCoverage`
+(D153). An unknown/open bound is a source issue and NEVER sets truncation (an
+open bound is not evidence of older-than-cap data). So every deterministic bound
+falls into exactly one of {intersecting source issue, older-than-cap truncation,
+neither}, and no bound sets both. Undated records are NEVER included in the
+envelope: that requires a unique provenance id (a future Wave S / D33 item);
+until then an in-range undated is a refusal, not an inclusion.
+
+### Provenance-bound sidecar — ctime hygiene
+
+The `st_ctime ≤ next` determinism predicate above is correct but FRAGILE across
+its own lifetime: st_ctime advances on any attribute touch, so a benign operation
+that never changes a byte — a `chmod`/ACL permission repair (including A3-05's own
+recovery), an `rsync`/backup restore, an xattr write, even while the app is off —
+flips a legacy undated file's ctime past the next sessionStart. On the next scan
+the live predicate then reads non-deterministic → open bound → the file becomes a
+source issue → EVERY query that window refuses (P0-848 re-materialized). The bound
+did not actually become less certain; only an attribute-time moved.
+
+To close this WITHOUT weakening the predicate, each session directory carries a
+durable, **DERIVED (re-generatable)** trust record `provenance-bound-v1.json`:
+`{version, sessionId, rawSHA256, rawByteCount, lower, upper, nextSessionId,
+policyCase}`. It is **content-addressed**: on a snapshot REBUILD, if the CURRENT
+`(sessionId, rawSHA256, rawByteCount, nextSessionId, policyCase)` all match the
+record, the bound was already validated deterministic (mtime AND ctime ≤ next) for
+THIS exact state, so its determinism is trusted **without re-reading ctime** — the
+benign flip cannot revoke it. Any real change — different bytes (SHA/byteCount, so
+a same-size same-mtime content rewrite is caught), a moved next-session identity,
+or a different policy case — misses the record and falls back to the live
+mtime+ctime predicate.
+
+Load-bearing constraints:
+
+- **Determinism-trust ONLY; VALUES always recomputed.** The record gates whether
+  the bound is deterministic; `lower`/`upper` are recomputed from current code
+  every scan (the persisted values are an identity record, never trusted as
+  output), so a later margin-mapping change cannot ship a stale bound.
+- **Consulted only on rebuild.** A `canonicalIndex` hit (unchanged `(size, mtime,
+  ctime)` fingerprint) skips `buildSnapshot` and keeps the prior determinism; the
+  record matters when the index is cold (restart) or the fingerprint changed.
+- **hash-once-at-decode.** `rawSHA256` is computed inside the decode retry loop,
+  so it describes exactly the settled bytes, and is carried on the decode cache — a
+  cache hit returns it without re-hashing (no per-scan hash cost). It uses a THIRD
+  ctime-independent read path, separate from both the equality-fingerprint ctime
+  and the determinism-predicate ctime.
+- **Write-once discipline.** After `buildSnapshot` the on-disk record is either
+  freshly-written-matching (deterministic) or removed (non-deterministic) — never a
+  stale survivor a future scan could match.
+- **Atomic, non-sticky, raw-safe.** Written UUID-temp (0600) → POSIX `rename(2)`
+  (one atomic overwrite) into the session dir (0700), no backup, so concurrent
+  writers publish one complete record (last-writer-wins), never a torn file. A
+  write failure is diagnosed to `os.Logger` (subsystem `com.clawgate`) ONLY — this
+  is an optimization cache, not session data — leaves the raw file untouched, and
+  is non-sticky (the current launch still resolves via the live predicate, the
+  pre-sidecar baseline). A CORRUPT record is silently ignored (never quarantined)
+  and rebuilt.
+
 
 ### Prefix v3 contract (D1/D6/D3/D153 prefix text)
 
@@ -173,10 +295,16 @@ impossible:
   clear-and-auto-expand). The envelope is flagged `staleScopeCleared`, the commit
   publishes the clear (the chip resets), and the action is cancelled with a
   distinct typed `staleScopeRefused` status (dispatch 0, draft preserved). The
-  NEXT click — now with no selection — uses automatic full-day scope. The
-  DISPLAY still falls back to the full day (D17: display and query never diverge
-  into "visible full day / send 0"); only the auto-EXPAND of a hard-scope request
-  is withheld until the user clicks again.
+  NEXT click — now with no selection — uses the AUTOMATIC scope (A3-06: for today
+  this is the cross-day backward window that includes the immediately-preceding
+  context, NOT a literal "full day"). The DISPLAY still falls back to the day's
+  segments (D17: display and query never diverge into "visible / send 0"); only
+  the auto-EXPAND of a hard-scope request is withheld until the user clicks again.
+- **Empty selected past day (D155)**: an explicitly-selected PAST day with zero
+  segments resolves to a typed empty scope (dispatch 0), NOT a cross-day backward
+  window — an empty past day must never borrow the previous day's history the way
+  today's automatic anchor reaches backward. The cross-day backward reach is a
+  property of the today/automatic anchor only; a chosen empty past day is empty.
 
 ### Action result pane and built-in summary
 
@@ -312,30 +440,51 @@ of incompleteness converge to ONE typed fail-closed path.
 
 ### Past-day cache invalidation & poll timer (D38/D92)
 
-- **Past-day invalidation (D38)**: "past days are static" is only an
+- **Past-day invalidation (D38/A3-25)**: "past days are static" is only an
   optimization hint. Each past-day load compares the day's on-disk fingerprint
-  (session file names/sizes/mod-times, no decode) against the cached one; a
-  change (late STT write, recovery, backfill) invalidates the cache and
-  re-reads, so a late write to a past day is never hidden behind the cache. A
-  content update while a past day is being read refreshes in place — the day
-  stays selected and the scroll is not yanked to the bottom (only today follows
-  live capture, and a day change scrolls once on navigation).
-  - **Collision resistance**: the mod-time in the fingerprint is kept at FULL
-    sub-second precision, so a same-second, same-size rewrite (content corrected
-    without changing the byte count) still changes it. The day fingerprint is
-    also folded into the cheap input fingerprint for past days AND today (D161),
-    so a same-count/same-endpoint rewrite forces a republish rather than matching
-    count/first/last and being skipped (today reads the fingerprint after the
-    decode; it is uncached, so a mid-decode write just re-reads next poll).
-  - **Two-phase read**: the day fingerprint is re-read (off-main) after the
-    decode; the decoded content is published under the post-decode fingerprint,
-    but the cache is only stored when the on-disk state was stable across the
-    read — a write that raced the decode is not cached as authoritative, so the
-    next poll re-reads it.
-- **Poll timer idempotency (D92)**: `start()` is idempotent — a duplicate
+  against the cached one; a change (late STT write, recovery, backfill)
+  invalidates the cache and re-reads, so a late write is never hidden. The
+  fingerprint is composed from the canonical snapshots of ONLY the files RELEVANT
+  to the day — those whose dated `capturedAt` `[min,max]` intersects it, that
+  have a file issue, or whose undated bound intersects it — using `capturedAt`,
+  NOT file mtime, for relevance (A3-25). So today's active session appending does
+  not churn a past day's fingerprint (D151), while a backfill with an in-day
+  `capturedAt` DOES invalidate that day. A content update while a past day is
+  being read refreshes in place — the day stays selected and the scroll is not
+  yanked (only today follows live capture; a day change scrolls once).
+  - **Collision resistance**: each file's fingerprint is `(size, mtime, ctime)`
+    with FULL sub-second mtime — a normal rewrite advances mtime, and a
+    same-mtime+same-size rewrite is still caught because st_ctime always advances
+    on any write and cannot be backdated (mtime alone would collide). The day
+    fingerprint is folded into the cheap input fingerprint for past days AND today
+    (D161), so a same-count/same-endpoint rewrite forces a republish.
+  - **Torn-read safety (D42)**: the canonical decode re-stats after reading; a
+    file that changed under the read is retried once and, if still changing, fails
+    closed rather than caching a torn snapshot. The settle-check compares
+    `(mod, size, ctime)` — ctime is included so a same-mtime+same-size CONCURRENT
+    rewrite (A decodes old, B publishes new keeping mtime/size, A resumes) is
+    detected on A's post-decode re-stat (B's ctime advanced), forcing A to retry and
+    settle on the new content instead of rolling back to the stale decode. A read
+    failure is never cached (recovers after a permission repair), and a newer
+    fingerprint is never rolled back to an older one.
+  - **Bounded residency (A3-N01)**: both in-memory caches (the canonical snapshot
+    index and the decode cache) are capped at a fixed number of sessions
+    (insertion-order/FIFO eviction under their existing locks) so residency cannot
+    grow without limit over months of continuous use. Below the cap behavior is
+    identical to unbounded; above it the overflow re-decodes each scan (correct,
+    just slower — the durable `capturedAt` scan-skip index, deferred A3-N01, is the
+    real remedy for that cliff, NOT a larger cap, because `canonicalSnapshots`
+    touches every session each pass). Eviction can NEVER re-materialize P0-848: an
+    evicted entry re-enters `buildSnapshot`, which consults the provenance-bound
+    sidecar before the ctime predicate, so determinism survives eviction exactly as
+    it survives a restart.
+- **Poll timer idempotency (D92/D152)**: `start()` is idempotent — a duplicate
   `start()` (e.g. a repeated `onAppear`) keeps the same single 3-second timer
   rather than leaking a second one that `stop()` can't reach; `stop()` clears
-  it and `deinit` invalidates it.
+  it and `deinit` invalidates it. The initial `load()` sits BEHIND the same
+  already-started guard (D152), so a duplicate `start()` re-enqueues neither a
+  timer NOR a redundant load — the first `start()` owns exactly one load and one
+  timer, and repeats are no-ops until `stop()`.
 
 ### Transport privacy (D59)
 

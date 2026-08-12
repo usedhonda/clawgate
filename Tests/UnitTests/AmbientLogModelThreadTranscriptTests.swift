@@ -313,6 +313,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let sceneA = AmbientLogGrouping.scenes(from: a + b, timeZone: jst)[0].id
 
         let model = AmbientLogModel()
+        model.sessionsRootOverrideForTesting = root
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [sceneA]
         let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "A", sessionsRoot: root)
@@ -376,6 +377,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let sceneA = AmbientLogGrouping.scenes(from: a + b, timeZone: jst)[0].id
 
         let model = AmbientLogModel()
+        model.sessionsRootOverrideForTesting = root
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [sceneA]
 
@@ -613,7 +615,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         try writeSession("ctx-x", [seg("A", at: base - 600), seg("B", at: base - 300), undated], under: root)
 
         let scan = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
-        XCTAssertEqual(scan.missingTimestampCount, 1, "the undated line is counted as a source issue")
+        XCTAssertEqual(scan.issues.missingTimestampCount, 1, "the undated line is counted as a source issue")
         XCTAssertTrue(scan.hasSourceIssue)
         XCTAssertEqual(scan.window.map(\.text), ["A", "B"], "dated segments still form the window")
     }
@@ -634,8 +636,8 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let scan = AmbientStorage.scanBackward(
             anchor: anchor, sanityCapHours: 48, timeZone: jst, sessionsRoot: root)
 
-        XCTAssertEqual(scan.missingTimestampCount, 0)
-        XCTAssertEqual(scan.readFailureCount, 0)
+        XCTAssertEqual(scan.issues.missingTimestampCount, 0)
+        XCTAssertEqual(scan.issues.readFailureCount, 0)
         XCTAssertFalse(scan.hasSourceIssue)
         XCTAssertTrue(scan.truncatedBeforeCoverage)
     }
@@ -655,7 +657,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         try (existing + "{ this is not json\n").write(to: raw, atomically: true, encoding: .utf8)
 
         let scan = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
-        XCTAssertEqual(scan.decodeFailureCount, 1, "the malformed line is counted")
+        XCTAssertEqual(scan.issues.decodeFailureCount, 1, "the malformed line is counted")
         XCTAssertTrue(scan.hasSourceIssue)
         XCTAssertEqual(scan.window.map(\.text), ["valid"], "the valid segment is still returned")
     }
@@ -668,6 +670,854 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let scan = AmbientStorage.scanBackward(anchor: Date(), sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
         XCTAssertFalse(scan.hasSourceIssue, "an absent root is empty, not a source issue")
         XCTAssertTrue(scan.window.isEmpty)
+    }
+
+    /// A3-02: an EXISTING but unreadable sessions root is a source issue (old
+    /// impl folded ENOENT and EACCES into the same "no records" empty).
+    func testScanBackwardUnreadableExistingRootIsSourceIssue() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try writeSession("ctx-1", [seg("x", at: Date().timeIntervalSince1970 - 600)], under: root)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: root.path)
+
+        let scan = AmbientStorage.scanBackward(anchor: Date(), sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertTrue(scan.issues.rootUnreadable, "an existing unreadable root is flagged (not silent empty)")
+        XCTAssertTrue(scan.hasSourceIssue)
+    }
+
+    /// A3-03/D177: a fresh ctx whose raw.jsonl has not been written yet is a
+    /// normal 0-record session, NOT a read failure (old impl counted the absent
+    /// raw as readFailure and refused every action right after startup).
+    func testScanBackwardFreshCtxWithoutRawIsNotAFailure() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+
+        try writeSession("ctx-valid", [seg("valid", at: base - 600)], under: root)
+        // A fresh session: transcripts/ exists but raw.jsonl was never written.
+        let freshDir = root.appendingPathComponent("ctx-fresh/transcripts", isDirectory: true)
+        try FileManager.default.createDirectory(at: freshDir, withIntermediateDirectories: true)
+
+        let scan = AmbientStorage.scanBackward(anchor: Date(timeIntervalSince1970: base),
+                                               sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertFalse(scan.hasSourceIssue, "a fresh ctx without raw.jsonl is 0 records, not a failure")
+        XCTAssertEqual(scan.window.map(\.text), ["valid"], "the valid session still dispatches")
+    }
+
+    /// A3-03: an EXISTING raw that cannot be read IS a source issue.
+    func testScanBackwardUnreadableExistingRawIsSourceIssue() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+
+        try writeSession("ctx-x", [seg("x", at: base - 600)], under: root)
+        let raw = root.appendingPathComponent("ctx-x/transcripts/raw.jsonl")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: raw.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: raw.path) }
+
+        let scan = AmbientStorage.scanBackward(anchor: Date(timeIntervalSince1970: base),
+                                               sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertGreaterThanOrEqual(scan.issues.readFailureCount, 1, "an unreadable existing raw is an issue")
+        XCTAssertTrue(scan.hasSourceIssue)
+    }
+
+    /// A3-05: a read failure is NOT cached — after the permission is restored
+    /// (mtime/size unchanged, so a cached failure would persist) the next scan
+    /// recovers instead of refusing forever.
+    func testReadFailureNotCachedRecoversAfterPermissionRestore() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+        let anchor = Date(timeIntervalSince1970: base)
+
+        try writeSession("ctx-r", [seg("v", at: base - 600)], under: root)
+        let raw = root.appendingPathComponent("ctx-r/transcripts/raw.jsonl")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: raw.path)
+        let scan1 = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertTrue(scan1.hasSourceIssue, "unreadable raw -> source issue")
+
+        // Restore read permission WITHOUT touching content (mtime/size unchanged).
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: raw.path)
+        let scan2 = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertFalse(scan2.hasSourceIssue, "after permission restore the read recovers (failure was not cached)")
+        XCTAssertEqual(scan2.window.map(\.text), ["v"], "segments recovered, not stuck on a cached failure")
+    }
+
+    /// A3-05/D42: a rewrite that races the decode is retried against the settled
+    /// file — the torn (old) snapshot is never cached or returned, and a later
+    /// scan serves the settled content (no rollback to the old bytes).
+    func testMidDecodeRewriteRetriesAndCachesSettledContentNotTorn() throws {
+        let root = makeTempSessionsRoot()
+        let rawPath = root.appendingPathComponent("ctx-race/transcripts/raw.jsonl").path
+        defer {
+            AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawPath)
+            try? FileManager.default.removeItem(at: root)
+        }
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let base = Calendar(identifier: .gregorian).date(from: c)!.timeIntervalSince1970
+        let anchor = Date(timeIntervalSince1970: base)
+
+        try writeSession("ctx-race", [seg("old", at: base - 600)], under: root)   // F1
+        // On the first decode only, rewrite the file to F2 (different content+size).
+        // The registry already targets this exact canonical raw path, so the hook
+        // body only guards reentrancy (`rewrote`).
+        var rewrote = false
+        AmbientStorage.setDecodePauseHookForTesting(rawPath: rawPath) { [weak self] _ in
+            guard let self, !rewrote else { return }
+            rewrote = true
+            try? self.writeSession("ctx-race",
+                                   [seg("new1", at: base - 500), seg("new2", at: base - 400)], under: root)
+        }
+
+        let scan = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawPath)
+        XCTAssertEqual(scan.window.map(\.text), ["new1", "new2"],
+                       "a mid-decode rewrite is retried; the settled F2 is returned, never the torn F1")
+
+        let scan2 = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 1, timeZone: jst, sessionsRoot: root)
+        XCTAssertEqual(scan2.window.map(\.text), ["new1", "new2"],
+                       "the cache holds the settled F2 — never rolled back to F1")
+    }
+
+    // MARK: - A3-25 canonical snapshot / undated provenance bound
+
+    private let utc = TimeZone(identifier: "UTC")!
+    private func iso(_ s: String) -> Double {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f.date(from: s)!.timeIntervalSince1970
+    }
+    private func setRawMtime(_ id: String, _ epoch: Double, under root: URL) throws {
+        let raw = root.appendingPathComponent("\(id)/transcripts/raw.jsonl")
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: epoch)], ofItemAtPath: raw.path)
+    }
+    private func undatedSeg(_ text: String) -> TranscriptSegment {
+        var s = TranscriptSegment(startSeconds: 0, endSeconds: 1, text: text); s.capturedAt = nil; return s
+    }
+    private func writePreset(_ id: String, chunkSeconds: Int, under root: URL) throws {
+        let dir = root.appendingPathComponent(id, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let json = "{\"chunkSeconds\":\(chunkSeconds),\"preset\":\"default\",\"promptUsed\":false}"
+        try Data(json.utf8).write(to: dir.appendingPathComponent("preset.json"))
+    }
+
+    /// A3-25: only the two capture-policy values proven by repository history
+    /// receive precise margins; missing/unknown metadata fails closed to 63s.
+    func testUndatedLowerMarginIsVersionedMapping() throws {
+        let session = "ctx-2026-06-09T10-00-00Z"
+        let s1Start = iso("2026-06-09T10:00:00Z")
+        func lower(preset chunkSeconds: Int?) throws -> Double {
+            let root = makeTempSessionsRoot()
+            defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try writeSession(session, [undatedSeg("u")], under: root)
+            if let chunkSeconds { try writePreset(session, chunkSeconds: chunkSeconds, under: root) }
+            return AmbientStorage.canonicalSnapshots(sessionsRoot: root).snapshots
+                .first { $0.path.contains(session) }!.undatedLower!
+        }
+        XCTAssertEqual(try lower(preset: 30), s1Start - 33, accuracy: 0.001)
+        XCTAssertEqual(try lower(preset: 20), s1Start - 20, accuracy: 0.001)
+        XCTAssertEqual(try lower(preset: nil), s1Start - 63, accuracy: 0.001)
+        XCTAssertEqual(try lower(preset: 45), s1Start - 63, accuracy: 0.001,
+                       "unknown values do not inherit an unproven +3 overlap")
+    }
+
+    /// A3-25/D42 point2: a reader whose decode is raced by a newer publish returns
+    /// the SETTLED (new) content, never the torn/old snapshot, and the index is
+    /// never rolled back to the old bytes.
+    func testConcurrentNewerPublishIsNotRolledBack() throws {
+        let root = makeTempSessionsRoot()
+        let rawPath = root.appendingPathComponent("ctx-2026-06-09T10-00-00Z/transcripts/raw.jsonl").path
+        defer {
+            AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawPath)
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        let anchor = Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z"))
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("old", at: iso("2026-06-09T10:00:00Z"))], under: root)
+
+        var fired = false
+        AmbientStorage.setDecodePauseHookForTesting(rawPath: rawPath) { [weak self] _ in
+            guard let self, !fired else { return }
+            fired = true
+            // "B": rewrite to newer content and publish it into the index while
+            // "A" is mid-decode of the old bytes.
+            try? self.writeSession("ctx-2026-06-09T10-00-00Z", [seg("new", at: iso("2026-06-09T10:30:00Z"))], under: root)
+            _ = AmbientStorage.canonicalSnapshots(sessionsRoot: root)
+        }
+        // "A": resumes after the racing publish; its re-stat retries onto the
+        // settled (new) content.
+        let aScan = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawPath)
+        XCTAssertEqual(aScan.window.map(\.text), ["new"], "A returns the settled newer content, never the torn old snapshot")
+
+        // The index was not rolled back: a cache-served scan is still the new content.
+        let cached = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertEqual(cached.window.map(\.text), ["new"], "the index holds the newer content, never rolled back to old")
+    }
+
+    /// A3-25/D42 point3 (Cdx): the decode-pause seam is a PATH-SCOPED registry, so
+    /// two hooks for the SAME relative raw path under DIFFERENT temp roots coexist.
+    /// The old suffix-keyed registry collided on that shared suffix, while exact
+    /// canonical paths preserve both registrations without cross-fire.
+    func testDecodePauseHooksArePathScopedAndDoNotCrossFire() throws {
+        let rootA = makeTempSessionsRoot()
+        let rootB = makeTempSessionsRoot()
+        let session = "ctx-2026-06-09T10-00-00Z"
+        let rawA = rootA.appendingPathComponent("\(session)/transcripts/raw.jsonl").path
+        let rawB = rootB.appendingPathComponent("\(session)/transcripts/raw.jsonl").path
+        defer {
+            AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawA)
+            AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawB)
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: rootA)
+            try? FileManager.default.removeItem(at: rootB)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession(session, [seg("a", at: iso("2026-06-09T10:00:00Z"))], under: rootA)
+        try writeSession(session, [seg("b", at: iso("2026-06-09T10:00:00Z"))], under: rootB)
+
+        // Register A THEN B (B is the later writer — the one that clobbered A under
+        // the old single-slot seam). Each hook records which raw path it actually saw.
+        var aFiredFor: [String] = []
+        var bFiredFor: [String] = []
+        AmbientStorage.setDecodePauseHookForTesting(rawPath: rawA) { aFiredFor.append($0) }
+        AmbientStorage.setDecodePauseHookForTesting(rawPath: rawB) { bFiredFor.append($0) }
+
+        _ = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: rootA)
+        _ = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: rootB)
+
+        XCTAssertEqual(aFiredFor.count, 1, "hook A fires exactly once (old single slot: B clobbers A -> 0)")
+        XCTAssertEqual(bFiredFor.count, 1, "hook B fires exactly once")
+        XCTAssertEqual(aFiredFor.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+                       [URL(fileURLWithPath: rawA).resolvingSymlinksInPath().path])
+        XCTAssertEqual(bFiredFor.map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+                       [URL(fileURLWithPath: rawB).resolvingSymlinksInPath().path])
+    }
+
+    /// A3-25/#7 (D42 point2, ctime in the equality fingerprint): a content rewrite
+    /// with the SAME size AND SAME mtime is still re-decoded, never served stale,
+    /// because st_ctime advances on every write and cannot be backdated. The old
+    /// `size:mtime` fingerprint would collide and return the stale content.
+    func testSameSizeSameMtimeButNewCtimeIsReDecodedNotStale() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        let anchor = Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z"))
+        let fixedMtime = iso("2026-06-09T10:05:00Z")
+        let at = iso("2026-06-09T10:00:00Z")
+
+        // "old" and "new" are both 3 ASCII chars -> identical serialized raw size.
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("old", at: at)], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+        let scan1 = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertEqual(scan1.window.map(\.text), ["old"])
+
+        // Rewrite same-size content, then restore the SAME mtime. Size and mtime are
+        // now identical to before; only st_ctime advanced (the rewrite + setAttributes
+        // bump it). The old (size:mtime)-only fingerprint would collide and serve the
+        // stale "old"; the (size:mtime:ctime) fingerprint detects it and re-decodes.
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("new", at: at)], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+        let scan2 = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertEqual(scan2.window.map(\.text), ["new"],
+                       "same size+mtime but a new ctime is re-decoded, never served stale (D42 point2/#7)")
+    }
+
+    func testSameMtimeSameSizeConcurrentRewriteSettlesOnNewNotStale() throws {
+        let root = makeTempSessionsRoot()
+        let rawPath = root.appendingPathComponent("ctx-2026-06-09T10-00-00Z/transcripts/raw.jsonl").path
+        defer {
+            AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawPath)
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        let anchor = Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z"))
+        let fixedMtime = iso("2026-06-09T10:05:00Z")
+        let at = iso("2026-06-09T10:00:00Z")
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("old", at: at)], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+
+        var fired = false
+        AmbientStorage.setDecodePauseHookForTesting(rawPath: rawPath) { [weak self] _ in
+            guard let self, !fired else { return }
+            fired = true
+            try? self.writeSession("ctx-2026-06-09T10-00-00Z", [seg("new", at: at)], under: root)
+            try? self.setRawMtime("ctx-2026-06-09T10-00-00Z", fixedMtime, under: root)
+            _ = AmbientStorage.canonicalSnapshots(sessionsRoot: root)
+        }
+        let first = AmbientStorage.scanBackward(
+            anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        AmbientStorage.removeDecodePauseHookForTesting(rawPath: rawPath)
+        XCTAssertEqual(first.window.map(\.text), ["new"])
+        XCTAssertEqual(AmbientStorage.scanBackward(
+            anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root).window.map(\.text), ["new"])
+    }
+
+    /// A3-25/#4: a stable (same-fingerprint) file is decoded exactly ONCE across
+    /// repeated scans — the canonical index reuses the snapshot (no rebuild) and the
+    /// session cache dedups the decode below it.
+    func testStableFileFingerprintDecodesOncePerProcess() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("x", at: iso("2026-06-09T10:00:00Z"))], under: root)
+        let anchor = Date(timeIntervalSince1970: iso("2026-06-09T13:00:00Z"))
+
+        AmbientStorage.decodeCountForTesting = 0
+        for _ in 0..<3 {
+            _ = AmbientStorage.scanBackward(anchor: anchor, sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        }
+        XCTAssertEqual(AmbientStorage.decodeCountForTesting, 1,
+                       "a stable same-fingerprint file is decoded exactly once across repeated scans")
+    }
+
+    /// A3-25 (P0 848件): an undated file's provenance bound only makes a query a
+    /// source issue when it INTERSECTS the window. A June session's undated
+    /// records (bounded by its next session) can't touch an Aug automatic window,
+    /// so the query is NOT refused (a GLOBAL count would refuse every query); a
+    /// query on the undated file's OWN day IS refused.
+    func testUndatedFileBoundOnlyIssuesWhenIntersectsWindow() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        // st_ctime can't be backdated on disk (setAttributes sets it to NOW), so a
+        // June-only fixture would read a now-ctime and become non-deterministic.
+        // Inject a June ctime (<= the June-12 next SID) to make the bound the
+        // genuinely-consistent one this test is about.
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+
+        // S1 (June 9 10:00) undated-only; S2 (June 9 12:00) dated -> S1 has a next
+        // session bound. Backdate mtimes to June (mtime <= next SID => deterministic).
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u1"), undatedSeg("u2")], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:30:00Z"), under: root)
+        try writeSession("ctx-2026-06-09T12-00-00Z", [seg("dated", at: iso("2026-06-09T12:05:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T12-00-00Z", iso("2026-06-09T12:10:00Z"), under: root)
+
+        let augScan = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-08-09T12:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertFalse(augScan.hasSourceIssue,
+                       "a June undated bound can't touch an Aug window -> not an issue (else all 848 refuse)")
+
+        let juneDay = AmbientStorage.segmentsForDayWithIssues(
+            forDay: Date(timeIntervalSince1970: iso("2026-06-09T10:00:00Z")), timeZone: utc, sessionsRoot: root)
+        XCTAssertTrue(juneDay.issues.hasIssue, "the undated file's bound intersects its own day -> source issue")
+    }
+
+    /// A3-25/D151: an unrelated TODAY-session append (capturedAt today) must NOT
+    /// change a PAST day's fingerprint — relevance is by capturedAt [min,max], not
+    /// mtime, so a viewed past day is not re-scanned every poll during live capture.
+    func testTodayAppendDoesNotChurnPastDayFingerprint() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        let pastDay = Date(timeIntervalSince1970: iso("2026-06-09T00:00:00Z"))
+
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("past", at: iso("2026-06-09T10:00:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:05:00Z"), under: root)
+        let fp1 = AmbientStorage.dayFingerprint(forDay: pastDay, timeZone: utc, sessionsRoot: root)
+
+        try writeSession("ctx-2026-08-09T10-00-00Z", [seg("today", at: iso("2026-08-09T10:00:00Z"))], under: root)
+        let fp2 = AmbientStorage.dayFingerprint(forDay: pastDay, timeZone: utc, sessionsRoot: root)
+
+        XCTAssertEqual(fp1, fp2, "an unrelated today-session append must not change a past day's fingerprint (D151)")
+    }
+
+    /// A3-25: the in-memory index is not durable — a rebuild (as after a restart)
+    /// yields the same segments and issues.
+    func testCanonicalIndexRebuildYieldsSameResult() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("a", at: iso("2026-06-09T10:00:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:05:00Z"), under: root)
+        let day = Date(timeIntervalSince1970: iso("2026-06-09T00:00:00Z"))
+
+        let r1 = AmbientStorage.segmentsForDayWithIssues(forDay: day, timeZone: utc, sessionsRoot: root)
+        let fp1 = AmbientStorage.dayFingerprint(forDay: day, timeZone: utc, sessionsRoot: root)
+        AmbientStorage.clearCanonicalIndexForTesting()  // simulate a restart
+        let r2 = AmbientStorage.segmentsForDayWithIssues(forDay: day, timeZone: utc, sessionsRoot: root)
+        let fp2 = AmbientStorage.dayFingerprint(forDay: day, timeZone: utc, sessionsRoot: root)
+
+        XCTAssertEqual(r1.segments.map(\.text), r2.segments.map(\.text), "rebuilt index -> same segments")
+        XCTAssertEqual(r1.issues, r2.issues, "rebuilt index -> same issues")
+        // #3: the rebuild (as after a restart) also yields the SAME fingerprint —
+        // the (size, mtime, ctime) composition is stable for an unchanged file.
+        XCTAssertEqual(fp1, fp2, "rebuilt index -> same day fingerprint (restart-stable)")
+    }
+
+    /// A3-25: a LAST session's undated records have no NEXT session, so their
+    /// bound is unknown (open) and fails closed for ANY window — the model can't
+    /// be sent an undated record it can't place (D33 unique provenance ID needed
+    /// before inclusion).
+    func testLastSessionUndatedUnknownBoundIssuesAnyWindow() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u")], under: root)  // only session -> no next
+        let scan = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-08-09T12:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertTrue(scan.hasSourceIssue, "a last session's undated (no next => unknown bound) fails closed for any window")
+    }
+
+    /// A3-25/D151 (flip side): a backfill that writes an in-day `capturedAt`
+    /// (even with an OLD mtime) DOES invalidate that day's fingerprint — coverage
+    /// relevance is by capturedAt, so it is not hidden behind the mtime.
+    func testBackfillWithInDayCapturedAtInvalidatesDayFingerprint() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        let pastDay = Date(timeIntervalSince1970: iso("2026-06-09T00:00:00Z"))
+
+        try writeSession("ctx-2026-06-09T10-00-00Z", [seg("orig", at: iso("2026-06-09T10:00:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:05:00Z"), under: root)
+        let fp1 = AmbientStorage.dayFingerprint(forDay: pastDay, timeZone: utc, sessionsRoot: root)
+
+        // Backfill: a different session with a June-9 capturedAt but an OLD mtime.
+        try writeSession("ctx-2026-06-09T11-00-00Z", [seg("backfill", at: iso("2026-06-09T11:00:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T11-00-00Z", iso("2026-06-09T11:05:00Z"), under: root)
+        let fp2 = AmbientStorage.dayFingerprint(forDay: pastDay, timeZone: utc, sessionsRoot: root)
+
+        XCTAssertNotEqual(fp1, fp2, "a backfill with an in-day capturedAt invalidates the day (relevance by capturedAt, not mtime)")
+    }
+
+    /// A3-25: an undated file whose raw mtime is AFTER its next session's start is
+    /// a consistency failure — the bound is non-deterministic (unknown/open) and
+    /// fails closed, rather than trusting a possibly-wrong provenance range.
+    func testUndatedMtimeAfterNextSessionIsUnknownBoundAndIssues() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u")], under: root)
+        try writeSession("ctx-2026-06-09T12-00-00Z", [seg("dated", at: iso("2026-06-09T12:05:00Z"))], under: root)
+        // S1's mtime is AFTER S2's start (June 13:00 > June 12:00) — inconsistent.
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T13:00:00Z"), under: root)
+        try setRawMtime("ctx-2026-06-09T12-00-00Z", iso("2026-06-09T12:10:00Z"), under: root)
+
+        let augScan = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-08-09T12:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertTrue(augScan.hasSourceIssue,
+                      "mtime after the next session start => non-deterministic bound => fails closed for any window")
+    }
+
+    /// A3-25/D153 (Cdx point 2): an undated file whose provenance bound lies
+    /// ENTIRELY older than the cap is retained data OLDER than coverage — it must
+    /// set `truncatedBeforeCoverage`, contribute 0 window segments, and NOT be a
+    /// source issue. `upper == cap` is still "entirely older" (half-open bound).
+    func testUndatedBoundEntirelyOlderThanCapMarksTruncatedNotIssue() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        // S1 (June 9 10:00) undated-only; S2 (June 9 12:00) gives S1 a next-SID
+        // upper of June-12. Make S1 genuinely consistent (mtime + injected ctime
+        // both <= June-12).
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u")], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:30:00Z"), under: root)
+        // S2's dated segment sits well AFTER the anchors below, so it never itself
+        // triggers truncation (dated `at < cap`) — the flag can only come from S1's
+        // undated older-than-cap bound.
+        try writeSession("ctx-2026-06-09T12-00-00Z", [seg("s2", at: iso("2026-06-09T18:00:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T12-00-00Z", iso("2026-06-09T12:10:00Z"), under: root)
+
+        // Strictly older: cap (June-16) is after upper (June-12).
+        let strict = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-06-09T20:00:00Z")),
+            sanityCapHours: 4, timeZone: utc, sessionsRoot: root)  // cap = June-16
+        XCTAssertTrue(strict.truncatedBeforeCoverage,
+                      "an undated bound entirely older than cap sets truncatedBeforeCoverage")
+        XCTAssertEqual(strict.issues.missingTimestampCount, 0,
+                       "an older-than-cap undated bound is NOT a source issue (it can't touch the window)")
+        XCTAssertFalse(strict.window.contains { $0.text == "u" },
+                       "undated records are never included in the window")
+
+        // Exact boundary: cap == upper (June-12). Half-open bound => still older.
+        let boundary = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-06-09T16:00:00Z")),
+            sanityCapHours: 4, timeZone: utc, sessionsRoot: root)  // cap = June-12 == upper
+        XCTAssertTrue(boundary.truncatedBeforeCoverage,
+                      "upper == cap is still entirely older (upper <= cap), so truncatedBeforeCoverage holds")
+        XCTAssertEqual(boundary.issues.missingTimestampCount, 0, "boundary bound is not a source issue")
+    }
+
+    /// A3-25/D153 (Cdx point 2, exclusivity): for the SAME window, a file whose
+    /// undated bound is older-than-cap contributes ONLY truncation, while a file
+    /// whose undated bound intersects the window contributes ONLY a source issue —
+    /// never both, never neither.
+    func testUndatedTruncationAndIntersectAreMutuallyExclusive() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        // Consistent ctime per file: OLD (June) <= its June-12 next; IN (Aug) <= its
+        // Aug-15 next.
+        AmbientStorage.ctimeProviderForTesting = { path in
+            path.contains("T10-00-00Z") ? Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z"))
+                                        : Date(timeIntervalSince1970: self.iso("2026-08-09T09:30:00Z"))
+        }
+        // OLD: undated June-9 10:00, next SID June-9 12:00 (upper June-12).
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("old")], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:30:00Z"), under: root)
+        try writeSession("ctx-2026-06-09T12-00-00Z", [seg("june", at: iso("2026-06-09T12:05:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T12-00-00Z", iso("2026-06-09T12:10:00Z"), under: root)
+        // IN: undated Aug-9 09:00, next SID Aug-9 15:00 (upper Aug-15) — intersects
+        // the Aug window below.
+        try writeSession("ctx-2026-08-09T09-00-00Z", [undatedSeg("in")], under: root)
+        try setRawMtime("ctx-2026-08-09T09-00-00Z", iso("2026-08-09T09:30:00Z"), under: root)
+        try writeSession("ctx-2026-08-09T15-00-00Z", [seg("aug", at: iso("2026-08-09T15:05:00Z"))], under: root)
+        try setRawMtime("ctx-2026-08-09T15-00-00Z", iso("2026-08-09T15:10:00Z"), under: root)
+
+        let scan = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-08-09T14:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: root)  // cap = Aug-7 14:00
+        XCTAssertTrue(scan.truncatedBeforeCoverage,
+                      "the OLD (June) undated bound is entirely older than cap => truncation")
+        XCTAssertEqual(scan.issues.missingTimestampCount, 1,
+                       "only the IN (Aug) undated bound intersects => exactly one source issue, not double-counted")
+    }
+
+    /// A3-25/D153 (Cdx point 2, check b): an unknown/open undated bound (a last
+    /// session with no next SID) fails closed as a SOURCE ISSUE but must NOT set
+    /// `truncatedBeforeCoverage` — an open bound is not evidence of older-than-cap
+    /// data, and asserting truncation would claim evidence that does not exist.
+    func testUnknownUndatedBoundIsIssueButNotTruncated() throws {
+        let root = makeTempSessionsRoot()
+        defer { AmbientStorage.clearCanonicalIndexForTesting(); try? FileManager.default.removeItem(at: root) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u")], under: root)  // only session -> no next
+        let scan = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-08-09T12:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertTrue(scan.hasSourceIssue, "an unknown/open bound fails closed as a source issue")
+        XCTAssertFalse(scan.truncatedBeforeCoverage,
+                       "an unknown/open bound must NOT assert older-than-cap truncation evidence")
+    }
+
+    /// A3-25 (Cdx supplement): a file whose mtime is <= next SID (looks fine) but
+    /// whose st_ctime is AFTER the next SID — a backdated mtime on a
+    /// recently-touched file — is a consistency failure: the bound is
+    /// non-deterministic (unknown/open) and fails closed for any window. ctime,
+    /// unlike mtime, cannot be forged by setAttributes.
+    func testUndatedCtimeAfterNextSessionIsUnknownBound() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u")], under: root)
+        try writeSession("ctx-2026-06-09T12-00-00Z", [seg("dated", at: iso("2026-06-09T12:05:00Z"))], under: root)
+        // mtime looks consistent (June-10 30 <= next SID June-12)...
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:30:00Z"), under: root)
+        try setRawMtime("ctx-2026-06-09T12-00-00Z", iso("2026-06-09T12:10:00Z"), under: root)
+        // ...but the injected ctime is AFTER the next SID (the file was really
+        // touched in August) => the backdated mtime is caught, bound is unknown.
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-08-01T00:00:00Z")) }
+        let augScan = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-08-09T12:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertTrue(augScan.hasSourceIssue,
+                      "ctime after the next SID => non-deterministic bound => fails closed for any window")
+    }
+
+    func testUndatedCtimeUnavailableIsUnknownBound() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u")], under: root)
+        try writeSession("ctx-2026-06-09T12-00-00Z", [seg("dated", at: iso("2026-06-09T12:05:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:30:00Z"), under: root)
+        try setRawMtime("ctx-2026-06-09T12-00-00Z", iso("2026-06-09T12:10:00Z"), under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in nil }
+        let scan = AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-08-09T12:00:00Z")),
+            sanityCapHours: 48, timeZone: utc, sessionsRoot: root)
+        XCTAssertTrue(scan.hasSourceIssue,
+                      "unavailable ctime makes the provenance bound non-deterministic")
+    }
+
+    // MARK: - Provenance-bound sidecar (ctime hygiene)
+
+    /// Shared setup for the sidecar fixtures: an undated session A whose next
+    /// session B fixes its upper bound, with A's mtime consistent (<= B's SID). The
+    /// query window is chosen so A's DETERMINISTIC bound [start-63, B) does NOT
+    /// intersect it (no issue), while a NON-deterministic bound (open both sides)
+    /// intersects ANY window (issue) — so `hasSourceIssue` is the discriminator
+    /// between "bound trusted deterministic" and "refuses".
+    private func writeSidecarFixtureSessions(under root: URL) throws {
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("u")], under: root)
+        try writeSession("ctx-2026-06-09T12-00-00Z", [seg("dated", at: iso("2026-06-09T12:05:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:30:00Z"), under: root)
+        try setRawMtime("ctx-2026-06-09T12-00-00Z", iso("2026-06-09T12:10:00Z"), under: root)
+    }
+    /// anchor 20:00 with a 4h cap => window [16:00, 20:00); A's deterministic bound
+    /// [09:58:57, 12:00) lies entirely below it.
+    private func sidecarFixtureScan(under root: URL) -> AmbientStorage.BackwardScan {
+        AmbientStorage.scanBackward(
+            anchor: Date(timeIntervalSince1970: iso("2026-06-09T20:00:00Z")),
+            sanityCapHours: 4, timeZone: utc, sessionsRoot: root)
+    }
+    private func sidecarPath(under root: URL) -> URL {
+        root.appendingPathComponent("ctx-2026-06-09T10-00-00Z/provenance-bound-v1.json")
+    }
+
+    /// Sidecar #1: the FIRST deterministic validation persists a trust record.
+    /// Before the first scan there is none; a consistent (mtime AND ctime <= next
+    /// SID) undated bound writes it. No record => nothing to trust on the next
+    /// launch, so this is the precondition for every other sidecar behavior.
+    func testSidecarFirstDeterministicValidationWritesTrustRecord() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sidecarPath(under: root).path),
+                       "no trust record exists before the first scan")
+        let scan = sidecarFixtureScan(under: root)
+        XCTAssertFalse(scan.hasSourceIssue, "consistent mtime+ctime => deterministic bound, no source issue")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecarPath(under: root).path),
+                      "the first deterministic validation writes the provenance trust record")
+        let sidecarMode = (try FileManager.default.attributesOfItem(atPath: sidecarPath(under: root).path)[.posixPermissions] as? NSNumber)?.intValue
+        let sessionDir = root.appendingPathComponent("ctx-2026-06-09T10-00-00Z")
+        let sessionMode = (try FileManager.default.attributesOfItem(atPath: sessionDir.path)[.posixPermissions] as? NSNumber)?.intValue
+        XCTAssertEqual(sidecarMode, 0o600, "the trust record is private from creation through publish")
+        XCTAssertEqual(sessionMode, 0o700, "the existing session directory converges to private permissions")
+    }
+
+    /// Sidecar #2 (THE ctime-fragility fix): once validated, a benign ctime flip
+    /// (chmod/rsync/backup restore, even while the app is off) across a restart must
+    /// NOT revoke the bound. Scan 1 validates + writes the record. Then ctime jumps
+    /// to AFTER the next SID (the benign flip) and the index is cleared (restart):
+    /// the record still matches (same sessionId/SHA/byteCount/nextSessionId/policy),
+    /// so the bound stays deterministic and the query still resolves.
+    /// OLD-FAIL (P0-848 re-materialized): DELETE the record and repeat the same
+    /// flip — with no trust record the live ctime>next check fails closed and EVERY
+    /// window refuses. The two halves share one flip; only the record differs.
+    func testSidecarSurvivesBenignCtimeFlipAcrossRestart() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+
+        // Scan 1: consistent ctime => deterministic => record written.
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue, "first validation is deterministic")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecarPath(under: root).path), "record written")
+
+        // Benign ctime flip to AFTER the next SID + restart (index cleared).
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-08-01T00:00:00Z")) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue,
+                       "a benign ctime flip after restart does NOT revoke the trusted deterministic bound")
+
+        // OLD-FAIL: remove the trust record, same flip => refuses for any window.
+        try FileManager.default.removeItem(at: sidecarPath(under: root))
+        AmbientStorage.clearCanonicalIndexForTesting()
+        XCTAssertTrue(sidecarFixtureScan(under: root).hasSourceIssue,
+                      "without the record the ctime>next flip fails closed (P0-848) — the record is load-bearing")
+    }
+
+    /// Sidecar #3 (content-addressed): a stale record must NOT trust a file whose
+    /// BYTES changed, even at identical size+mtime. Rewriting the undated content
+    /// (same size, same mtime) advances the SHA; the record's rawSHA256 no longer
+    /// matches, so trust falls back to the live ctime check — which (flipped past
+    /// next) now refuses. Proves the bound is bound to the content, not just identity.
+    func testSidecarDoesNotTrustChangedBytesAtSameSizeAndMtime() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue, "first validation is deterministic")
+
+        // Same-size ("u"->"x", both 1 ASCII char) same-mtime rewrite => new SHA.
+        try writeSession("ctx-2026-06-09T10-00-00Z", [undatedSeg("x")], under: root)
+        try setRawMtime("ctx-2026-06-09T10-00-00Z", iso("2026-06-09T10:30:00Z"), under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-08-01T00:00:00Z")) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        XCTAssertTrue(sidecarFixtureScan(under: root).hasSourceIssue,
+                      "a stale record never trusts changed bytes (SHA mismatch) => live ctime>next refuses")
+    }
+
+    /// Sidecar #4 (identity): the record binds the NEXT session's identity. Inserting
+    /// a new session between A and B changes A's `nextSessionId`, so the record no
+    /// longer matches and trust falls back to the live ctime check (flipped => refuses).
+    /// Guards against trusting a bound whose upper endpoint silently moved.
+    func testSidecarInvalidatedWhenNextSessionIdentityChanges() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue, "first validation is deterministic")
+
+        // A new session between A(10:00) and B(12:00): A's next is now 11:00, not B.
+        try writeSession("ctx-2026-06-09T11-00-00Z", [seg("mid", at: iso("2026-06-09T11:05:00Z"))], under: root)
+        try setRawMtime("ctx-2026-06-09T11-00-00Z", iso("2026-06-09T11:10:00Z"), under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-08-01T00:00:00Z")) }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        XCTAssertTrue(sidecarFixtureScan(under: root).hasSourceIssue,
+                      "a changed next-session identity invalidates the record => live ctime>next refuses")
+    }
+
+    /// Sidecar #5 (derived, re-generatable): a CORRUPT record is silently ignored
+    /// (never quarantined) and rebuilt. With a consistent live ctime the bound is
+    /// re-validated deterministic and a fresh, valid record replaces the garbage.
+    func testSidecarCorruptRecordIsIgnoredAndRebuilt() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue, "first validation is deterministic")
+
+        // Corrupt the record; ctime stays consistent so the live check still passes.
+        try Data("not-json{".utf8).write(to: sidecarPath(under: root))
+        AmbientStorage.clearCanonicalIndexForTesting()
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue,
+                       "a corrupt record is ignored, the bound re-validated deterministic")
+        let rebuilt = try Data(contentsOf: sidecarPath(under: root))
+        let obj = try JSONSerialization.jsonObject(with: rebuilt) as? [String: Any]
+        XCTAssertNotNil(obj?["rawSHA256"], "the garbage was replaced by a fresh valid trust record")
+    }
+
+    /// Sidecar #6 (non-sticky write failure): if the record cannot be written, the
+    /// determinism of THIS launch still holds (via the live ctime check — the
+    /// pre-sidecar baseline) and the raw file is untouched. The failure is diagnosed
+    /// (os.Logger) but leaves no record on disk, so it is not sticky.
+    func testSidecarUnwritableLeavesRawUntouchedAndStillDeterministicThisLaunch() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.sidecarWriteShouldFailForTesting = false
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+        let raw = root.appendingPathComponent("ctx-2026-06-09T10-00-00Z/transcripts/raw.jsonl")
+        let bytesBefore = try Data(contentsOf: raw)
+        let mtimeBefore = try FileManager.default.attributesOfItem(atPath: raw.path)[.modificationDate] as? Date
+
+        AmbientStorage.sidecarWriteShouldFailForTesting = true
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue,
+                       "determinism this launch holds via the live ctime check even when the record cannot be written")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sidecarPath(under: root).path),
+                       "a failed write leaves no record (non-sticky next launch)")
+        XCTAssertEqual(try Data(contentsOf: raw), bytesBefore, "the raw file bytes are untouched by a sidecar write failure")
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: raw.path)[.modificationDate] as? Date,
+                       mtimeBefore, "the raw file mtime is untouched by a sidecar write failure")
+    }
+
+    /// Sidecar #7 (atomic last-writer-wins): concurrent scans of the same session
+    /// each try to write the record; the UUID-temp + rename(2) publish means the
+    /// on-disk file is ALWAYS one complete valid record, never a torn/partial write.
+    func testSidecarConcurrentScansPublishOneValidAtomicRecord() throws {
+        let root = makeTempSessionsRoot()
+        defer {
+            AmbientStorage.ctimeProviderForTesting = nil
+            AmbientStorage.clearCanonicalIndexForTesting()
+            try? FileManager.default.removeItem(at: root)
+        }
+        AmbientStorage.clearCanonicalIndexForTesting()
+        try writeSidecarFixtureSessions(under: root)
+        AmbientStorage.ctimeProviderForTesting = { _ in Date(timeIntervalSince1970: self.iso("2026-06-09T10:30:00Z")) }
+
+        DispatchQueue.concurrentPerform(iterations: 24) { _ in
+            _ = sidecarFixtureScan(under: root)
+        }
+        let data = try Data(contentsOf: sidecarPath(under: root))
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertNotNil(obj?["rawSHA256"], "concurrent writers leave exactly one complete, valid record (atomic rename)")
+        XCTAssertFalse(sidecarFixtureScan(under: root).hasSourceIssue, "the published record trusts the deterministic bound")
+    }
+
+
+    /// A3-01: an EXPLICIT selection with a broken day source flags
+    /// sourceReadIncomplete and KEEPS the selection — a source failure must not
+    /// masquerade as scene loss (old impl reconciled to empty and cleared it).
+    func testExplicitSourceIssueKeepsSelectionAndFlagsSourceReadIncomplete() throws {
+        let root = makeTempSessionsRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var c = DateComponents(); c.year = 2026; c.month = 6; c.day = 20; c.hour = 12; c.timeZone = jst
+        let pastDay = Calendar(identifier: .gregorian).date(from: c)!
+        let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
+        let segs = [seg("A", at: dayStart + 100), seg("B", at: dayStart + 200)]
+        let sceneID = AmbientLogGrouping.scenes(from: segs, timeZone: jst)[0].id
+        try writeSession("ctx-day", segs, under: root)
+
+        // Make the day's source unreadable AFTER computing the scene id.
+        let raw = root.appendingPathComponent("ctx-day/transcripts/raw.jsonl")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: raw.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: raw.path) }
+
+        let model = AmbientLogModel()
+        model.selectedDay = startOfDayJST(pastDay)
+        model.selectedSceneIDs = [sceneID]
+        let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "x", sessionsRoot: root)
+
+        XCTAssertTrue(prepared.envelope.sourceReadIncomplete, "a broken day source flags sourceReadIncomplete")
+        XCTAssertFalse(prepared.envelope.staleScopeCleared, "a source failure is NOT treated as scene loss")
+        XCTAssertEqual(prepared.envelope.scopeOverride, [sceneID], "the user's selection is preserved, not cleared")
+
+        var dispatched = 0
+        model.commitPreparedLogQuery(prepared) { _, _ in dispatched += 1 }
+        XCTAssertEqual(model.selectedSceneIDs, [sceneID], "commit keeps the user's selection")
     }
 
     /// D20: midnight alone never splits a contiguous run.

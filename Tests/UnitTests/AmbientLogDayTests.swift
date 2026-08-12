@@ -102,17 +102,19 @@ final class AmbientLogDayTests: XCTestCase {
         XCTAssertTrue(run().isEmpty)
     }
 
-    func testOldModDateSessionIsSkippedEvenIfSegmentMatches() throws {
+    /// A3-25: coverage is decided by capturedAt, NOT file mtime. An old-mtime
+    /// session (a backfill/restore that preserved an old mod time) whose segment's
+    /// capturedAt falls inside the day IS read — the old mtime cutoff that used to
+    /// drop it is gone (it made display and query diverge on backfills, D17).
+    func testOldModDateSessionWithInDaySegmentIsReadByCapturedAt() throws {
         let start = dayStartEpoch()
-        // Fresh session (default mod time = now) with an in-day segment: read.
         try writeSession("ctx-fresh", [seg("fresh", at: start + 10)])
-        // Old session whose raw.jsonl mod time predates the day, yet contains a
-        // segment whose capturedAt falls inside the day. The mod-date cutoff must
-        // skip the file, so "leak" must never surface (proves the file is unread).
+        // Stale mtime (predates the day) but an in-day capturedAt segment.
         try writeSession(
             "ctx-old",
-            [seg("leak", at: start + 20)],
+            [seg("recovered", at: start + 20)],
             modDate: Date(timeIntervalSince1970: start - 3600))
-        XCTAssertEqual(run().map(\.text), ["fresh"])
+        XCTAssertEqual(run().map(\.text), ["fresh", "recovered"],
+                       "an in-day capturedAt is read regardless of an old file mtime (A3-25: no mtime coverage filter)")
     }
 }

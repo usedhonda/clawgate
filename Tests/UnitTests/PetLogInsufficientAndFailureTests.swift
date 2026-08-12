@@ -270,6 +270,29 @@ final class PetLogInsufficientAndFailureTests: XCTestCase {
         XCTAssertFalse(model.isSummonBusy)
     }
 
+    /// A3-04: when ALL segments are unusable the envelope is both empty AND
+    /// sourceReadIncomplete — the source-issue refusal must WIN over the generic
+    /// empty-scope refusal so corruption is not mis-reported as "no logs".
+    func testSourceReadIncompleteWinsOverEmptyScope() {
+        let model = PetModel()
+        model.connectionState = .connected
+        model.setSessionKeyForTesting("test-session")
+        model.suppressLogSendForTesting = true
+
+        let requestId = UUID().uuidString
+        var env = PetLogQueryEnvelope(
+            requestId: requestId, actionId: "free", instruction: "まとめて",
+            queryTimestamp: Date(), anchorTimestamp: Date(), scopeOverride: nil,
+            coverageStart: nil, coverageEnd: nil, completeBeforeAnchor: true,
+            segments: [])                       // empty (all lines were malformed)
+        env.sourceReadIncomplete = true
+        let accepted = model.sendLogInstruction(envelope: env)
+
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(model.logDispatchStatus, .sourceReadIncompleteRefused(requestId: requestId),
+                       "source issue wins over empty-scope — corruption is not mis-reported as 'no logs'")
+    }
+
     // MARK: - D153 truncated-before-coverage parser branches
 
     /// A truncated automatic answer must TRIM a real leading prefix — full
