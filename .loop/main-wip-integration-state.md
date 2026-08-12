@@ -4,33 +4,37 @@
 
 iteration cap 6 / no-progress 2 / wall-clock 90min
 
-## Seeded baseline (2026-08-12)
+## Baseline
 
-- branch/HEAD: `main` / `0282d0b`
-- remote relation at authoring: `origin/main` matched `0282d0b`
-- worktree: 13 modified files + 1 untracked test; no conflict markers
-- backup oracle: `stash@{0}: On main: preserve main worktree before wave-floating-goal merge`
-- diff size at authoring: 1,741 insertions / 329 deletions
-- full gate: not run by makeloop; this file seeds the execution loop only
-
-## Candidate units (must be confirmed from the full diff in iteration 0)
-
-| unit | visible paths | status | focused verification |
-| --- | --- | --- | --- |
-| Pet Log storage/source completeness | `AmbientStorage.swift`, `AmbientLogPetView.swift`, Pet Log tests/spec | pending inventory | relevant Ambient Log/Pet Log test classes |
-| Character manifest validation | `CharacterManifest.swift`, `CharacterManifestTests.swift` | pending inventory | `swift test --filter CharacterManifestTests` |
-| Pet test isolation ordering | four PetModel fixture files + `PetLogTestIsolationOrderingTests.swift` | pending inventory | ordering test + affected fixture classes |
-| Floating-window deltas | `PetFloatingWindowContractTests.swift`, `pet-floating-window-spec.md` | needs evidence | `swift test --filter PetFloatingWindowContractTests` |
+- `main` started at `0282d0b`; `origin/main` matched at inventory time.
+- 13 modified paths + 1 untracked test, 1,741 insertions / 329 deletions.
+- Backup oracle preserved: `stash@{0}: On main: preserve main worktree before wave-floating-goal merge`.
+- Floating-window paths contained only accidental conflict-resolution whitespace loss; restored to HEAD.
 
 ## Iterations
 
-No loop iteration has run yet.
+| iteration | unit | focused verification | result | commit |
+| --- | --- | --- | --- | --- |
+| 0 | full WIP inventory and loop contract | complete diff/path classification | 3 real units; floating-window whitespace proven accidental | `8f2d985` |
+| 1 | character sprite metadata validation | `swift test --filter CharacterManifestTests` | 34 pass; invalid bundle count corrected from capped diagnostics count | `b796935` |
+| 2 | Pet Log global test override ordering | isolation ordering + affected PetModel/PetLog classes | isolation classes green; independent A3-04 failure routed to iteration 3 | `3a5490a` |
+| 3 | Pet Log canonical provenance/source completeness | focused Ambient Log/Cache/Day/PetLog classes | 85 pass; sidecar permission follow-up 1 pass; real sessions sidecar count 0 | `83195f6` |
 
-## Last verified state
+## Accounted paths
 
-Contract generated only. Product WIP, tests, commits, runtime, stashes, and remotes were not changed.
+- Character manifest production/tests -> `b796935`.
+- Pet Log isolation test infrastructure -> `3a5490a`.
+- Pet Log storage, display/query reader, refusal ordering, focused tests, and normative spec -> `83195f6`.
+- Floating-window test/spec whitespace-only deltas -> restored to existing HEAD content; no behavior discarded.
+
+## Current verification state
+
+- Worktree clean after all product/test/spec commits.
+- Focused gates green; no conflict markers or untracked product files.
+- `provenance-bound-v1.json` count under the real sessions root: 0 after tests.
+- Fresh-eyes final diff review is running against `0282d0b..83195f6`.
 
 ## Next action
 
-Run iteration 0: inventory the full diff, confirm logical units/hunk splits, and choose the smallest
-focused unit. End with `ITERATING`; do not run the full suite during inventory.
+Run the final gate exactly once: diff check, leak check, build, full test, canonical local restart,
+health check, then record the evidence and finish with a clean worktree. Preserve `stash@{0}`.
