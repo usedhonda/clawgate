@@ -27,14 +27,17 @@ iteration cap 6 / no-progress 2 / wall-clock 90min
 - Pet Log storage, display/query reader, refusal ordering, focused tests, and normative spec -> `83195f6`.
 - Floating-window test/spec whitespace-only deltas -> restored to existing HEAD content; no behavior discarded.
 
-## Current verification state
+## Final gate (2026-08-12)
 
-- Worktree clean after all product/test/spec commits.
-- Focused gates green; no conflict markers or untracked product files.
-- `provenance-bound-v1.json` count under the real sessions root: 0 after tests.
-- Fresh-eyes final diff review is running against `0282d0b..83195f6`.
+- `git diff --check`: pass.
+- `bash scripts/security-leak-check.sh --all`: pass.
+- `swift build`: pass.
+- `swift test`: 658 executed, 1 skipped, 0 failures.
+- `./scripts/restart-local-clawgate.sh`: exit 0; app PID 56788.
+- `curl -fsS http://127.0.0.1:8765/v1/health`: `{"ok":true,"version":"0.1.0"}`.
+- Worktree was clean after the runtime gate; `stash@{0}` remains preserved.
 
 ## Next action
 
-Run the final gate exactly once: diff check, leak check, build, full test, canonical local restart,
-health check, then record the evidence and finish with a clean worktree. Preserve `stash@{0}`.
+Record the immutable-range fresh-eyes review result, verify the final docs-only state commit, and
+finish `FINAL` with a clean worktree. No product/test input changed after the one full gate.
