@@ -50,8 +50,22 @@ inputs afterward. A single replacement final gate is therefore required.
 - `5c1a04f` closes all three with dependency-aware cache hits, settle-stat labeling,
   and a settled SHA fallback when ctime is unavailable.
 - The four focused regression tests passed before the fix commit.
+- Independent re-review of immutable commit `5c1a04f` returned PASS with no
+  correctness findings; byte-identical replacement remains intentionally
+  indistinguishable under the content-addressed sidecar contract.
+
+## Replacement final gate (2026-08-13)
+
+- `git diff --check`: pass.
+- `bash scripts/security-leak-check.sh --all`: pass.
+- `swift build`: pass.
+- `swift test`: 661 executed, 1 skipped, 0 failures.
+- `./scripts/restart-local-clawgate.sh`: exit 0; app PID 31090.
+- `curl -fsS http://127.0.0.1:8765/v1/health`: `{"version":"0.1.0","ok":true}`.
+- Real sessions `provenance-bound-v1.json` count: 0.
+- Worktree clean; `stash@{0}` remains preserved.
 
 ## Next action
 
-Complete the independent review of `5c1a04f`, run one replacement final gate,
-record its evidence, and finish `FINAL` with a clean worktree.
+Finish `FINAL` after committing this docs-only evidence update and confirming the
+clean worktree. No product or test input changed after the replacement final gate.
