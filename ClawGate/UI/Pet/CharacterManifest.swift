@@ -18,9 +18,64 @@ struct CharacterManifest: Codable, Equatable {
         let loop: Bool?
         let sheetColumns: Int?
         let sheetRows: Int?
+        private let hasExplicitSheetColumns: Bool
+        private let hasExplicitSheetRows: Bool
+
+        private enum CodingKeys: String, CodingKey {
+            case name
+            case frames
+            case fps
+            case loop
+            case sheetColumns
+            case sheetRows
+        }
+
+        init(
+            name: String,
+            frames: [String],
+            fps: Double?,
+            loop: Bool?,
+            sheetColumns: Int?,
+            sheetRows: Int?
+        ) {
+            self.name = name
+            self.frames = frames
+            self.fps = fps
+            self.loop = loop
+            self.sheetColumns = sheetColumns
+            self.sheetRows = sheetRows
+            self.hasExplicitSheetColumns = sheetColumns != nil
+            self.hasExplicitSheetRows = sheetRows != nil
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            name = try container.decode(String.self, forKey: .name)
+            frames = try container.decode([String].self, forKey: .frames)
+            fps = try container.decodeIfPresent(Double.self, forKey: .fps)
+            loop = try container.decodeIfPresent(Bool.self, forKey: .loop)
+            hasExplicitSheetColumns = container.contains(.sheetColumns)
+            hasExplicitSheetRows = container.contains(.sheetRows)
+            sheetColumns = try container.decodeIfPresent(Int.self, forKey: .sheetColumns)
+            sheetRows = try container.decodeIfPresent(Int.self, forKey: .sheetRows)
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(name, forKey: .name)
+            try container.encode(frames, forKey: .frames)
+            try container.encodeIfPresent(fps, forKey: .fps)
+            try container.encodeIfPresent(loop, forKey: .loop)
+            try container.encodeIfPresent(sheetColumns, forKey: .sheetColumns)
+            try container.encodeIfPresent(sheetRows, forKey: .sheetRows)
+        }
+
+        var hasExplicitSheetMetadata: Bool {
+            hasExplicitSheetColumns || hasExplicitSheetRows
+        }
 
         var isSheet: Bool {
-            frames.count == 1 && (sheetColumns ?? 0) > 0
+            frames.count == 1 && (sheetColumns ?? 0) > 0 && (sheetRows ?? 0) > 0
         }
 
         var shouldLoop: Bool {
@@ -534,9 +589,13 @@ final class CharacterManager: ObservableObject {
             return false
         }
 
-        if state.isSheet {
+        if state.hasExplicitSheetMetadata {
             let cols = state.sheetColumns ?? 0
             let rows = state.sheetRows ?? 0
+            guard state.frames.count == 1 else {
+                issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
+                return false
+            }
             guard cols > 0, rows > 0 else {
                 issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
                 return false
@@ -546,13 +605,6 @@ final class CharacterManager: ObservableObject {
                 issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
                 return false
             }
-            guard state.frames.count == 1 else {
-                issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
-                return false
-            }
-        } else if (state.sheetColumns ?? 0) > 0 || (state.sheetRows ?? 0) > 0 {
-            issueCounts[Self.invalidSpriteConfigCode, default: 0] += 1
-            return false
         }
 
         if let fps = state.fps, (!fps.isFinite || fps <= 0) {

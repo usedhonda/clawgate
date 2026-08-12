@@ -601,6 +601,108 @@ final class CharacterManifestTests: XCTestCase {
         XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
     }
 
+    func testExplicitZeroSpriteColumnsAreRejectedWithoutSingleFrameFallback() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("zero-columns"),
+            manifest: CharacterManifest(
+                name: "zero-columns",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 0,
+                        sheetRows: 1
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemYellow]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testExplicitNegativeSpriteRowsAreRejectedWithoutSingleFrameFallback() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("negative-rows"),
+            manifest: CharacterManifest(
+                name: "negative-rows",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 1,
+                        sheetRows: -1
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemOrange]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testMixedInvalidAndMissingSpriteDimensionsAreRejected() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("mixed-dimensions"),
+            manifest: CharacterManifest(
+                name: "mixed-dimensions",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 0,
+                        sheetRows: nil
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemBlue]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
     func testSpriteCellOverflowIsRejectedWithoutCrash() throws {
         let root = makeTempRoot()
         defer { try? fileManager.removeItem(at: root) }
@@ -634,6 +736,255 @@ final class CharacterManifestTests: XCTestCase {
         XCTAssertEqual(manager.characters, [])
         XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
         XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testMalformedSpriteDimensionTypeRejectsManifestJSONAndKeepsValidBundle() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("valid"),
+            manifest: makeManifest(name: "valid", states: [makeState(name: "idle", frames: ["idle.png"])]),
+            frameColors: ["idle.png": .systemGreen]
+        )
+
+        let invalidPath = root.appendingPathComponent("malformed-dimensions")
+        try fileManager.createDirectory(at: invalidPath, withIntermediateDirectories: true)
+        let badJSON = """
+        {
+          "name": "malformed-dimensions",
+          "states": [
+            {
+              "name": "idle",
+              "frames": ["idle.png"],
+              "sheetColumns": "2",
+              "sheetRows": 1
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+        try badJSON.write(to: invalidPath.appendingPathComponent("manifest.json"))
+        try writePNG(at: invalidPath.appendingPathComponent("idle.png"), color: .systemRed)
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters.map(\.name), ["valid"])
+        XCTAssertEqual(diagCount(CharacterManager.invalidManifestJSONCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testInvalidFpsIsRejected() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("bad-fps"),
+            manifest: CharacterManifest(
+                name: "bad-fps",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: 0,
+                        loop: nil,
+                        sheetColumns: nil,
+                        sheetRows: nil
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemPink]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters, [])
+        XCTAssertEqual(diagCount(CharacterManager.invalidFpsCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testValidFallbackBundleRemainsAvailableWhenInvalidSpriteBundleIsDropped() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("valid"),
+            manifest: makeManifest(name: "valid", states: [makeState(name: "idle", frames: ["idle.png"])]),
+            frameColors: ["idle.png": .systemGreen]
+        )
+        try makeBundle(
+            at: root.appendingPathComponent("invalid"),
+            manifest: CharacterManifest(
+                name: "invalid",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 0,
+                        sheetRows: 1
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemRed]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.selectedName = "valid"
+        manager.scan()
+
+        XCTAssertEqual(manager.characters.map(\.name), ["valid"])
+        XCTAssertEqual(manager.current()?.frames(for: "idle").count, 1)
+        XCTAssertEqual(diagCount(CharacterManager.invalidSpriteConfigCode, manager.lastScanDiagnostics), 1)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 1)
+    }
+
+    func testValidFrameCountsRemainUnchangedForSingleFrameAndSpriteSheet() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("valid-frames"),
+            manifest: CharacterManifest(
+                name: "valid-frames",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    makeState(name: "idle", frames: ["idle.png"]),
+                    CharacterManifest.StateInfo(
+                        name: "sheet",
+                        frames: ["sheet.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 2,
+                        sheetRows: 1
+                    )
+                ]
+            ),
+            frameColors: [
+                "idle.png": .systemBlue,
+                "sheet.png": .systemPurple,
+            ],
+            imageSizes: ["sheet.png": CGSize(width: 20, height: 10)]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.selectedName = "valid-frames"
+        manager.scan()
+
+        guard let character = manager.current() else {
+            return XCTFail("valid character should remain available")
+        }
+
+        XCTAssertEqual(character.frames(for: "idle").count, 1)
+        XCTAssertEqual(character.frames(for: "sheet").count, 2)
+        XCTAssertEqual(manager.lastScanDiagnostics, [])
+    }
+
+    func testScanDiagnosticsRemainBoundedWithManyDistinctIssues() throws {
+        let root = makeTempRoot()
+        defer { try? fileManager.removeItem(at: root) }
+
+        try makeBundle(
+            at: root.appendingPathComponent("valid"),
+            manifest: makeManifest(name: "valid", states: [makeState(name: "idle", frames: ["idle.png"])]),
+            frameColors: ["idle.png": .systemBlue]
+        )
+
+        try fileManager.createDirectory(at: root.appendingPathComponent("missing-manifest"), withIntermediateDirectories: true)
+        try makeBundle(
+            at: root.appendingPathComponent("invalid-character-name"),
+            manifest: makeManifest(name: " ", states: [makeState(name: "idle", frames: ["idle.png"])]),
+            frameColors: ["idle.png": .systemBlue]
+        )
+        try makeBundle(
+            at: root.appendingPathComponent("missing-states"),
+            manifest: makeManifest(name: "missing-states", states: []),
+            frameColors: [:]
+        )
+        try makeBundle(
+            at: root.appendingPathComponent("invalid-state-name"),
+            manifest: makeManifest(name: "invalid-state-name", states: [makeState(name: " ", frames: ["idle.png"])]),
+            frameColors: ["idle.png": .systemBlue]
+        )
+        try makeBundle(
+            at: root.appendingPathComponent("invalid-frames"),
+            manifest: makeManifest(name: "invalid-frames", states: [makeState(name: "idle", frames: [])]),
+            frameColors: [:]
+        )
+        try makeBundle(
+            at: root.appendingPathComponent("missing-frame"),
+            manifest: makeManifest(name: "missing-frame", states: [makeState(name: "idle", frames: ["missing.png"])]),
+            frameColors: [:]
+        )
+        try makeBundle(
+            at: root.appendingPathComponent("invalid-image"),
+            manifest: makeManifest(name: "invalid-image", states: [makeState(name: "idle", frames: ["idle.png"])]),
+            frameColors: [:]
+        )
+        try Data("not an image".utf8).write(to: root.appendingPathComponent("invalid-image/idle.png"))
+        try makeBundle(
+            at: root.appendingPathComponent("invalid-sprite"),
+            manifest: CharacterManifest(
+                name: "invalid-sprite",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: nil,
+                        loop: nil,
+                        sheetColumns: 0,
+                        sheetRows: 1
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemBlue]
+        )
+        try makeBundle(
+            at: root.appendingPathComponent("invalid-fps"),
+            manifest: CharacterManifest(
+                name: "invalid-fps",
+                displayName: nil,
+                author: nil,
+                version: nil,
+                description: nil,
+                states: [
+                    CharacterManifest.StateInfo(
+                        name: "idle",
+                        frames: ["idle.png"],
+                        fps: -1,
+                        loop: nil,
+                        sheetColumns: nil,
+                        sheetRows: nil
+                    )
+                ]
+            ),
+            frameColors: ["idle.png": .systemBlue]
+        )
+
+        let manager = CharacterManager(searchPaths: [root])
+        manager.scan()
+
+        XCTAssertEqual(manager.characters.map(\.name), ["valid"])
+        XCTAssertEqual(manager.lastScanDiagnostics.count, 8)
+        XCTAssertEqual(Set(manager.lastScanDiagnostics.map(\.code)).count, 8)
+        XCTAssertEqual(manager.lastScanDroppedBundleCount, 9)
     }
 
     func testDuplicateStateNamesAreRejected() throws {
