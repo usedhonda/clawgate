@@ -5,21 +5,25 @@ import XCTest
 /// retention). Abstract synthetic data only.
 final class PetLogInsufficientAndFailureTests: XCTestCase {
     private var originalLogStoreDir = ""
+    private var isolation: PetLogTestIsolation.Token!
 
     // A dispatched (accepted) Log request persists a log_user entry through
     // PetLogStore — redirect it to a throwaway temp dir so a test never writes
     // to the user's real ~/.clawgate/logs/*.json (2026-07-14 data-loss incident).
+    // D162/A3-21: the redirect runs inside the held isolation critical section.
     override func setUp() {
         super.setUp()
-        PetLogStore.testIsolationSemaphore.wait()
-        originalLogStoreDir = PetLogStore.dir
-        PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
+        isolation = PetLogTestIsolation.acquire(overriding: {
+            originalLogStoreDir = PetLogStore.dir
+            PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
+        }, restoring: {
+            try? FileManager.default.removeItem(atPath: PetLogStore.dir)
+            PetLogStore.dir = self.originalLogStoreDir
+        })
     }
 
     override func tearDown() {
-        try? FileManager.default.removeItem(atPath: PetLogStore.dir)
-        PetLogStore.dir = originalLogStoreDir
-        PetLogStore.testIsolationSemaphore.signal()
+        isolation.release()
         super.tearDown()
     }
 

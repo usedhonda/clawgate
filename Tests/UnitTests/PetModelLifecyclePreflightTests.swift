@@ -4,27 +4,32 @@ import XCTest
 
 final class PetModelLifecyclePreflightTests: XCTestCase {
     private var originalLogStoreDir = ""
+    private var isolation: PetLogTestIsolation.Token!
 
     override func setUp() {
         super.setUp()
-        PetLogStore.testIsolationSemaphore.wait()
-        originalLogStoreDir = PetLogStore.dir
-        PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-"
-            + UUID().uuidString
-        do {
-            try FileManager.default.createDirectory(
-                atPath: PetLogStore.dir,
-                withIntermediateDirectories: true
-            )
-        } catch {
-            XCTFail("Failed to prepare isolated PetLogStore dir: \(error)")
-        }
+        // D162/A3-21: the dir redirect (and its directory creation) runs inside
+        // the held isolation critical section via the seam.
+        isolation = PetLogTestIsolation.acquire(overriding: {
+            originalLogStoreDir = PetLogStore.dir
+            PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-"
+                + UUID().uuidString
+            do {
+                try FileManager.default.createDirectory(
+                    atPath: PetLogStore.dir,
+                    withIntermediateDirectories: true
+                )
+            } catch {
+                XCTFail("Failed to prepare isolated PetLogStore dir: \(error)")
+            }
+        }, restoring: {
+            try? FileManager.default.removeItem(atPath: PetLogStore.dir)
+            PetLogStore.dir = self.originalLogStoreDir
+        })
     }
 
     override func tearDown() {
-        try? FileManager.default.removeItem(atPath: PetLogStore.dir)
-        PetLogStore.dir = originalLogStoreDir
-        PetLogStore.testIsolationSemaphore.signal()
+        isolation.release()
         super.tearDown()
     }
 

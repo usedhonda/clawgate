@@ -15,30 +15,33 @@ final class PetModelSharedSummonWatchdogTests: XCTestCase {
     private var originalSummonReplyTimeoutSeconds: TimeInterval = 0
     private var originalLogAwaitingReplyTimeoutSeconds: TimeInterval = 0
     private var originalLogStoreDir = ""
+    private var isolation: PetLogTestIsolation.Token!
 
     override func setUp() {
         super.setUp()
-        // D162: acquire the shared semaphore FIRST so the process-global static
-        // timeout snapshot/override below is inside the same critical section as
-        // the PetLogStore.dir redirect — otherwise a parallel test in another
-        // class can race the timeout values (and the 2026-07-14 real-data-loss
-        // incident is guarded by the dir redirect that must also be atomic).
-        PetLogStore.testIsolationSemaphore.wait()
-        originalSummonReplyTimeoutSeconds = PetModel.summonReplyTimeoutSeconds
-        PetModel.summonReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
-        originalLogAwaitingReplyTimeoutSeconds = PetModel.logAwaitingReplyTimeoutSeconds
-        PetModel.logAwaitingReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
-
-        originalLogStoreDir = PetLogStore.dir
-        PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
+        // D162/A3-21: acquire the shared semaphore FIRST, then run the static
+        // overrides INSIDE the held critical section via the isolation seam — the
+        // process-global timeouts and the PetLogStore.dir redirect must be atomic
+        // together, or a parallel test in another class can race the values (and
+        // the 2026-07-14 real-data-loss incident is guarded by the dir redirect
+        // that must also be atomic).
+        isolation = PetLogTestIsolation.acquire(overriding: {
+            originalSummonReplyTimeoutSeconds = PetModel.summonReplyTimeoutSeconds
+            PetModel.summonReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
+            originalLogAwaitingReplyTimeoutSeconds = PetModel.logAwaitingReplyTimeoutSeconds
+            PetModel.logAwaitingReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
+            originalLogStoreDir = PetLogStore.dir
+            PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
+        }, restoring: {
+            PetModel.summonReplyTimeoutSeconds = self.originalSummonReplyTimeoutSeconds
+            PetModel.logAwaitingReplyTimeoutSeconds = self.originalLogAwaitingReplyTimeoutSeconds
+            try? FileManager.default.removeItem(atPath: PetLogStore.dir)
+            PetLogStore.dir = self.originalLogStoreDir
+        })
     }
 
     override func tearDown() {
-        PetModel.summonReplyTimeoutSeconds = originalSummonReplyTimeoutSeconds
-        PetModel.logAwaitingReplyTimeoutSeconds = originalLogAwaitingReplyTimeoutSeconds
-        try? FileManager.default.removeItem(atPath: PetLogStore.dir)
-        PetLogStore.dir = originalLogStoreDir
-        PetLogStore.testIsolationSemaphore.signal()
+        isolation.release()
         super.tearDown()
     }
 

@@ -13,34 +13,36 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
     private var originalIdleTimeoutNanos: UInt64 = 0
     private var originalLogAwaitingReplyTimeoutSeconds: TimeInterval = 0
     private var originalLogStoreDir = ""
+    private var isolation: PetLogTestIsolation.Token!
 
     override func setUp() {
         super.setUp()
-        // D162: acquire the shared semaphore FIRST — the process-global static
-        // timeouts below are also mutated here, so their snapshot/override must
-        // sit inside the same critical section as the PetLogStore.dir redirect,
-        // or a parallel test in another class can race the timeout values.
-        PetLogStore.testIsolationSemaphore.wait()
-        originalIdleTimeoutNanos = PetModel.deltaIdleTimeoutNanos
-        PetModel.deltaIdleTimeoutNanos = 80_000_000 // 80ms, shrunk for fast/deterministic tests
-        originalLogAwaitingReplyTimeoutSeconds = PetModel.logAwaitingReplyTimeoutSeconds
-        PetModel.logAwaitingReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
-
-        // A bare PetModel() starts with empty in-memory logReplies (real disk
-        // load only happens in start(), which this test never calls). If a
-        // "log"-source completion below reaches PetLogStore.save(), it must
-        // never write through to the user's real ~/.clawgate/logs/log.json —
-        // redirect to a throwaway temp directory for the duration of the test.
-        originalLogStoreDir = PetLogStore.dir
-        PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
+        // D162/A3-21: acquire the shared semaphore FIRST, then run the static
+        // overrides INSIDE the held critical section via the isolation seam — the
+        // process-global timeouts and the PetLogStore.dir redirect must be atomic
+        // together, or a parallel test in another class can race the values.
+        // A bare PetModel() starts with empty in-memory logReplies (real disk load
+        // only happens in start(), which this test never calls). If a "log"-source
+        // completion below reaches PetLogStore.save(), it must never write through
+        // to the user's real ~/.clawgate/logs/log.json — redirect to a throwaway
+        // temp directory for the duration of the test.
+        isolation = PetLogTestIsolation.acquire(overriding: {
+            originalIdleTimeoutNanos = PetModel.deltaIdleTimeoutNanos
+            PetModel.deltaIdleTimeoutNanos = 80_000_000 // 80ms, shrunk for fast/deterministic tests
+            originalLogAwaitingReplyTimeoutSeconds = PetModel.logAwaitingReplyTimeoutSeconds
+            PetModel.logAwaitingReplyTimeoutSeconds = 0.1 // 100ms, shrunk for fast/deterministic tests
+            originalLogStoreDir = PetLogStore.dir
+            PetLogStore.dir = NSTemporaryDirectory() + "clawgate-test-logs-\(UUID().uuidString)"
+        }, restoring: {
+            PetModel.deltaIdleTimeoutNanos = self.originalIdleTimeoutNanos
+            PetModel.logAwaitingReplyTimeoutSeconds = self.originalLogAwaitingReplyTimeoutSeconds
+            try? FileManager.default.removeItem(atPath: PetLogStore.dir)
+            PetLogStore.dir = self.originalLogStoreDir
+        })
     }
 
     override func tearDown() {
-        PetModel.deltaIdleTimeoutNanos = originalIdleTimeoutNanos
-        PetModel.logAwaitingReplyTimeoutSeconds = originalLogAwaitingReplyTimeoutSeconds
-        try? FileManager.default.removeItem(atPath: PetLogStore.dir)
-        PetLogStore.dir = originalLogStoreDir
-        PetLogStore.testIsolationSemaphore.signal()
+        isolation.release()
         super.tearDown()
     }
 
