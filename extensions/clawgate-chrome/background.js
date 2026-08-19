@@ -618,14 +618,6 @@ async function buildPassiveEntry(tab, activeSeconds) {
   }
 }
 
-function hashString(value) {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) | 0;
-  }
-  return (hash >>> 0).toString(36);
-}
-
 // Builds a messenger-capture entry per the oc-general.cc contract (proposed,
 // pending final confirmation — see MESSENGER_CAPTURE_ENDPOINT above): a
 // stable per-thread id (so recaptures are updates, not new rows), a
@@ -646,7 +638,14 @@ async function buildMessengerEntry(tab) {
     }
 
     const url = tab.url || result?.url || '';
-    const threadId = typeof messenger.threadId === 'string' && messenger.threadId ? messenger.threadId : hashString(url);
+    // A capture can fire before Messenger has resolved the URL to a thread.
+    // Keying such a capture off a hash of the URL invents a thread that then
+    // sits in the store forever beside the real one, so wait for the next
+    // capture instead — the observer fires again as soon as the thread loads.
+    if (typeof messenger.threadId !== 'string' || !messenger.threadId) {
+      return null;
+    }
+    const threadId = messenger.threadId;
 
     // The thread list describes the sidebar, not this thread, so the contract
     // carries it as a sibling of `entries` and never merged into one. It is

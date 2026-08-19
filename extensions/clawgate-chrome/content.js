@@ -206,6 +206,8 @@ const MESSENGER_UNREAD_PATTERN = /^未読/;
 const MESSENGER_GROUP_LABEL_PATTERN = /^グループチャット[:：]/;
 const MESSENGER_OPTIONS_LABEL_PATTERN = /^(.+?)さんのその他のオプション$/;
 const MESSENGER_ONLINE_TEXT = 'オンライン中';
+const MESSENGER_THREAD_LABEL_PREFIX = /^スレッド[:：]\s*/;
+const MESSENGER_THREAD_LABEL_SUFFIX = /というタイトルのスレッド$/;
 const MESSENGER_MAX_READERS = 20;
 const MESSENGER_MAX_ATTACHMENTS = 5;
 const MESSENGER_MAX_THREAD_ROWS = 50;
@@ -252,7 +254,17 @@ function extractMessengerContactName() {
   // contained within the landmark (verified on four threads, 2026-08-19).
   const [landmark, ...rest] = headings;
   const plain = rest.find((text) => text.length < landmark.length && landmark.includes(text));
-  return (plain || landmark).slice(0, 200);
+  if (plain) {
+    return plain.slice(0, 200);
+  }
+  // A capture can land before the plain heading has rendered — Messenger
+  // threads capture immediately, with no dwell — so strip the decoration the
+  // landmark is known to carry rather than filing the contact under it.
+  return landmark
+    .replace(MESSENGER_THREAD_LABEL_PREFIX, '')
+    .replace(MESSENGER_THREAD_LABEL_SUFFIX, '')
+    .trim()
+    .slice(0, 200);
 }
 
 function findMessageLabelElement(article) {
@@ -1175,6 +1187,8 @@ async function extractPagePayload(options = {}) {
           oldestCapturedAt: messengerResult.oldestCapturedAt,
           contentSignature: messengerResult.contentSignature,
           messages: messengerResult.messages,
+          participants: messengerResult.participants,
+          threadList: messengerResult.threadList,
         },
       };
     }

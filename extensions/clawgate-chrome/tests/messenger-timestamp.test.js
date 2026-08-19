@@ -122,8 +122,11 @@ test('the contact name is the name, not the landmark label wrapped around it', (
   assert.equal(withHeadings(['スレッド: 山田 花子', '山田 花子', 'メッセージ']), '山田 花子');
   // Group thread: the landmark wraps the name in a phrase instead.
   assert.equal(withHeadings(['旅行の相談というタイトルのスレッド', '旅行の相談', 'メッセージ']), '旅行の相談');
-  // Nothing contained in the landmark: keep it rather than invent a name.
-  assert.equal(withHeadings(['スレッド: 山田 花子', 'メッセージ']), 'スレッド: 山田 花子');
+  // Captured before the plain heading rendered: strip the decoration rather
+  // than filing the contact under Messenger's label. Observed in production —
+  // a real capture stored "スレッド: 佐藤 次郎" as the contact name.
+  assert.equal(withHeadings(['スレッド: 山田 花子', 'メッセージ']), '山田 花子');
+  assert.equal(withHeadings(['旅行の相談というタイトルのスレッド']), '旅行の相談');
   assert.equal(withHeadings([]), '');
 });
 
