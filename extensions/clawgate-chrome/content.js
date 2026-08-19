@@ -173,6 +173,181 @@ function isXPage() {
   return /(^|\.)x\.com$|(^|\.)twitter\.com$/i.test(window.location.hostname);
 }
 
+const MESSENGER_MAX_MESSAGES = 30;
+const MESSENGER_MAX_MESSAGE_CHARS = 500;
+const MESSENGER_MAX_BLOCK_CHARS = 4000;
+const MESSENGER_LABEL_PATTERN = /^(.+?)[、,]\s*(.+?)[:：]\s*([\s\S]+)$/;
+const MESSENGER_SELF_SENDER_PATTERN = /^(あなた|you)$/i;
+const MESSENGER_JP_DATETIME_PATTERN = /(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s+(\d{1,2}):(\d{2})/;
+const MESSENGER_THREAD_ID_PATTERN = /\/(?:e2ee\/)?t\/(\d+)/;
+
+function isMessengerPage() {
+  const location = window.location;
+  if (!location) {
+    return false;
+  }
+  const { hostname, pathname } = location;
+  if (/(^|\.)messenger\.com$/i.test(hostname || '')) {
+    return true;
+  }
+  if (/(^|\.)facebook\.com$/i.test(hostname || '') && (pathname || '').startsWith('/messages')) {
+    return true;
+  }
+  return false;
+}
+
+function findMessengerLogContainer() {
+  return document.querySelector('[role="main"] [role="log"]') || document.querySelector('[role="log"]');
+}
+
+function extractMessengerThreadId() {
+  const match = MESSENGER_THREAD_ID_PATTERN.exec(window.location.pathname);
+  return match ? match[1] : '';
+}
+
+function extractMessengerContactName() {
+  // The thread header is a native heading element (observed as <h2> on the
+  // live site, 2026-08-09) without an explicit role="heading" attribute —
+  // match h1-h3 and the explicit role as a fallback for markup changes.
+  const heading = document.querySelector(
+    '[role="main"] h1, [role="main"] h2, [role="main"] h3, [role="main"] [role="heading"]'
+  );
+  return heading ? normalizeText(heading.textContent || '').slice(0, 200) : '';
+}
+
+function findMessageLabelElement(article) {
+  if (article.hasAttribute('aria-label') && MESSENGER_LABEL_PATTERN.test(article.getAttribute('aria-label') || '')) {
+    return article;
+  }
+  const candidates = article.querySelectorAll('[aria-label]');
+  for (const el of candidates) {
+    if (el.tagName === 'BUTTON' || el.closest('button, [role="toolbar"]')) {
+      continue;
+    }
+    const label = el.getAttribute('aria-label') || '';
+    if (MESSENGER_LABEL_PATTERN.test(label)) {
+      return el;
+    }
+  }
+  return null;
+}
+
+// Parses a locale-formatted absolute datetime out of the article's aria-label
+// (e.g. "2024年7月25日 16:59"). Returns null if the format doesn't match —
+// callers must treat the timestamp as approximate (capture time) in that case,
+// never guess. Interpreted in the browser's local timezone, since Messenger
+// renders times in the viewer's locale.
+function parseMessengerTimestamp(raw) {
+  const match = MESSENGER_JP_DATETIME_PATTERN.exec(raw || '');
+  if (!match) {
+    return null;
+  }
+  const [, year, month, day, hour, minute] = match.map(Number);
+  const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function parseMessengerArticle(article) {
+  const labelEl = findMessageLabelElement(article);
+  if (!labelEl) {
+    return null;
+  }
+  const label = labelEl.getAttribute('aria-label') || '';
+  const match = MESSENGER_LABEL_PATTERN.exec(label);
+  if (!match) {
+    return null;
+  }
+  const [, rawDateTime, rawSender, rawText] = match;
+  const senderNormalized = normalizeText(rawSender);
+  const fromSelf = MESSENGER_SELF_SENDER_PATTERN.test(senderNormalized);
+  const sender = fromSelf ? 'Me' : senderNormalized;
+  const text = normalizeText(rawText).slice(0, MESSENGER_MAX_MESSAGE_CHARS);
+  if (!text) {
+    return null;
+  }
+  const parsedDate = parseMessengerTimestamp(rawDateTime);
+  // ISO-8601 always carries an explicit offset (toISOString() uses "Z"/UTC),
+  // so downstream never has to guess which timezone this was written in.
+  const sentAt = (parsedDate || new Date()).toISOString();
+  const sentAtPrecision = parsedDate ? 'exact' : 'approximate';
+  return { sender, fromSelf, text, sentAt, sentAtPrecision };
+}
+
+function computeMessengerSignature(messages) {
+  const last = messages[messages.length - 1];
+  const raw = `${messages.length}:${last ? `${last.sender}|${last.text.slice(0, 80)}` : ''}`;
+  let hash = 0;
+  for (let i = 0; i < raw.length; i += 1) {
+    hash = (hash * 31 + raw.charCodeAt(i)) | 0;
+  }
+  return `${messages.length}-${(hash >>> 0).toString(36)}`;
+}
+
+// Returns the richer structured capture oc-general.cc's contract needs
+// (messages array with sender/timestamp, plus coverage metadata) alongside a
+// human-readable `content` block for the fallback/local-debug path. DOM
+// extraction only ever sees what's currently rendered, so captureScope is
+// always "visible_window" — never claim "full_thread" from a DOM scrape.
+function extractMessengerConversation() {
+  const container = findMessengerLogContainer();
+  if (!container) {
+    return null;
+  }
+
+  // Facebook renders each message bubble as `<div role="article">`, not an
+  // `<article>` tag (verified against the live site 2026-08-09) — match both
+  // in case a future markup revision uses the real element.
+  const articles = Array.from(container.querySelectorAll('article, [role="article"]')).slice(-MESSENGER_MAX_MESSAGES);
+  const messages = [];
+  for (const article of articles) {
+    const parsed = parseMessengerArticle(article);
+    if (parsed) {
+      messages.push(parsed);
+    }
+  }
+  if (!messages.length) {
+    return null;
+  }
+
+  let injectionDetected = false;
+  const lines = [];
+  const includedMessages = [];
+  let totalChars = 0;
+  for (const message of messages) {
+    if (detectInjectionAttempt(message.text) || detectInjectionAttempt(message.sender)) {
+      injectionDetected = true;
+    }
+    const line = `${message.sender}: ${message.text}`;
+    if (totalChars + line.length > MESSENGER_MAX_BLOCK_CHARS) {
+      break;
+    }
+    lines.push(line);
+    includedMessages.push(message);
+    totalChars += line.length;
+  }
+  if (!lines.length) {
+    return null;
+  }
+
+  return {
+    content: `## Messenger Conversation\n${lines.join('\n')}`,
+    contentSignature: computeMessengerSignature(messages),
+    injectionDetected,
+    threadId: extractMessengerThreadId(),
+    contactName: extractMessengerContactName(),
+    captureScope: 'visible_window',
+    messageCount: includedMessages.length,
+    oldestCapturedAt: includedMessages[0].sentAt,
+    messages: includedMessages.map(({ sender, fromSelf, text, sentAt, sentAtPrecision }) => ({
+      sender,
+      fromSelf,
+      text,
+      sentAt,
+      sentAtPrecision,
+    })),
+  };
+}
+
 function isLikelyDecorativeImage(image) {
   const src = image.currentSrc || image.src || '';
   const alt = (image.alt || '').toLowerCase();
@@ -690,6 +865,40 @@ async function extractImageContext(root, preferredImageURL = '') {
 }
 
 async function extractPagePayload(options = {}) {
+  if (isMessengerPage()) {
+    const messengerResult = extractMessengerConversation();
+    if (messengerResult) {
+      return {
+        ok: true,
+        url: window.location.href,
+        title: normalizeText(document.title),
+        content: messengerResult.content,
+        contentMetrics: {
+          isMessenger: true,
+          messageCount: messengerResult.messageCount,
+          injectionDetected: messengerResult.injectionDetected,
+        },
+        contentSignature: messengerResult.contentSignature,
+        imageContext: null,
+        meta: {
+          description: extractMeta('description'),
+          ogTitle: extractMeta('og:title', 'property'),
+          ogImage: extractMeta('og:image', 'property'),
+        },
+        messenger: {
+          threadId: messengerResult.threadId,
+          contactName: messengerResult.contactName,
+          captureScope: messengerResult.captureScope,
+          messageCount: messengerResult.messageCount,
+          oldestCapturedAt: messengerResult.oldestCapturedAt,
+          contentSignature: messengerResult.contentSignature,
+          messages: messengerResult.messages,
+        },
+      };
+    }
+    // Fall through to the generic extraction path below (empty/failed parse).
+  }
+
   const root = pickRootNode();
   const clone = root.cloneNode(true);
   clone.querySelectorAll(REMOVE_SELECTORS).forEach((node) => node.remove());
@@ -792,4 +1001,54 @@ const runtimeOnMessage = getRuntimeOnMessageOrInvalidate();
 if (runtimeOnMessage && typeof runtimeOnMessage.addListener === 'function') {
   globalThis[CONTENT_RUNTIME_HANDLER_KEY] = handleRuntimeMessage;
   runtimeOnMessage.addListener(handleRuntimeMessage);
+}
+
+const MESSENGER_MUTATION_DEBOUNCE_MS = 2000;
+const MESSENGER_OBSERVER_RETRY_MS = 2000;
+let messengerObserver = null;
+let messengerDebounceTimer = null;
+
+function notifyMessengerContentChanged() {
+  const runtime = getRuntimeOrInvalidate('sendMessage');
+  if (!runtime) {
+    return;
+  }
+  try {
+    runtime.sendMessage({ type: 'messenger_content_changed' }, () => {
+      void runtime.lastError;
+    });
+  } catch {}
+}
+
+function scheduleMessengerNotify() {
+  if (messengerDebounceTimer) {
+    clearTimeout(messengerDebounceTimer);
+  }
+  messengerDebounceTimer = setTimeout(() => {
+    messengerDebounceTimer = null;
+    notifyMessengerContentChanged();
+  }, MESSENGER_MUTATION_DEBOUNCE_MS);
+}
+
+function setupMessengerObserver() {
+  if (!isMessengerPage() || messengerObserver || extensionContextInvalidated) {
+    return;
+  }
+  if (typeof MutationObserver === 'undefined') {
+    return;
+  }
+  const container = findMessengerLogContainer();
+  if (!container) {
+    // The SPA may not have rendered the message log yet; retry shortly.
+    setTimeout(setupMessengerObserver, MESSENGER_OBSERVER_RETRY_MS);
+    return;
+  }
+  messengerObserver = new MutationObserver(() => {
+    scheduleMessengerNotify();
+  });
+  messengerObserver.observe(container, { childList: true, subtree: true });
+}
+
+if (isMessengerPage()) {
+  setupMessengerObserver();
 }

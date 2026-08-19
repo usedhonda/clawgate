@@ -19,6 +19,11 @@ const PASSIVE_FLUSH_ALARM = 'clawgate-passive-flush';
 const PASSIVE_FLUSH_PERIOD_MINUTES = 1.5;
 const PASSIVE_SEND_LOG_LIMIT = 200;
 
+// Proposed contract, pending final confirmation with oc-general.cc — see
+// docs/plans/delegated-snacking-garden.md "エンドポイント契約". Update this
+// path if the agreed contract differs.
+const MESSENGER_CAPTURE_ENDPOINT = '/api/messenger-capture';
+
 let cursor = '';
 let pollTimer = null;
 let pollInFlight = false;
@@ -26,6 +31,19 @@ let pollInFlight = false;
 let passiveVisit = null;
 const passiveQueue = [];
 const passiveSentAtByURL = new Map();
+
+function isMessengerURL(urlString) {
+  try {
+    const url = new URL(urlString || '');
+    if (/(^|\.)messenger\.com$/i.test(url.hostname)) {
+      return true;
+    }
+    if (/(^|\.)facebook\.com$/i.test(url.hostname) && url.pathname.startsWith('/messages')) {
+      return true;
+    }
+  } catch {}
+  return false;
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureDefaults();
@@ -115,7 +133,33 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== PASSIVE_FLUSH_ALARM) {
     return;
   }
-  flushPassiveQueue().catch(() => undefined);
+  // Messenger recapture check first, so a freshly-queued entry rides this
+  // same flush instead of waiting another 1.5 minutes; this is a backstop for
+  // the MutationObserver-driven path (e.g. tab wasn't active when content
+  // changed), not the primary trigger.
+  handleMessengerFlushAlarmTick()
+    .catch(() => undefined)
+    .finally(() => {
+      flushPassiveQueue().catch(() => undefined);
+    });
+});
+
+async function handleMessengerFlushAlarmTick() {
+  const tab = await getActiveTab();
+  if (!tab?.url || !isMessengerURL(tab.url)) {
+    return;
+  }
+  await captureMessengerNow(tab);
+}
+
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type !== 'messenger_content_changed' || !sender?.tab?.id) {
+    return undefined;
+  }
+  chrome.tabs.get(sender.tab.id)
+    .then((tab) => captureMessengerNow(tab))
+    .catch(() => undefined);
+  return undefined;
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -412,9 +456,12 @@ async function startPassiveVisit(tab) {
     startedAt: Date.now(),
     timerId: null,
   };
+  // Messenger favors capturing as much as possible over the generic dwell
+  // throttle — skip the wait so the first capture happens right away.
+  const dwellMs = isMessengerURL(tab.url) ? 0 : PASSIVE_DWELL_MS;
   visit.timerId = setTimeout(() => {
     handlePassiveDwell(visit).catch(() => undefined);
-  }, PASSIVE_DWELL_MS);
+  }, dwellMs);
   passiveVisit = visit;
 }
 
@@ -446,6 +493,12 @@ async function handlePassiveDwell(visit) {
   if (!tab?.active || tab.url !== visit.url || !isPassiveEligibleURL(tab.url, settings.gatewayURL, settings.excludedDomains)) {
     return;
   }
+
+  if (isMessengerURL(tab.url)) {
+    await captureMessengerNow(tab);
+    return;
+  }
+
   if (isPassiveDuplicate(tab.url)) {
     return;
   }
@@ -456,8 +509,34 @@ async function handlePassiveDwell(visit) {
     return;
   }
 
-  passiveSentAtByURL.set(entry.url, Date.now());
+  passiveSentAtByURL.set(entry.url, { time: Date.now() });
   enqueuePassiveEntry(entry);
+}
+
+// Messenger favors "capture as much as possible" over the generic dwell/
+// alarm-cadence throttle. Called both from the (zero-wait) dwell path and
+// from the MutationObserver notification in content.js, and flushes
+// immediately rather than waiting for the next periodic alarm.
+async function captureMessengerNow(tab) {
+  const settings = await getSettings();
+  if (!settings.passiveTracking || !settings.gatewayURL || !settings.gatewayToken) {
+    return;
+  }
+  if (!tab?.url || !isMessengerURL(tab.url) || !isPassiveEligibleURL(tab.url, settings.gatewayURL, settings.excludedDomains)) {
+    return;
+  }
+
+  const entry = await buildMessengerEntry(tab);
+  if (!entry) {
+    return;
+  }
+  if (isPassiveDuplicate(entry.threadUrl, entry.contentSignature)) {
+    return;
+  }
+
+  passiveSentAtByURL.set(entry.threadUrl, { time: Date.now(), signature: entry.contentSignature });
+  enqueuePassiveEntry(entry);
+  await flushPassiveQueue();
 }
 
 async function buildPassiveEntry(tab, activeSeconds) {
@@ -503,6 +582,59 @@ async function buildPassiveEntry(tab, activeSeconds) {
   }
 }
 
+function hashString(value) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(36);
+}
+
+// Builds a messenger-capture entry per the oc-general.cc contract (proposed,
+// pending final confirmation — see MESSENGER_CAPTURE_ENDPOINT above): a
+// stable per-thread id (so recaptures are updates, not new rows), a
+// structured messages[] array (never a flattened blob), explicit
+// captureScope/oldestCapturedAt so downstream can tell "no reply" from "reply
+// not captured", and ISO-8601 timestamps with an explicit UTC offset.
+async function buildMessengerEntry(tab) {
+  try {
+    await ensureContentScript(tab.id);
+
+    const result = await chrome.tabs.sendMessage(tab.id, {
+      type: 'extract_content',
+      preferredImageURL: '',
+    });
+    const messenger = result?.messenger;
+    if (!messenger || !Array.isArray(messenger.messages) || !messenger.messages.length) {
+      return null;
+    }
+
+    const url = tab.url || result?.url || '';
+    const threadId = typeof messenger.threadId === 'string' && messenger.threadId ? messenger.threadId : hashString(url);
+
+    return {
+      id: `messenger:${threadId}`,
+      platform: 'messenger',
+      threadUrl: url,
+      contactName: typeof messenger.contactName === 'string' ? messenger.contactName : '',
+      capturedAt: new Date().toISOString(),
+      captureScope: messenger.captureScope === 'full_thread' ? 'full_thread' : 'visible_window',
+      oldestCapturedAt: typeof messenger.oldestCapturedAt === 'string' ? messenger.oldestCapturedAt : new Date().toISOString(),
+      messageCount: Number.isFinite(messenger.messageCount) ? messenger.messageCount : messenger.messages.length,
+      contentSignature: typeof messenger.contentSignature === 'string' ? messenger.contentSignature : '',
+      messages: messenger.messages.map((m) => ({
+        sender: typeof m.sender === 'string' ? m.sender : '',
+        fromSelf: typeof m.fromSelf === 'boolean' ? m.fromSelf : null,
+        text: typeof m.text === 'string' ? m.text : '',
+        sentAt: typeof m.sentAt === 'string' ? m.sentAt : new Date().toISOString(),
+        sentAtPrecision: m.sentAtPrecision === 'exact' ? 'exact' : 'approximate',
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function enqueuePassiveEntry(entry) {
   passiveQueue.push(entry);
   while (passiveQueue.length > PASSIVE_QUEUE_LIMIT) {
@@ -521,16 +653,32 @@ async function flushPassiveQueue() {
   }
 
   const entries = passiveQueue.slice();
-  await postWebHistoryEntries(entries, settings);
   passiveQueue.splice(0, entries.length);
 
+  const messengerEntries = entries.filter((entry) => entry.platform === 'messenger');
+  const webEntries = entries.filter((entry) => entry.platform !== 'messenger');
+
   const sentAt = new Date().toISOString();
-  await appendPassiveSendLog(entries.map((entry) => ({
-    domain: entry.domain || '',
-    title: entry.title || '',
-    url: entry.url || '',
-    sentAt,
-  })));
+
+  if (webEntries.length) {
+    await postWebHistoryEntries(webEntries, settings);
+    await appendPassiveSendLog(webEntries.map((entry) => ({
+      domain: entry.domain || '',
+      title: entry.title || '',
+      url: entry.url || '',
+      sentAt,
+    })));
+  }
+
+  if (messengerEntries.length) {
+    await postMessengerEntries(messengerEntries, settings);
+    await appendPassiveSendLog(messengerEntries.map((entry) => ({
+      domain: safeHostname(entry.threadUrl) || '',
+      title: entry.contactName || '',
+      url: entry.threadUrl || '',
+      sentAt,
+    })));
+  }
 }
 
 async function appendPassiveSendLog(records) {
@@ -563,9 +711,36 @@ async function postWebHistoryEntries(entries, settings) {
   return response;
 }
 
-function isPassiveDuplicate(url) {
+async function postMessengerEntries(entries, settings) {
+  const endpoint = new URL(MESSENGER_CAPTURE_ENDPOINT, settings.gatewayURL).toString();
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${settings.gatewayToken}`,
+    },
+    body: JSON.stringify({ entries }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Gateway rejected messenger capture (${response.status})`);
+  }
+  return response;
+}
+
+// `signature`, when provided (messenger only), makes this a content-change
+// check instead of a time-window throttle: a thread whose captured content
+// hasn't changed since the last send is a duplicate regardless of elapsed
+// time, but a genuinely new/changed capture is never held back by the window.
+function isPassiveDuplicate(url, signature) {
   const previous = passiveSentAtByURL.get(url);
-  return previous != null && Date.now() - previous < PASSIVE_DEDUP_WINDOW_MS;
+  if (!previous) {
+    return false;
+  }
+  if (signature != null) {
+    return previous.signature === signature;
+  }
+  return Date.now() - previous.time < PASSIVE_DEDUP_WINDOW_MS;
 }
 
 function isPassiveEligibleURL(value, gatewayURL, excludedDomains) {
