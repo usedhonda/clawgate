@@ -338,12 +338,14 @@ function computeMessengerSignature(messages) {
 
 // A deterministic per-message id so the receiving store can dedupe on
 // re-capture instead of relying solely on the thread-level contentSignature.
-// Stable for "exact" and for "inferred_date" — a reconstructed date resolves
-// to the same instant the dated label will report tomorrow, so the id converges
-// rather than forking. It is NOT stable for "approximate": that sentAt is a
-// capture-time placeholder (see parseMessengerArticle) and changes on every
-// re-capture. There is no DOM-native message id to fall back on (verified:
-// Facebook's message rows carry no unique id/data- attribute).
+// Stable for "exact". Stable for "inferred_date" only while the inferred date
+// is right: a tab left open across midnight resolves yesterday's "10:00"
+// against today, and that row never merges with the correctly dated one — they
+// are different instants, not two spellings of one. It is NOT stable for
+// "approximate": that sentAt is a capture-time placeholder (see
+// parseMessengerArticle) and changes on every re-capture. There is no
+// DOM-native message id to fall back on (verified: Facebook's message rows
+// carry no unique id/data- attribute).
 function computeMessengerMessageId(threadId, message) {
   const raw = `${threadId}|${message.sentAt}|${message.fromSelf}|${message.text.slice(0, 200)}`;
   return `msg:${threadId}:${hashString(raw)}`;
