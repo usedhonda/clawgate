@@ -237,6 +237,29 @@ function extractMessengerThreadId() {
   return match ? match[1] : '';
 }
 
+// Messenger is a single-page app: the URL changes the moment a conversation is
+// clicked, but the message log keeps rendering the previous thread for a
+// while. Pairing the new URL's id with the old thread's messages files a
+// conversation under the wrong contact — observed in production, where one
+// contact's thread accumulated 27 messages belonging to two other threads.
+// The sidebar marks the thread actually on screen with aria-current="page", so
+// that is the DOM stating which conversation it is showing.
+function extractMessengerOpenThreadId() {
+  const marked = document.querySelector('[role="grid"] [aria-current="page"]');
+  if (!marked) {
+    return '';
+  }
+  const row = marked.closest('[role="row"]') || marked;
+  for (const anchor of row.querySelectorAll('a[href]')) {
+    const match = MESSENGER_THREAD_ID_PATTERN.exec(anchor.getAttribute('href') || '');
+    if (match) {
+      return match[1];
+    }
+  }
+  const self = MESSENGER_THREAD_ID_PATTERN.exec(marked.getAttribute('href') || '');
+  return self ? self[1] : '';
+}
+
 function extractMessengerContactName() {
   // The thread header is a native heading element (observed as <h2> on the
   // live site) without an explicit role="heading" attribute — match h1-h3 and
@@ -580,6 +603,14 @@ function extractMessengerConversation() {
     return null;
   }
   const threadId = extractMessengerThreadId();
+
+  // Refuse rather than guess when the URL and the screen name different
+  // threads: the log still belongs to the previous conversation, and the
+  // observer fires again a moment later once it has caught up.
+  const openThreadId = extractMessengerOpenThreadId();
+  if (threadId && openThreadId && threadId !== openThreadId) {
+    return null;
+  }
 
   // Facebook renders each message bubble as `<div role="article">`, not an
   // `<article>` tag (verified against the live site 2026-08-09) — match both

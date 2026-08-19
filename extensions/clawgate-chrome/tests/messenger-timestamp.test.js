@@ -175,6 +175,27 @@ test('thread state is read at the strength the DOM actually states it', () => {
   );
 });
 
+test('a capture is refused while the screen still shows another thread', () => {
+  const context = loadContentScript();
+  const withMarkedRow = (href) => {
+    context.document.querySelector = (selector) => {
+      if (selector !== '[role="grid"] [aria-current="page"]') return null;
+      if (href === null) return null;
+      return {
+        closest: () => ({ querySelectorAll: () => [{ getAttribute: () => href }] }),
+        querySelectorAll: () => [{ getAttribute: () => href }],
+        getAttribute: () => href,
+      };
+    };
+    return vm.runInContext('extractMessengerOpenThreadId()', context);
+  };
+
+  assert.equal(withMarkedRow('/t/1352134236563347/'), '1352134236563347');
+  assert.equal(withMarkedRow('/e2ee/t/7467967463261857/'), '7467967463261857');
+  // No marker: fall back to the URL rather than block every capture.
+  assert.equal(withMarkedRow(null), '');
+});
+
 test('the epoch-stamped E2EE system notice is rejected as a placeholder', () => {
   const context = loadContentScript();
   const implausible = (raw) => vm.runInContext(`hasImplausibleYear(${JSON.stringify(raw)})`, context);
