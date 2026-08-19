@@ -623,6 +623,7 @@ async function buildMessengerEntry(tab) {
       messageCount: Number.isFinite(messenger.messageCount) ? messenger.messageCount : messenger.messages.length,
       contentSignature: typeof messenger.contentSignature === 'string' ? messenger.contentSignature : '',
       messages: messenger.messages.map((m) => ({
+        id: typeof m.id === 'string' ? m.id : '',
         sender: typeof m.sender === 'string' ? m.sender : '',
         fromSelf: typeof m.fromSelf === 'boolean' ? m.fromSelf : null,
         text: typeof m.text === 'string' ? m.text : '',

@@ -273,14 +273,31 @@ function parseMessengerArticle(article) {
   return { sender, fromSelf, text, sentAt, sentAtPrecision };
 }
 
+function hashString(value) {
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash * 31 + value.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(36);
+}
+
 function computeMessengerSignature(messages) {
   const last = messages[messages.length - 1];
   const raw = `${messages.length}:${last ? `${last.sender}|${last.text.slice(0, 80)}` : ''}`;
-  let hash = 0;
-  for (let i = 0; i < raw.length; i += 1) {
-    hash = (hash * 31 + raw.charCodeAt(i)) | 0;
-  }
-  return `${messages.length}-${(hash >>> 0).toString(36)}`;
+  return `${messages.length}-${hashString(raw)}`;
+}
+
+// A deterministic per-message id so the receiving store can dedupe on
+// re-capture instead of relying solely on the thread-level contentSignature.
+// Reliable only when sentAtPrecision is "exact" — an "approximate" sentAt is
+// a capture-time placeholder (see parseMessengerArticle), so it changes on
+// every re-capture and the resulting id is NOT stable across captures for
+// that message. This mirrors the same caveat already called out for
+// sentAtPrecision; there is no DOM-native message id to fall back on
+// (verified: Facebook's message rows carry no unique id/data- attribute).
+function computeMessengerMessageId(threadId, message) {
+  const raw = `${threadId}|${message.sentAt}|${message.fromSelf}|${message.text.slice(0, 200)}`;
+  return `msg:${threadId}:${hashString(raw)}`;
 }
 
 // Returns the richer structured capture oc-general.cc's contract needs
@@ -293,6 +310,7 @@ function extractMessengerConversation() {
   if (!container) {
     return null;
   }
+  const threadId = extractMessengerThreadId();
 
   // Facebook renders each message bubble as `<div role="article">`, not an
   // `<article>` tag (verified against the live site 2026-08-09) — match both
@@ -333,17 +351,18 @@ function extractMessengerConversation() {
     content: `## Messenger Conversation\n${lines.join('\n')}`,
     contentSignature: computeMessengerSignature(messages),
     injectionDetected,
-    threadId: extractMessengerThreadId(),
+    threadId,
     contactName: extractMessengerContactName(),
     captureScope: 'visible_window',
     messageCount: includedMessages.length,
     oldestCapturedAt: includedMessages[0].sentAt,
-    messages: includedMessages.map(({ sender, fromSelf, text, sentAt, sentAtPrecision }) => ({
-      sender,
-      fromSelf,
-      text,
-      sentAt,
-      sentAtPrecision,
+    messages: includedMessages.map((message) => ({
+      id: computeMessengerMessageId(threadId, message),
+      sender: message.sender,
+      fromSelf: message.fromSelf,
+      text: message.text,
+      sentAt: message.sentAt,
+      sentAtPrecision: message.sentAtPrecision,
     })),
   };
 }
