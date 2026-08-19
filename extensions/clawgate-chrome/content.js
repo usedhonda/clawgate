@@ -178,7 +178,20 @@ const MESSENGER_MAX_MESSAGE_CHARS = 500;
 const MESSENGER_MAX_BLOCK_CHARS = 4000;
 const MESSENGER_LABEL_PATTERN = /^(.+?)[、,]\s*(.+?)[:：]\s*([\s\S]+)$/;
 const MESSENGER_SELF_SENDER_PATTERN = /^(あなた|you)$/i;
-const MESSENGER_JP_DATETIME_PATTERN = /(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s+(\d{1,2}):(\d{2})/;
+// Messenger renders three different absolute-time shapes in the same aria-label
+// slot (all verified on the live site 2026-08-19):
+//   older than ~a week   "2024年3月11日 19:32"
+//   within ~a week       "2026年8月14日(金) 11:02"   <- weekday in parentheses
+//   today                "18:51"                    <- time only, no date
+// Only the first shape used to parse, so today's messages — the ones a reminder
+// is actually about — all fell back to the capture-time placeholder.
+const MESSENGER_JP_DATETIME_PATTERN = /(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日\s*(?:[(（][^)）]{1,3}[)）])?\s*(\d{1,2}):(\d{2})/;
+const MESSENGER_JP_TIME_ONLY_PATTERN = /^\s*(\d{1,2}):(\d{2})\s*$/;
+const MESSENGER_YEAR_PATTERN = /(\d{4})年/;
+// Facebook stamps the E2EE system notice with the Unix epoch ("1970年1月1日
+// 7:30"). Anything below Facebook's own founding year is a placeholder, not an
+// observation, so it must not reach the store.
+const MESSENGER_MIN_PLAUSIBLE_YEAR = 2004;
 const MESSENGER_THREAD_ID_PATTERN = /\/(?:e2ee\/)?t\/(\d+)/;
 
 function isMessengerPage() {
@@ -238,13 +251,41 @@ function findMessageLabelElement(article) {
 // never guess. Interpreted in the browser's local timezone, since Messenger
 // renders times in the viewer's locale.
 function parseMessengerTimestamp(raw) {
-  const match = MESSENGER_JP_DATETIME_PATTERN.exec(raw || '');
-  if (!match) {
-    return null;
+  const text = raw || '';
+  const match = MESSENGER_JP_DATETIME_PATTERN.exec(text);
+  if (match) {
+    const [, year, month, day, hour, minute] = match.map(Number);
+    const date = new Date(year, month - 1, day, hour, minute, 0, 0);
+    return Number.isNaN(date.getTime()) ? null : date;
   }
-  const [, year, month, day, hour, minute] = match.map(Number);
-  const date = new Date(year, month - 1, day, hour, minute, 0, 0);
-  return Number.isNaN(date.getTime()) ? null : date;
+  // A bare "H:MM" is only ever rendered for today — once a message crosses
+  // midnight Messenger re-labels it with a date. Resolving it against the
+  // capture date therefore yields a real wall-clock time rather than a guess,
+  // and it makes the id of a given message converge: the same message captured
+  // again tomorrow parses to the identical instant instead of becoming a
+  // second row.
+  const timeOnly = MESSENGER_JP_TIME_ONLY_PATTERN.exec(text);
+  if (timeOnly) {
+    const [, hour, minute] = timeOnly.map(Number);
+    const now = new Date();
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, minute, 0, 0);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    // Clock skew, or a tab left open across midnight, could put the resolved
+    // time in the future. Roll back a day rather than claim a message that has
+    // not happened yet.
+    if (date.getTime() > now.getTime() + 60000) {
+      date.setDate(date.getDate() - 1);
+    }
+    return date;
+  }
+  return null;
+}
+
+function hasImplausibleYear(raw) {
+  const match = MESSENGER_YEAR_PATTERN.exec(raw || '');
+  return Boolean(match) && Number(match[1]) < MESSENGER_MIN_PLAUSIBLE_YEAR;
 }
 
 function parseMessengerArticle(article) {
@@ -258,6 +299,12 @@ function parseMessengerArticle(article) {
     return null;
   }
   const [, rawDateTime, rawSender, rawText] = match;
+  // An epoch-stamped row is Facebook's E2EE system notice, not a message.
+  // Dropping it keeps a fabricated 1970 timestamp out of a store that never
+  // prunes.
+  if (hasImplausibleYear(rawDateTime)) {
+    return null;
+  }
   const senderNormalized = normalizeText(rawSender);
   const fromSelf = MESSENGER_SELF_SENDER_PATTERN.test(senderNormalized);
   const sender = fromSelf ? 'Me' : senderNormalized;
