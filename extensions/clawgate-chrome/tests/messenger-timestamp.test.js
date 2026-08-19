@@ -127,6 +127,51 @@ test('the contact name is the name, not the landmark label wrapped around it', (
   assert.equal(withHeadings([]), '');
 });
 
+test('thread state is read at the strength the DOM actually states it', () => {
+  const context = loadContentScript();
+  const fakeArticle = (labels, alts = [], headings = []) => ({
+    querySelectorAll(selector) {
+      if (selector === 'img[alt]') return alts.map((alt) => ({ alt }));
+      if (selector.includes('heading')) return headings.map((textContent) => ({ textContent }));
+      return labels.map((label) => ({ getAttribute: () => label }));
+    },
+  });
+  // Values cross a vm realm boundary, so their prototypes differ from this
+  // realm's — compare the data, not the object identity.
+  const call = (fn, article) => {
+    context.__article = article;
+    return JSON.parse(vm.runInContext(`JSON.stringify(${fn}(__article) ?? null)`, context));
+  };
+
+  // The affordance button sits on every message and means nothing was reacted.
+  assert.equal(call('extractMessengerReactions', fakeArticle(['絵文字でリアクションする'])), null);
+  assert.deepEqual(
+    call('extractMessengerReactions', fakeArticle(['絵文字付きのリアクションが3件ありました: 👍、❤️。リアクションした人をチェックしよう。'])),
+    { count: 3, emoji: ['👍', '❤️'] }
+  );
+
+  // A reader whose time does not parse still counts as a reader, but must not
+  // be given the capture time as if it were a read time.
+  assert.deepEqual(
+    call('extractMessengerReadBy', fakeArticle([], ['田中 健一さんがついさっきに閲覧'])),
+    [{ reader: '田中 健一', readAt: null, readAtPrecision: 'approximate' }]
+  );
+  const dated = call('extractMessengerReadBy', fakeArticle([], ['小林 誠さんが2026年4月1日 7:56に閲覧']));
+  assert.equal(dated.length, 1);
+  assert.equal(dated[0].readAtPrecision, 'exact');
+
+  assert.equal(
+    call('extractMessengerReplyToName', fakeArticle([], [], ['鈴木 一郎さんがAlex Riveraさんに返信しました'])),
+    'Alex Rivera'
+  );
+
+  // Title and domain are concatenated with no delimiter; the label is kept whole.
+  assert.deepEqual(
+    call('extractMessengerAttachments', fakeArticle(['添付を開く: 2026Q3 Product Update | Noteswww.example.com'])),
+    [{ kind: 'link', label: '2026Q3 Product Update | Noteswww.example.com' }]
+  );
+});
+
 test('the epoch-stamped E2EE system notice is rejected as a placeholder', () => {
   const context = loadContentScript();
   const implausible = (raw) => vm.runInContext(`hasImplausibleYear(${JSON.stringify(raw)})`, context);

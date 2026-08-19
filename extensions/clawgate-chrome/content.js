@@ -193,6 +193,23 @@ const MESSENGER_YEAR_PATTERN = /(\d{4})年/;
 // observation, so it must not reach the store.
 const MESSENGER_MIN_PLAUSIBLE_YEAR = 2004;
 const MESSENGER_THREAD_ID_PATTERN = /\/(?:e2ee\/)?t\/(\d+)/;
+// Thread-state shapes, all verified against the live site 2026-08-19. The
+// reaction label stops at "リアクションした人をチェックしよう", so it never
+// names who reacted — a consumer may only say a reaction exists.
+const MESSENGER_REACTION_PATTERN = /^絵文字付きのリアクションが(\d+)件ありました[:：]\s*([^。]+)。/;
+const MESSENGER_READ_RECEIPT_PATTERN = /^(.+?)さんが(.+?)に閲覧$/;
+const MESSENGER_REPLY_HEADING_PATTERN = /^(.+?)さんが(.+?)さんに返信しました$/;
+const MESSENGER_ATTACHMENT_PATTERN = /^添付を開く[:：]\s*(.+)$/;
+const MESSENGER_PHOTO_ALT_PATTERN = /^写真.*を開く$/;
+const MESSENGER_COMPOSER_PATTERN = /^(.+)に書く$/;
+const MESSENGER_UNREAD_PATTERN = /^未読/;
+const MESSENGER_GROUP_LABEL_PATTERN = /^グループチャット[:：]/;
+const MESSENGER_OPTIONS_LABEL_PATTERN = /^(.+?)さんのその他のオプション$/;
+const MESSENGER_ONLINE_TEXT = 'オンライン中';
+const MESSENGER_MAX_READERS = 20;
+const MESSENGER_MAX_ATTACHMENTS = 5;
+const MESSENGER_MAX_THREAD_ROWS = 50;
+const MESSENGER_MAX_PREVIEW_CHARS = 300;
 
 function isMessengerPage() {
   const location = window.location;
@@ -329,7 +346,186 @@ function parseMessengerArticle(article) {
   // so downstream never has to guess which timezone this was written in.
   const sentAt = (parsed ? parsed.date : new Date()).toISOString();
   const sentAtPrecision = parsed ? parsed.precision : 'approximate';
-  return { sender, fromSelf, text, sentAt, sentAtPrecision };
+  return {
+    sender,
+    fromSelf,
+    text,
+    sentAt,
+    sentAtPrecision,
+    reactions: extractMessengerReactions(article),
+    readBy: extractMessengerReadBy(article),
+    replyToName: extractMessengerReplyToName(article),
+    attachments: extractMessengerAttachments(article),
+  };
+}
+
+// Every signal below was verified to live inside the message's own
+// [role="article"] element (reactions 2/2, read receipts 2/2 and 5/5, reply
+// headings 3/3, attachments 6/6 across two threads), so a per-message scope is
+// the real structure rather than an assumption about it.
+
+function extractMessengerReactions(article) {
+  for (const el of article.querySelectorAll('[aria-label]')) {
+    const match = MESSENGER_REACTION_PATTERN.exec(el.getAttribute('aria-label') || '');
+    if (!match) {
+      continue;
+    }
+    const count = Number(match[1]);
+    if (!Number.isFinite(count)) {
+      return null;
+    }
+    // Messenger collapses the list to at most two distinct emoji.
+    const emoji = match[2].split(/[、,]/).map((part) => part.trim()).filter(Boolean);
+    return { count, emoji };
+  }
+  return null;
+}
+
+function extractMessengerReadBy(article) {
+  const readers = [];
+  for (const img of article.querySelectorAll('img[alt]')) {
+    const match = MESSENGER_READ_RECEIPT_PATTERN.exec(normalizeText(img.alt || ''));
+    if (!match) {
+      continue;
+    }
+    const [, rawReader, rawTime] = match;
+    if (hasImplausibleYear(rawTime)) {
+      continue;
+    }
+    const parsed = parseMessengerTimestamp(rawTime);
+    // Who read it is worth keeping even when the label's time does not parse,
+    // but the capture time is not a read time: report null rather than a
+    // placeholder that would read as "just now".
+    readers.push({
+      reader: normalizeText(rawReader).slice(0, 100),
+      readAt: parsed ? parsed.date.toISOString() : null,
+      readAtPrecision: parsed ? parsed.precision : 'approximate',
+    });
+    if (readers.length >= MESSENGER_MAX_READERS) {
+      break;
+    }
+  }
+  return readers;
+}
+
+function extractMessengerReplyToName(article) {
+  for (const heading of article.querySelectorAll('h1, h2, h3, [role="heading"]')) {
+    const match = MESSENGER_REPLY_HEADING_PATTERN.exec(normalizeText(heading.textContent || ''));
+    if (match) {
+      return normalizeText(match[2]).slice(0, 100);
+    }
+  }
+  return '';
+}
+
+function extractMessengerAttachments(article) {
+  const attachments = [];
+  for (const el of article.querySelectorAll('[aria-label]')) {
+    const match = MESSENGER_ATTACHMENT_PATTERN.exec(el.getAttribute('aria-label') || '');
+    if (!match) {
+      continue;
+    }
+    // Title and domain are concatenated with no delimiter ("...| Noteswww.
+    // example.com"), so the label is passed through whole. Splitting it would be
+    // a guess, and Messenger's own labelling is buggy enough to produce
+    // "写真NaNを開く".
+    attachments.push({ kind: 'link', label: normalizeText(match[1]).slice(0, 300) });
+    if (attachments.length >= MESSENGER_MAX_ATTACHMENTS) {
+      return attachments;
+    }
+  }
+  for (const img of article.querySelectorAll('img[alt]')) {
+    if (!MESSENGER_PHOTO_ALT_PATTERN.test(normalizeText(img.alt || ''))) {
+      continue;
+    }
+    attachments.push({ kind: 'photo', label: normalizeText(img.alt || '').slice(0, 300) });
+    if (attachments.length >= MESSENGER_MAX_ATTACHMENTS) {
+      break;
+    }
+  }
+  return attachments;
+}
+
+// The composer names every participant in full, while the thread title may be
+// an abbreviation ("涛、桂太" against "程 涛、豊野 桂太"), so this is the
+// accurate list for identifying who a thread is actually with.
+function extractMessengerParticipants() {
+  for (const el of document.querySelectorAll('[role="main"] [aria-label]')) {
+    const match = MESSENGER_COMPOSER_PATTERN.exec(el.getAttribute('aria-label') || '');
+    if (match) {
+      return normalizeText(match[1]).slice(0, 300);
+    }
+  }
+  return '';
+}
+
+function messengerRowTexts(row) {
+  const texts = [];
+  for (const node of row.querySelectorAll('*')) {
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) {
+        const text = normalizeText(child.textContent || '');
+        if (text) {
+          texts.push(text);
+        }
+      }
+    }
+  }
+  return texts;
+}
+
+// The sidebar is virtualised — about 21 rows against a much longer account —
+// so this is a window on the same terms as the message log, and a thread
+// missing from it was not observed rather than absent.
+function extractMessengerThreadList() {
+  const rows = Array.from(document.querySelectorAll('[role="grid"] [role="row"]')).slice(0, MESSENGER_MAX_THREAD_ROWS);
+  const list = [];
+  for (const row of rows) {
+    const links = Array.from(row.querySelectorAll('a[href]'));
+    const threadLink = links.find((a) => MESSENGER_THREAD_ID_PATTERN.test(a.getAttribute('href') || ''));
+    if (!threadLink) {
+      continue;
+    }
+    const threadId = MESSENGER_THREAD_ID_PATTERN.exec(threadLink.getAttribute('href'))[1];
+    const optionsLabel = Array.from(row.querySelectorAll('[aria-label]'))
+      .map((el) => el.getAttribute('aria-label') || '')
+      .map((label) => MESSENGER_OPTIONS_LABEL_PATTERN.exec(label))
+      .find(Boolean);
+    const isGroup = links.some((a) => MESSENGER_GROUP_LABEL_PATTERN.test(a.getAttribute('aria-label') || ''));
+    const abbr = row.querySelector('abbr[aria-label]');
+    const texts = messengerRowTexts(row);
+    // An online thread prepends "オンライン中", which shifts every later text
+    // node — 7 of 21 rows on the measured account. Drop it before reading by
+    // position or the presence lands in the name field.
+    const body = texts.filter((text) => text !== MESSENGER_ONLINE_TEXT);
+    const unread = body.some((text) => MESSENGER_UNREAD_PATTERN.test(text));
+    const preview = body.filter((text) => !MESSENGER_UNREAD_PATTERN.test(text)).slice(1, -2).join(' ');
+    list.push({
+      threadId,
+      name: optionsLabel ? normalizeText(optionsLabel[1]).slice(0, 200) : (body[0] || ''),
+      isGroup,
+      unread,
+      previewText: preview.slice(0, MESSENGER_MAX_PREVIEW_CHARS),
+      // Kept as the string Messenger rendered. The sidebar carries no absolute
+      // time anywhere, so converting this to an instant would manufacture a
+      // precision the DOM never had.
+      lastActivityLabel: abbr ? normalizeText(abbr.getAttribute('aria-label') || '') : '',
+    });
+  }
+
+  const folders = [];
+  for (const el of document.querySelectorAll('[role="navigation"] [aria-label], [role="tablist"] [aria-label]')) {
+    const label = normalizeText(el.getAttribute('aria-label') || '');
+    const match = /^(.+?)\s*·\s*未読(\d+)件$/.exec(label);
+    if (match) {
+      folders.push({ name: normalizeText(match[1]).slice(0, 100), unreadCount: Number(match[2]) });
+    }
+  }
+
+  if (!list.length && !folders.length) {
+    return null;
+  }
+  return { capturedAt: new Date().toISOString(), captureScope: 'visible_window', rows: list, folders };
 }
 
 function hashString(value) {
@@ -424,7 +620,13 @@ function extractMessengerConversation() {
       text: message.text,
       sentAt: message.sentAt,
       sentAtPrecision: message.sentAtPrecision,
+      reactions: message.reactions,
+      readBy: message.readBy,
+      replyToName: message.replyToName,
+      attachments: message.attachments,
     })),
+    participants: extractMessengerParticipants(),
+    threadList: extractMessengerThreadList(),
   };
 }
 

@@ -32,6 +32,9 @@ let pollInFlight = false;
 let passiveVisit = null;
 const passiveQueue = [];
 const passiveSentAtByURL = new Map();
+// The sidebar observed during the most recent capture. Sent alongside the
+// entries it was observed with, never folded into one.
+let latestThreadList = null;
 
 function isMessengerURL(urlString) {
   try {
@@ -294,6 +297,37 @@ async function refreshBadge() {
   await chrome.action.setBadgeText({ text: configured ? '' : '!' });
 }
 
+// A freshly loaded extension has no gateway settings, and until it has them
+// every capture returns early — so the whole pipeline sits silent behind one
+// button press in the popup. The popup's Connect button reads this same
+// bootstrap payload from the local bridge, so doing it automatically asks the
+// same question of the same 127.0.0.1 endpoint and just spares the click.
+async function ensureGatewayConfigured() {
+  const { bridgePort, gatewayURL, gatewayToken } = await getSettings();
+  if (gatewayURL && gatewayToken) {
+    return;
+  }
+  try {
+    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/openclaw-info`);
+    if (!response.ok) {
+      return;
+    }
+    const data = await response.json();
+    const host = typeof data.gateway_host === 'string' && data.gateway_host
+      ? data.gateway_host
+      : (typeof data.host === 'string' ? data.host : '');
+    const port = Number(data.port);
+    const token = typeof data.token === 'string' ? data.token : '';
+    if (!host || !Number.isFinite(port) || !token) {
+      return;
+    }
+    await chrome.storage.local.set({ gatewayURL: `http://${host}:${port}`, gatewayToken: token });
+    await refreshBadge();
+  } catch {
+    // The app is not up yet. The next poll tick tries again.
+  }
+}
+
 async function ensurePassiveAlarm() {
   await chrome.alarms.create(PASSIVE_FLUSH_ALARM, {
     periodInMinutes: PASSIVE_FLUSH_PERIOD_MINUTES,
@@ -315,6 +349,7 @@ async function startPolling() {
   }
   pollInFlight = true;
   try {
+    await ensureGatewayConfigured();
     const { bridgePort } = await getSettings();
     const url = new URL(`http://127.0.0.1:${bridgePort}/v1/poll`);
     if (cursor) {
@@ -613,11 +648,19 @@ async function buildMessengerEntry(tab) {
     const url = tab.url || result?.url || '';
     const threadId = typeof messenger.threadId === 'string' && messenger.threadId ? messenger.threadId : hashString(url);
 
+    // The thread list describes the sidebar, not this thread, so the contract
+    // carries it as a sibling of `entries` and never merged into one. It is
+    // held here rather than on the entry so that shape cannot drift.
+    latestThreadList = messenger.threadList && Array.isArray(messenger.threadList.rows)
+      ? messenger.threadList
+      : null;
+
     return {
       id: `messenger:${threadId}`,
       platform: 'messenger',
       threadUrl: url,
       contactName: typeof messenger.contactName === 'string' ? messenger.contactName : '',
+      participants: typeof messenger.participants === 'string' ? messenger.participants : '',
       capturedAt: new Date().toISOString(),
       captureScope: messenger.captureScope === 'full_thread' ? 'full_thread' : 'visible_window',
       oldestCapturedAt: typeof messenger.oldestCapturedAt === 'string' ? messenger.oldestCapturedAt : new Date().toISOString(),
@@ -630,6 +673,25 @@ async function buildMessengerEntry(tab) {
         text: typeof m.text === 'string' ? m.text : '',
         sentAt: typeof m.sentAt === 'string' ? m.sentAt : new Date().toISOString(),
         sentAtPrecision: MESSENGER_SENT_AT_PRECISIONS.has(m.sentAtPrecision) ? m.sentAtPrecision : 'approximate',
+        // Reactions carry no attribution — the DOM label stops before naming
+        // anyone — so this says a reaction exists, never who made it.
+        reactions: m.reactions && Number.isFinite(m.reactions.count)
+          ? { count: m.reactions.count, emoji: Array.isArray(m.reactions.emoji) ? m.reactions.emoji : [] }
+          : null,
+        readBy: Array.isArray(m.readBy)
+          ? m.readBy.map((r) => ({
+            reader: typeof r.reader === 'string' ? r.reader : '',
+            readAt: typeof r.readAt === 'string' ? r.readAt : null,
+            readAtPrecision: MESSENGER_SENT_AT_PRECISIONS.has(r.readAtPrecision) ? r.readAtPrecision : 'approximate',
+          }))
+          : [],
+        replyToName: typeof m.replyToName === 'string' ? m.replyToName : '',
+        attachments: Array.isArray(m.attachments)
+          ? m.attachments.map((a) => ({
+            kind: typeof a.kind === 'string' ? a.kind : '',
+            label: typeof a.label === 'string' ? a.label : '',
+          }))
+          : [],
       })),
     };
   } catch {
@@ -721,12 +783,13 @@ async function postMessengerEntries(entries, settings) {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${settings.gatewayToken}`,
     },
-    body: JSON.stringify({ entries }),
+    body: JSON.stringify(latestThreadList ? { entries, threadList: latestThreadList } : { entries }),
   });
 
   if (!response.ok) {
     throw new Error(`Gateway rejected messenger capture (${response.status})`);
   }
+  latestThreadList = null;
   return response;
 }
 
