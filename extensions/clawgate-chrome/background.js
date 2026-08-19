@@ -19,10 +19,11 @@ const PASSIVE_FLUSH_ALARM = 'clawgate-passive-flush';
 const PASSIVE_FLUSH_PERIOD_MINUTES = 1.5;
 const PASSIVE_SEND_LOG_LIMIT = 200;
 
-// Proposed contract, pending final confirmation with oc-general.cc — see
-// docs/plans/delegated-snacking-garden.md "エンドポイント契約". Update this
-// path if the agreed contract differs.
+// Confirmed against oc-general's docs/contracts/messenger-capture.md.
 const MESSENGER_CAPTURE_ENDPOINT = '/api/messenger-capture';
+// Anything the contract does not name falls back to "approximate", the value
+// that grants a timestamp the least trust.
+const MESSENGER_SENT_AT_PRECISIONS = new Set(['exact', 'inferred_date', 'approximate']);
 
 let cursor = '';
 let pollTimer = null;
@@ -628,7 +629,7 @@ async function buildMessengerEntry(tab) {
         fromSelf: typeof m.fromSelf === 'boolean' ? m.fromSelf : null,
         text: typeof m.text === 'string' ? m.text : '',
         sentAt: typeof m.sentAt === 'string' ? m.sentAt : new Date().toISOString(),
-        sentAtPrecision: m.sentAtPrecision === 'exact' ? 'exact' : 'approximate',
+        sentAtPrecision: MESSENGER_SENT_AT_PRECISIONS.has(m.sentAtPrecision) ? m.sentAtPrecision : 'approximate',
       })),
     };
   } catch {

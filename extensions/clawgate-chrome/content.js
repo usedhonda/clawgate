@@ -256,14 +256,16 @@ function parseMessengerTimestamp(raw) {
   if (match) {
     const [, year, month, day, hour, minute] = match.map(Number);
     const date = new Date(year, month - 1, day, hour, minute, 0, 0);
-    return Number.isNaN(date.getTime()) ? null : date;
+    return Number.isNaN(date.getTime()) ? null : { date, precision: 'exact' };
   }
   // A bare "H:MM" is only ever rendered for today — once a message crosses
   // midnight Messenger re-labels it with a date. Resolving it against the
   // capture date therefore yields a real wall-clock time rather than a guess,
   // and it makes the id of a given message converge: the same message captured
   // again tomorrow parses to the identical instant instead of becoming a
-  // second row.
+  // second row. The date is reconstructed rather than read, so it reports as
+  // "inferred_date" — the store keeps that distinction instead of letting a
+  // reconstructed date pass as one Messenger actually stated.
   const timeOnly = MESSENGER_JP_TIME_ONLY_PATTERN.exec(text);
   if (timeOnly) {
     const [, hour, minute] = timeOnly.map(Number);
@@ -278,7 +280,7 @@ function parseMessengerTimestamp(raw) {
     if (date.getTime() > now.getTime() + 60000) {
       date.setDate(date.getDate() - 1);
     }
-    return date;
+    return { date, precision: 'inferred_date' };
   }
   return null;
 }
@@ -312,11 +314,11 @@ function parseMessengerArticle(article) {
   if (!text) {
     return null;
   }
-  const parsedDate = parseMessengerTimestamp(rawDateTime);
+  const parsed = parseMessengerTimestamp(rawDateTime);
   // ISO-8601 always carries an explicit offset (toISOString() uses "Z"/UTC),
   // so downstream never has to guess which timezone this was written in.
-  const sentAt = (parsedDate || new Date()).toISOString();
-  const sentAtPrecision = parsedDate ? 'exact' : 'approximate';
+  const sentAt = (parsed ? parsed.date : new Date()).toISOString();
+  const sentAtPrecision = parsed ? parsed.precision : 'approximate';
   return { sender, fromSelf, text, sentAt, sentAtPrecision };
 }
 
@@ -336,12 +338,12 @@ function computeMessengerSignature(messages) {
 
 // A deterministic per-message id so the receiving store can dedupe on
 // re-capture instead of relying solely on the thread-level contentSignature.
-// Reliable only when sentAtPrecision is "exact" — an "approximate" sentAt is
-// a capture-time placeholder (see parseMessengerArticle), so it changes on
-// every re-capture and the resulting id is NOT stable across captures for
-// that message. This mirrors the same caveat already called out for
-// sentAtPrecision; there is no DOM-native message id to fall back on
-// (verified: Facebook's message rows carry no unique id/data- attribute).
+// Stable for "exact" and for "inferred_date" — a reconstructed date resolves
+// to the same instant the dated label will report tomorrow, so the id converges
+// rather than forking. It is NOT stable for "approximate": that sentAt is a
+// capture-time placeholder (see parseMessengerArticle) and changes on every
+// re-capture. There is no DOM-native message id to fall back on (verified:
+// Facebook's message rows carry no unique id/data- attribute).
 function computeMessengerMessageId(threadId, message) {
   const raw = `${threadId}|${message.sentAt}|${message.fromSelf}|${message.text.slice(0, 200)}`;
   return `msg:${threadId}:${hashString(raw)}`;
