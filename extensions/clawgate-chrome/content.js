@@ -220,12 +220,22 @@ function extractMessengerThreadId() {
 
 function extractMessengerContactName() {
   // The thread header is a native heading element (observed as <h2> on the
-  // live site, 2026-08-09) without an explicit role="heading" attribute —
-  // match h1-h3 and the explicit role as a fallback for markup changes.
-  const heading = document.querySelector(
+  // live site) without an explicit role="heading" attribute — match h1-h3 and
+  // the explicit role as a fallback for markup changes.
+  const headings = Array.from(document.querySelectorAll(
     '[role="main"] h1, [role="main"] h2, [role="main"] h3, [role="main"] [role="heading"]'
-  );
-  return heading ? normalizeText(heading.textContent || '').slice(0, 200) : '';
+  )).map((el) => normalizeText(el.textContent || '')).filter(Boolean);
+  if (!headings.length) {
+    return '';
+  }
+  // That first heading is a screen-reader landmark, so it carries a decorated
+  // title — "スレッド: 山田 花子", "旅行の相談というタイトルのスレッド" — and
+  // storing it verbatim files the contact under Messenger's label rather than
+  // under their name. The undecorated name follows as a shorter heading
+  // contained within the landmark (verified on four threads, 2026-08-19).
+  const [landmark, ...rest] = headings;
+  const plain = rest.find((text) => text.length < landmark.length && landmark.includes(text));
+  return (plain || landmark).slice(0, 200);
 }
 
 function findMessageLabelElement(article) {

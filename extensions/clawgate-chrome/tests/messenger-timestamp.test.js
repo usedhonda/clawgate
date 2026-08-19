@@ -18,6 +18,7 @@ function loadContentScript() {
       head: { appendChild() {}, querySelector() { return null; } },
       createElement() { return { setAttribute() {} }; },
       querySelector() { return null; },
+      querySelectorAll() { return []; },
     },
     HTMLMetaElement: function HTMLMetaElement() {},
     window: {
@@ -108,6 +109,22 @@ test('a bare time that resolves into the future rolls back a day', () => {
   assert.ok(parsed, 'a bare H:MM label must parse');
   assert.ok(parsed.date.getTime() <= now.getTime() + 60000, 'must never claim a message from the future');
   assert.equal(parsed.date.getHours(), ahead.getHours());
+});
+
+test('the contact name is the name, not the landmark label wrapped around it', () => {
+  const context = loadContentScript();
+  const withHeadings = (headings) => {
+    context.document.querySelectorAll = () => headings.map((text) => ({ textContent: text }));
+    return vm.runInContext('extractMessengerContactName()', context);
+  };
+
+  // 1:1 thread: the landmark prefixes the name.
+  assert.equal(withHeadings(['スレッド: 山田 花子', '山田 花子', 'メッセージ']), '山田 花子');
+  // Group thread: the landmark wraps the name in a phrase instead.
+  assert.equal(withHeadings(['旅行の相談というタイトルのスレッド', '旅行の相談', 'メッセージ']), '旅行の相談');
+  // Nothing contained in the landmark: keep it rather than invent a name.
+  assert.equal(withHeadings(['スレッド: 山田 花子', 'メッセージ']), 'スレッド: 山田 花子');
+  assert.equal(withHeadings([]), '');
 });
 
 test('the epoch-stamped E2EE system notice is rejected as a placeholder', () => {
