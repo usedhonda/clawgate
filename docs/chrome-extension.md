@@ -1,6 +1,6 @@
 # ClawGate Chrome extension
 
-Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.8.0`.
+Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.9.0`.
 
 The extension is the browser half of ClawGate. It sends pages you choose to Chi,
 records where you have been, and — on Messenger only — reads the conversation on
@@ -85,6 +85,33 @@ Messenger is handled on its own path. `isMessengerPage()` matches
 DOM settles. The 1.5-minute alarm remains as a backstop. Captures are deduped by
 a content signature rather than by a time window, so re-viewing an unchanged
 thread costs nothing.
+
+**Following the conversation.** Messenger replaces the message log wholesale when
+another conversation is opened — the previous container is detached and never
+emits another mutation. A second observer on `[role="main"]`, which survives the
+switch, notices the replacement and rebinds the log observer to the new
+container, disconnecting the old one. Exactly one log container is observed at a
+time. The log observer also watches `characterData` and the `aria-label`
+attribute, because a row is often inserted before it carries a timestamp and the
+label arriving is an attribute change.
+
+**Sending.** A reply you have just sent is the case most worth catching and the
+easiest to miss, so sending is detected directly rather than waited for:
+
+- Return in the composer, excluding Shift, other modifiers, and an IME accepting
+  a candidate (`isComposing`, or `keyCode` 229);
+- a click on a control whose label ends in `を送信`;
+- a form submit;
+- the composer going from holding text to empty, which is what sending does
+  however it was triggered. Only the length of the draft is read.
+
+Each of these schedules a short fixed ladder of recapture requests (0.6 s, 2.5 s,
+6 s) rather than a single attempt, because the row's timestamp settles a moment
+after the send. The ladder is restarted rather than stacked, so a burst of
+messages never accumulates timers, and the content signature discards whichever
+attempts saw nothing new. Listeners are registered on the capture phase and
+never call `preventDefault`, so the page behaves exactly as it would without the
+extension.
 
 **Scope.** The extension reads rendered DOM, so it observes a window and never a
 thread: `captureScope` is always `visible_window`, bounded at the 30 most recent
@@ -193,8 +220,11 @@ cd extensions/clawgate-chrome && node --test tests/*.test.js
 `inferred_date` reconstruction and its convergence with the dated label, the
 future rollback, the epoch-notice rejection, contact-name selection, the
 reaction affordance not counting as a reaction, and a read receipt keeping its
-reader when its time does not parse. `tests/ocr-sandbox-postmessage.test.js`
-covers the OCR sandbox's origin handling.
+reader when its time does not parse.
+`tests/messenger-send-recapture.test.js` covers the send triggers, the IME
+exclusion, rebinding after the log container is replaced, and the ladder staying
+bounded. `tests/ocr-sandbox-postmessage.test.js` covers the OCR sandbox's origin
+handling.
 
 Examples in tests use invented names. Real conversation content never belongs in
 this repository — see the privacy boundary in `AGENTS.md`.

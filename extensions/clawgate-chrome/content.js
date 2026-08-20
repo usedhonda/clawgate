@@ -1332,8 +1332,25 @@ if (runtimeOnMessage && typeof runtimeOnMessage.addListener === 'function') {
 
 const MESSENGER_MUTATION_DEBOUNCE_MS = 2000;
 const MESSENGER_OBSERVER_RETRY_MS = 2000;
-let messengerObserver = null;
+// A reply is only worth capturing once the row Messenger just added carries a
+// timestamp, and that lands a moment after the send. One shot would race it, so
+// the send fans out into a short fixed ladder and lets the existing content
+// signature drop whichever attempts saw nothing new. The ladder is bounded and
+// restarted rather than stacked, so repeated sends never accumulate timers.
+const MESSENGER_SEND_RECAPTURE_DELAYS_MS = [600, 2500, 6000];
+// Verified on the live composer: the only send control present while the box is
+// empty is labelled "「いいね！」を送信". A text send button appears only once
+// there is text, so its label is not measured here and is not guessed at — the
+// composer-emptied signal below covers that path instead.
+const MESSENGER_SEND_BUTTON_LABEL_PATTERN = /を送信$/;
+const MESSENGER_COMPOSER_SELECTOR = '[role="main"] [role="textbox"][contenteditable="true"]';
+let messengerLogObserver = null;
+let messengerObservedLog = null;
+let messengerRootObserver = null;
 let messengerDebounceTimer = null;
+let messengerSendTimers = [];
+let messengerComposerHadText = false;
+let messengerListenersBound = false;
 
 function notifyMessengerContentChanged() {
   const runtime = getRuntimeOrInvalidate('sendMessage');
@@ -1357,23 +1374,151 @@ function scheduleMessengerNotify() {
   }, MESSENGER_MUTATION_DEBOUNCE_MS);
 }
 
+function clearMessengerSendTimers() {
+  for (const timer of messengerSendTimers) {
+    clearTimeout(timer);
+  }
+  messengerSendTimers = [];
+}
+
+// Called when the page says a message was sent. Restarting rather than adding
+// keeps the number of pending timers at the ladder's length no matter how fast
+// messages are sent.
+function scheduleMessengerSendRecapture() {
+  clearMessengerSendTimers();
+  messengerSendTimers = MESSENGER_SEND_RECAPTURE_DELAYS_MS.map((delay) => setTimeout(() => {
+    notifyMessengerContentChanged();
+  }, delay));
+}
+
+function findMessengerComposer() {
+  return document.querySelector(MESSENGER_COMPOSER_SELECTOR);
+}
+
+// Sending empties the composer, whichever way it was sent — return key, send
+// button, or an IME confirming and submitting in one gesture. Watching the box
+// empty therefore catches sends without naming a button that only exists while
+// there is text to send. Only the length is read; the draft itself is never
+// inspected, stored, or sent anywhere.
+function updateMessengerComposerState() {
+  const composer = findMessengerComposer();
+  const hasText = Boolean(composer && (composer.textContent || '').trim().length);
+  if (messengerComposerHadText && !hasText) {
+    scheduleMessengerSendRecapture();
+  }
+  messengerComposerHadText = hasText;
+}
+
+function isInsideMessengerComposer(node) {
+  const element = node && node.nodeType === 1 ? node : (node && node.parentElement) || null;
+  return Boolean(element && typeof element.closest === 'function' && element.closest(MESSENGER_COMPOSER_SELECTOR));
+}
+
+function handleMessengerKeydown(event) {
+  if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) {
+    return;
+  }
+  // An IME uses Enter to accept a candidate, which is composing rather than
+  // sending. `isComposing` says which one this is; keyCode 229 is the same
+  // signal from browsers that do not set it.
+  if (event.isComposing || event.keyCode === 229) {
+    return;
+  }
+  if (isInsideMessengerComposer(event.target)) {
+    scheduleMessengerSendRecapture();
+  }
+}
+
+function handleMessengerClick(event) {
+  const element = event.target && event.target.nodeType === 1 ? event.target : null;
+  if (!element || typeof element.closest !== 'function') {
+    return;
+  }
+  const labelled = element.closest('[aria-label]');
+  if (labelled && MESSENGER_SEND_BUTTON_LABEL_PATTERN.test(labelled.getAttribute('aria-label') || '')) {
+    scheduleMessengerSendRecapture();
+  }
+}
+
+function handleMessengerSubmit() {
+  scheduleMessengerSendRecapture();
+}
+
+// Listeners are on the capture phase so Messenger cannot stop them from firing,
+// and they never call preventDefault — the page keeps behaving exactly as it
+// would without the extension.
+function bindMessengerActionListeners() {
+  if (messengerListenersBound || typeof document.addEventListener !== 'function') {
+    return;
+  }
+  document.addEventListener('keydown', handleMessengerKeydown, true);
+  document.addEventListener('click', handleMessengerClick, true);
+  document.addEventListener('submit', handleMessengerSubmit, true);
+  messengerListenersBound = true;
+}
+
+// The message log is replaced wholesale when another conversation is opened —
+// verified on the live site: the previous container reports isConnected false
+// and never emits another mutation. An observer bound once therefore goes deaf
+// after the first thread switch, which is why a reply could be sent and never
+// captured. Ownership of exactly one live container is tracked here instead.
+function bindMessengerLogObserver() {
+  const container = findMessengerLogContainer();
+  if (!container) {
+    return false;
+  }
+  if (container === messengerObservedLog) {
+    return true;
+  }
+  if (messengerLogObserver) {
+    messengerLogObserver.disconnect();
+  }
+  messengerLogObserver = new MutationObserver(() => {
+    scheduleMessengerNotify();
+  });
+  messengerLogObserver.observe(container, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    // A row is often inserted before its timestamp label exists; the label
+    // arriving is an attribute change, which childList alone never sees.
+    attributes: true,
+    attributeFilter: ['aria-label'],
+  });
+  messengerObservedLog = container;
+  return true;
+}
+
 function setupMessengerObserver() {
-  if (!isMessengerPage() || messengerObserver || extensionContextInvalidated) {
+  if (!isMessengerPage() || extensionContextInvalidated) {
     return;
   }
   if (typeof MutationObserver === 'undefined') {
     return;
   }
-  const container = findMessengerLogContainer();
-  if (!container) {
+  bindMessengerActionListeners();
+
+  // [role="main"] survives a thread switch (verified: same node, still
+  // connected), so it is the stable ground from which the log container's
+  // replacement can be noticed.
+  if (!messengerRootObserver) {
+    const root = document.querySelector('[role="main"]') || document.body;
+    if (root) {
+      messengerRootObserver = new MutationObserver(() => {
+        const bound = bindMessengerLogObserver();
+        updateMessengerComposerState();
+        if (bound) {
+          scheduleMessengerNotify();
+        }
+      });
+      messengerRootObserver.observe(root, { childList: true, subtree: true });
+    }
+  }
+
+  if (!bindMessengerLogObserver()) {
     // The SPA may not have rendered the message log yet; retry shortly.
     setTimeout(setupMessengerObserver, MESSENGER_OBSERVER_RETRY_MS);
-    return;
   }
-  messengerObserver = new MutationObserver(() => {
-    scheduleMessengerNotify();
-  });
-  messengerObserver.observe(container, { childList: true, subtree: true });
 }
 
 if (isMessengerPage()) {
