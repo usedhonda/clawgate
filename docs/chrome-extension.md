@@ -1,6 +1,6 @@
 # ClawGate Chrome extension
 
-Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.9.0`.
+Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.9.1`.
 
 The extension is the browser half of ClawGate. It sends pages you choose to Chi,
 records where you have been, and — on Messenger only — reads the conversation on
@@ -95,6 +95,19 @@ time. The log observer also watches `characterData` and the `aria-label`
 attribute, because a row is often inserted before it carries a timestamp and the
 label arriving is an attribute change.
 
+The rebind reports whether the container was the same, replaced, or absent, and
+only a replacement asks for a capture. Opening a thread renders it in many
+steps, each of which is a root mutation; treating every step as news would
+capture the same conversation repeatedly while it appears. What the current
+conversation does is reported by the log observer alone.
+
+A content script can be injected again — reloading the extension invalidates the
+running one — so each instance publishes a teardown and runs the previous one
+first. Observers are disconnected, pending recaptures cleared and listeners
+removed before the new instance binds, so bindings never accumulate. Note the
+limit: a content script orphaned by an extension reload keeps its own listeners
+until the page is reloaded, and the new instance cannot reach into it.
+
 **Sending.** A reply you have just sent is the case most worth catching and the
 easiest to miss, so sending is detected directly rather than waited for:
 
@@ -103,7 +116,10 @@ easiest to miss, so sending is detected directly rather than waited for:
 - a click on a control whose label ends in `を送信`;
 - a form submit;
 - the composer going from holding text to empty, which is what sending does
-  however it was triggered. Only the length of the draft is read.
+  however it was triggered. Only the length of the draft is read, and the state
+  is tied to the composer node it was read from — switching conversations swaps
+  the composer and leaves any draft behind with it, which would otherwise look
+  exactly like a send. A new composer primes the state instead.
 
 Each of these schedules a short fixed ladder of recapture requests (0.6 s, 2.5 s,
 6 s) rather than a single attempt, because the row's timestamp settles a moment

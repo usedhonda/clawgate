@@ -15,6 +15,8 @@ function makeHarness() {
   const notifications = [];
   const observers = [];
   const listeners = new Map();
+  const listenerAdds = [];
+  const listenerRemoves = [];
   let now = 0;
   let nextTimerId = 1;
   const timers = new Map();
@@ -57,9 +59,11 @@ function makeHarness() {
     },
     querySelectorAll: () => [],
     addEventListener(type, handler, capture) {
+      listenerAdds.push(type);
       listeners.set(type, { handler, capture });
     },
     removeEventListener(type) {
+      listenerRemoves.push(type);
       listeners.delete(type);
     },
   };
@@ -139,6 +143,8 @@ function makeHarness() {
       }
     },
     pendingTimers: () => timers.size,
+    listenerAdds,
+    listenerRemoves,
   };
 }
 
@@ -236,6 +242,77 @@ test('an unchanged conversation is not re-observed, and sends do not stack timer
   h.advance(10000);
   assert.ok(h.notifications.length <= 4, 'the ladder stays bounded');
   assert.equal(h.pendingTimers(), 0, 'and leaves nothing pending');
+});
+
+test('the same conversation re-rendering is not news', () => {
+  const h = makeHarness();
+  h.notifications.length = 0;
+  // Opening a thread renders it in stages; every stage is a root mutation.
+  for (let i = 0; i < 8; i += 1) {
+    h.fire(h.rootObserver());
+  }
+  h.advance(10000);
+  assert.equal(h.notifications.length, 0,
+    'the log observer already reports what this conversation does; the root must not report it again');
+
+  // A swapped-in conversation is news, exactly once.
+  h.state.log = new (h.state.composer.constructor)();
+  h.fire(h.rootObserver());
+  h.fire(h.rootObserver());
+  h.advance(2500);
+  assert.equal(h.notifications.length, 1, 'one notification for the switch, not one per render step');
+});
+
+test('switching to a conversation with an empty composer is not a send', () => {
+  const h = makeHarness();
+  h.state.composer.textContent = 'a draft left in this thread';
+  h.fire(h.rootObserver());
+  h.notifications.length = 0;
+
+  // Opening another conversation swaps the composer, and the new one is empty.
+  const fresh = new (h.state.composer.constructor)({}, '');
+  fresh.selfSelector = h.state.composer.selfSelector;
+  h.state.composer = fresh;
+  h.state.log = new (h.state.composer.constructor)();
+  h.fire(h.rootObserver());
+  h.advance(10000);
+
+  const switchNotifications = h.notifications.length;
+  assert.ok(switchNotifications <= 1,
+    'the switch itself may ask once, but the abandoned draft must not read as a send');
+
+  // The primed composer still reports a real send afterwards.
+  h.notifications.length = 0;
+  fresh.textContent = 'a reply';
+  h.fire(h.rootObserver());
+  fresh.textContent = '';
+  h.fire(h.rootObserver());
+  h.advance(700);
+  assert.equal(h.notifications.length, 1, 'sending from the new conversation still counts');
+});
+
+test('a re-injected content script takes over instead of doubling up', () => {
+  const h = makeHarness();
+  const teardown = h.context.globalThis
+    ? h.context.globalThis.__clawgateMessengerTeardown
+    : h.context.__clawgateMessengerTeardown;
+  assert.equal(typeof teardown, 'function', 'the instance publishes how to release its bindings');
+
+  const rootObserver = h.rootObserver();
+  const logObserver = h.logObserver();
+  h.dispatch('keydown', composerEvent(h));
+  assert.ok(h.pendingTimers() > 0);
+
+  teardown();
+
+  assert.equal(rootObserver.disconnected, true, 'the lifecycle observer is released');
+  assert.equal(logObserver.disconnected, true, 'the log observer is released');
+  assert.equal(h.pendingTimers(), 0, 'pending recaptures are dropped');
+  for (const type of ['keydown', 'click', 'submit']) {
+    assert.ok(h.listenerRemoves.includes(type), `${type} listener is removed`);
+  }
+  h.advance(10000);
+  assert.equal(h.notifications.length, 0, 'a released instance goes quiet');
 });
 
 test('emptying the composer is treated as a send, whatever emptied it', () => {

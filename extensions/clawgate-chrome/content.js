@@ -884,6 +884,7 @@ function rejectPendingOCRRequests(error) {
 
 function teardownExtensionBindings() {
   disconnectActiveImageFetchPorts();
+  teardownMessengerBindings();
 
   if (windowMessageListenerAttached) {
     window.removeEventListener('message', handleSandboxMessage);
@@ -1344,11 +1345,18 @@ const MESSENGER_SEND_RECAPTURE_DELAYS_MS = [600, 2500, 6000];
 // composer-emptied signal below covers that path instead.
 const MESSENGER_SEND_BUTTON_LABEL_PATTERN = /を送信$/;
 const MESSENGER_COMPOSER_SELECTOR = '[role="main"] [role="textbox"][contenteditable="true"]';
+// Re-injection is a normal event here — reloading the extension invalidates the
+// running content script and the next capture injects a fresh one — and the
+// runtime message handler already guards against ending up with two. The
+// Messenger bindings need the same guard, or every reload leaves another set of
+// observers, listeners and timers attached to a page that stays open.
+const MESSENGER_TEARDOWN_KEY = '__clawgateMessengerTeardown';
 let messengerLogObserver = null;
 let messengerObservedLog = null;
 let messengerRootObserver = null;
 let messengerDebounceTimer = null;
 let messengerSendTimers = [];
+let messengerComposerNode = null;
 let messengerComposerHadText = false;
 let messengerListenersBound = false;
 
@@ -1400,9 +1408,19 @@ function findMessengerComposer() {
 // empty therefore catches sends without naming a button that only exists while
 // there is text to send. Only the length is read; the draft itself is never
 // inspected, stored, or sent anywhere.
+//
+// The emptiness only means "sent" for one and the same composer. Opening
+// another conversation swaps the composer out and leaves a draft behind with
+// it, which looks identical to a send unless the state is tied to the node it
+// was observed on. A new composer primes the state instead of reporting a send.
 function updateMessengerComposerState() {
   const composer = findMessengerComposer();
   const hasText = Boolean(composer && (composer.textContent || '').trim().length);
+  if (composer !== messengerComposerNode) {
+    messengerComposerNode = composer;
+    messengerComposerHadText = hasText;
+    return;
+  }
   if (messengerComposerHadText && !hasText) {
     scheduleMessengerSendRecapture();
   }
@@ -1462,13 +1480,17 @@ function bindMessengerActionListeners() {
 // and never emits another mutation. An observer bound once therefore goes deaf
 // after the first thread switch, which is why a reply could be sent and never
 // captured. Ownership of exactly one live container is tracked here instead.
+// Returns what happened, not merely whether a container exists. The caller has
+// to tell "the conversation was swapped" apart from "the same conversation
+// re-rendered": treating both as a reason to recapture turns an ordinary render
+// into a burst of captures while a thread is opening.
 function bindMessengerLogObserver() {
   const container = findMessengerLogContainer();
   if (!container) {
-    return false;
+    return 'none';
   }
   if (container === messengerObservedLog) {
-    return true;
+    return 'same';
   }
   if (messengerLogObserver) {
     messengerLogObserver.disconnect();
@@ -1486,7 +1508,34 @@ function bindMessengerLogObserver() {
     attributeFilter: ['aria-label'],
   });
   messengerObservedLog = container;
-  return true;
+  return 'rebound';
+}
+
+// Releases everything this module attached, so a re-injected instance can take
+// over cleanly rather than run alongside the old one.
+function teardownMessengerBindings() {
+  clearMessengerSendTimers();
+  if (messengerDebounceTimer) {
+    clearTimeout(messengerDebounceTimer);
+    messengerDebounceTimer = null;
+  }
+  if (messengerLogObserver) {
+    messengerLogObserver.disconnect();
+    messengerLogObserver = null;
+  }
+  if (messengerRootObserver) {
+    messengerRootObserver.disconnect();
+    messengerRootObserver = null;
+  }
+  messengerObservedLog = null;
+  messengerComposerNode = null;
+  messengerComposerHadText = false;
+  if (messengerListenersBound && typeof document.removeEventListener === 'function') {
+    document.removeEventListener('keydown', handleMessengerKeydown, true);
+    document.removeEventListener('click', handleMessengerClick, true);
+    document.removeEventListener('submit', handleMessengerSubmit, true);
+  }
+  messengerListenersBound = false;
 }
 
 function setupMessengerObserver() {
@@ -1507,7 +1556,11 @@ function setupMessengerObserver() {
       messengerRootObserver = new MutationObserver(() => {
         const bound = bindMessengerLogObserver();
         updateMessengerComposerState();
-        if (bound) {
+        // Only a swapped-in conversation is news here. Everything the current
+        // conversation does is already reported by the log observer, so
+        // notifying again on each root mutation would just multiply captures
+        // of the same thread while it renders.
+        if (bound === 'rebound') {
           scheduleMessengerNotify();
         }
       });
@@ -1515,12 +1568,20 @@ function setupMessengerObserver() {
     }
   }
 
-  if (!bindMessengerLogObserver()) {
+  updateMessengerComposerState();
+  if (bindMessengerLogObserver() === 'none') {
     // The SPA may not have rendered the message log yet; retry shortly.
     setTimeout(setupMessengerObserver, MESSENGER_OBSERVER_RETRY_MS);
   }
 }
 
 if (isMessengerPage()) {
+  const previousTeardown = globalThis[MESSENGER_TEARDOWN_KEY];
+  if (typeof previousTeardown === 'function') {
+    try {
+      previousTeardown();
+    } catch {}
+  }
+  globalThis[MESSENGER_TEARDOWN_KEY] = teardownMessengerBindings;
   setupMessengerObserver();
 }
