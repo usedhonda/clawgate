@@ -882,9 +882,12 @@ function rejectPendingOCRRequests(error) {
   }
 }
 
+// Released after each extraction: the OCR frame, its ports and the window
+// listeners that serve one extraction. This must not touch the Messenger
+// observers — they live for as long as the injected script does, and every
+// successful capture runs through here.
 function teardownExtensionBindings() {
   disconnectActiveImageFetchPorts();
-  teardownMessengerBindings();
 
   if (windowMessageListenerAttached) {
     window.removeEventListener('message', handleSandboxMessage);
@@ -916,6 +919,9 @@ function markExtensionContextInvalidated(error) {
     : makeInvalidationError();
   rejectPendingOCRRequests(invalidationError);
   teardownExtensionBindings();
+  // Nothing this instance observes can reach the worker any more, so stop
+  // observing rather than leaving listeners on the page.
+  teardownMessengerBindings();
   return invalidationError;
 }
 
@@ -1279,9 +1285,12 @@ function removeRuntimeMessageListener() {
   delete globalThis[CONTENT_RUNTIME_HANDLER_KEY];
 }
 
+// The injected script is finished here, not merely between extractions, so the
+// Messenger observers go too.
 function finalizeInjectedSession() {
   removeRuntimeMessageListener();
   teardownExtensionBindings();
+  teardownMessengerBindings();
 }
 
 function respondWithExtractionError(sendResponse, error) {

@@ -96,6 +96,7 @@ function makeHarness() {
     },
     document,
     HTMLMetaElement: function HTMLMetaElement() {},
+    HTMLIFrameElement: function HTMLIFrameElement() {},
     MutationObserver: FakeMutationObserver,
     window: {
       location: { hostname: 'www.messenger.com', pathname: '/t/1' },
@@ -289,6 +290,42 @@ test('switching to a conversation with an empty composer is not a send', () => {
   h.fire(h.rootObserver());
   h.advance(700);
   assert.equal(h.notifications.length, 1, 'sending from the new conversation still counts');
+});
+
+test('capturing a conversation does not stop the extension from watching it', () => {
+  const h = makeHarness();
+  const logObserver = h.logObserver();
+
+  // Every successful extraction runs this: it releases the OCR frame and the
+  // ports that served that one extraction. Watching the conversation is not
+  // part of that, and folding it in silently ended monitoring after the very
+  // first capture.
+  vm.runInContext('teardownExtensionBindings()', h.context);
+
+  assert.equal(logObserver.disconnected, false, 'the conversation is still being watched');
+  h.notifications.length = 0;
+  h.fire(logObserver);
+  h.advance(2500);
+  assert.equal(h.notifications.length, 1, 'a later message still reaches the worker');
+
+  h.dispatch('keydown', composerEvent(h));
+  h.advance(700);
+  assert.equal(h.notifications.length, 2, 'and a later send still triggers a recapture');
+});
+
+test('ending the injected session does release the watchers', () => {
+  const h = makeHarness();
+  const rootObserver = h.rootObserver();
+  const logObserver = h.logObserver();
+  h.dispatch('keydown', composerEvent(h));
+
+  vm.runInContext('finalizeInjectedSession()', h.context);
+
+  assert.equal(rootObserver.disconnected, true);
+  assert.equal(logObserver.disconnected, true);
+  assert.equal(h.pendingTimers(), 0);
+  h.advance(10000);
+  assert.equal(h.notifications.length, 0);
 });
 
 test('a re-injected content script takes over instead of doubling up', () => {
