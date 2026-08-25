@@ -133,6 +133,35 @@ enum PetChatWindowPolicy {
     }
 }
 
+enum PetDesktopOcclusionPolicy {
+    private static let edgeTolerance: CGFloat = 8
+    private static let minimumCoverage: CGFloat = 0.98
+
+    static func shouldSuppressPet(
+        targetScreenFrame: NSRect,
+        targetVisibleFrame: NSRect,
+        normalWindowFrames: [NSRect]
+    ) -> Bool {
+        normalWindowFrames.contains { windowFrame in
+            covers(targetVisibleFrame, with: windowFrame)
+                || covers(targetScreenFrame, with: windowFrame)
+        }
+    }
+
+    private static func covers(_ target: NSRect, with window: NSRect) -> Bool {
+        guard target.width > 0, target.height > 0 else { return false }
+        let intersection = target.intersection(window)
+        guard !intersection.isNull, !intersection.isEmpty else { return false }
+
+        let coverage = (intersection.width * intersection.height) / (target.width * target.height)
+        return coverage >= minimumCoverage
+            && window.minX <= target.minX + edgeTolerance
+            && window.maxX >= target.maxX - edgeTolerance
+            && window.minY <= target.minY + edgeTolerance
+            && window.maxY >= target.maxY - edgeTolerance
+    }
+}
+
 /// Transparent always-on-top window for the pet character
 final class PetWindowController {
     private var window: NSWindow?
@@ -142,12 +171,14 @@ final class PetWindowController {
     private var opacityObservation: AnyCancellable?
     private var stateObservation: AnyCancellable?
     private var sizeObservation: AnyCancellable?
+    private var isSuppressedByMaximizedWindow = false
 
     init(model: PetModel) {
         self.model = model
     }
 
     func show() {
+        guard !isSuppressedByMaximizedWindow else { return }
         guard window == nil else { return }
 
         let characterSize = model.characterSize
@@ -264,6 +295,66 @@ final class PetWindowController {
             }
         }
 
+    }
+
+    func refreshMaximizedWindowSuppression() {
+        guard let targetScreen = occlusionTargetScreen() else { return }
+        guard let windowInfo = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            return
+        }
+
+        let globalTop = NSScreen.screens.map(\.frame.maxY).max() ?? targetScreen.frame.maxY
+        let normalWindowFrames = windowInfo.compactMap { info -> NSRect? in
+            let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? -1
+            guard layer == 0 else { return nil }
+            let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            guard alpha > 0 else { return nil }
+            guard let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let cgFrame = CGRect(dictionaryRepresentation: bounds) else {
+                return nil
+            }
+            return NSRect(
+                x: cgFrame.minX,
+                y: globalTop - cgFrame.minY - cgFrame.height,
+                width: cgFrame.width,
+                height: cgFrame.height
+            )
+        }
+
+        let shouldSuppress = PetDesktopOcclusionPolicy.shouldSuppressPet(
+            targetScreenFrame: targetScreen.frame,
+            targetVisibleFrame: targetScreen.visibleFrame,
+            normalWindowFrames: normalWindowFrames
+        )
+        setMaximizedWindowSuppression(shouldSuppress)
+    }
+
+    private func occlusionTargetScreen() -> NSScreen? {
+        guard let petFrame = window?.frame else { return NSScreen.main }
+        return NSScreen.screens.max { lhs, rhs in
+            let lhsArea = lhs.frame.intersection(petFrame)
+            let rhsArea = rhs.frame.intersection(petFrame)
+            return lhsArea.width * lhsArea.height < rhsArea.width * rhsArea.height
+        }
+    }
+
+    private func setMaximizedWindowSuppression(_ suppressed: Bool) {
+        guard suppressed != isSuppressedByMaximizedWindow else { return }
+        isSuppressedByMaximizedWindow = suppressed
+
+        if suppressed {
+            model.moveController.stop()
+            window?.orderOut(nil)
+        } else if model.isVisible {
+            if let window {
+                window.orderFront(nil)
+            } else {
+                show()
+            }
+        }
     }
 
     func hide() {

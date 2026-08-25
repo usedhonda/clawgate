@@ -60,6 +60,50 @@ final class PetFloatingWindowContractTests: XCTestCase {
         XCTAssertTrue(PetChatWindowPolicy.shouldRevealChatWindow(isVisible: true, isMiniaturized: false))
     }
 
+    func testDesktopPetSuppressesOnlyForWindowsCoveringItsDisplay() {
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let visible = NSRect(x: 0, y: 0, width: 1440, height: 875)
+
+        XCTAssertTrue(PetDesktopOcclusionPolicy.shouldSuppressPet(
+            targetScreenFrame: screen,
+            targetVisibleFrame: visible,
+            normalWindowFrames: [visible]
+        ))
+        XCTAssertTrue(PetDesktopOcclusionPolicy.shouldSuppressPet(
+            targetScreenFrame: screen,
+            targetVisibleFrame: visible,
+            normalWindowFrames: [screen]
+        ))
+        XCTAssertFalse(PetDesktopOcclusionPolicy.shouldSuppressPet(
+            targetScreenFrame: screen,
+            targetVisibleFrame: visible,
+            normalWindowFrames: [NSRect(x: 80, y: 40, width: 1200, height: 760)]
+        ))
+        XCTAssertFalse(PetDesktopOcclusionPolicy.shouldSuppressPet(
+            targetScreenFrame: screen,
+            targetVisibleFrame: visible,
+            normalWindowFrames: [NSRect(x: 1440, y: 0, width: 1440, height: 900)]
+        ))
+    }
+
+    func testDesktopPetOcclusionUsesTemporarySuppressionInsteadOfVisibilityPreference() throws {
+        let petSource = try source("ClawGate/UI/Pet/PetWindow.swift")
+        let menuSource = try source("ClawGate/UI/MenuBarApp.swift")
+        let suppressionBody = try functionBody(
+            from: petSource,
+            functionName: "setMaximizedWindowSuppression",
+            nextFunctionHeader: "func hide()"
+        )
+
+        XCTAssertTrue(petSource.contains("isSuppressedByMaximizedWindow"))
+        XCTAssertTrue(suppressionBody.contains("window?.orderOut(nil)"))
+        XCTAssertTrue(suppressionBody.contains("window.orderFront(nil)"))
+        XCTAssertFalse(suppressionBody.contains("model.isVisible = false"),
+                       "temporary suppression must not overwrite the user's visibility preference")
+        XCTAssertTrue(menuSource.contains("petWindowController?.refreshMaximizedWindowSuppression()"),
+                      "the existing app refresh lifecycle must re-evaluate occlusion")
+    }
+
     func testFullChatWindowCloseRoutesThroughCleanup() {
         var closed = 0
         XCTAssertFalse(PetChatWindowPolicy.routeClose { closed += 1 })

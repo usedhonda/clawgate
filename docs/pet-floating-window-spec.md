@@ -32,6 +32,18 @@ This document is the Normative contract for the Pet floating chat experience onl
 - when no target screen exists, character creation skips and content-driven resizes use an
   explicit local safe fallback; child-window placement preserves its local frame
 
+### Desktop character occlusion
+
+- When an on-screen normal window covers at least 98% of the display containing the desktop
+  character, the character window is temporarily ordered out.
+- Both regular maximized windows covering the visible frame and macOS full-screen windows
+  covering the full screen frame trigger suppression.
+- Suppression does not change the persisted character visibility preference and does not close
+  the separate full-chat window.
+- The existing two-second app refresh cycle rechecks coverage, and application activation also
+  triggers an immediate recheck. When the covering window disappears, the character returns
+  without activating ClawGate.
+
 ### Activation and focus
 
 - `showFullChat()` must create the full chat window as an activating macOS window.

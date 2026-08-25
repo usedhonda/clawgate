@@ -100,6 +100,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // toggling the avatar back on works without a restart.
         petWindowController = PetWindowController(model: petModel)
         petModel.start()
+        petWindowController?.refreshMaximizedWindowSuppression()
         if petModel.isVisible {
             petWindowController?.show()
         }
@@ -295,6 +296,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         ) { [weak self] notification in
             let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             self?.applyMainPanelLevel(frontmostBundleID: app?.bundleIdentifier)
+            self?.petWindowController?.refreshMaximizedWindowSuppression()
         }
         applyMainPanelLevel(frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
     }
@@ -1295,6 +1297,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self?.refreshStatsAndTimeline()
             self?.refreshSessionsMenu(sessions: self?.runtime.allCCSessions() ?? [])
             self?.saveCurrentFrame()
+            self?.petWindowController?.refreshMaximizedWindowSuppression()
         }
     }
 
