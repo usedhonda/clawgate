@@ -1586,6 +1586,31 @@ export function isHybridFusionSource(source) {
   return source === "hybrid_fusion" || source === "line_hybrid_fusion";
 }
 
+/**
+ * Command authorization for a ClawGate inbound event.
+ *
+ * LINE inbound is derived entirely from screen capture (OCR / AX tree / notification
+ * banner fusion). Its text is untrusted: SenderName/SenderId default to the
+ * conversation name (the owner), so OCR garble and re-read fragments would otherwise
+ * arrive as the owner's `CommandAuthorized:true` messages and could execute owner-level
+ * control commands. Fail closed: never command-authorize LINE screen-derived inbound.
+ *
+ * Genuine owner LINE chat is unaffected because CommandAuthorized only gates
+ * command/directive execution, not normal chat replies; only a literal control command
+ * typed into LINE loses execution (accepted trade-off — treating OCR noise as an owner
+ * command is the more dangerous failure). Non-LINE adapters (tproj dev-lane, tmux)
+ * retain their existing authorization. A future upstream-verified direct-input LINE
+ * source would be admitted by extending the allowlist below, not by trusting screen text.
+ */
+export function resolveInboundCommandAuthorized(adapter, source) {
+  const a = `${adapter || ""}`.trim().toLowerCase();
+  const s = `${source || ""}`.trim().toLowerCase();
+  if (a === "line") return false;
+  if (isHybridFusionSource(s)) return false;
+  if (s === "notification_banner") return false;
+  return true;
+}
+
 function isUiChromeLine(line, options = {}) {
   const s = line.trim();
   if (!s) return true;
@@ -2781,7 +2806,9 @@ function buildMsgContext(event, accountId, defaultConversation) {
     SenderId: sender,
     MessageSid: String(event.id ?? Date.now()),
     Timestamp: timestamp,
-    CommandAuthorized: true,
+    // LINE inbound is screen-capture derived (OCR/AX/notification fusion) and untrusted;
+    // never let screen text execute owner control commands. See resolveInboundCommandAuthorized.
+    CommandAuthorized: resolveInboundCommandAuthorized(event.adapter, source),
     OriginatingChannel: "clawgate",
     OriginatingTo: conversation,
     _clawgateSource: source,
@@ -2871,6 +2898,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
     status: "start",
     source: event.payload?.source || "poll",
     adapter: event.adapter || "line",
+    command_authorized: ctx.CommandAuthorized,
   });
 
   log?.info?.(`clawgate: [${accountId}] inbound from "${ctx.SenderName}" in "${conversation}": "${ctx.Body?.slice(0, 80)}"`);
