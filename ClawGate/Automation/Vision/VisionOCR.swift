@@ -34,9 +34,16 @@ enum VisionOCR {
         return performOCR(on: image, config: config)
     }
 
-    /// OCR for LINE inbound text:
-    /// runs OCR on the raw image and filters results by bounding-box geometry
-    /// to keep only left-aligned (inbound) observations.
+    /// OCR for LINE inbound text: masks the outgoing side out of the image,
+    /// then drops the timestamp and read-receipt observations LINE renders
+    /// beside the remaining bubble, and reports nothing when only those are left.
+    ///
+    /// Deliberately not filtered by bounding-box geometry. LINE puts an
+    /// outgoing bubble's timestamp to its left, so on a real capture the
+    /// leftmost observations on screen are outgoing chrome ("午前 10:05" at
+    /// minX 0.010) while message bodies start further right (0.074 inbound,
+    /// 0.100 outgoing). Keeping "left-aligned" observations would keep the
+    /// chrome and drop the messages.
     static func extractTextLineInbound(
         from screenRect: CGRect,
         windowID: CGWindowID = kCGNullWindowID,
@@ -121,7 +128,7 @@ enum VisionOCR {
 
         guard let observations = request.results else { return nil }
 
-        let inboundTexts = observations.compactMap { obs -> String? in
+        let observedTexts = observations.compactMap { obs -> String? in
             let candidates = obs.topCandidates(config.candidateCount)
             if let accepted = candidates.first(where: { $0.confidence >= config.confidenceAccept }) {
                 return accepted.string
@@ -131,8 +138,83 @@ enum VisionOCR {
             }
             return nil
         }
-        guard !inboundTexts.isEmpty else { return nil }
-        return inboundTexts.joined(separator: "\n")
+        return inboundBody(fromObservedTexts: observedTexts)
+    }
+
+    // MARK: - Chrome rejection
+
+    /// Letters that may remain in a text once its label vocabulary is removed
+    /// before it stops counting as chrome and starts counting as a message.
+    private static let chromeResidualLetterLimit = 3
+    private static let chromeLabelVocabulary = ["午前", "午後", "既読", "AM", "PM", "am", "pm"]
+
+    /// Keep the message body and drop the chrome LINE renders beside it.
+    ///
+    /// A timestamp and a read receipt are separate OCR observations, never part
+    /// of the bubble they belong to, so they can be dropped whole -- a time
+    /// written inside a sentence is in the sentence's own observation and is
+    /// never seen here.
+    ///
+    /// Returning nil when nothing but chrome survives is the point of this
+    /// function, not a detail: a frame whose only content is a clock is not a
+    /// message, and emitting it once produced an appointment nobody made.
+    static func inboundBody(fromObservedTexts texts: [String]) -> String? {
+        let body = texts.filter { !isChromeLabel($0) }
+        guard !body.isEmpty else { return nil }
+        return body.joined(separator: "\n")
+    }
+
+    /// True when a text is a timestamp or a read receipt rather than a message.
+    ///
+    /// Matching the rendered wording is not enough. An inbound bubble is white,
+    /// so its row never reaches the green mask and its timestamp survives
+    /// preprocessing on every single frame; read at fallback confidence it also
+    /// garbles, and "午前 10:05" has been observed coming back as "千別 10:0".
+    /// So the test is structural: a clock fragment (or a read receipt) carrying
+    /// almost no other letters, whether or not the letters it does carry were
+    /// recognised correctly.
+    static func isChromeLabel(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        // Enough real letters to be a sentence: keep it, clock fragment or not.
+        guard residualLetterCount(trimmed) < chromeResidualLetterLimit else { return false }
+        if trimmed.contains("既読") { return true }
+        return containsClockFragment(trimmed)
+    }
+
+    /// Letters left once the label vocabulary is stripped. Digits, punctuation
+    /// and OCR debris are not letters and never count.
+    private static func residualLetterCount(_ text: String) -> Int {
+        var stripped = text
+        for token in chromeLabelVocabulary {
+            stripped = stripped.replacingOccurrences(of: token, with: "")
+        }
+        return stripped.reduce(into: 0) { count, character in
+            if character.isLetter { count += 1 }
+        }
+    }
+
+    /// H:MM, and the truncated H:M that low-confidence OCR produces from it.
+    private static func containsClockFragment(_ text: String) -> Bool {
+        let chars = Array(text)
+        for (index, character) in chars.enumerated() where character == ":" || character == "：" {
+            let digitsBefore = countDigits(in: chars, from: index - 1, step: -1)
+            let digitsAfter = countDigits(in: chars, from: index + 1, step: 1)
+            if (1...2).contains(digitsBefore), (1...2).contains(digitsAfter) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func countDigits(in chars: [Character], from start: Int, step: Int) -> Int {
+        var index = start
+        var count = 0
+        while index >= 0, index < chars.count, chars[index].isNumber, count < 3 {
+            count += 1
+            index += step
+        }
+        return count
     }
 
     // MARK: - Inbound preprocessing (fixed right lane)
