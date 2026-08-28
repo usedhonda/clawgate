@@ -174,10 +174,39 @@ done
 open -na "$APP_PATH"
 sleep 2
 
+GATEWAY_LABEL="ai.openclaw.gateway"
+
+# PID column of the gateway's launchd job, or empty when it is not running.
+gateway_job_pid() {
+  launchctl list 2>/dev/null \
+    | awk -v label="$GATEWAY_LABEL" '$3 == label && $1 != "-" { print $1 }'
+}
+
 if launchctl list 2>/dev/null | grep -q 'ai\.openclaw\.gateway'; then
-  launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
-  sleep 1
-  launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true
+  # Wait for the old instance to actually exit before starting a new one.
+  # launchctl stop only sends SIGTERM and returns immediately; a gateway
+  # holding many listeners does not always finish shutting down within a
+  # second. Starting on top of it leaves the old process running with no
+  # launchd job owning it, and those orphans accumulate one per restart,
+  # each still holding its ports. Mirrors the app handling above.
+  GATEWAY_OLD_PID="$(gateway_job_pid)"
+  launchctl stop "$GATEWAY_LABEL" >/dev/null 2>&1 || true
+  if [[ -n "$GATEWAY_OLD_PID" ]]; then
+    for ((w=1; w<=5; w++)); do
+      if ! kill -0 "$GATEWAY_OLD_PID" 2>/dev/null; then
+        break
+      fi
+      if [[ $w -eq 5 ]]; then
+        echo "Old gateway (pid $GATEWAY_OLD_PID) still alive after 5s, sending SIGKILL"
+        kill -9 "$GATEWAY_OLD_PID" >/dev/null 2>&1 || true
+        sleep 1
+      fi
+      sleep 1
+    done
+  else
+    sleep 1
+  fi
+  launchctl start "$GATEWAY_LABEL" >/dev/null 2>&1 || true
   sleep 1
 fi
 
