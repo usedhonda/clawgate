@@ -90,8 +90,37 @@ final class AmbientInputDeviceDriftTests: XCTestCase {
             actualInputDeviceName: actualName,
             inputDeviceDrifted: drifted,
             suppressedAutoRecovers: 0,
-            lastSuppressedRecoveryReason: nil
+            lastSuppressedRecoveryReason: nil,
+            actualInputObservedAt: nil,
+            backendPhase: "running",
+            backendPhaseAgeSeconds: 0,
+            backendGeneration: 1,
+            autoResumeBlockedReason: nil
         )
+    }
+
+    // MARK: - Generation gate
+
+    /// A buffer or completion for a retired generation, or from a backend
+    /// with no live session, never enters the pipeline.
+    func testOnlyTheLiveGenerationDelivers() {
+        XCTAssertTrue(AmbientCaptureBackend.shouldDeliver(bufferGeneration: 3, liveGeneration: 3))
+        XCTAssertFalse(AmbientCaptureBackend.shouldDeliver(bufferGeneration: 2, liveGeneration: 3))
+        XCTAssertFalse(AmbientCaptureBackend.shouldDeliver(bufferGeneration: 4, liveGeneration: 3))
+        XCTAssertFalse(AmbientCaptureBackend.shouldDeliver(bufferGeneration: 0, liveGeneration: 0))
+    }
+
+    // MARK: - Auto-resume inhibit
+
+    /// The user's intent to stream and the safety inhibit are separate flags,
+    /// and the inhibit always wins. Folding one into the other would make a
+    /// backend timeout indistinguishable from the user stopping the stream.
+    func testInhibitWinsOverIntentToStream() {
+        XCTAssertTrue(AmbientController.shouldAutoResume(wasStreaming: true, blockedReason: nil))
+        XCTAssertTrue(AmbientController.shouldAutoResume(wasStreaming: true, blockedReason: ""))
+        XCTAssertFalse(AmbientController.shouldAutoResume(wasStreaming: true, blockedReason: "backend_timeout"))
+        XCTAssertFalse(AmbientController.shouldAutoResume(wasStreaming: false, blockedReason: nil))
+        XCTAssertFalse(AmbientController.shouldAutoResume(wasStreaming: false, blockedReason: "backend_timeout"))
     }
 
     // MARK: - Automatic recovery budget

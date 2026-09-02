@@ -99,10 +99,13 @@ final class AmbientCaptureManager {
         return firstLiveSampleAt - TimeInterval(actualPrimedFrames) / sampleRate
     }
 
-    /// `var` so a wedge recovery can swap in a fresh AVAudioEngine object — the
-    /// only reliable in-process reset when the engine stops delivering buffers.
-    private var engine = AVAudioEngine()
+    /// The microphone session lives in the backend, on its own queue, and is
+    /// addressed by generation: every start retires the previous generation, so
+    /// a completion or a buffer that arrives late for an old one is dropped.
+    private let backend: AmbientCaptureBackend
+    private var backendGeneration = 0
     private var converter: AVAudioConverter?
+    private var converterInputFormat: AVAudioFormat?
     /// Buffer format handed to AVAudioFile.write — must match AVAudioFile.processingFormat.
     private let recordFormat: AVAudioFormat
     /// On-disk encoding (16-bit PCM mono 16 kHz) for whisper.cpp.
@@ -154,14 +157,11 @@ final class AmbientCaptureManager {
     private var _requestedInputDeviceUID: String?
     private var _actualInputDeviceUID: String?
     private var _actualInputDeviceName: String?
+    private var _actualInputObservedAt: Date?
+    private var _backendPhase: BackendPhase = .idle
+    private var _backendPhaseSince: Date = Date()
     private var preferredDeviceUID: String?
-    private var configurationChangeObserver: NSObjectProtocol?
-    /// Guarded by `configurationLock`, never by `lock`: the notification can
-    /// arrive on any thread, and taking the capture lock from inside it risks
-    /// re-entering a section that is mid-restart.
-    private var pendingConfigurationRecover: DispatchWorkItem?
-    private let configurationLock = NSLock()
-    private let configurationQueue = DispatchQueue(label: "ai.clawgate.ambient.engine-config", qos: .utility)
+    private let deadlineQueue = DispatchQueue(label: "ai.clawgate.ambient.backend-deadline", qos: .utility)
     private let resolveAudioDeviceID: (String) -> AudioDeviceID?
     private let tapTimeToDate: (AVAudioTime) -> Date?
     private let writeAudioFile: (AVAudioFile, AVAudioPCMBuffer) throws -> AVAudioFrameCount
@@ -178,10 +178,24 @@ final class AmbientCaptureManager {
         var requestedInputDeviceUID: String?
         var actualInputDeviceUID: String?
         var actualInputDeviceName: String?
-        /// True only when a device was requested and the engine is on another.
+        /// When the actual device was last confirmed by the backend. Status
+        /// shows it so an old observation is never mistaken for a current one.
+        var actualInputObservedAt: Date?
+        /// True only when a device was requested and the backend opened another.
         var inputDeviceDrifted: Bool
         var suppressedAutoRecovers: Int
         var lastSuppressedRecoveryReason: String?
+        var backendPhase: BackendPhase
+        var backendPhaseSince: Date
+        var backendGeneration: Int
+    }
+
+    /// Where the backend is in its lifecycle, as last reported. `timedOut`
+    /// is terminal for this process: a session that did not finish starting
+    /// or stopping cannot be cancelled, so no second session is started beside
+    /// it. The process watchdog reads this and restarts the app.
+    enum BackendPhase: String {
+        case idle, starting, running, stopping, failed, timedOut
     }
 
     func livenessSnapshot() -> Liveness {
@@ -199,9 +213,13 @@ final class AmbientCaptureManager {
                         requestedInputDeviceUID: _requestedInputDeviceUID,
                         actualInputDeviceUID: _actualInputDeviceUID,
                         actualInputDeviceName: _actualInputDeviceName,
+                        actualInputObservedAt: _actualInputObservedAt,
                         inputDeviceDrifted: drifted,
                         suppressedAutoRecovers: _suppressedAutoRecovers,
-                        lastSuppressedRecoveryReason: _lastSuppressedRecoveryReason)
+                        lastSuppressedRecoveryReason: _lastSuppressedRecoveryReason,
+                        backendPhase: _backendPhase,
+                        backendPhaseSince: _backendPhaseSince,
+                        backendGeneration: backendGeneration)
     }
 
     // MARK: - Automatic recovery admission
@@ -226,6 +244,10 @@ final class AmbientCaptureManager {
     func autoRecover(reason: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard state == .capturing else { return false }
+        guard backendPhaseLocked() != .timedOut else {
+            log("ambient capture auto-recover refused (backend timed out; process restart required): \(reason)")
+            return false
+        }
         livenessLock.lock()
         let admitted = Self.shouldAdmitAutoRecover(lastRecoveryAt: _lastRecoveryAt, now: Date())
         if !admitted {
@@ -259,13 +281,16 @@ final class AmbientCaptureManager {
         return actualUID == requestedUID ? .matched : .drifted
     }
 
-    /// Re-read which device the live engine is on and record it. Returns true
-    /// when it has drifted from the requested device. Cheap, so status and the
-    /// health monitor call it on every look rather than trusting the last one.
+    /// Whether the backend opened a device other than the one requested,
+    /// from the last start report. Cached on purpose: the device an
+    /// AVCaptureDeviceInput holds cannot change underneath it, and asking
+    /// Core Audio from a status call is how the previous design hung.
     func refreshInputDeviceObservation() -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        guard state == .capturing else { return false }
-        return observeInputDeviceLocked(engine.inputNode)
+        livenessLock.lock(); defer { livenessLock.unlock() }
+        return Self.classifyDeviceApplication(
+            requestedUID: _requestedInputDeviceUID,
+            actualUID: _actualInputDeviceUID
+        ) == .drifted
     }
 
     /// Classify capture liveness from the tap-staleness. Shared by status, the
@@ -331,7 +356,20 @@ final class AmbientCaptureManager {
         ]
         self.chunkFrameLimit = AVAudioFrameCount(self.chunkSeconds * 16_000)
         self.currentChunkTiming = ChunkTimingState(sequence: 0)
+        self.backend = AmbientCaptureBackend(log: log)
+        self.backend.onBuffer = { [weak self] generation, buffer, format, time in
+            self?.handleBuffer(generation: generation, buffer: buffer, format: format, at: time)
+        }
+        self.backend.onEvent = { [weak self] generation, event in
+            self?.handleBackendEvent(generation: generation, event: event)
+        }
     }
+
+    /// Set by the owner. Called (off the capture lock) when the backend times
+    /// out, with a typed reason to persist: the owner keeps the user's intent
+    /// to stream separate from this safety inhibit and must not resume the
+    /// microphone on the next launch until a person clears it.
+    var onQuarantine: ((String) -> Void)?
 
     // MARK: - Permission
 
@@ -354,18 +392,22 @@ final class AmbientCaptureManager {
 
     // MARK: - Lifecycle
 
+    /// Begin capturing. Returns once the request is handed to the backend;
+    /// the session opens asynchronously and `livenessSnapshot().backendPhase`
+    /// reports `running` when it has. Throws only for a failure that is known
+    /// immediately (the chunk file could not be opened).
     func start() throws {
         lock.lock(); defer { lock.unlock() }
         guard state == .idle else { return }
-        try beginEngineLocked()
+        try beginBackendLocked()
         state = .capturing
-        log("ambient capture started (chunk=\(chunkSeconds)s, 16kHz mono)")
+        log("ambient capture start requested (chunk=\(chunkSeconds)s, 16kHz mono)")
     }
 
     func pause() {
         lock.lock(); defer { lock.unlock() }
         guard state == .capturing else { return }
-        teardownEngineLocked(finalize: true)
+        teardownBackendLocked(finalize: true)
         state = .paused
         log("ambient capture paused")
     }
@@ -373,25 +415,25 @@ final class AmbientCaptureManager {
     func resume() throws {
         lock.lock(); defer { lock.unlock() }
         guard state == .paused else { return }
-        try beginEngineLocked()
+        try beginBackendLocked()
         state = .capturing
-        log("ambient capture resumed")
+        log("ambient capture resume requested")
     }
 
     func stop() {
         lock.lock(); defer { lock.unlock() }
         guard state != .idle else { return }
-        teardownEngineLocked(finalize: true)
+        teardownBackendLocked(finalize: true)
         state = .idle
         log("ambient capture stopped")
     }
 
-    /// Hard-recover a wedged capture in-process: tear down the (dead) engine and
-    /// tap, swap in a FRESH AVAudioEngine, and re-install the tap. Keeps `state`
-    /// == .capturing and the same session/chunk sequence so continuity and the
-    /// ingest window are preserved. This is the self-heal action; if the fresh
-    /// engine also fails to start, state stays .capturing so the monitor/watchdog
-    /// escalates (e.g. to a process restart).
+    /// Hard-recover a wedged capture in-process: retire the current session and
+    /// ask the backend for a fresh one. Keeps `state` == .capturing and the same
+    /// session/chunk sequence so continuity and the ingest window are preserved.
+    /// This is the self-heal action; if the fresh session also fails to start,
+    /// state stays .capturing so the monitor/watchdog escalates (e.g. to a
+    /// process restart). Refused outright once the backend has timed out.
     func hardRecover(reason: String) {
         lock.lock(); defer { lock.unlock() }
         guard state == .capturing else { return }
@@ -399,13 +441,20 @@ final class AmbientCaptureManager {
     }
 
     private func hardRecoverLocked(reason: String) {
+        if backendPhaseLocked() == .timedOut {
+            // A session that never finished cannot be cancelled. Starting
+            // another beside it is how a process ends up holding a headset's
+            // input from a thread that never returns; the watchdog restarts
+            // the process instead.
+            log("ambient capture hardRecover refused: backend timed out; process restart required (\(reason))")
+            return
+        }
         log("ambient capture hardRecover: \(reason)")
-        teardownEngineLocked(finalize: true)
-        engine = AVAudioEngine()   // fresh object — re-acquires the HAL input
+        teardownBackendLocked(finalize: true)
         do {
-            try beginEngineLocked()
+            try beginBackendLocked()
             recordRecovery(reason: reason)
-            log("ambient capture hardRecover ok")
+            log("ambient capture hardRecover requested")
         } catch {
             recordRecovery(reason: "\(reason) (FAILED: \(error.localizedDescription))")
             log("ambient capture hardRecover FAILED: \(error)")
@@ -417,12 +466,11 @@ final class AmbientCaptureManager {
         preferredDeviceUID = uid
         guard state == .capturing else { return }
         log("ambient capture mic device changed")
-        teardownEngineLocked(finalize: true)
-        engine = AVAudioEngine()
+        teardownBackendLocked(finalize: true)
         do {
-            try beginEngineLocked()
+            try beginBackendLocked()
             recordRecovery(reason: "device changed")
-            log("ambient capture mic device applied")
+            log("ambient capture mic device apply requested")
         } catch {
             recordRecovery(reason: "device changed (FAILED: \(error.localizedDescription))")
             log("ambient capture mic device apply FAILED: \(error)")
@@ -436,8 +484,8 @@ final class AmbientCaptureManager {
     func simulateWedge() {
         lock.lock(); defer { lock.unlock() }
         guard state == .capturing else { return }
-        teardownEngineLocked(finalize: false)
-        log("ambient capture WEDGE SIMULATED (engine torn down, state left .capturing)")
+        teardownBackendLocked(finalize: false)
+        log("ambient capture WEDGE SIMULATED (backend torn down, state left .capturing)")
     }
 
     private func recordRecovery(reason: String) {
@@ -449,221 +497,149 @@ final class AmbientCaptureManager {
         livenessLock.unlock()
     }
 
-    // MARK: - Engine (lock held)
+    // MARK: - Backend (lock held)
 
-    private func beginEngineLocked() throws {
-        let input = engine.inputNode
-        let requestedDeviceID = applyPreferredDeviceLocked(to: input)
-        let inputFormat = input.inputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0 else {
-            throw NSError(domain: "AmbientCapture", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "no input format (mic unavailable)"])
-        }
-        guard let conv = AVAudioConverter(from: inputFormat, to: recordFormat) else {
-            throw NSError(domain: "AmbientCapture", code: 2,
-                          userInfo: [NSLocalizedDescriptionKey: "cannot build audio converter"])
-        }
-        converter = conv
+    /// How long a start may take before this process gives up on it. Long
+    /// enough for a slow device to come up; short enough that a user notices
+    /// the status change rather than a silent gap.
+    static let backendStartDeadline: TimeInterval = 20
+
+    private func backendPhaseLocked() -> BackendPhase {
+        livenessLock.lock(); defer { livenessLock.unlock() }
+        return _backendPhase
+    }
+
+    private func setBackendPhase(_ phase: BackendPhase) {
+        livenessLock.lock()
+        _backendPhase = phase
+        _backendPhaseSince = Date()
+        livenessLock.unlock()
+    }
+
+    /// Open the chunk file now and ask the backend for a session. Nothing here
+    /// waits on Core Audio. The generation minted here is the only one whose
+    /// completion, buffers, or events will be accepted.
+    private func beginBackendLocked() throws {
+        backendGeneration += 1
+        let generation = backendGeneration
+        converter = nil
+        converterInputFormat = nil
         try openNewChunkLocked()
 
-        input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
-            self?.handleTap(buffer, at: time)
-        }
-        engine.prepare()
-        try engine.start()
-        try verifyInputDeviceLocked(input, requested: requestedDeviceID)
-        installConfigurationChangeObserverLocked()
-    }
-
-    /// After start, confirm the engine is on the device that was requested.
-    ///
-    /// The set before start succeeds and is then undone: the engine has been
-    /// observed moving itself back onto the default-device aggregate, which on a
-    /// Mac with AirPods connected is the AirPods microphone -- and merely
-    /// opening that input drops AirPods output into hands-free mono. One
-    /// re-apply is allowed. If the engine still will not stay put, it is torn
-    /// down and the start fails loudly, because recording from the wrong
-    /// microphone in silence is the failure this exists to prevent.
-    private func verifyInputDeviceLocked(_ input: AVAudioInputNode, requested: AudioDeviceID?) throws {
-        guard let requested else {
-            observeInputDeviceLocked(input)
-            return
-        }
-        guard observeInputDeviceLocked(input) else {
-            log("ambient capture input verified: \(actualInputDescription())")
-            return
-        }
-        log("ambient capture input drifted after start to \(actualInputDescription()); re-applying selected mic")
-        engine.stop()
-        applyDeviceIDLocked(requested, to: input)
-        try engine.start()
-        guard observeInputDeviceLocked(input) else {
-            log("ambient capture input re-applied: \(actualInputDescription())")
-            return
-        }
-        let actual = actualInputDescription()
-        teardownEngineLocked(finalize: false)
-        throw NSError(domain: "AmbientCapture", code: 3,
-                      userInfo: [NSLocalizedDescriptionKey:
-                                 "selected mic not honoured by the audio engine (engine is on \(actual)); refusing to record from the wrong input"])
-    }
-
-    /// Read back the engine's live input device and record it. Returns true
-    /// when a device was requested and the engine is not on it.
-    @discardableResult
-    private func observeInputDeviceLocked(_ input: AVAudioInputNode) -> Bool {
-        let actualID = Self.readCurrentDeviceID(from: input)
-        let actualUID = actualID.flatMap(MicrophoneDeviceService.resolveAudioDeviceUID)
-        let actualName = actualID.flatMap(MicrophoneDeviceService.resolveAudioDeviceName)
+        let requested = preferredDeviceUID.flatMap { $0.isEmpty ? nil : $0 }
         livenessLock.lock()
-        _actualInputDeviceUID = actualUID
-        _actualInputDeviceName = actualName
-        let requestedUID = _requestedInputDeviceUID
+        _requestedInputDeviceUID = requested
+        _actualInputDeviceUID = nil
+        _actualInputDeviceName = nil
+        _actualInputObservedAt = nil
         livenessLock.unlock()
-        return Self.classifyDeviceApplication(requestedUID: requestedUID, actualUID: actualUID) == .drifted
-    }
+        setBackendPhase(.starting)
 
-    private static func readCurrentDeviceID(from input: AVAudioInputNode) -> AudioDeviceID? {
-        guard let audioUnit = input.audioUnit else { return nil }
-        var deviceID: AudioDeviceID = kAudioObjectUnknown
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let status = AudioUnitGetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            &size
-        )
-        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
-        return deviceID
-    }
-
-    // MARK: - Engine configuration changes
-
-    /// The engine posts this when the audio configuration changes underneath it
-    /// -- a Bluetooth headset connecting is the common case -- and stops itself.
-    /// Recover promptly on a fresh engine so the selected microphone is
-    /// re-applied and verified, instead of waiting for tap staleness to notice
-    /// half a minute later. Observed per engine instance, so a recovered engine
-    /// gets its own.
-    private func installConfigurationChangeObserverLocked() {
-        removeConfigurationChangeObserverLocked()
-        configurationChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: nil
-        ) { [weak self] _ in
-            self?.scheduleConfigurationRecover()
+        backend.start(deviceUID: requested, generation: generation) { [weak self] result in
+            self?.handleStartResult(generation: generation, requested: requested, result: result)
+        }
+        deadlineQueue.asyncAfter(deadline: .now() + Self.backendStartDeadline) { [weak self] in
+            self?.handleStartDeadline(generation: generation)
         }
     }
 
-    private func removeConfigurationChangeObserverLocked() {
-        if let observer = configurationChangeObserver {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        configurationChangeObserver = nil
-        configurationLock.lock()
-        pendingConfigurationRecover?.cancel()
-        pendingConfigurationRecover = nil
-        configurationLock.unlock()
+    /// The one failure that is handled by falling back rather than failing:
+    /// the selected microphone is not present. That has always meant "use the
+    /// system default", and it is never reported as drift, because nothing was
+    /// opened that the user did not choose. Pure, so the contract is testable.
+    static func shouldFallBackToDefault(afterStartFailure error: Error, requestedUID: String?) -> Bool {
+        guard let requestedUID, !requestedUID.isEmpty else { return false }
+        if case AmbientCaptureBackend.BackendError.deviceNotFound = error { return true }
+        return false
     }
 
-    /// Coalesced, because one headset connection posts several changes, and
-    /// re-evaluated rather than acted on blindly: a change that left the engine
-    /// running on the right device needs nothing, and recovering anyway would
-    /// restart the engine for every change it posts about itself.
-    private func scheduleConfigurationRecover() {
-        let work = DispatchWorkItem { [weak self] in
-            self?.recoverIfConfigurationChangeHurt()
-        }
-        configurationLock.lock()
-        pendingConfigurationRecover?.cancel()
-        pendingConfigurationRecover = work
-        configurationLock.unlock()
-        configurationQueue.asyncAfter(deadline: .now() + 0.5, execute: work)
-    }
-
-    private func recoverIfConfigurationChangeHurt() {
-        lock.lock()
-        guard state == .capturing else { lock.unlock(); return }
-        let stopped = !engine.isRunning
-        let drifted = observeInputDeviceLocked(engine.inputNode)
-        lock.unlock()
-        guard stopped || drifted else { return }
-        autoRecover(reason: stopped
-            ? "engine configuration change stopped the engine"
-            : "engine configuration change moved the input to \(actualInputDescription())")
-    }
-
-    private func actualInputDescription() -> String {
-        livenessLock.lock(); defer { livenessLock.unlock() }
-        let name = _actualInputDeviceName ?? "unknown"
-        let uid = _actualInputDeviceUID ?? "?"
-        return "\(name) [\(uid)]"
-    }
-
-    static func resolvePreferredDeviceIDForCapture(
-        uid: String?,
-        resolver: (String) -> AudioDeviceID?,
-        log: (String) -> Void
-    ) -> AudioDeviceID? {
-        guard let uid, !uid.isEmpty else { return nil }
-        guard let deviceID = resolver(uid) else {
-            log("ambient capture selected mic not found; using system default")
-            return nil
-        }
-        return deviceID
-    }
-
-    /// Returns the device that was requested, or nil when none applies: nothing
-    /// selected, or the selection is not present. That nil is the fail-soft path
-    /// that has always existed -- the system default is used on purpose and is
-    /// never reported as drift.
-    private func applyPreferredDeviceLocked(to input: AVAudioInputNode) -> AudioDeviceID? {
-        guard let deviceID = Self.resolvePreferredDeviceIDForCapture(
-            uid: preferredDeviceUID,
-            resolver: resolveAudioDeviceID,
-            log: log
-        ) else {
-            livenessLock.lock(); _requestedInputDeviceUID = nil; livenessLock.unlock()
-            return nil
-        }
-        livenessLock.lock(); _requestedInputDeviceUID = preferredDeviceUID; livenessLock.unlock()
-        applyDeviceIDLocked(deviceID, to: input)
-        return deviceID
-    }
-
-    private func applyDeviceIDLocked(_ deviceID: AudioDeviceID, to input: AVAudioInputNode) {
-        var deviceID = deviceID
-        guard let audioUnit = input.audioUnit else {
-            log("ambient capture input audio unit unavailable; selected mic cannot be applied")
+    private func handleStartResult(generation: Int, requested: String?, result: Result<AmbientCaptureBackend.StartedInfo, Error>) {
+        lock.lock(); defer { lock.unlock() }
+        guard generation == backendGeneration else {
+            log("ambient capture ignoring start result for retired generation \(generation)")
             return
         }
-        let status = AudioUnitSetProperty(
-            audioUnit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            0,
-            &deviceID,
-            UInt32(MemoryLayout<AudioDeviceID>.size)
-        )
-        if status != noErr {
-            log("ambient capture selected mic apply failed status=\(status)")
+        guard backendPhaseLocked() == .starting else { return }
+        switch result {
+        case .success(let info):
+            livenessLock.lock()
+            _actualInputDeviceUID = info.deviceUID
+            _actualInputDeviceName = info.deviceName
+            _actualInputObservedAt = Date()
+            _lastTapAt = Date()   // fresh session gets the staleness window before liveness judges it
+            livenessLock.unlock()
+            setBackendPhase(.running)
+            log("ambient capture running on \(info.deviceName) [\(info.deviceUID)] \(Int(info.sampleRate))Hz ch=\(info.channels)")
+        case .failure(let error):
+            // The selected microphone is not present: fall back to the system
+            // default, once, exactly as before. That is a fail-soft path and is
+            // never reported as drift. Any other failure is a failed start.
+            if Self.shouldFallBackToDefault(afterStartFailure: error, requestedUID: requested) {
+                log("ambient capture selected mic not found; using system default")
+                livenessLock.lock(); _requestedInputDeviceUID = nil; livenessLock.unlock()
+                let retryGeneration = backendGeneration
+                backend.start(deviceUID: nil, generation: retryGeneration) { [weak self] retry in
+                    self?.handleStartResult(generation: retryGeneration, requested: nil, result: retry)
+                }
+                return
+            }
+            setBackendPhase(.failed)
+            recordRecovery(reason: "start failed: \(error)")
+            log("ambient capture start FAILED: \(error)")
         }
     }
 
-    private func teardownEngineLocked(finalize: Bool) {
-        removeConfigurationChangeObserverLocked()
+    private func handleStartDeadline(generation: Int) {
+        lock.lock()
+        guard generation == backendGeneration, backendPhaseLocked() == .starting else { lock.unlock(); return }
+        setBackendPhase(.timedOut)
+        let quarantine = onQuarantine
+        lock.unlock()
+        log("ambient capture backend did not start within \(Int(Self.backendStartDeadline))s; timed out, no further session in this process")
+        quarantine?("backend_timeout")
+    }
+
+    private func handleBackendEvent(generation: Int, event: AmbientCaptureBackend.Event) {
+        lock.lock()
+        guard generation == backendGeneration, state == .capturing else { lock.unlock(); return }
+        lock.unlock()
+        switch event {
+        case .runtimeError(let message):
+            log("ambient capture session runtime error: \(message)")
+            autoRecover(reason: "session runtime error: \(message)")
+        case .interrupted:
+            log("ambient capture session interrupted")
+        case .interruptionEnded:
+            log("ambient capture session interruption ended")
+            autoRecover(reason: "session interruption ended")
+        }
+    }
+
+    /// Retire the current generation and release the session. The stop itself
+    /// runs on the backend queue and is not awaited: anything still in flight
+    /// for the old generation is dropped by the generation check, and the next
+    /// start queues behind the stop on the backend's own serial queue.
+    private func teardownBackendLocked(finalize: Bool) {
+        backendGeneration += 1
+        setBackendPhase(.stopping)
+        let generation = backendGeneration
+        backend.stop { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            if generation == self.backendGeneration, self.backendPhaseLocked() == .stopping {
+                self.setBackendPhase(.idle)
+            }
+            self.lock.unlock()
+        }
         livenessLock.lock()
         _requestedInputDeviceUID = nil
         _actualInputDeviceUID = nil
         _actualInputDeviceName = nil
+        _actualInputObservedAt = nil
         livenessLock.unlock()
-        engine.inputNode.removeTap(onBus: 0)
-        if engine.isRunning { engine.stop() }
         if finalize { finalizeChunkLocked() }
         converter = nil
+        converterInputFormat = nil
         overlapTail.removeAll()
     }
 
@@ -736,8 +712,18 @@ final class AmbientCaptureManager {
         return tapTimeToDate(tapTime)
     }
 
-    private func handleTap(_ buffer: AVAudioPCMBuffer, at tapTime: AVAudioTime?) {
-        recordTap()   // engine delivered a buffer — liveness proof, even before conversion
+    private func handleBuffer(generation: Int, buffer: AVAudioPCMBuffer, format: AVAudioFormat, at tapTime: AVAudioTime?) {
+        lock.lock()
+        guard generation == backendGeneration, state == .capturing else { lock.unlock(); return }
+        if converter == nil || converterInputFormat != format {
+            converter = AVAudioConverter(from: format, to: recordFormat)
+            converterInputFormat = format
+            if converter == nil { log("ambient capture cannot build audio converter from \(format)") }
+        }
+        let converter = self.converter
+        lock.unlock()
+
+        recordTap()   // the session delivered a buffer: liveness proof, even before conversion
         let firstLiveSampleDate = firstLiveSampleDate(from: tapTime)
         guard let converter else { return }
         let ratio = recordFormat.sampleRate / buffer.format.sampleRate

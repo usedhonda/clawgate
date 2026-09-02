@@ -41,6 +41,17 @@ final class AmbientController {
         var inputDeviceDrifted: Bool
         var suppressedAutoRecovers: Int
         var lastSuppressedRecoveryReason: String?
+        var actualInputObservedAt: Date?
+        // Backend lifecycle, cached and never read from Core Audio here. The
+        // process watchdog restarts the app on `timedOut`, or on `starting`
+        // that has aged past what a start can take.
+        var backendPhase: String
+        var backendPhaseAgeSeconds: Int
+        var backendGeneration: Int
+        /// Typed safety inhibit, separate from the user's intent to stream.
+        /// Present means: do not open the microphone on launch until a person
+        /// starts it again.
+        var autoResumeBlockedReason: String?
     }
 
     private let configStore: ConfigStore
@@ -91,6 +102,9 @@ final class AmbientController {
         self.capture.onChunkReady = { [weak self] chunk in
             self?.handleChunk(chunk)
         }
+        self.capture.onQuarantine = { [weak self] reason in
+            self?.setAutoResumeBlocked(reason: reason)
+        }
         self.capture.setPreferredDevice(uid: configStore.load().ambientMicDeviceUID)
     }
 
@@ -136,6 +150,7 @@ final class AmbientController {
                         self.writeSessionMetadata()
                     }
                     self.streaming = true
+                    self.setAutoResumeBlocked(reason: nil)   // an explicit start is the person clearing the inhibit
                     self.setWasStreaming(true)
                     self.lastError = nil
                     if let sid = self.sessionID {
@@ -225,10 +240,40 @@ final class AmbientController {
         UserDefaults.standard.set(on, forKey: Self.wasStreamingKey)
     }
 
-    /// Called once at app startup: if the stream was on before this launch and
-    /// the mic is usable, resume recording automatically.
+    /// A safety inhibit, kept apart from `wasStreaming` on purpose. The flag
+    /// above is what the user wanted; this is the app refusing to act on it
+    /// until a person intervenes, because the last backend never finished and
+    /// opening the microphone again on launch would repeat the hang. Cleared
+    /// only by an explicit, successful start.
+    static let autoResumeBlockedReasonKey = "clawgate.ambient.autoResumeBlockedReason"
+    private func setAutoResumeBlocked(reason: String?) {
+        if let reason {
+            UserDefaults.standard.set(reason, forKey: Self.autoResumeBlockedReasonKey)
+            log("ambient auto-resume blocked: \(reason)")
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.autoResumeBlockedReasonKey)
+        }
+    }
+    private var autoResumeBlockedReason: String? {
+        UserDefaults.standard.string(forKey: Self.autoResumeBlockedReasonKey)
+    }
+
+    /// Whether launch may resume the microphone. Pure, so the two flags'
+    /// precedence is pinned: the inhibit always wins over the intent.
+    static func shouldAutoResume(wasStreaming: Bool, blockedReason: String?) -> Bool {
+        wasStreaming && (blockedReason ?? "").isEmpty
+    }
+
+    /// Called once at app startup: if the stream was on before this launch,
+    /// nothing is inhibiting it, and the mic is usable, resume automatically.
     func resumeIfWasStreaming() {
-        guard isAvailable, UserDefaults.standard.bool(forKey: Self.wasStreamingKey) else { return }
+        guard isAvailable else { return }
+        let wasStreaming = UserDefaults.standard.bool(forKey: Self.wasStreamingKey)
+        let blocked = autoResumeBlockedReason
+        guard Self.shouldAutoResume(wasStreaming: wasStreaming, blockedReason: blocked) else {
+            if wasStreaming, let blocked { log("ambient auto-resume inhibited: \(blocked)") }
+            return
+        }
         log("ambient auto-resume: stream was on before launch, restarting")
         startStream { [weak self] result in
             switch result {
@@ -250,6 +295,7 @@ final class AmbientController {
                     // Capture can run without a stream; the monitor still has
                     // to watch the input device while the microphone is open.
                     self.healthMonitor.start()
+                    self.setAutoResumeBlocked(reason: nil)   // an explicit resume is the person clearing the inhibit
                     completion(.success(()))
                 } catch {
                     completion(.failure(.captureFailed("\(error)")))
@@ -263,9 +309,7 @@ final class AmbientController {
     func snapshot() -> Status {
         state.sync {
             let capturing = capture.state == .capturing
-            // Re-read the live device on every look; the last observation is
-            // exactly what cannot be trusted here.
-            _ = capture.refreshInputDeviceObservation()
+            // Cached only. A status call must never wait on Core Audio.
             let live = capture.livenessSnapshot()
             let now = Date()
             // Liveness is meaningful only while capturing AND streaming (a paused
@@ -307,7 +351,12 @@ final class AmbientController {
                 // degrades the user's output too.
                 inputDeviceDrifted: capturing && live.inputDeviceDrifted,
                 suppressedAutoRecovers: live.suppressedAutoRecovers,
-                lastSuppressedRecoveryReason: live.lastSuppressedRecoveryReason
+                lastSuppressedRecoveryReason: live.lastSuppressedRecoveryReason,
+                actualInputObservedAt: live.actualInputObservedAt,
+                backendPhase: live.backendPhase.rawValue,
+                backendPhaseAgeSeconds: Int(now.timeIntervalSince(live.backendPhaseSince)),
+                backendGeneration: live.backendGeneration,
+                autoResumeBlockedReason: autoResumeBlockedReason
             )
         }
     }

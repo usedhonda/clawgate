@@ -39,26 +39,32 @@ final class MicrophoneDeviceServiceTests: XCTestCase {
         XCTAssertEqual(MicrophoneDeviceService.systemDefaultMenuTitle(for: nil), "System Default")
     }
 
-    func testCaptureManagerFailsSoftWhenPreferredDeviceCannotResolve() {
-        var logs: [String] = []
-        let resolved = AmbientCaptureManager.resolvePreferredDeviceIDForCapture(
-            uid: "clawgate.tests.missing-mic-device",
-            resolver: { _ in nil },
-            log: { logs.append($0) }
-        )
-
-        XCTAssertNil(resolved)
-        XCTAssertEqual(logs, ["ambient capture selected mic not found; using system default"])
+    /// The selected microphone not being present has always meant "use the
+    /// system default", quietly. That is the only start failure handled by
+    /// falling back; anything else is a failed start and is reported as one.
+    func testMissingSelectedMicFallsBackToSystemDefault() {
+        XCTAssertTrue(AmbientCaptureManager.shouldFallBackToDefault(
+            afterStartFailure: AmbientCaptureBackend.BackendError.deviceNotFound("clawgate.tests.missing-mic-device"),
+            requestedUID: "clawgate.tests.missing-mic-device"
+        ))
     }
 
-    func testCaptureManagerResolvesPreferredDeviceWhenAvailable() {
-        let expected = AudioDeviceID(42)
-        let resolved = AmbientCaptureManager.resolvePreferredDeviceIDForCapture(
-            uid: "clawgate.tests.mic-device",
-            resolver: { uid in uid == "clawgate.tests.mic-device" ? expected : nil },
-            log: { _ in XCTFail("resolver success should not log fallback") }
-        )
+    func testOtherStartFailuresDoNotFallBack() {
+        XCTAssertFalse(AmbientCaptureManager.shouldFallBackToDefault(
+            afterStartFailure: AmbientCaptureBackend.BackendError.cannotAddOutput,
+            requestedUID: "clawgate.tests.mic-device"
+        ))
+        XCTAssertFalse(AmbientCaptureManager.shouldFallBackToDefault(
+            afterStartFailure: AmbientCaptureBackend.BackendError.noDefaultInput,
+            requestedUID: "clawgate.tests.mic-device"
+        ))
+    }
 
-        XCTAssertEqual(resolved, expected)
+    /// With nothing selected there is nothing to fall back from.
+    func testNoSelectionNeverFallsBack() {
+        XCTAssertFalse(AmbientCaptureManager.shouldFallBackToDefault(
+            afterStartFailure: AmbientCaptureBackend.BackendError.deviceNotFound(""),
+            requestedUID: nil
+        ))
     }
 }
