@@ -141,6 +141,13 @@ final class AmbientCaptureManager {
     private var _recoveryCount = 0
     private var _lastRecoveryAt: Date?
     private var _lastRecoveryReason: String?
+    /// Automatic recoveries refused because one ran recently. Counted, not
+    /// acted on: every automatic recovery rebuilds the engine, and a rebuilt
+    /// engine binds to the system default input before it is moved -- with a
+    /// Bluetooth headset that touch alone is enough to drop it into hands-free
+    /// mode. Five such rebuilds in a few minutes were observed on 2026-09-02.
+    private var _suppressedAutoRecovers = 0
+    private var _lastSuppressedRecoveryReason: String?
     /// What the user asked for and what the engine is actually on. Kept apart
     /// because they have been observed to differ: the engine can be moved off
     /// the requested device after start, silently, and only a read-back shows it.
@@ -173,6 +180,8 @@ final class AmbientCaptureManager {
         var actualInputDeviceName: String?
         /// True only when a device was requested and the engine is on another.
         var inputDeviceDrifted: Bool
+        var suppressedAutoRecovers: Int
+        var lastSuppressedRecoveryReason: String?
     }
 
     func livenessSnapshot() -> Liveness {
@@ -190,7 +199,46 @@ final class AmbientCaptureManager {
                         requestedInputDeviceUID: _requestedInputDeviceUID,
                         actualInputDeviceUID: _actualInputDeviceUID,
                         actualInputDeviceName: _actualInputDeviceName,
-                        inputDeviceDrifted: drifted)
+                        inputDeviceDrifted: drifted,
+                        suppressedAutoRecovers: _suppressedAutoRecovers,
+                        lastSuppressedRecoveryReason: _lastSuppressedRecoveryReason)
+    }
+
+    // MARK: - Automatic recovery admission
+
+    /// At most one automatic recovery per window. Manual recovery (the
+    /// /capture/recover endpoint, a microphone selection) is never gated;
+    /// only the engine's own reactions are, because those are the ones that
+    /// can chain: a rebuild touches the default input, the headset reconfigures,
+    /// the engine posts a change, and the change asks for another rebuild.
+    static let autoRecoverCooldown: TimeInterval = 120
+
+    /// Pure admission rule, shared by every automatic path so they form one
+    /// budget rather than one each. The first recovery is always admitted.
+    static func shouldAdmitAutoRecover(lastRecoveryAt: Date?, now: Date) -> Bool {
+        guard let lastRecoveryAt else { return true }
+        return now.timeIntervalSince(lastRecoveryAt) > autoRecoverCooldown
+    }
+
+    /// Recover if the budget allows; otherwise record the refusal and return
+    /// false. Callers log; they must not retry on their own clock.
+    @discardableResult
+    func autoRecover(reason: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard state == .capturing else { return false }
+        livenessLock.lock()
+        let admitted = Self.shouldAdmitAutoRecover(lastRecoveryAt: _lastRecoveryAt, now: Date())
+        if !admitted {
+            _suppressedAutoRecovers += 1
+            _lastSuppressedRecoveryReason = reason
+        }
+        livenessLock.unlock()
+        guard admitted else {
+            log("ambient capture auto-recover refused (cooldown): \(reason)")
+            return false
+        }
+        hardRecoverLocked(reason: reason)
+        return true
     }
 
     /// Whether the engine honoured the requested input device.
@@ -347,6 +395,10 @@ final class AmbientCaptureManager {
     func hardRecover(reason: String) {
         lock.lock(); defer { lock.unlock() }
         guard state == .capturing else { return }
+        hardRecoverLocked(reason: reason)
+    }
+
+    private func hardRecoverLocked(reason: String) {
         log("ambient capture hardRecover: \(reason)")
         teardownEngineLocked(finalize: true)
         engine = AVAudioEngine()   // fresh object — re-acquires the HAL input
@@ -539,7 +591,7 @@ final class AmbientCaptureManager {
         let drifted = observeInputDeviceLocked(engine.inputNode)
         lock.unlock()
         guard stopped || drifted else { return }
-        hardRecover(reason: stopped
+        autoRecover(reason: stopped
             ? "engine configuration change stopped the engine"
             : "engine configuration change moved the input to \(actualInputDescription())")
     }

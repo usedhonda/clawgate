@@ -12,11 +12,12 @@ import Foundation
 final class AmbientHealthMonitor {
     private enum Constants {
         static let tickInterval: TimeInterval = 20
-        /// At most one hard-recover per this window. If recovery doesn't revive
-        /// the engine, captureLiveness stays "wedged"; the external watchdog
-        /// (WATCHDOG_AMBIENT_CHECK) then escalates to a process restart.
-        static let recoverCooldown: TimeInterval = 120
     }
+    // The recover cooldown lives in AmbientCaptureManager.autoRecoverCooldown,
+    // shared with the engine's own configuration-change path so both draw on
+    // one budget. If recovery doesn't revive the engine, captureLiveness stays
+    // "wedged"; the external watchdog (WATCHDOG_AMBIENT_CHECK) then escalates
+    // to a process restart.
 
     private weak var controller: AmbientController?
     private let log: (String) -> Void
@@ -24,7 +25,6 @@ final class AmbientHealthMonitor {
     private let timerQueue = DispatchQueue(label: "ai.clawgate.ambient-health-monitor", qos: .utility)
     private let stateLock = NSLock()
     private var timer: DispatchSourceTimer?
-    private var lastRecoverAt: Date = .distantPast
 
     init(controller: AmbientController, log: @escaping (String) -> Void = { _ in }) {
         self.controller = controller
@@ -44,7 +44,7 @@ final class AmbientHealthMonitor {
         timer = source
         stateLock.unlock()
         source.resume()
-        log("AmbientHealthMonitor started (tick=\(Int(Constants.tickInterval))s cooldown=\(Int(Constants.recoverCooldown))s)")
+        log("AmbientHealthMonitor started (tick=\(Int(Constants.tickInterval))s cooldown=\(Int(AmbientCaptureManager.autoRecoverCooldown))s)")
     }
 
     func stop() {
@@ -81,18 +81,10 @@ final class AmbientHealthMonitor {
         guard let controller else { return }
         let s = controller.snapshot()
         guard let reason = Self.recoveryReason(for: s) else { return }
-
-        stateLock.lock()
-        let onCooldown = Date().timeIntervalSince(lastRecoverAt) <= Constants.recoverCooldown
-        if !onCooldown { lastRecoverAt = Date() }
-        stateLock.unlock()
-
-        if onCooldown {
-            log("AmbientHealthMonitor: recover due (\(reason)) but on cooldown")
-            return
+        if controller.autoRecover(reason: reason) {
+            log("AmbientHealthMonitor: \(reason) (chunksSurfaced=\(s.chunksSurfaced)), hard-recovered")
+        } else {
+            log("AmbientHealthMonitor: recover due (\(reason)) but refused by cooldown")
         }
-
-        log("AmbientHealthMonitor: \(reason) (chunksSurfaced=\(s.chunksSurfaced)), hard-recovering")
-        controller.recover(reason: reason)
     }
 }

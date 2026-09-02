@@ -88,8 +88,37 @@ final class AmbientInputDeviceDriftTests: XCTestCase {
             requestedInputDeviceUID: requested,
             actualInputDeviceUID: drifted ? "00-11-22-33-44-55:input" : requested,
             actualInputDeviceName: actualName,
-            inputDeviceDrifted: drifted
+            inputDeviceDrifted: drifted,
+            suppressedAutoRecovers: 0,
+            lastSuppressedRecoveryReason: nil
         )
+    }
+
+    // MARK: - Automatic recovery budget
+
+    /// Every automatic recovery rebuilds the engine, and a rebuilt engine
+    /// touches the system default input before it is moved. Chained rebuilds
+    /// were observed keeping a Bluetooth headset in hands-free mode, so all
+    /// automatic paths share one budget.
+    func testFirstAutoRecoverIsAlwaysAdmitted() {
+        XCTAssertTrue(AmbientCaptureManager.shouldAdmitAutoRecover(lastRecoveryAt: nil, now: Date()))
+    }
+
+    func testAutoRecoverIsRefusedInsideTheCooldown() {
+        let last = Date()
+        XCTAssertFalse(AmbientCaptureManager.shouldAdmitAutoRecover(
+            lastRecoveryAt: last, now: last.addingTimeInterval(0.5)
+        ))
+        XCTAssertFalse(AmbientCaptureManager.shouldAdmitAutoRecover(
+            lastRecoveryAt: last, now: last.addingTimeInterval(AmbientCaptureManager.autoRecoverCooldown)
+        ))
+    }
+
+    func testAutoRecoverIsAdmittedOnceTheCooldownHasPassed() {
+        let last = Date()
+        XCTAssertTrue(AmbientCaptureManager.shouldAdmitAutoRecover(
+            lastRecoveryAt: last, now: last.addingTimeInterval(AmbientCaptureManager.autoRecoverCooldown + 1)
+        ))
     }
 
     func testHealthyCaptureNeedsNoRecovery() {

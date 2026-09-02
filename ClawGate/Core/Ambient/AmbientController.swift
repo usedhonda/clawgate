@@ -39,6 +39,8 @@ final class AmbientController {
         var actualInputDeviceUID: String?
         var actualInputDeviceName: String?
         var inputDeviceDrifted: Bool
+        var suppressedAutoRecovers: Int
+        var lastSuppressedRecoveryReason: String?
     }
 
     private let configStore: ConfigStore
@@ -183,6 +185,13 @@ final class AmbientController {
         state.sync { self.capture.hardRecover(reason: reason) }
     }
 
+    /// Automatic recovery, subject to the capture manager's shared cooldown.
+    /// Returns false when refused. Used by the health monitor; manual and
+    /// user-initiated recovery goes through `recover` and is never refused.
+    func autoRecover(reason: String) -> Bool {
+        state.sync { self.capture.autoRecover(reason: reason) }
+    }
+
     /// TEST ONLY: simulate a capture wedge (engine torn down, captureState left
     /// "capturing") so the detect→recover loop can be verified on demand.
     func simulateWedge() {
@@ -296,7 +305,9 @@ final class AmbientController {
                 // Judged whenever the microphone is open, streaming or not: the
                 // wrong input is wrong audio either way, and with AirPods it
                 // degrades the user's output too.
-                inputDeviceDrifted: capturing && live.inputDeviceDrifted
+                inputDeviceDrifted: capturing && live.inputDeviceDrifted,
+                suppressedAutoRecovers: live.suppressedAutoRecovers,
+                lastSuppressedRecoveryReason: live.lastSuppressedRecoveryReason
             )
         }
     }
