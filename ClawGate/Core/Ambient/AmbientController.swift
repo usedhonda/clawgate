@@ -33,6 +33,12 @@ final class AmbientController {
         var chunksSurfaced: Int           // cumulative chunks finalized (incl. silence)
         var recoveryCount: Int
         var lastRecoveryReason: String?
+        // Input device truth: what was asked for versus what the engine is on.
+        // They have been observed to differ, silently, with AirPods connected.
+        var requestedInputDeviceUID: String?
+        var actualInputDeviceUID: String?
+        var actualInputDeviceName: String?
+        var inputDeviceDrifted: Bool
     }
 
     private let configStore: ConfigStore
@@ -148,7 +154,13 @@ final class AmbientController {
         state.async {
             self.streaming = false
             self.setWasStreaming(false)
-            self.healthMonitor.stop()
+            // The microphone may stay open after the stream stops. While it does,
+            // the monitor stays up so a later input-device drift is still caught;
+            // it has nothing to do for a wedge (liveness is unknown when not
+            // streaming), so only pauseCapture stops it.
+            if self.capture.state != .capturing {
+                self.healthMonitor.stop()
+            }
             Task { await self.ingest.stop() }
             self.log("ambient stream stopped (capture continues=\(self.capture.state == .capturing))")
         }
@@ -226,6 +238,9 @@ final class AmbientController {
                 do {
                     if self.capture.state == .idle { try self.capture.start() }
                     else if self.capture.state == .paused { try self.capture.resume() }
+                    // Capture can run without a stream; the monitor still has
+                    // to watch the input device while the microphone is open.
+                    self.healthMonitor.start()
                     completion(.success(()))
                 } catch {
                     completion(.failure(.captureFailed("\(error)")))
@@ -239,6 +254,9 @@ final class AmbientController {
     func snapshot() -> Status {
         state.sync {
             let capturing = capture.state == .capturing
+            // Re-read the live device on every look; the last observation is
+            // exactly what cannot be trusted here.
+            _ = capture.refreshInputDeviceObservation()
             let live = capture.livenessSnapshot()
             let now = Date()
             // Liveness is meaningful only while capturing AND streaming (a paused
@@ -271,7 +289,14 @@ final class AmbientController {
                 secondsSinceLastChunk: sinceChunk,
                 chunksSurfaced: live.chunksSurfaced,
                 recoveryCount: live.recoveryCount,
-                lastRecoveryReason: live.lastRecoveryReason
+                lastRecoveryReason: live.lastRecoveryReason,
+                requestedInputDeviceUID: live.requestedInputDeviceUID,
+                actualInputDeviceUID: live.actualInputDeviceUID,
+                actualInputDeviceName: live.actualInputDeviceName,
+                // Judged whenever the microphone is open, streaming or not: the
+                // wrong input is wrong audio either way, and with AirPods it
+                // degrades the user's output too.
+                inputDeviceDrifted: capturing && live.inputDeviceDrifted
             )
         }
     }

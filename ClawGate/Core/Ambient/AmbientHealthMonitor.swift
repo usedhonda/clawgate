@@ -56,11 +56,31 @@ final class AmbientHealthMonitor {
         log("AmbientHealthMonitor stopped")
     }
 
+    /// Why a recover is due, or nil. Pure, so the decision is testable apart
+    /// from the timer. Two conditions qualify:
+    ///  - while streaming, the tap has gone stale long enough to call the
+    ///    engine wedged (liveness is only measured while streaming);
+    ///  - while the microphone is open at all, the engine is on a different
+    ///    input device from the one that was requested. That is not a wedge --
+    ///    audio still flows -- but it is the wrong audio, and with AirPods it
+    ///    also degrades the user's output, so it is recovered the same way:
+    ///    fresh engine, re-apply, verify.
+    static func recoveryReason(for s: AmbientController.Status) -> String? {
+        if s.streaming, s.captureLiveness == "wedged" {
+            return "health-monitor: tap stale \(s.secondsSinceLastTap)s"
+        }
+        if s.captureState == "capturing", s.inputDeviceDrifted {
+            let requested = s.requestedInputDeviceUID ?? "?"
+            let actual = s.actualInputDeviceName ?? s.actualInputDeviceUID ?? "unknown"
+            return "health-monitor: input drifted (requested \(requested), engine on \(actual))"
+        }
+        return nil
+    }
+
     private func tick() {
         guard let controller else { return }
         let s = controller.snapshot()
-        // Only act on a confirmed wedge while actively streaming.
-        guard s.streaming, s.captureLiveness == "wedged" else { return }
+        guard let reason = Self.recoveryReason(for: s) else { return }
 
         stateLock.lock()
         let onCooldown = Date().timeIntervalSince(lastRecoverAt) <= Constants.recoverCooldown
@@ -68,11 +88,11 @@ final class AmbientHealthMonitor {
         stateLock.unlock()
 
         if onCooldown {
-            log("AmbientHealthMonitor: capture wedged (sinceTap=\(s.secondsSinceLastTap)s) but recover on cooldown")
+            log("AmbientHealthMonitor: recover due (\(reason)) but on cooldown")
             return
         }
 
-        log("AmbientHealthMonitor: capture wedged (sinceTap=\(s.secondsSinceLastTap)s, chunksSurfaced=\(s.chunksSurfaced)), hard-recovering")
-        controller.recover(reason: "health-monitor: tap stale \(s.secondsSinceLastTap)s")
+        log("AmbientHealthMonitor: \(reason) (chunksSurfaced=\(s.chunksSurfaced)), hard-recovering")
+        controller.recover(reason: reason)
     }
 }

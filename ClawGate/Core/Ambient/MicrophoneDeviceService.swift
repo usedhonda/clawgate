@@ -112,6 +112,26 @@ enum MicrophoneDeviceService {
         return deviceID
     }
 
+    static func resolveAudioDeviceUID(_ deviceID: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uidValue: Unmanaged<CFString>?
+        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0,
+            nil,
+            &uidSize,
+            &uidValue
+        ) == noErr else { return nil }
+        guard let raw = uidValue?.takeRetainedValue() else { return nil }
+        return raw as String
+    }
+
     static func resolveAudioDeviceName(_ deviceID: AudioDeviceID) -> String? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceNameCFString,

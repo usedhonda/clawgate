@@ -141,7 +141,20 @@ final class AmbientCaptureManager {
     private var _recoveryCount = 0
     private var _lastRecoveryAt: Date?
     private var _lastRecoveryReason: String?
+    /// What the user asked for and what the engine is actually on. Kept apart
+    /// because they have been observed to differ: the engine can be moved off
+    /// the requested device after start, silently, and only a read-back shows it.
+    private var _requestedInputDeviceUID: String?
+    private var _actualInputDeviceUID: String?
+    private var _actualInputDeviceName: String?
     private var preferredDeviceUID: String?
+    private var configurationChangeObserver: NSObjectProtocol?
+    /// Guarded by `configurationLock`, never by `lock`: the notification can
+    /// arrive on any thread, and taking the capture lock from inside it risks
+    /// re-entering a section that is mid-restart.
+    private var pendingConfigurationRecover: DispatchWorkItem?
+    private let configurationLock = NSLock()
+    private let configurationQueue = DispatchQueue(label: "ai.clawgate.ambient.engine-config", qos: .utility)
     private let resolveAudioDeviceID: (String) -> AudioDeviceID?
     private let tapTimeToDate: (AVAudioTime) -> Date?
     private let writeAudioFile: (AVAudioFile, AVAudioPCMBuffer) throws -> AVAudioFrameCount
@@ -155,16 +168,56 @@ final class AmbientCaptureManager {
         var recoveryCount: Int
         var lastRecoveryAt: Date?
         var lastRecoveryReason: String?
+        var requestedInputDeviceUID: String?
+        var actualInputDeviceUID: String?
+        var actualInputDeviceName: String?
+        /// True only when a device was requested and the engine is on another.
+        var inputDeviceDrifted: Bool
     }
 
     func livenessSnapshot() -> Liveness {
         livenessLock.lock(); defer { livenessLock.unlock() }
+        let drifted = Self.classifyDeviceApplication(
+            requestedUID: _requestedInputDeviceUID,
+            actualUID: _actualInputDeviceUID
+        ) == .drifted
         return Liveness(lastTapAt: _lastTapAt,
                         lastChunkReadyAt: _lastChunkReadyAt,
                         chunksSurfaced: _chunksSurfaced,
                         recoveryCount: _recoveryCount,
                         lastRecoveryAt: _lastRecoveryAt,
-                        lastRecoveryReason: _lastRecoveryReason)
+                        lastRecoveryReason: _lastRecoveryReason,
+                        requestedInputDeviceUID: _requestedInputDeviceUID,
+                        actualInputDeviceUID: _actualInputDeviceUID,
+                        actualInputDeviceName: _actualInputDeviceName,
+                        inputDeviceDrifted: drifted)
+    }
+
+    /// Whether the engine honoured the requested input device.
+    ///
+    /// `notRequested` is the fail-soft case that already existed: the user chose
+    /// nothing, or chose a device that is not present, and the system default is
+    /// used on purpose. `drifted` is different and must not be folded into it:
+    /// the device exists, was asked for, and the engine is on something else.
+    enum DeviceApplication: Equatable {
+        case notRequested
+        case matched
+        case drifted
+    }
+
+    static func classifyDeviceApplication(requestedUID: String?, actualUID: String?) -> DeviceApplication {
+        guard let requestedUID, !requestedUID.isEmpty else { return .notRequested }
+        guard let actualUID else { return .drifted }
+        return actualUID == requestedUID ? .matched : .drifted
+    }
+
+    /// Re-read which device the live engine is on and record it. Returns true
+    /// when it has drifted from the requested device. Cheap, so status and the
+    /// health monitor call it on every look rather than trusting the last one.
+    func refreshInputDeviceObservation() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard state == .capturing else { return false }
+        return observeInputDeviceLocked(engine.inputNode)
     }
 
     /// Classify capture liveness from the tap-staleness. Shared by status, the
@@ -348,7 +401,7 @@ final class AmbientCaptureManager {
 
     private func beginEngineLocked() throws {
         let input = engine.inputNode
-        applyPreferredDeviceLocked(to: input)
+        let requestedDeviceID = applyPreferredDeviceLocked(to: input)
         let inputFormat = input.inputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0 else {
             throw NSError(domain: "AmbientCapture", code: 1,
@@ -366,6 +419,136 @@ final class AmbientCaptureManager {
         }
         engine.prepare()
         try engine.start()
+        try verifyInputDeviceLocked(input, requested: requestedDeviceID)
+        installConfigurationChangeObserverLocked()
+    }
+
+    /// After start, confirm the engine is on the device that was requested.
+    ///
+    /// The set before start succeeds and is then undone: the engine has been
+    /// observed moving itself back onto the default-device aggregate, which on a
+    /// Mac with AirPods connected is the AirPods microphone -- and merely
+    /// opening that input drops AirPods output into hands-free mono. One
+    /// re-apply is allowed. If the engine still will not stay put, it is torn
+    /// down and the start fails loudly, because recording from the wrong
+    /// microphone in silence is the failure this exists to prevent.
+    private func verifyInputDeviceLocked(_ input: AVAudioInputNode, requested: AudioDeviceID?) throws {
+        guard let requested else {
+            observeInputDeviceLocked(input)
+            return
+        }
+        guard observeInputDeviceLocked(input) else {
+            log("ambient capture input verified: \(actualInputDescription())")
+            return
+        }
+        log("ambient capture input drifted after start to \(actualInputDescription()); re-applying selected mic")
+        engine.stop()
+        applyDeviceIDLocked(requested, to: input)
+        try engine.start()
+        guard observeInputDeviceLocked(input) else {
+            log("ambient capture input re-applied: \(actualInputDescription())")
+            return
+        }
+        let actual = actualInputDescription()
+        teardownEngineLocked(finalize: false)
+        throw NSError(domain: "AmbientCapture", code: 3,
+                      userInfo: [NSLocalizedDescriptionKey:
+                                 "selected mic not honoured by the audio engine (engine is on \(actual)); refusing to record from the wrong input"])
+    }
+
+    /// Read back the engine's live input device and record it. Returns true
+    /// when a device was requested and the engine is not on it.
+    @discardableResult
+    private func observeInputDeviceLocked(_ input: AVAudioInputNode) -> Bool {
+        let actualID = Self.readCurrentDeviceID(from: input)
+        let actualUID = actualID.flatMap(MicrophoneDeviceService.resolveAudioDeviceUID)
+        let actualName = actualID.flatMap(MicrophoneDeviceService.resolveAudioDeviceName)
+        livenessLock.lock()
+        _actualInputDeviceUID = actualUID
+        _actualInputDeviceName = actualName
+        let requestedUID = _requestedInputDeviceUID
+        livenessLock.unlock()
+        return Self.classifyDeviceApplication(requestedUID: requestedUID, actualUID: actualUID) == .drifted
+    }
+
+    private static func readCurrentDeviceID(from input: AVAudioInputNode) -> AudioDeviceID? {
+        guard let audioUnit = input.audioUnit else { return nil }
+        var deviceID: AudioDeviceID = kAudioObjectUnknown
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            &size
+        )
+        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
+    }
+
+    // MARK: - Engine configuration changes
+
+    /// The engine posts this when the audio configuration changes underneath it
+    /// -- a Bluetooth headset connecting is the common case -- and stops itself.
+    /// Recover promptly on a fresh engine so the selected microphone is
+    /// re-applied and verified, instead of waiting for tap staleness to notice
+    /// half a minute later. Observed per engine instance, so a recovered engine
+    /// gets its own.
+    private func installConfigurationChangeObserverLocked() {
+        removeConfigurationChangeObserverLocked()
+        configurationChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.scheduleConfigurationRecover()
+        }
+    }
+
+    private func removeConfigurationChangeObserverLocked() {
+        if let observer = configurationChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        configurationChangeObserver = nil
+        configurationLock.lock()
+        pendingConfigurationRecover?.cancel()
+        pendingConfigurationRecover = nil
+        configurationLock.unlock()
+    }
+
+    /// Coalesced, because one headset connection posts several changes, and
+    /// re-evaluated rather than acted on blindly: a change that left the engine
+    /// running on the right device needs nothing, and recovering anyway would
+    /// restart the engine for every change it posts about itself.
+    private func scheduleConfigurationRecover() {
+        let work = DispatchWorkItem { [weak self] in
+            self?.recoverIfConfigurationChangeHurt()
+        }
+        configurationLock.lock()
+        pendingConfigurationRecover?.cancel()
+        pendingConfigurationRecover = work
+        configurationLock.unlock()
+        configurationQueue.asyncAfter(deadline: .now() + 0.5, execute: work)
+    }
+
+    private func recoverIfConfigurationChangeHurt() {
+        lock.lock()
+        guard state == .capturing else { lock.unlock(); return }
+        let stopped = !engine.isRunning
+        let drifted = observeInputDeviceLocked(engine.inputNode)
+        lock.unlock()
+        guard stopped || drifted else { return }
+        hardRecover(reason: stopped
+            ? "engine configuration change stopped the engine"
+            : "engine configuration change moved the input to \(actualInputDescription())")
+    }
+
+    private func actualInputDescription() -> String {
+        livenessLock.lock(); defer { livenessLock.unlock() }
+        let name = _actualInputDeviceName ?? "unknown"
+        let uid = _actualInputDeviceUID ?? "?"
+        return "\(name) [\(uid)]"
     }
 
     static func resolvePreferredDeviceIDForCapture(
@@ -381,14 +564,28 @@ final class AmbientCaptureManager {
         return deviceID
     }
 
-    private func applyPreferredDeviceLocked(to input: AVAudioInputNode) {
-        guard var deviceID = Self.resolvePreferredDeviceIDForCapture(
+    /// Returns the device that was requested, or nil when none applies: nothing
+    /// selected, or the selection is not present. That nil is the fail-soft path
+    /// that has always existed -- the system default is used on purpose and is
+    /// never reported as drift.
+    private func applyPreferredDeviceLocked(to input: AVAudioInputNode) -> AudioDeviceID? {
+        guard let deviceID = Self.resolvePreferredDeviceIDForCapture(
             uid: preferredDeviceUID,
             resolver: resolveAudioDeviceID,
             log: log
-        ) else { return }
+        ) else {
+            livenessLock.lock(); _requestedInputDeviceUID = nil; livenessLock.unlock()
+            return nil
+        }
+        livenessLock.lock(); _requestedInputDeviceUID = preferredDeviceUID; livenessLock.unlock()
+        applyDeviceIDLocked(deviceID, to: input)
+        return deviceID
+    }
+
+    private func applyDeviceIDLocked(_ deviceID: AudioDeviceID, to input: AVAudioInputNode) {
+        var deviceID = deviceID
         guard let audioUnit = input.audioUnit else {
-            log("ambient capture input audio unit unavailable; using system default")
+            log("ambient capture input audio unit unavailable; selected mic cannot be applied")
             return
         }
         let status = AudioUnitSetProperty(
@@ -400,11 +597,17 @@ final class AmbientCaptureManager {
             UInt32(MemoryLayout<AudioDeviceID>.size)
         )
         if status != noErr {
-            log("ambient capture selected mic apply failed status=\(status); using system default")
+            log("ambient capture selected mic apply failed status=\(status)")
         }
     }
 
     private func teardownEngineLocked(finalize: Bool) {
+        removeConfigurationChangeObserverLocked()
+        livenessLock.lock()
+        _requestedInputDeviceUID = nil
+        _actualInputDeviceUID = nil
+        _actualInputDeviceName = nil
+        livenessLock.unlock()
         engine.inputNode.removeTap(onBus: 0)
         if engine.isRunning { engine.stop() }
         if finalize { finalizeChunkLocked() }
