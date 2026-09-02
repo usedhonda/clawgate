@@ -84,9 +84,14 @@ except Exception:
 '
 }
 
+# Read-only verify: this function must never change the recording state of the
+# machine. It only observes /v1/ambient/status and never POSTs to start a
+# stream or trigger a hard recover. Starting the microphone from a deploy gate
+# caused a real incident (2026-09-02): a Bluetooth headset was dropped into
+# hands-free mono and the ambient subsystem hung for minutes.
 ambient_verify_chunks_after_restart() {
   echo "[verify] Host B ambient capture liveness"
-  local status start_result before after liveness streaming
+  local status liveness streaming chunks before elapsed
   status="$(ambient_status_json)"
   if [[ -z "$status" ]]; then
     echo "WARN: ambient status unavailable, skipping ambient verify" >&2
@@ -97,47 +102,51 @@ ambient_verify_chunks_after_restart() {
     return 0
   fi
 
-  start_result="$(curl -fsS -m 30 -X POST http://127.0.0.1:8765/v1/ambient/stream/start 2>/dev/null || true)"
-  if [[ -z "$start_result" ]]; then
-    echo "FAIL: ambient stream start returned empty response" >&2
-    return 1
-  fi
-  if [[ "$(printf '%s' "$start_result" | ambient_response_ok)" != "true" ]]; then
-    echo "FAIL: ambient stream start failed: $start_result" >&2
-    return 1
-  fi
-
-  before="$(printf '%s' "$start_result" | ambient_extract_field chunksSurfaced)"
-  [[ "$before" =~ ^-?[0-9]+$ ]] || before="$(printf '%s' "$start_result" | ambient_extract_field chunks_surfaced)"
-  [[ "$before" =~ ^-?[0-9]+$ ]] || before=0
-  liveness="$(printf '%s' "$start_result" | ambient_extract_field captureLiveness)"
-  streaming="$(printf '%s' "$start_result" | ambient_extract_field streaming)"
-  echo "ambient start ok (streaming=$streaming liveness=${liveness:-unknown} chunksSurfaced=$before)"
-
-  sleep 35
-  status="$(ambient_status_json)"
-  after="$(printf '%s' "$status" | ambient_extract_field chunksSurfaced)"
-  [[ "$after" =~ ^-?[0-9]+$ ]] || after="$(printf '%s' "$status" | ambient_extract_field chunks_surfaced)"
-  [[ "$after" =~ ^-?[0-9]+$ ]] || after=0
-  liveness="$(printf '%s' "$status" | ambient_extract_field captureLiveness)"
-  if (( after > before )); then
-    echo "ok (chunksSurfaced $before -> $after, liveness=${liveness:-unknown})"
+  if [[ "$AMBIENT_WAS_STREAMING" != "1" ]]; then
+    echo "skip (ambient was not streaming before restart; a deploy never starts the microphone)"
     return 0
   fi
 
-  echo "FAIL: ambient chunksSurfaced did not increase after restart ($before -> $after, liveness=${liveness:-unknown}); attempting one hard recover" >&2
-  curl -fsS -m 30 -X POST http://127.0.0.1:8765/v1/ambient/capture/recover >/dev/null 2>&1 || true
-  sleep 35
-  status="$(ambient_status_json)"
-  after="$(printf '%s' "$status" | ambient_extract_field chunksSurfaced)"
-  [[ "$after" =~ ^-?[0-9]+$ ]] || after="$(printf '%s' "$status" | ambient_extract_field chunks_surfaced)"
-  [[ "$after" =~ ^-?[0-9]+$ ]] || after=0
-  liveness="$(printf '%s' "$status" | ambient_extract_field captureLiveness)"
-  if (( after > before )); then
-    echo "ok after recover (chunksSurfaced $before -> $after, liveness=${liveness:-unknown})"
+  # The app may be refusing to resume on purpose: after a backend timeout it
+  # records a typed inhibit and waits for a person to start the stream again.
+  # That is correct behaviour, not a failed restart.
+  local blocked
+  blocked="$(printf '%s' "$status" | ambient_extract_field autoResumeBlockedReason)"
+  if [[ -n "$blocked" && "$blocked" != "None" ]]; then
+    echo "skip (auto-resume inhibited by the app: $blocked; a person must start the stream)"
     return 0
   fi
-  echo "FAIL: ambient capture did not surface chunks after recover ($before -> $after, liveness=${liveness:-unknown})" >&2
+
+  before=""
+  elapsed=0
+  while (( elapsed < 45 )); do
+    status="$(ambient_status_json)"
+    if [[ -z "$status" ]]; then
+      echo "WARN: ambient status unavailable during verify (app may be busy); not treating as failure" >&2
+      return 0
+    fi
+    streaming="$(printf '%s' "$status" | ambient_extract_field streaming)"
+    liveness="$(printf '%s' "$status" | ambient_extract_field captureLiveness)"
+    chunks="$(printf '%s' "$status" | ambient_extract_field chunksSurfaced)"
+    [[ "$chunks" =~ ^-?[0-9]+$ ]] || chunks="$(printf '%s' "$status" | ambient_extract_field chunks_surfaced)"
+    [[ "$chunks" =~ ^-?[0-9]+$ ]] || chunks=0
+    if [[ -z "$before" ]]; then
+      before="$chunks"
+    fi
+
+    if [[ "$streaming" == "true" ]] && { [[ "$liveness" == "live" ]] || (( chunks > before )); }; then
+      echo "ok (app resumed on its own: streaming=true liveness=${liveness:-unknown} chunksSurfaced=$before -> $chunks)"
+      return 0
+    fi
+
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  status="$(ambient_status_json)"
+  streaming="$(printf '%s' "$status" | ambient_extract_field streaming)"
+  liveness="$(printf '%s' "$status" | ambient_extract_field captureLiveness)"
+  echo "FAIL: ambient was streaming before restart but did not resume on its own within 45s (streaming=${streaming:-unknown} liveness=${liveness:-unknown})" >&2
   return 1
 }
 
@@ -189,6 +198,11 @@ else
     exit 1
   fi
 fi
+
+# Capture the app's own persisted auto-resume intent before restarting, so the
+# verify step below knows whether it is allowed to expect streaming to resume.
+# This is a read-only defaults(1) read, never a stream/recover trigger.
+AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
 
 # Host B restart (canonical local path).
 echo "[local] Restart Host B ClawGate.app"

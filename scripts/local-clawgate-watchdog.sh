@@ -130,6 +130,19 @@ if [ "$AMBIENT_CHECK" = "1" ]; then
     AMBIENT_STREAMING="$(printf '%s' "$AMBIENT_JSON" | json_result_field streaming)"
     AMBIENT_LIVENESS="$(printf '%s' "$AMBIENT_JSON" | json_result_field captureLiveness)"
     AMBIENT_SECONDS_CHUNK="$(printf '%s' "$AMBIENT_JSON" | json_result_field secondsSinceLastChunk)"
+    AMBIENT_PHASE="$(printf '%s' "$AMBIENT_JSON" | json_result_field backendPhase)"
+    AMBIENT_PHASE_AGE="$(printf '%s' "$AMBIENT_JSON" | json_result_field backendPhaseAgeSeconds)"
+    case "$AMBIENT_PHASE_AGE" in ''|*[!0-9]*) AMBIENT_PHASE_AGE=0 ;; esac
+    # A backend that timed out cannot be recovered in-process: the session that
+    # never finished cannot be cancelled, and starting another beside it is how
+    # a headset's input gets held from a thread that never returns. The app has
+    # already recorded an auto-resume inhibit, so the restart comes up with the
+    # microphone closed. Do not POST recover here; the app refuses it anyway.
+    if [ "$AMBIENT_PHASE" = "timedOut" ] || { [ "$AMBIENT_PHASE" = "starting" ] && [ "$AMBIENT_PHASE_AGE" -gt 90 ]; }; then
+      log "WARN ambient backend phase=$AMBIENT_PHASE age=${AMBIENT_PHASE_AGE}s; process restart required, restarting"
+      do_restart
+      exit $?
+    fi
     if [ "$AMBIENT_AVAILABLE" != "true" ] || [ "$AMBIENT_STREAMING" != "true" ]; then
       reset_ambient_wedge_state
     elif [ "$AMBIENT_LIVENESS" = "wedged" ]; then
