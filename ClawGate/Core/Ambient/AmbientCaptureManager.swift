@@ -371,6 +371,14 @@ final class AmbientCaptureManager {
     /// microphone on the next launch until a person clears it.
     var onQuarantine: ((String) -> Void)?
 
+    /// Set by the owner. Called once per generation, off the capture lock,
+    /// when the first buffer from a freshly started session is accepted. That
+    /// -- not the start being accepted, not the session reporting running --
+    /// is the moment a start has demonstrably succeeded, and the only moment
+    /// the owner may clear the auto-resume inhibit.
+    var onFirstBuffer: ((Int) -> Void)?
+    private var firstBufferSeenForGeneration = 0
+
     // MARK: - Permission
 
     static func micAuthorizationStatus() -> AVAuthorizationStatus {
@@ -715,6 +723,11 @@ final class AmbientCaptureManager {
     private func handleBuffer(generation: Int, buffer: AVAudioPCMBuffer, format: AVAudioFormat, at tapTime: AVAudioTime?) {
         lock.lock()
         guard generation == backendGeneration, state == .capturing else { lock.unlock(); return }
+        var firstBuffer: ((Int) -> Void)?
+        if firstBufferSeenForGeneration != generation {
+            firstBufferSeenForGeneration = generation
+            firstBuffer = onFirstBuffer
+        }
         if converter == nil || converterInputFormat != format {
             converter = AVAudioConverter(from: format, to: recordFormat)
             converterInputFormat = format
@@ -722,6 +735,7 @@ final class AmbientCaptureManager {
         }
         let converter = self.converter
         lock.unlock()
+        firstBuffer?(generation)
 
         recordTap()   // the session delivered a buffer: liveness proof, even before conversion
         let firstLiveSampleDate = firstLiveSampleDate(from: tapTime)

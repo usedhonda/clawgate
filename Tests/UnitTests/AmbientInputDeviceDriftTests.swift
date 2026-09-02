@@ -91,7 +91,7 @@ final class AmbientInputDeviceDriftTests: XCTestCase {
             inputDeviceDrifted: drifted,
             suppressedAutoRecovers: 0,
             lastSuppressedRecoveryReason: nil,
-            actualInputObservedAt: nil,
+            actualInputObservedAgeSeconds: nil,
             backendPhase: "running",
             backendPhaseAgeSeconds: 0,
             backendGeneration: 1,

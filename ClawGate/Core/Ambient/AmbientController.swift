@@ -41,7 +41,9 @@ final class AmbientController {
         var inputDeviceDrifted: Bool
         var suppressedAutoRecovers: Int
         var lastSuppressedRecoveryReason: String?
-        var actualInputObservedAt: Date?
+        /// Seconds since the backend last confirmed the actual device, so a
+        /// stale observation reads as stale. Nil until a session has started.
+        var actualInputObservedAgeSeconds: Int?
         // Backend lifecycle, cached and never read from Core Audio here. The
         // process watchdog restarts the app on `timedOut`, or on `starting`
         // that has aged past what a start can take.
@@ -105,6 +107,12 @@ final class AmbientController {
         self.capture.onQuarantine = { [weak self] reason in
             self?.setAutoResumeBlocked(reason: reason)
         }
+        // The inhibit is cleared only by audio actually arriving from a session
+        // the user started. Clearing on "start accepted" would reopen the
+        // microphone on the next launch even when that start never delivered.
+        self.capture.onFirstBuffer = { [weak self] _ in
+            self?.setAutoResumeBlocked(reason: nil)
+        }
         self.capture.setPreferredDevice(uid: configStore.load().ambientMicDeviceUID)
     }
 
@@ -150,7 +158,6 @@ final class AmbientController {
                         self.writeSessionMetadata()
                     }
                     self.streaming = true
-                    self.setAutoResumeBlocked(reason: nil)   // an explicit start is the person clearing the inhibit
                     self.setWasStreaming(true)
                     self.lastError = nil
                     if let sid = self.sessionID {
@@ -244,7 +251,7 @@ final class AmbientController {
     /// above is what the user wanted; this is the app refusing to act on it
     /// until a person intervenes, because the last backend never finished and
     /// opening the microphone again on launch would repeat the hang. Cleared
-    /// only by an explicit, successful start.
+    /// only when a session the person started delivers its first buffer.
     static let autoResumeBlockedReasonKey = "clawgate.ambient.autoResumeBlockedReason"
     private func setAutoResumeBlocked(reason: String?) {
         if let reason {
@@ -295,7 +302,6 @@ final class AmbientController {
                     // Capture can run without a stream; the monitor still has
                     // to watch the input device while the microphone is open.
                     self.healthMonitor.start()
-                    self.setAutoResumeBlocked(reason: nil)   // an explicit resume is the person clearing the inhibit
                     completion(.success(()))
                 } catch {
                     completion(.failure(.captureFailed("\(error)")))
@@ -352,7 +358,7 @@ final class AmbientController {
                 inputDeviceDrifted: capturing && live.inputDeviceDrifted,
                 suppressedAutoRecovers: live.suppressedAutoRecovers,
                 lastSuppressedRecoveryReason: live.lastSuppressedRecoveryReason,
-                actualInputObservedAt: live.actualInputObservedAt,
+                actualInputObservedAgeSeconds: live.actualInputObservedAt.map { Int(now.timeIntervalSince($0)) },
                 backendPhase: live.backendPhase.rawValue,
                 backendPhaseAgeSeconds: Int(now.timeIntervalSince(live.backendPhaseSince)),
                 backendGeneration: live.backendGeneration,
