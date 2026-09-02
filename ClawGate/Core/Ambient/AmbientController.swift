@@ -41,8 +41,12 @@ final class AmbientController {
         var inputDeviceDrifted: Bool
         var suppressedAutoRecovers: Int
         var lastSuppressedRecoveryReason: String?
-        /// Seconds since the backend last confirmed the actual device, so a
-        /// stale observation reads as stale. Nil until a session has started.
+        /// Seconds since the live session was bound to the actual device --
+        /// the age of the binding, not of a repeated observation. An
+        /// AVCaptureDeviceInput cannot change device underneath the session, so
+        /// a large value with the same generation is a long, healthy session.
+        /// Do not read it as staleness; liveness is `captureLiveness`.
+        /// Nil until a session has started.
         var actualInputObservedAgeSeconds: Int?
         // Backend lifecycle, cached and never read from Core Audio here. The
         // process watchdog restarts the app on `timedOut`, or on `starting`
