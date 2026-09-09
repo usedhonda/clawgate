@@ -7,12 +7,14 @@ set -euo pipefail
 # Usage:
 #   ./scripts/restart-local-clawgate.sh
 #   ./scripts/restart-local-clawgate.sh --skip-build
+#   ./scripts/restart-local-clawgate.sh --skip-plugin-sync
 #   ./scripts/restart-local-clawgate.sh --project-path "$(pwd)"
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_BUILD=false
 SKIP_SYNC=false
+SKIP_PLUGIN_SYNC=false
 SKIP_SIGN=false
 WAIT_SECONDS=8
 CLAWGATE_ROLE="host_b_client"
@@ -26,6 +28,8 @@ while [[ $# -gt 0 ]]; do
       SKIP_BUILD=true; shift ;;
     --skip-sync)
       SKIP_SYNC=true; shift ;;
+    --skip-plugin-sync)
+      SKIP_PLUGIN_SYNC=true; shift ;;
     --skip-sign)
       SKIP_SIGN=true; shift ;;
     --wait-seconds)
@@ -37,7 +41,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 source "$PROJECT_PATH/scripts/lib-ops-log.sh"
-ops_log info "restart_begin" "local restart started (skip_build=$SKIP_BUILD skip_sync=$SKIP_SYNC skip_sign=$SKIP_SIGN)"
+ops_log info "restart_begin" "local restart started (skip_build=$SKIP_BUILD skip_sync=$SKIP_SYNC skip_plugin_sync=$SKIP_PLUGIN_SYNC skip_sign=$SKIP_SIGN)"
 trap 'ops_log error "restart_failed" "local restart failed (line=$LINENO exit=$?)"' ERR
 
 APP_PATH="$PROJECT_PATH/ClawGate.app"
@@ -52,6 +56,7 @@ echo "== restart-local-clawgate =="
 echo "Project path: $PROJECT_PATH"
 echo "Skip build  : $SKIP_BUILD"
 echo "Skip sync   : $SKIP_SYNC"
+echo "Skip plugins: $SKIP_PLUGIN_SYNC"
 echo "Skip sign   : $SKIP_SIGN"
 
 if [[ "$SKIP_BUILD" != "true" ]]; then
@@ -97,28 +102,32 @@ else
   echo "[2/5] Skip app-binary sync (by option)"
 fi
 
-echo "[3/5] Sync OpenClaw plugins"
-sync_plugin_dir() {
-  local src="$1"
-  local dst="$2"
-  local label="$3"
-  if [[ ! -d "$src" ]]; then
-    echo "  - skip $label (missing source: $src)"
-    return
-  fi
-  mkdir -p "$dst"
-  if command -v rsync >/dev/null 2>&1; then
-    rsync -a --delete "$src/" "$dst/"
-  else
-    rm -rf "$dst"
+if [[ "$SKIP_PLUGIN_SYNC" != "true" ]]; then
+  echo "[3/5] Sync OpenClaw plugins"
+  sync_plugin_dir() {
+    local src="$1"
+    local dst="$2"
+    local label="$3"
+    if [[ ! -d "$src" ]]; then
+      echo "  - skip $label (missing source: $src)"
+      return
+    fi
     mkdir -p "$dst"
-    cp -R "$src/." "$dst/"
-  fi
-  echo "  - synced $label -> $dst"
-}
-sync_plugin_dir "$PLUGIN_CLAWGATE_SRC" "$PLUGIN_CLAWGATE_DST" "clawgate"
-# DISABLED: vibeterm-telemetry is a 4-route bundle managed by oc-general, not clawgate.
-# sync_plugin_dir "$PLUGIN_TELEMETRY_SRC" "$PLUGIN_TELEMETRY_DST" "vibeterm-telemetry"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a --delete "$src/" "$dst/"
+    else
+      rm -rf "$dst"
+      mkdir -p "$dst"
+      cp -R "$src/." "$dst/"
+    fi
+    echo "  - synced $label -> $dst"
+  }
+  sync_plugin_dir "$PLUGIN_CLAWGATE_SRC" "$PLUGIN_CLAWGATE_DST" "clawgate"
+  # DISABLED: vibeterm-telemetry is a 4-route bundle managed by oc-general, not clawgate.
+  # sync_plugin_dir "$PLUGIN_TELEMETRY_SRC" "$PLUGIN_TELEMETRY_DST" "vibeterm-telemetry"
+else
+  echo "[3/5] Skip OpenClaw plugin sync (by option)"
+fi
 
 if [[ "$SKIP_SIGN" != "true" ]]; then
   # Prefer Developer ID Application (stable TCC binding across rebuilds).
@@ -182,7 +191,7 @@ gateway_job_pid() {
     | awk -v label="$GATEWAY_LABEL" '$3 == label && $1 != "-" { print $1 }'
 }
 
-if launchctl list 2>/dev/null | grep -q 'ai\.openclaw\.gateway'; then
+if [[ "$SKIP_PLUGIN_SYNC" != "true" ]] && launchctl list 2>/dev/null | grep -q 'ai\.openclaw\.gateway'; then
   # Wait for the old instance to actually exit before starting a new one.
   # launchctl stop only sends SIGTERM and returns immediately; a gateway
   # holding many listeners does not always finish shutting down within a
