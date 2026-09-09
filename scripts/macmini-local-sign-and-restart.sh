@@ -6,10 +6,12 @@ set -euo pipefail
 # Usage:
 #   KEYCHAIN_PASSWORD='your-login-password' ./scripts/macmini-local-sign-and-restart.sh
 #   ./scripts/macmini-local-sign-and-restart.sh --keychain-password 'your-login-password'
+#   ./scripts/macmini-local-sign-and-restart.sh --skip-plugin-sync
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
+SKIP_PLUGIN_SYNC=false
 
 # Pull in SIGNING_ID from release.env if present. Preferred signing identity
 # is Developer ID Application (stable TCC binding across rebuilds via Team ID).
@@ -40,6 +42,8 @@ while [[ $# -gt 0 ]]; do
       PROJECT_PATH="$2"; shift 2 ;;
     --keychain-password)
       KEYCHAIN_PASSWORD="$2"; shift 2 ;;
+    --skip-plugin-sync)
+      SKIP_PLUGIN_SYNC=true; shift ;;
     *)
       echo "Unknown arg: $1" >&2
       exit 2 ;;
@@ -131,7 +135,11 @@ codesign --force --deep --options runtime \
   --sign "$RESOLVED_SIGNING_ID" ClawGate.app
 
 echo "[6/6] Restart ClawGate + OpenClaw gateway"
-./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-sign
+RESTART_ARGS=(--skip-build --skip-sync --skip-sign)
+if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+  RESTART_ARGS+=(--skip-plugin-sync)
+fi
+./scripts/restart-local-clawgate.sh "${RESTART_ARGS[@]}"
 sleep 2
 launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
 sleep 1

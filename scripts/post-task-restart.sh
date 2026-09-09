@@ -17,11 +17,13 @@ set -euo pipefail
 # Swift binary will NOT reach macmini; only source is synced and the existing
 # bundle is restarted.
 #   ./scripts/post-task-restart.sh --build-hosta
+#   ./scripts/post-task-restart.sh --build-hosta --skip-plugin-sync
 
 REMOTE_HOST="macmini"
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_SYNC=false
+SKIP_PLUGIN_SYNC=false
 REQUIRE_HOSTA_LOCAL_SIGN=false
 BUILD_HOSTA=false
 CLAWGATE_ROLE="host_b_client"
@@ -35,6 +37,8 @@ while [[ $# -gt 0 ]]; do
       PROJECT_PATH="$2"; shift 2 ;;
     --skip-sync)
       SKIP_SYNC=true; shift ;;
+    --skip-plugin-sync)
+      SKIP_PLUGIN_SYNC=true; shift ;;
     --skip-remote-build)
       shift ;;  # deprecated: remote build path was removed (kept for backward compat)
     --skip-local-relay)
@@ -151,13 +155,14 @@ ambient_verify_chunks_after_restart() {
 }
 
 source "$PROJECT_PATH/scripts/lib-ops-log.sh"
-ops_log info "post_task_begin" "post-task restart begin (remote_host=$REMOTE_HOST skip_sync=$SKIP_SYNC)"
+ops_log info "post_task_begin" "post-task restart begin (remote_host=$REMOTE_HOST skip_sync=$SKIP_SYNC skip_plugin_sync=$SKIP_PLUGIN_SYNC)"
 trap 'ops_log error "post_task_failed" "post-task restart failed (line=$LINENO exit=$?)"' ERR
 
 echo "== post-task-restart =="
 echo "Remote host : $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
 echo "Skip sync   : $SKIP_SYNC"
+echo "Skip plugins: $SKIP_PLUGIN_SYNC"
 echo "Require HostA local sign: $REQUIRE_HOSTA_LOCAL_SIGN"
 echo "Build HostA (SSH sign)  : $BUILD_HOSTA"
 
@@ -177,7 +182,11 @@ if [[ "$BUILD_HOSTA" == "true" ]]; then
   # This is the only path that lands a fresh Swift binary on macmini, and it
   # writes .runtime/hosta-local-sign.stamp so the verify step below can confirm.
   echo "[hostA] build + codesign + restart via macmini-local-sign-and-restart.sh (SSH)"
-  if ! ssh "$REMOTE_HOST" "KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\""; then
+  REMOTE_PLUGIN_SYNC_ARG=""
+  if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+    REMOTE_PLUGIN_SYNC_ARG=" --skip-plugin-sync"
+  fi
+  if ! ssh "$REMOTE_HOST" "KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
     echo
     echo "[fallback] Host A build/sign over SSH failed. Run on macmini local desktop session:"
     echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"
@@ -206,7 +215,11 @@ AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStre
 
 # Host B restart (canonical local path).
 echo "[local] Restart Host B ClawGate.app"
-./scripts/restart-local-clawgate.sh
+LOCAL_RESTART_ARGS=(./scripts/restart-local-clawgate.sh)
+if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+  LOCAL_RESTART_ARGS+=(--skip-plugin-sync)
+fi
+"${LOCAL_RESTART_ARGS[@]}"
 
 echo
 echo "[verify] Host B health"
