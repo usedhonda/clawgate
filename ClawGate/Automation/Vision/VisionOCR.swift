@@ -5,6 +5,12 @@ import Vision
 /// Requires Screen Recording permission for CGWindowListCreateImage.
 /// Gracefully returns nil when permission is not granted.
 enum VisionOCR {
+    struct InboundOCRObservation: Equatable {
+        let text: String
+        /// Top-down global screen Y of the observation's top edge.
+        let screenY: CGFloat
+    }
+
     struct OCRConfig {
         var confidenceAccept: Float = 0.40
         var confidenceFallback: Float = 0.25
@@ -56,6 +62,34 @@ enum VisionOCR {
         return performOCRInbound(on: image, debug: debug, config: config)
     }
 
+    /// OCR for LINE inbound text with the accepted observations' real screen
+    /// positions. Inbound preprocessing masks rows and applies a bottom cut,
+    /// but never crops or resizes the image, so Vision's normalized bounding
+    /// boxes map directly back into `screenRect`.
+    static func extractTextLineInboundPositioned(
+        from screenRect: CGRect,
+        windowID: CGWindowID = kCGNullWindowID,
+        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
+        config: OCRConfig = .default
+    ) -> [InboundOCRObservation]? {
+        guard let image = captureImage(from: screenRect, windowID: windowID) else {
+            return nil
+        }
+        return performOCRInboundPositioned(
+            on: image,
+            screenRect: screenRect,
+            debug: debug,
+            config: config
+        )
+    }
+
+    /// Converts Vision's bottom-up normalized bounding box into top-down global
+    /// screen coordinates. The top edge is used to match positional dedup's
+    /// line anchor semantics.
+    static func globalTopDownY(for observationBoundingBox: CGRect, in screenRect: CGRect) -> CGFloat {
+        screenRect.minY + (1 - observationBoundingBox.maxY) * screenRect.height
+    }
+
     /// Capture raw + preprocessed images for inbound OCR debugging.
     /// Returns nil when capture failed (e.g. Screen Recording permission missing).
     /// Preprocessed image reflects fixed-lane outbound masking and bottom cut.
@@ -102,6 +136,43 @@ enum VisionOCR {
         debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
         config: OCRConfig = .default
     ) -> String? {
+        guard let observations = performOCRInboundObservations(on: image, debug: debug, config: config) else {
+            return nil
+        }
+        return inboundBody(fromObservedTexts: observations.map(\.text))
+    }
+
+    private static func performOCRInboundPositioned(
+        on image: CGImage,
+        screenRect: CGRect,
+        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
+        config: OCRConfig = .default
+    ) -> [InboundOCRObservation]? {
+        guard let observations = performOCRInboundObservations(on: image, debug: debug, config: config) else {
+            return nil
+        }
+        return observations.compactMap { observation in
+            guard !isChromeLabel(observation.text) else { return nil }
+            return InboundOCRObservation(
+                text: observation.text,
+                screenY: globalTopDownY(
+                    for: observation.boundingBox,
+                    in: screenRect
+                )
+            )
+        }
+    }
+
+    private struct AcceptedInboundObservation {
+        let text: String
+        let boundingBox: CGRect
+    }
+
+    private static func performOCRInboundObservations(
+        on image: CGImage,
+        debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
+        config: OCRConfig = .default
+    ) -> [AcceptedInboundObservation]? {
         let preprocessing = preprocessInboundImage(image)
         debug?.pointee = preprocessing.debug
         let ocrImage = preprocessing.image ?? image
@@ -128,17 +199,17 @@ enum VisionOCR {
 
         guard let observations = request.results else { return nil }
 
-        let observedTexts = observations.compactMap { obs -> String? in
+        let acceptedObservations = observations.compactMap { obs -> AcceptedInboundObservation? in
             let candidates = obs.topCandidates(config.candidateCount)
             if let accepted = candidates.first(where: { $0.confidence >= config.confidenceAccept }) {
-                return accepted.string
+                return AcceptedInboundObservation(text: accepted.string, boundingBox: obs.boundingBox)
             }
             if let best = candidates.first, best.confidence >= config.confidenceFallback {
-                return best.string
+                return AcceptedInboundObservation(text: best.string, boundingBox: obs.boundingBox)
             }
             return nil
         }
-        return inboundBody(fromObservedTexts: observedTexts)
+        return acceptedObservations
     }
 
     // MARK: - Chrome rejection

@@ -38,6 +38,27 @@ struct LineCursorTruncationResult {
     let postCursorNovelLineCount: Int
 }
 
+enum LinePixelContinuity {
+    // Require observed overlap, not merely an absent emitted cursor, before recovering a tail.
+    static func appendedTail(previous: String, current: String) -> String {
+        let old = lines(previous)
+        let new = lines(current)
+        guard !old.isEmpty, !new.isEmpty else { return "" }
+        for count in stride(from: min(old.count, new.count), through: 1, by: -1) {
+            if Array(old.suffix(count)) == Array(new.prefix(count)) {
+                return new.dropFirst(count).joined(separator: "\n")
+            }
+        }
+        return ""
+    }
+
+    private static func lines(_ text: String) -> [String] {
+        LineTextSanitizer.sanitize(text).split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+}
+
 struct LineInboundFreshnessEvidence {
     let incomingRows: Int
     let bottomChanged: Bool
@@ -272,6 +293,8 @@ final class LINEInboundWatcher {
     private var lastImageHash: UInt64 = 0
     private var lastOCRText: String = ""
     private var baselineCaptured: Bool = false
+    private var lastPixelOCRAt: Date = .distantPast
+    private var pixelConversation = ""
 
     /// Exposed for debug snapshot endpoint/logging
     private var lastSignalNames: [String] = []
@@ -424,6 +447,8 @@ final class LINEInboundWatcher {
         lastImageHash = 0
         lastOCRText = ""
         baselineCaptured = false
+        lastPixelOCRAt = .distantPast
+        pixelConversation = ""
         lastSignalNames = []
         lastScore = 0
         lastConfidence = "low"
@@ -678,7 +703,7 @@ final class LINEInboundWatcher {
             "line_watch_drop_stage": "none",
             "line_watch_drop_reason": "accepted",
         ]
-        for (k, v) in decision.details where k != "observed_fragments_json" {
+        for (k, v) in decision.details where k != "observed_fragments_json" && k != "pixel_observed_fragments_json" {
             payload[k] = v
         }
 
@@ -715,7 +740,7 @@ final class LINEInboundWatcher {
             "signals": signal.name,
             "pipeline_version": "line-legacy-v2",
         ]
-        for (k, v) in signal.details where k != "observed_fragments_json" {
+        for (k, v) in signal.details where k != "observed_fragments_json" && k != "pixel_observed_fragments_json" {
             payload[k] = v
         }
 
@@ -837,7 +862,7 @@ final class LINEInboundWatcher {
     }
 
     private func observedFragmentsForDedup(from details: [String: String]) -> [LineObservedFragment] {
-        guard let encoded = details["observed_fragments_json"],
+        guard let encoded = details["observed_fragments_json"] ?? details["pixel_observed_fragments_json"],
               let data = encoded.data(using: .utf8),
               let decoded = try? JSONDecoder().decode([LineObservedFragment].self, from: data) else {
             return []
@@ -1334,6 +1359,13 @@ final class LINEInboundWatcher {
 
         let hash = computeImageHash(image)
 
+        if pixelConversation != conversation {
+            baselineCaptured = false
+            lastOCRText = ""
+            lastPixelOCRAt = .distantPast
+            pixelConversation = conversation
+        }
+
         if !baselineCaptured {
             lastImageHash = hash
             let baseline = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
@@ -1341,25 +1373,34 @@ final class LINEInboundWatcher {
                 logger.log(.debug, "LINEInboundWatcher: baseline fallback without y-cut (continuing)")
             }
             let baselineHead = String(baseline.text.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
-            lastOCRText = ""  // force textChanged=true on first poll after baseline
+            lastOCRText = baseline.text
+            lastPixelOCRAt = Date()
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash), lane=\(baseline.laneXDescription), y_cut=\(baseline.cutYDescription), text_head=[\(baselineHead)])")
             lastPixelDiag = ["pixel_baseline_captured": "true", "pixel_hash_changed": "n/a", "pixel_hash": "\(hash)", "pixel_ocr_text_head": baselineHead, "pixel_signal_result": "nil_baseline"]
             return nil
         }
 
-        guard hash != lastImageHash else {
+        // The downsampled hash is only an optimization: small new bubbles can miss its samples.
+        let hashChanged = hash != lastImageHash
+        guard hashChanged || Date().timeIntervalSince(lastPixelOCRAt) >= 5 else {
             lastPixelDiag = ["pixel_baseline_captured": "true", "pixel_hash_changed": "false", "pixel_hash": "\(hash)", "pixel_signal_result": "nil_hash_unchanged"]
             return nil
         }
         let previousHash = lastImageHash
-        lastImageHash = hash
 
         let burst = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
+        lastPixelOCRAt = Date()
         if burst.frameSkippedNoCutDescription == "1" {
             logger.log(.debug, "LINEInboundWatcher: frame fallback without y-cut (continuing)")
         }
         let pixelOCRText = burst.text
+        guard !pixelOCRText.isEmpty else {
+            // Do not consume the last readable frame on a transient empty OCR result.
+            lastPixelDiag = ["pixel_baseline_captured": "true", "pixel_hash_changed": hashChanged ? "true" : "false", "pixel_signal_result": "nil_ocr_empty_retry"]
+            return nil
+        }
+        lastImageHash = hash
         let previousOCRText = lastOCRText
         let textChanged = pixelOCRText != previousOCRText
         if !textChanged {
@@ -1371,25 +1412,55 @@ final class LINEInboundWatcher {
             lastOCRText = pixelOCRText
         }
         let cursorResult = applyCursorTruncation(to: pixelOCRText, conversation: conversation)
-        let deltaText = textChanged ? extractDeltaText(previous: previousOCRText, current: cursorResult.text) : ""
+        let deltaText: String
+        if !textChanged {
+            deltaText = ""
+        } else if cursorResult.status == .notFound {
+            deltaText = LinePixelContinuity.appendedTail(previous: previousOCRText, current: pixelOCRText)
+        } else if cursorResult.status == .notApplicable, !previousOCRText.isEmpty {
+            deltaText = LinePixelContinuity.appendedTail(previous: previousOCRText, current: pixelOCRText)
+        } else {
+            deltaText = extractDeltaText(previous: previousOCRText, current: cursorResult.text)
+        }
 
         let ocrHead = String(pixelOCRText.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
         lastPixelDiag = [
             "pixel_baseline_captured": "true",
-            "pixel_hash_changed": "true",
+            "pixel_hash_changed": hashChanged ? "true" : "false",
             "pixel_hash": "\(hash)",
             "pixel_ocr_text_head": ocrHead,
             "pixel_signal_result": textChanged ? "fired_text_changed" : "fired_text_same",
             "pixel_cursor_status": cursorResult.status.rawValue,
             "pixel_post_cursor_novel_lines": String(cursorResult.postCursorNovelLineCount),
+            "pixel_cursor_recovered": cursorResult.status == .notFound && !deltaText.isEmpty ? "1" : "0",
         ]
+
+        var pixelDetails: [String: String] = [:]
+        if !deltaText.isEmpty {
+            var nextOrder = 0
+            let observed = burst.observations.flatMap {
+                observedFragments(from: $0.text, observedY: Int($0.screenY), source: "pixel_ocr", nextOrder: &nextOrder)
+            }
+            // Match from the bottom so repeated text selects the new occurrence, not old history.
+            var remaining = Dictionary(deltaText.split(separator: "\n").map {
+                (normalizeForDuplicateFingerprint(String($0)), 1)
+            }, uniquingKeysWith: +)
+            let candidates = observed.reversed().filter { fragment in
+                guard let count = remaining[fragment.normalizedLine], count > 0 else { return false }
+                remaining[fragment.normalizedLine] = count - 1
+                return true
+            }.reversed()
+            if let encoded = encodeObservedFragments(Array(candidates)) {
+                pixelDetails["pixel_observed_fragments_json"] = encoded
+            }
+        }
 
         return LineDetectionSignal(
             name: "pixel_diff",
             score: textChanged ? 62 : 35,
             text: textChanged ? LineTextSanitizer.sanitize(deltaText) : "",
             conversation: conversation,
-            details: [
+            details: pixelDetails.merging([
                 "pixel_hash_prev": String(previousHash),
                 "pixel_hash_now": String(hash),
                 "pixel_text_changed": textChanged ? "1" : "0",
@@ -1405,8 +1476,9 @@ final class LINEInboundWatcher {
                 "pixel_post_cursor_novel_lines": String(cursorResult.postCursorNovelLineCount),
                 "pixel_cursor_discarded_lines": String(cursorResult.discardedLineCount),
                 "pixel_cursor_kept_lines": String(cursorResult.keptLineCount),
+                "pixel_cursor_recovered": cursorResult.status == .notFound && !deltaText.isEmpty ? "1" : "0",
                 "frame_action": "processed",
-            ]
+            ]) { _, new in new }
         )
     }
 
@@ -1581,6 +1653,7 @@ final class LINEInboundWatcher {
 
     private func burstInboundOCR(from rect: CGRect, windowID: CGWindowID) -> (
         text: String,
+        observations: [VisionOCR.InboundOCRObservation],
         delaysDescription: String,
         lengthsDescription: String,
         anchorYDescription: String,
@@ -1592,6 +1665,7 @@ final class LINEInboundWatcher {
     ) {
         let delays = [0]
         var best = ""
+        var bestObservations: [VisionOCR.InboundOCRObservation] = []
         var lengths: [Int] = []
         var selectedDebug = VisionOCR.InboundPreprocessDebug(
             laneX: -1,
@@ -1611,11 +1685,13 @@ final class LINEInboundWatcher {
                 cutApplied: false,
                 frameSkippedNoCut: false
             )
-            let raw = VisionOCR.extractTextLineInbound(from: rect, windowID: windowID, debug: &debug, config: ocrConfig) ?? ""
+            let observations = VisionOCR.extractTextLineInboundPositioned(from: rect, windowID: windowID, debug: &debug, config: ocrConfig) ?? []
+            let raw = observations.map(\.text).joined(separator: "\n")
             let sanitized = LineTextSanitizer.sanitize(raw)
             lengths.append(sanitized.count)
             if sanitized.count > best.count {
                 best = sanitized
+                bestObservations = observations
                 selectedDebug = debug
             } else if delays.count == 1 {
                 selectedDebug = debug
@@ -1623,6 +1699,7 @@ final class LINEInboundWatcher {
         }
         return (
             text: best,
+            observations: bestObservations,
             delaysDescription: delays.map(String.init).joined(separator: ","),
             lengthsDescription: lengths.map(String.init).joined(separator: ","),
             anchorYDescription: String(Int(rect.origin.y)),

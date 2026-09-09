@@ -2,6 +2,40 @@ import XCTest
 @testable import ClawGate
 
 final class LineInboundWatcherDedupTests: XCTestCase {
+    func testMissingCursorRecoversOnlyNewTailWithObservedContinuity() {
+        XCTAssertEqual(
+            LinePixelContinuity.appendedTail(previous: "Older message\nVisible anchor", current: "Visible anchor\nNew question"),
+            "New question"
+        )
+        XCTAssertEqual(
+            LinePixelContinuity.appendedTail(previous: "Visible anchor", current: "Visible anchor\nFirst line\nSecond line"),
+            "First line\nSecond line"
+        )
+    }
+
+    func testMissingCursorNeverReplaysUnchangedOrUnrelatedScreen() {
+        XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "Visible anchor", current: "Visible anchor"), "")
+        XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "Visible anchor", current: "Unrelated history"), "")
+        XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "", current: "Unrelated history"), "")
+        XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "Visible anchor", current: ""), "")
+        XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "Visible anchor\nLatest", current: "Older history\nVisible anchor"), "")
+    }
+
+    func testRecoveredPixelTailWithPositionPassesDedupOnce() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let tail = LinePixelContinuity.appendedTail(previous: "Visible anchor", current: "Visible anchor\nNew question")
+        let fragments = [fragment("new question", display: tail, y: 620, order: 0)]
+        let freshness = LineInboundFreshnessEvidence(incomingRows: 0, bottomChanged: false, newestSliceUsed: false,
+            cursorStatus: .notFound, postCursorNovelLineCount: 0, pixelTextChanged: true)
+        let first = LineInboundDedupDecisionEngine.decide(fingerprintHit: false, fragments: fragments,
+            tracker: [:], freshness: freshness, now: now)
+        XCTAssertFalse(first.evaluation.shouldSuppress)
+        XCTAssertEqual(first.evaluation.emittedText, "New question")
+        let repeated = LineInboundDedupDecisionEngine.decide(fingerprintHit: false, fragments: fragments,
+            tracker: first.updatedTracker, freshness: freshness, now: now.addingTimeInterval(30))
+        XCTAssertTrue(repeated.evaluation.shouldSuppress)
+    }
+
     func testSameLineMovedUpwardSuppressesAndTrackerFollowsNewY() {
         let now = Date(timeIntervalSince1970: 1_000)
         let tracker = [

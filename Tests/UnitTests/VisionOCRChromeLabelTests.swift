@@ -98,4 +98,22 @@ final class VisionOCRChromeLabelTests: XCTestCase {
         ])
         XCTAssertEqual(body, "おはよう\n今日は18:00から予定が入ってるよ")
     }
+
+    // MARK: - Positioned observations
+
+    func testVisionBoundingBoxMapsToTopDownGlobalY() {
+        let screenRect = CGRect(x: 0, y: 200, width: 400, height: 800)
+        let boundingBox = CGRect(x: 0.1, y: 0.25, width: 0.5, height: 0.25)
+
+        XCTAssertEqual(
+            VisionOCR.globalTopDownY(for: boundingBox, in: screenRect),
+            600,
+            accuracy: 0.001
+        )
+    }
+
+    func testPositionedChromeFilterKeepsMessageSemantics() {
+        XCTAssertFalse(VisionOCR.isChromeLabel("今日は18:00から予定が入ってるよ"))
+        XCTAssertTrue(VisionOCR.isChromeLabel("午前 10:05"))
+    }
 }

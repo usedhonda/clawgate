@@ -105,7 +105,7 @@ AX API で LINE チャットリストの行数変化を検出。
 **Image Hash**
 ```
 画像をダウンサンプルして 64bit ハッシュ → 前回 hash と比較
-hash 変化なし → return nil（早期脱出）
+hash 変化なし → 5秒以内のみ return nil（定期 OCR で hash の取りこぼしを確認）
 ```
 
 **テキスト変化判定**
@@ -116,6 +116,11 @@ textChanged = (currentOCRText != lastOCRText)
 ```
 
 `textChanged=false` のとき `text_unchanged prev=[...] curr=[...]` としてデバッグログに記録。
+
+初回と conversation 切替時は見えている本文を観測 baseline に保存し、その画面を再送しない。
+空の OCR 結果では直前の読み取り済み本文を消費せず、次回の読み取り対象として残す。
+Pixel 単独の候補にも Vision の実測 Y 座標を `pixel_observed_fragments_json` で渡す。
+Structural の positioned fragments がある場合はそちらを維持し、ない場合だけ Pixel の座標を dedup に使う。
 
 ---
 
@@ -143,6 +148,14 @@ textChanged = (currentOCRText != lastOCRText)
 
 `cursor_not_found` で全文を再処理しないのが今回の重要点。これでスクロールや anchor loss 時に古い画面全文を再 emit しなくなる。
 
+### 観測 baseline による末尾回復
+
+`applyCursorTruncation` 自体は `not_found` で空文字を返す契約を維持する。
+Pixel 側は別途、**前回 OCR の末尾と今回 OCR の先頭が完全一致する場合だけ**、一致部分より後ろの新しい行を候補にできる。
+この候補も実測座標による通常の dedup を通り、カーソル不一致だけでは全文を解放しない。
+同じ画面、上方向のスクロール、重なりのない画面は回復対象外。重なりのない場合は観測 baseline のみを更新し、次の連続した追記を検出する。
+`pixel_cursor_recovered=1` はこの限定回復を示す。実際の受信完了は eventBus と下流の受信証跡で別途確認する。
+
 ---
 
 ## 4. extractDeltaText
@@ -154,6 +167,7 @@ previousLines (Set) と currentLines の差分を取る
 ```
 
 `applyCursorTruncation` が `not_found` を返した場合は current が空なので、ここでも fail-open しない。
+限定的な末尾回復はこの差分関数を使わず、前節の完全一致する重なりで判定する。
 
 ---
 
