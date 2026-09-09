@@ -40,10 +40,11 @@ struct LineCursorTruncationResult {
 
 enum LinePixelContinuity {
     // Require observed overlap, not merely an absent emitted cursor, before recovering a tail.
-    static func appendedTail(previous: String, current: String) -> String {
+    static func appendedTail(previous: String, current: String, observedEmptyBaseline: Bool = false) -> String {
         let old = lines(previous)
         let new = lines(current)
-        guard !old.isEmpty, !new.isEmpty else { return "" }
+        guard !new.isEmpty else { return "" }
+        guard !old.isEmpty else { return observedEmptyBaseline ? new.joined(separator: "\n") : "" }
         for count in stride(from: min(old.count, new.count), through: 1, by: -1) {
             if Array(old.suffix(count)) == Array(new.prefix(count)) {
                 return new.dropFirst(count).joined(separator: "\n")
@@ -1369,6 +1370,10 @@ final class LINEInboundWatcher {
         if !baselineCaptured {
             lastImageHash = hash
             let baseline = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
+            guard baseline.succeeded else {
+                lastPixelDiag = ["pixel_baseline_captured": "false", "pixel_signal_result": "nil_baseline_ocr_retry"]
+                return nil
+            }
             if baseline.frameSkippedNoCutDescription == "1" {
                 logger.log(.debug, "LINEInboundWatcher: baseline fallback without y-cut (continuing)")
             }
@@ -1416,7 +1421,8 @@ final class LINEInboundWatcher {
         if !textChanged {
             deltaText = ""
         } else if cursorResult.status == .notFound {
-            deltaText = LinePixelContinuity.appendedTail(previous: previousOCRText, current: pixelOCRText)
+            deltaText = LinePixelContinuity.appendedTail(previous: previousOCRText, current: pixelOCRText,
+                observedEmptyBaseline: previousOCRText.isEmpty)
         } else if cursorResult.status == .notApplicable, !previousOCRText.isEmpty {
             deltaText = LinePixelContinuity.appendedTail(previous: previousOCRText, current: pixelOCRText)
         } else {
@@ -1653,6 +1659,7 @@ final class LINEInboundWatcher {
 
     private func burstInboundOCR(from rect: CGRect, windowID: CGWindowID) -> (
         text: String,
+        succeeded: Bool,
         observations: [VisionOCR.InboundOCRObservation],
         delaysDescription: String,
         lengthsDescription: String,
@@ -1665,6 +1672,7 @@ final class LINEInboundWatcher {
     ) {
         let delays = [0]
         var best = ""
+        var succeeded = false
         var bestObservations: [VisionOCR.InboundOCRObservation] = []
         var lengths: [Int] = []
         var selectedDebug = VisionOCR.InboundPreprocessDebug(
@@ -1685,7 +1693,9 @@ final class LINEInboundWatcher {
                 cutApplied: false,
                 frameSkippedNoCut: false
             )
-            let observations = VisionOCR.extractTextLineInboundPositioned(from: rect, windowID: windowID, debug: &debug, config: ocrConfig) ?? []
+            let result = VisionOCR.extractTextLineInboundPositioned(from: rect, windowID: windowID, debug: &debug, config: ocrConfig)
+            succeeded = succeeded || result != nil
+            let observations = result ?? []
             let raw = observations.map(\.text).joined(separator: "\n")
             let sanitized = LineTextSanitizer.sanitize(raw)
             lengths.append(sanitized.count)
@@ -1699,6 +1709,7 @@ final class LINEInboundWatcher {
         }
         return (
             text: best,
+            succeeded: succeeded,
             observations: bestObservations,
             delaysDescription: delays.map(String.init).joined(separator: ","),
             lengthsDescription: lengths.map(String.init).joined(separator: ","),

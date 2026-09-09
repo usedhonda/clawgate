@@ -118,6 +118,7 @@ textChanged = (currentOCRText != lastOCRText)
 `textChanged=false` のとき `text_unchanged prev=[...] curr=[...]` としてデバッグログに記録。
 
 初回と conversation 切替時は見えている本文を観測 baseline に保存し、その画面を再送しない。
+OCR 失敗は空の baseline と区別し、baseline が取れるまで再試行する。正常に確認した空画面からの最初の本文は、別シグナル由来のカーソルが不一致でも位置付き候補にできる。
 空の OCR 結果では直前の読み取り済み本文を消費せず、次回の読み取り対象として残す。
 Pixel 単独の候補にも Vision の実測 Y 座標を `pixel_observed_fragments_json` で渡す。
 Structural の positioned fragments がある場合はそちらを維持し、ない場合だけ Pixel の座標を dedup に使う。

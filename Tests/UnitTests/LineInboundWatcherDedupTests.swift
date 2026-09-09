@@ -21,6 +21,13 @@ final class LineInboundWatcherDedupTests: XCTestCase {
         XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "Visible anchor\nLatest", current: "Older history\nVisible anchor"), "")
     }
 
+    func testConfirmedEmptyBaselineAllowsFirstQuestionDespiteUnrelatedCursor() {
+        XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "", current: "First question",
+            observedEmptyBaseline: true), "First question")
+        XCTAssertEqual(LinePixelContinuity.appendedTail(previous: "", current: "First question",
+            observedEmptyBaseline: false), "")
+    }
+
     func testRecoveredPixelTailWithPositionPassesDedupOnce() {
         let now = Date(timeIntervalSince1970: 1_000)
         let tail = LinePixelContinuity.appendedTail(previous: "Visible anchor", current: "Visible anchor\nNew question")
