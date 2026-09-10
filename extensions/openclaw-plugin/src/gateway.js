@@ -72,6 +72,37 @@ function getRuntime() {
   return _runtime;
 }
 
+// 8.x requires session store writes to use the agent-prefixed canonical shape
+// `agent:<agentId>:...` (assertCanonicalSessionKeyWrite in
+// src/config/sessions/session-canonical-key.ts); reads the configured agent id
+// so the key stays correct if a second agent is ever added, falling back to the
+// plugin-sdk default when config is unavailable.
+export function resolveSessionAgentId() {
+  const entries = getRuntime().config.current()?.agents?.entries;
+  const firstId = entries && Object.keys(entries)[0];
+  return firstId || "main";
+}
+
+// Same 8.x canonical-session-key contract as resolveSessionAgentId(), for the
+// dev-lane tmux ctx builders (handleTmuxQuestion/handleTmuxCompletion). NOT
+// blanket-lowercased like the LINE key: `project` is matched case-sensitively
+// against shared-state's sessionModeByProject map (set via
+// setSessionMode(project, ...) in recomputeProjectMode(), which only trims,
+// never folds case), and project directory names on this host are not all
+// lowercase (e.g. "GPTs", "Hybrix", "ClawGate"). Lowercasing here would make
+// devLanePaneProject()'s getSessionMode(project) lookup miss for any mixed-case
+// project, silently misrouting a dev-lane reply to the owner's LINE instead of
+// the CC pane. The session store itself still normalizes case on write
+// (recordInboundSession/resolveSqliteScope both fold via
+// normalizeSessionKeyPreservingOpaquePeerIds/normalizeStoreSessionKey before
+// persisting), so the required `agent:<agentId>:` prefix is the only part that
+// must be added here. devLanePaneProject() still finds the project via the
+// `:tmux:` substring split, and tprojOriginForSessionKey() still finds it via
+// the trailing segment — neither depends on what precedes `clawgate:`.
+export function buildTmuxSessionKey(accountId, project) {
+  return `agent:${resolveSessionAgentId()}:clawgate:${accountId}:tmux:${project}`;
+}
+
 // ── Claude Code knowledge (static, loaded once) ─────────────────
 let _ccKnowledge = "";
 try {
@@ -2780,7 +2811,7 @@ function execFilePromise(cmd, args, opts = {}) {
   });
 }
 
-function buildMsgContext(event, accountId, defaultConversation) {
+export function buildMsgContext(event, accountId, defaultConversation) {
   const payload = event.payload ?? {};
   // LINE Qt window title is always "LINE", so use defaultConversation from config
   const rawConv = payload.conversation || "LINE";
@@ -2796,7 +2827,14 @@ function buildMsgContext(event, accountId, defaultConversation) {
     CommandBody: text,
     From: `line:${sender}`,
     To: `clawgate:${accountId}`,
-    SessionKey: `clawgate:${accountId}:${conversation}`,
+    // 8.x canonical-session-key contract (2026-09-03..06 outage: this shape used to
+    // be bare `clawgate:${accountId}:${conversation}`, which
+    // assertCanonicalSessionKeyWrite rejects with SessionCanonicalKeyMigrationRequiredError
+    // because it lacks the `agent:<agentId>:` prefix). clawgate is not enrolled in the
+    // case-preserving-peer registry (session-key-utils.ts), so the store folds the whole
+    // key to lowercase on write; fold it here too so the value we emit is already in its
+    // own canonical/normalized form.
+    SessionKey: `agent:${resolveSessionAgentId()}:clawgate:${accountId}:${conversation}`.toLowerCase(),
     AccountId: accountId,
     ChatType: "direct",
     Provider: "clawgate",
@@ -3441,7 +3479,9 @@ async function handleTmuxQuestion({ event, accountId, apiUrl, cfg, defaultConver
     CommandBody: body,
     From: `tmux:${project}`,
     To: `clawgate:${accountId}`,
-    SessionKey: `clawgate:${accountId}:tmux:${project}`,
+    // See buildTmuxSessionKey() for the 8.x canonical-key contract and why the
+    // project segment is deliberately NOT lowercased.
+    SessionKey: buildTmuxSessionKey(accountId, project),
     AccountId: accountId,
     ChatType: "direct",
     Provider: "clawgate",
@@ -3788,7 +3828,9 @@ async function handleTmuxCompletion({ event, accountId, apiUrl, cfg, defaultConv
     CommandBody: body,
     From: `tmux:${project}`,
     To: `clawgate:${accountId}`,
-    SessionKey: `clawgate:${accountId}:tmux:${project}`,
+    // See buildTmuxSessionKey() for the 8.x canonical-key contract and why the
+    // project segment is deliberately NOT lowercased.
+    SessionKey: buildTmuxSessionKey(accountId, project),
     AccountId: accountId,
     ChatType: "direct",
     Provider: "clawgate",
