@@ -176,6 +176,10 @@ app-switch handling:
   excluded.
 - Walk on-screen CG candidates in Z-order and consider only layer-0 windows;
   skip undersized candidates and continue to the next candidate.
+- A size skip is the only case that continues to a lower CG candidate. If the
+  current large CG candidate has a matching AX window rejected by subrole or
+  `modal=true`, return `ignored`: stop movement, retain the previous accepted
+  app/window/frame and position, and do not search lower CG candidates.
 - A matching AX window is rejected only when its subrole is
   `AXFloatingWindow`, `AXSystemFloatingWindow`, `AXDialog`, or
   `AXSystemDialog`, or when `modal=true`. Other matching AX elements are
@@ -202,6 +206,9 @@ not fall back to the focused AX window. It treats AX identity as unavailable
 and does not fabricate an identity from focus. If AX cannot be matched to the
 current CG topmost frame, context capture likewise treats AX identity as
 unavailable rather than pretending the stale focused window is current.
+Before any app/window has been accepted, context capture intentionally returns
+`Unknown` with empty text and does not use the unaccepted frontmost app as a
+fallback.
 
 ## Opposite-Side Double-Click Contract
 

@@ -1472,7 +1472,7 @@ final class PetModel: NSObject, ObservableObject {
         if let targetWin = lastTrackedWindow {
             windowTitle = AXQuery.copyStringAttribute(targetWin, attribute: kAXTitleAttribute as String) ?? ""
             windowIdentifier = AXQuery.copyStringAttribute(targetWin, attribute: "AXIdentifier")
-            windowFrame = AXQuery.copyFrameAttribute(targetWin)
+            windowFrame = AXQuery.copyFrameAttribute(targetWin) ?? lastTrackedWindowFrame
 
             // Browser AX trees are deeper — increase search depth for Gmail etc.
             let maxDepth = isBrowser ? 7 : 3
