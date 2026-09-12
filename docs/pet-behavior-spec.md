@@ -167,6 +167,27 @@ The tracked window resolver should return:
 - a desktop-global AppKit rect derived from that CG frame (using the desktop union maxY, not a per-screen maxY)
 - AX element only when AX frame and CG frame roughly match
 
+Candidate acceptance is shared by normal tracking, immediate repositioning, and
+app-switch handling:
+
+- Use one minimum candidate size of **640x480 logical points**. The 640-point
+  width follows the user minimum guideline; 480 points is the implementation
+  choice that rejects short utility panels. Small editors may therefore be
+  excluded.
+- Walk on-screen CG candidates in Z-order and consider only layer-0 windows;
+  skip undersized candidates and continue to the next candidate.
+- A matching AX window is rejected only when its subrole is
+  `AXFloatingWindow`, `AXSystemFloatingWindow`, `AXDialog`, or
+  `AXSystemDialog`, or when `modal=true`. Other matching AX elements are
+  accepted.
+- An unavailable AX element is not evidence that the candidate is either an
+  ordinary window or a floating window; the existing CG fallback is
+  maintained. A large layer-0 float with no AX match cannot be guaranteed to
+  be excluded. If the user explicitly prioritizes zero false tracking, consider
+  a separately approved conservative rejection policy.
+- When a candidate is rejected, preserve the last accepted app, window, frame,
+  and position rather than replacing them with the rejected candidate.
+
 Implications:
 
 - placement follows actual Z-order
@@ -176,7 +197,11 @@ Implications:
 ### `lastTrackedWindow` / context capture
 
 `lastTrackedWindow` exists for context capture, not as a stronger truth than CG.
-If AX cannot be matched to the current CG topmost frame, context capture must treat AX identity as unavailable rather than pretending the stale focused window is current.
+If the accepted CG candidate has no matching AX element, context capture must
+not fall back to the focused AX window. It treats AX identity as unavailable
+and does not fabricate an identity from focus. If AX cannot be matched to the
+current CG topmost frame, context capture likewise treats AX identity as
+unavailable rather than pretending the stale focused window is current.
 
 ## Opposite-Side Double-Click Contract
 
@@ -245,10 +270,18 @@ This preserves both attachment and facing correctness.
 - Chi should not cling to fullscreen windows
 - Movement is stopped instead of forcing awkward edge attachment
 
-### Tiny windows / dialogs
+### Candidate size and transient windows
 
-- Chi ignores small transient windows
-- This prevents attachment to popups/tooltips/dialog scraps
+- Chi ignores CG candidates smaller than 640x480 logical points, using the
+  same shared width/height limits across every tracking path.
+- Layer-0 candidates are filtered in CG Z-order. A skipped undersized
+  candidate never replaces the accepted context; an underlying eligible
+  candidate may still be accepted according to Z-order.
+- Matching AX elements for floating windows, system floating windows, dialogs,
+  or modal windows are rejected. A missing AX match does not itself reject the
+  CG candidate.
+- Small editors may be excluded by the shared threshold; this is intentional
+  and avoids attachment to short utility panels, popups, or dialog scraps.
 
 ### No valid candidate side
 
@@ -258,7 +291,10 @@ This preserves both attachment and facing correctness.
 ### Topmost/focused disagreement
 
 - CG topmost wins for placement
-- AX focused is advisory for context only
+- The normal, immediate, and app-switch paths use the same resolver acceptance
+  rules.
+- Focused AX is advisory for context only and is never used as a fallback
+  identity when AX is unavailable for the accepted CG candidate.
 
 ### Hide sleep whispers
 

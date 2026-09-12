@@ -17,6 +17,8 @@ struct AXNode {
 }
 
 enum AXQuery {
+    static let substantiveWindowMinimumSize = CGSize(width: 640, height: 480)
+
     static func applicationElement(pid: pid_t) -> AXUIElement {
         AXUIElementCreateApplication(pid)
     }
@@ -34,7 +36,7 @@ enum AXQuery {
     /// Uses CGWindowListCopyWindowInfo which reflects actual Z-order, unlike
     /// kAXFocusedWindowAttribute (which returns the last-focused window of the app
     /// even if a different window is visually on top).
-    static func topmostWindowBounds(pid: pid_t, minWidth: CGFloat = 200, minHeight: CGFloat = 150) -> CGRect? {
+    static func topmostWindowBounds(pid: pid_t, minSize: CGSize = substantiveWindowMinimumSize) -> CGRect? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
@@ -47,7 +49,7 @@ enum AXQuery {
                   let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
                 continue
             }
-            if rect.width < minWidth || rect.height < minHeight { continue }
+            if rect.width < minSize.width || rect.height < minSize.height { continue }
             return rect
         }
         return nil

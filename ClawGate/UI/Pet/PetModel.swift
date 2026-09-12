@@ -755,8 +755,18 @@ final class PetModel: NSObject, ObservableObject {
         } ?? NSScreen.main
     }
 
-    private func resolveTrackedWindow(for app: NSRunningApplication) -> (element: AXUIElement?, frame: CGRect, appKitFrame: CGRect, screen: NSScreen)? {
-        guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier) else { return nil }
+    private enum TrackedWindowResolution {
+        case accepted(element: AXUIElement?, frame: CGRect, appKitFrame: CGRect, screen: NSScreen)
+        case ignored
+        case unavailable
+    }
+
+    private func resolveTrackedWindow(for app: NSRunningApplication) -> TrackedWindowResolution {
+        guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier) else {
+            return AXQuery.topmostWindowBounds(pid: app.processIdentifier, minSize: .zero) == nil
+                ? .unavailable
+                : .ignored
+        }
 
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
         let windows = AXQuery.windows(appElement: appElement)
@@ -769,17 +779,28 @@ final class PetModel: NSObject, ObservableObject {
         }
         for candidate in candidates {
             if let axFrame = AXQuery.copyFrameAttribute(candidate), PetGeometry.roughlySameFrame(axFrame, cgBounds) {
-                if let screen = screenForTrackedFrame(axFrame) {
-                    return (candidate, axFrame, appKitRectForTrackedFrame(axFrame), screen)
+                let subrole = AXQuery.copyStringAttribute(candidate, attribute: kAXSubroleAttribute as String)
+                let rejectedSubroles: Set<String> = [
+                    kAXFloatingWindowSubrole as String,
+                    kAXSystemFloatingWindowSubrole as String,
+                    kAXDialogSubrole as String,
+                    kAXSystemDialogSubrole as String,
+                ]
+                if (subrole.map(rejectedSubroles.contains) ?? false)
+                    || AXQuery.copyBoolAttribute(candidate, attribute: kAXModalAttribute as String) == true {
+                    return .ignored
                 }
-                return (candidate, axFrame, appKitRectForTrackedFrame(axFrame), NSScreen.main ?? NSScreen.screens.first!)
+                if let screen = screenForTrackedFrame(axFrame) {
+                    return .accepted(element: candidate, frame: axFrame, appKitFrame: appKitRectForTrackedFrame(axFrame), screen: screen)
+                }
+                return .accepted(element: candidate, frame: axFrame, appKitFrame: appKitRectForTrackedFrame(axFrame), screen: NSScreen.main ?? NSScreen.screens.first!)
             }
         }
 
         if let screen = screenForTrackedFrame(cgBounds) {
-            return (nil, cgBounds, appKitRectForTrackedFrame(cgBounds), screen)
+            return .accepted(element: nil, frame: cgBounds, appKitFrame: appKitRectForTrackedFrame(cgBounds), screen: screen)
         }
-        return (nil, cgBounds, appKitRectForTrackedFrame(cgBounds), NSScreen.main ?? NSScreen.screens.first!)
+        return .accepted(element: nil, frame: cgBounds, appKitFrame: appKitRectForTrackedFrame(cgBounds), screen: NSScreen.main ?? NSScreen.screens.first!)
     }
 
     /// Teleport to normal position without walk animation
@@ -789,13 +810,11 @@ final class PetModel: NSObject, ObservableObject {
         // Calculate where we should be, then teleport
         guard isTrackingEnabled else { isHiding = saved; return }
         guard let app = lastTrackedApp else { isHiding = saved; return }
-        guard let resolved = resolveTrackedWindow(for: app) else { isHiding = saved; return }
-        lastTrackedWindow = resolved.element
-        lastTrackedWindowFrame = resolved.frame
-        let frame = resolved.frame
-        let screen = resolved.screen.visibleFrame
+        guard case let .accepted(element, frame, appKitFrame, screen) = resolveTrackedWindow(for: app) else { isHiding = saved; return }
+        lastTrackedWindow = element
+        lastTrackedWindowFrame = frame
+        let visibleScreen = screen.visibleFrame
         let petSize: CGFloat = characterSize + 20
-        let appKitFrame = resolved.appKitFrame
         let appKitY = appKitFrame.origin.y
         let metrics = PetRenderMetrics(windowSize: petSize)
         let overlap = metrics.overlap
@@ -803,15 +822,15 @@ final class PetModel: NSObject, ObservableObject {
         let leftX = frame.origin.x - petSize + overlap
         let bottomY = appKitY
         var target: NSPoint
-        if lastPlacementSide == .right && rightX + petSize <= screen.maxX {
+        if lastPlacementSide == .right && rightX + petSize <= visibleScreen.maxX {
             target = NSPoint(x: rightX, y: bottomY)
-        } else if leftX >= screen.minX {
+        } else if leftX >= visibleScreen.minX {
             target = NSPoint(x: leftX, y: bottomY)
         } else {
-            target = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
+            target = NSPoint(x: visibleScreen.maxX - petSize - 8, y: visibleScreen.minY + 8)
         }
-        target.x = max(screen.minX, min(target.x, screen.maxX - petSize))
-        target.y = max(screen.minY, min(target.y, screen.maxY - petSize))
+        target.x = max(visibleScreen.minX, min(target.x, visibleScreen.maxX - petSize))
+        target.y = max(visibleScreen.minY, min(target.y, visibleScreen.maxY - petSize))
         moveController.moveTo(target, waveOnArrival: false, style: .immediate)
         isHiding = saved
     }
@@ -829,29 +848,46 @@ final class PetModel: NSObject, ObservableObject {
         let frontmost = NSWorkspace.shared.frontmostApplication
         var waveOnArrival = unhideWaveOnArrival
         unhideWaveOnArrival = false
+        var resolutionForPlacement: TrackedWindowResolution?
 
         // Track last non-ClawGate frontmost app (ClawGate becomes frontmost on pet click)
-        if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier {
-            if lastTrackedApp?.processIdentifier != app.processIdentifier {
+        if let app = frontmost, app.bundleIdentifier != Bundle.main.bundleIdentifier,
+           lastTrackedApp?.processIdentifier != app.processIdentifier {
+            let candidateResolution = resolveTrackedWindow(for: app)
+            switch candidateResolution {
+            case let .accepted(element, frame, _, _):
                 clearPlacementLock()
-                lastTrackedWindow = nil
-                lastTrackedWindowFrame = nil
+                lastTrackedApp = app
+                lastTrackedWindow = element
+                lastTrackedWindowFrame = frame
+                resolutionForPlacement = candidateResolution
                 if isHiding {
                     // Stay hidden — just teleport to the new window's edge
-                    lastTrackedApp = app
                     noteActivity(unhideIfNeeded: false)
                     // Fall through to the hiding branch below for immediate repositioning
                 } else {
                     waveOnArrival = true
                     noteActivity(unhideIfNeeded: true)
                 }
+            case .ignored:
+                clearPlacementLock()
+                moveController.stop()
+                return
+            case .unavailable:
+                resolutionForPlacement = .unavailable
+                break
             }
-            lastTrackedApp = app
         }
 
         guard let app = lastTrackedApp else { return }
 
-        guard let resolved = resolveTrackedWindow(for: app) else {
+        let resolution = resolutionForPlacement ?? resolveTrackedWindow(for: app)
+        guard case let .accepted(focusedWin, frame, appKitFrame, hostScreen) = resolution else {
+            if case .ignored = resolution {
+                clearPlacementLock()
+                moveController.stop()
+                return
+            }
             if isHiding {
                 NSLog("[PetHide] No on-screen window for tracked app — unhiding")
                 unhide()
@@ -863,10 +899,6 @@ final class PetModel: NSObject, ObservableObject {
             clearPlacementLock()
             return
         }
-        let focusedWin = resolved.element
-        let frame = resolved.frame
-        let appKitFrame = resolved.appKitFrame
-        let hostScreen = resolved.screen
 
         // Track the specific window Chi is following (for context capture)
         lastTrackedWindow = focusedWin
@@ -878,13 +910,6 @@ final class PetModel: NSObject, ObservableObject {
 
         let screen = hostScreen.visibleFrame
         let petSize: CGFloat = characterSize + 20  // match actual window size
-
-        // Skip small windows (popups, dialogs) — but clear walk first
-        if frame.width < 300 || frame.height < 200 {
-            clearPlacementLock()
-            moveController.stop()
-            return
-        }
 
         // Skip fullscreen apps — but clear walk first
         if abs(frame.width - hostScreen.frame.width) < 10 && abs(frame.height - hostScreen.frame.height) < 40 {
@@ -1423,9 +1448,14 @@ final class PetModel: NSObject, ObservableObject {
     // MARK: - Screen Context Capture (on-demand AX)
 
     func captureScreenContext() -> ScreenContext {
-        let app = lastTrackedApp ?? NSWorkspace.shared.frontmostApplication
-        let appName = app?.localizedName ?? "Unknown"
-        let bundleId = app?.bundleIdentifier ?? ""
+        guard let app = lastTrackedApp else {
+            return ScreenContext(
+                appName: "Unknown", bundleId: "", windowTitle: "", visibleText: "",
+                isTerminal: false, paneCwd: "", windowIdentifier: nil, windowFrame: nil
+            )
+        }
+        let appName = app.localizedName ?? "Unknown"
+        let bundleId = app.bundleIdentifier ?? ""
 
         let terminalBundles: Set<String> = [
             "com.mitchellh.ghostty", "com.apple.Terminal",
@@ -1436,58 +1466,49 @@ final class PetModel: NSObject, ObservableObject {
 
         var windowTitle = ""
         var windowIdentifier: String?
-        var windowFrame: CGRect?
+        var windowFrame: CGRect? = lastTrackedWindowFrame
         var visibleText = ""
 
-        if let pid = app?.processIdentifier {
-            let appElement = AXQuery.applicationElement(pid: pid)
-            // Use the window Chi is following, not just the focused window
-            let targetWin = lastTrackedWindow ?? AXQuery.focusedWindow(appElement: appElement)
-            if let focusedWin = targetWin {
-                windowTitle = AXQuery.copyStringAttribute(focusedWin, attribute: kAXTitleAttribute as String) ?? ""
-                windowIdentifier = AXQuery.copyStringAttribute(focusedWin, attribute: "AXIdentifier")
-                windowFrame = AXQuery.copyFrameAttribute(focusedWin)
+        if let targetWin = lastTrackedWindow {
+            windowTitle = AXQuery.copyStringAttribute(targetWin, attribute: kAXTitleAttribute as String) ?? ""
+            windowIdentifier = AXQuery.copyStringAttribute(targetWin, attribute: "AXIdentifier")
+            windowFrame = AXQuery.copyFrameAttribute(targetWin)
 
-                // Browser AX trees are deeper — increase search depth for Gmail etc.
-                let maxDepth = isBrowser ? 7 : 3
-                let maxNodes = isBrowser ? 1000 : 100
-                let nodes = AXQuery.descendants(of: focusedWin, maxDepth: maxDepth, maxNodes: maxNodes)
-                let textRoles: Set<String> = isBrowser
-                    ? ["AXStaticText", "AXTextField", "AXTextArea", "AXCell",
-                       "AXHeading", "AXLink", "AXListItem"]
-                    : ["AXStaticText", "AXTextField", "AXTextArea", "AXCell"]
-                var parts: [String] = []
-                var seen = Set<String>()
-                for node in nodes {
-                    guard let role = node.role, textRoles.contains(role) else { continue }
-                    let text = node.value ?? node.title ?? node.description ?? ""
-                    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty, !seen.contains(trimmed) else { continue }
-                    seen.insert(trimmed)
-                    parts.append(trimmed)
-                }
-                visibleText = parts.joined(separator: "\n")
-                if visibleText.count > 2000 {
-                    visibleText = String(visibleText.prefix(2000))
-                }
+            // Browser AX trees are deeper — increase search depth for Gmail etc.
+            let maxDepth = isBrowser ? 7 : 3
+            let maxNodes = isBrowser ? 1000 : 100
+            let nodes = AXQuery.descendants(of: targetWin, maxDepth: maxDepth, maxNodes: maxNodes)
+            let textRoles: Set<String> = isBrowser
+                ? ["AXStaticText", "AXTextField", "AXTextArea", "AXCell",
+                   "AXHeading", "AXLink", "AXListItem"]
+                : ["AXStaticText", "AXTextField", "AXTextArea", "AXCell"]
+            var parts: [String] = []
+            var seen = Set<String>()
+            for node in nodes {
+                guard let role = node.role, textRoles.contains(role) else { continue }
+                let text = node.value ?? node.title ?? node.description ?? ""
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, !seen.contains(trimmed) else { continue }
+                seen.insert(trimmed)
+                parts.append(trimmed)
+            }
+            visibleText = parts.joined(separator: "\n")
+            if visibleText.count > 2000 {
+                visibleText = String(visibleText.prefix(2000))
+            }
+        }
 
-                // OCR fallback: if AX yielded little/no text, try screenshot + Vision OCR
-                // This handles Qt apps (LINE), Electron, and any app with sparse AX trees
-                if visibleText.count < 50, let pid = app?.processIdentifier {
-                    let winFrame = AXQuery.copyFrameAttribute(focusedWin)
-                    // Find the CGWindowID matching this specific window (not just any window of the app)
-                    let windowID = Self.findWindowIDByFrame(pid: pid, targetFrame: winFrame)
-                        ?? AXActions.findWindowID(pid: pid) // fallback to first window
-                    if let windowID, let frame = winFrame {
-                        let ocrText = VisionOCR.extractText(
-                            from: frame, windowID: windowID,
-                            config: .init(confidenceAccept: 0.35, candidateCount: 3)
-                        )
-                        if let ocr = ocrText, ocr.count > visibleText.count {
-                            visibleText = String(ocr.prefix(2000))
-                            NSLog("[Pet] captureScreenContext: OCR fallback used (%d chars)", visibleText.count)
-                        }
-                    }
+        // OCR is bounded by the accepted CG frame; never fall back to an arbitrary first window.
+        if visibleText.count < 50, let frame = lastTrackedWindowFrame {
+            let windowID = Self.findWindowIDByFrame(pid: app.processIdentifier, targetFrame: frame)
+            if let windowID {
+                let ocrText = VisionOCR.extractText(
+                    from: frame, windowID: windowID,
+                    config: .init(confidenceAccept: 0.35, candidateCount: 3)
+                )
+                if let ocr = ocrText, ocr.count > visibleText.count {
+                    visibleText = String(ocr.prefix(2000))
+                    NSLog("[Pet] captureScreenContext: OCR fallback used (%d chars)", visibleText.count)
                 }
             }
         }
@@ -1602,7 +1623,7 @@ final class PetModel: NSObject, ObservableObject {
 
         // Capture target app context for post-response draft placement.
         let omakaseContext: OmakaseContext?
-        if let app = lastTrackedApp ?? NSWorkspace.shared.frontmostApplication {
+        if let app = lastTrackedApp {
             let isMessaging: Bool = {
                 if Self.messagingBundles.contains(ctx.bundleId) { return true }
                 if DraftPlacer.browserBundles.contains(ctx.bundleId) {
