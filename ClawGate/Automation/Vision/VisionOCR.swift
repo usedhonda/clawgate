@@ -27,6 +27,10 @@ enum VisionOCR {
         var expandedGreenRows: Int
         var cutApplied: Bool
         var frameSkippedNoCut: Bool
+        var bubbleStatus: String = "unavailable"
+        var bubbleCount: Int = 0
+        var recognizedPixels: Int = 0
+        var cacheHits: Int = 0
     }
 
     /// Extract text from a screen rectangle (in global CG coordinates).
@@ -40,37 +44,27 @@ enum VisionOCR {
         return performOCR(on: image, config: config)
     }
 
-    /// OCR for LINE inbound text: masks the outgoing side out of the image,
-    /// then drops the timestamp and read-receipt observations LINE renders
-    /// beside the remaining bubble, and reports nothing when only those are left.
-    ///
-    /// Deliberately not filtered by bounding-box geometry. LINE puts an
-    /// outgoing bubble's timestamp to its left, so on a real capture the
-    /// leftmost observations on screen are outgoing chrome ("午前 10:05" at
-    /// minX 0.010) while message bodies start further right (0.074 inbound,
-    /// 0.100 outgoing). Keeping "left-aligned" observations would keep the
-    /// chrome and drop the messages.
+    /// Recognize only verified incoming bubble interiors, never surrounding labels.
     static func extractTextLineInbound(
         from screenRect: CGRect,
         windowID: CGWindowID = kCGNullWindowID,
         debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
-        config: OCRConfig = .default
+        config: OCRConfig = .default,
+        cacheScope: String = ""
     ) -> String? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
         }
-        return performOCRInbound(on: image, debug: debug, config: config)
+        return performOCRInbound(on: image, debug: debug, config: config, cacheScope: cacheScope)
     }
 
-    /// OCR for LINE inbound text with the accepted observations' real screen
-    /// positions. Inbound preprocessing masks rows and applies a bottom cut,
-    /// but never crops or resizes the image, so Vision's normalized bounding
-    /// boxes map directly back into `screenRect`.
+    /// Atlas observations are mapped back to the original screen coordinates.
     static func extractTextLineInboundPositioned(
         from screenRect: CGRect,
         windowID: CGWindowID = kCGNullWindowID,
         debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
-        config: OCRConfig = .default
+        config: OCRConfig = .default,
+        cacheScope: String = ""
     ) -> [InboundOCRObservation]? {
         guard let image = captureImage(from: screenRect, windowID: windowID) else {
             return nil
@@ -79,7 +73,8 @@ enum VisionOCR {
             on: image,
             screenRect: screenRect,
             debug: debug,
-            config: config
+            config: config,
+            cacheScope: cacheScope
         )
     }
 
@@ -90,15 +85,11 @@ enum VisionOCR {
         screenRect.minY + (1 - observationBoundingBox.maxY) * screenRect.height
     }
 
-    /// Capture raw + preprocessed images for inbound OCR debugging.
-    /// Returns nil when capture failed (e.g. Screen Recording permission missing).
-    /// Preprocessed image reflects fixed-lane outbound masking and bottom cut.
-    static func captureInboundDebugImages(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> (raw: CGImage, preprocessed: CGImage?)? {
-        guard let image = captureImage(from: screenRect, windowID: windowID) else {
-            return nil
-        }
-        let preprocessed = preprocessInboundImage(image)
-        return (raw: image, preprocessed: preprocessed.image)
+    /// Captures the bubble atlas and a selection overlay without invoking OCR.
+    static func captureInboundDebugImages(from screenRect: CGRect, windowID: CGWindowID = kCGNullWindowID) -> (raw: CGImage, preprocessed: CGImage?, overlay: CGImage?, status: String, rects: String)? {
+        guard let image = captureImage(from: screenRect, windowID: windowID) else { return nil }
+        let preview = InboundBubbleOCR.preview(image)
+        return (image, preview.image, preview.overlay, preview.status, preview.rects)
     }
 
     /// Extract text from multiple screen rectangles merged into one capture (with padding).
@@ -134,25 +125,26 @@ enum VisionOCR {
     private static func performOCRInbound(
         on image: CGImage,
         debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
-        config: OCRConfig = .default
+        config: OCRConfig = .default,
+        cacheScope: String = ""
     ) -> String? {
-        guard let observations = performOCRInboundObservations(on: image, debug: debug, config: config) else {
+        guard let observations = performOCRInboundObservations(on: image, debug: debug, config: config, cacheScope: cacheScope) else {
             return nil
         }
-        return inboundBody(fromObservedTexts: observations.map(\.text))
+        return observations.isEmpty ? nil : observations.map(\.text).joined(separator: "\n")
     }
 
     private static func performOCRInboundPositioned(
         on image: CGImage,
         screenRect: CGRect,
         debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
-        config: OCRConfig = .default
+        config: OCRConfig = .default,
+        cacheScope: String = ""
     ) -> [InboundOCRObservation]? {
-        guard let observations = performOCRInboundObservations(on: image, debug: debug, config: config) else {
+        guard let observations = performOCRInboundObservations(on: image, debug: debug, config: config, cacheScope: cacheScope) else {
             return nil
         }
-        return observations.compactMap { observation in
-            guard !isChromeLabel(observation.text) else { return nil }
+        return observations.map { observation in
             return InboundOCRObservation(
                 text: observation.text,
                 screenY: globalTopDownY(
@@ -171,45 +163,18 @@ enum VisionOCR {
     private static func performOCRInboundObservations(
         on image: CGImage,
         debug: UnsafeMutablePointer<InboundPreprocessDebug>? = nil,
-        config: OCRConfig = .default
+        config: OCRConfig = .default,
+        cacheScope: String = ""
     ) -> [AcceptedInboundObservation]? {
-        let preprocessing = preprocessInboundImage(image)
-        debug?.pointee = preprocessing.debug
-        let ocrImage = preprocessing.image ?? image
-
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["ja-JP", "en-US"]
-        request.usesLanguageCorrection = config.usesLanguageCorrection
-
-        if config.revision > 0 {
-            if #available(macOS 14, *), config.revision >= 3 {
-                request.revision = VNRecognizeTextRequestRevision3
-            } else if #available(macOS 13, *), config.revision >= 2 {
-                request.revision = VNRecognizeTextRequestRevision2
-            }
-        }
-
-        let handler = VNImageRequestHandler(cgImage: ocrImage, options: [:])
-        do {
-            try handler.perform([request])
-        } catch {
+        guard let result = InboundBubbleOCR.recognize(image, scope: cacheScope, config: config) else {
+            debug?.pointee.bubbleStatus = "uncertain"
             return nil
         }
-
-        guard let observations = request.results else { return nil }
-
-        let acceptedObservations = observations.compactMap { obs -> AcceptedInboundObservation? in
-            let candidates = obs.topCandidates(config.candidateCount)
-            if let accepted = candidates.first(where: { $0.confidence >= config.confidenceAccept }) {
-                return AcceptedInboundObservation(text: accepted.string, boundingBox: obs.boundingBox)
-            }
-            if let best = candidates.first, best.confidence >= config.confidenceFallback {
-                return AcceptedInboundObservation(text: best.string, boundingBox: obs.boundingBox)
-            }
-            return nil
-        }
-        return acceptedObservations
+        debug?.pointee.bubbleStatus = result.bubbleCount == 0 ? "noBubbles" : "ready"
+        debug?.pointee.bubbleCount = result.bubbleCount
+        debug?.pointee.recognizedPixels = result.recognizedPixels
+        debug?.pointee.cacheHits = result.cacheHits
+        return result.observations.map { AcceptedInboundObservation(text: $0.text, boundingBox: $0.boundingBox) }
     }
 
     // MARK: - Chrome rejection
@@ -286,164 +251,6 @@ enum VisionOCR {
             index += step
         }
         return count
-    }
-
-    // MARK: - Inbound preprocessing (fixed right lane)
-
-    private static let laneOffsetRatio: Double = 0.045  // 4.5% from right edge (anchor crop basis)
-    private static let laneHalfWidth = 1  // 3px lane
-    private static let greenRowThreshold = 10  // min green pixels in a row for full-width scan
-    private static let whiteThreshold = 238
-    private static let minBottomWhiteRun = 8
-    /// Guard against false cut detection in the middle of chat history.
-    /// Input separator is expected near bottom in normal LINE layout.
-    private static let minAcceptedCutRatioFromTop = 0.84
-
-    private enum LaneRowClass {
-        case white
-        case green
-        case other
-    }
-
-    /// Fixed-lane preprocessing for inbound OCR:
-    /// 1) full-width scan classifies rows with green pixels as outbound,
-    /// 2) right-offset lane classifies remaining rows as white/other (for yCut),
-    /// 3) masks all green rows (no expansion),
-    /// 4) drops everything at/below Y cut.
-    private static func preprocessInboundImage(_ image: CGImage) -> (image: CGImage?, debug: InboundPreprocessDebug) {
-        let width = image.width
-        let height = image.height
-        let fallbackOffset = max(16, Int(Double(width) * laneOffsetRatio))
-        let fallbackDebug = InboundPreprocessDebug(
-            laneX: max(0, width - fallbackOffset),
-            yCut: nil,
-            greenRows: 0,
-            expandedGreenRows: 0,
-            cutApplied: false,
-            frameSkippedNoCut: true
-        )
-        guard width > (16 + laneHalfWidth), height > 0 else {
-            return (nil, fallbackDebug)
-        }
-
-        let bytesPerRow = width * 4
-        var buffer = [UInt8](repeating: 0, count: bytesPerRow * height)
-        guard let ctx = CGContext(
-            data: &buffer,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return (nil, fallbackDebug)
-        }
-        ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        let dynamicOffset = max(16, Int(Double(width) * laneOffsetRatio))
-        let laneX = max(laneHalfWidth, min(width - 1 - laneHalfWidth, width - dynamicOffset))
-        let laneRange = (laneX - laneHalfWidth)...(laneX + laneHalfWidth)
-        let voteThreshold = laneRange.count / 2 + 1
-
-        var rowClasses = [LaneRowClass](repeating: .other, count: height)
-        var greenRows = 0
-        for y in 0..<height {
-            let rowOffset = y * bytesPerRow
-            var greenCount = 0
-            for x in 0..<width {
-                let i = rowOffset + x * 4
-                let r = Int(buffer[i])
-                let g = Int(buffer[i + 1])
-                let b = Int(buffer[i + 2])
-                if isOutgoingGreenPixel(r: r, g: g, b: b) {
-                    greenCount += 1
-                    if greenCount >= greenRowThreshold { break }
-                }
-            }
-
-            if greenCount >= greenRowThreshold {
-                rowClasses[y] = .green
-                greenRows += 1
-            } else {
-                // White row detection stays lane-based (for yCut)
-                var whiteVotes = 0
-                for x in laneRange {
-                    let i = rowOffset + x * 4
-                    let r = Int(buffer[i])
-                    let g = Int(buffer[i + 1])
-                    let b = Int(buffer[i + 2])
-                    if isNearWhitePixel(r: r, g: g, b: b) { whiteVotes += 1 }
-                }
-                rowClasses[y] = whiteVotes >= voteThreshold ? .white : .other
-            }
-        }
-
-        let yCut = findBottomCutY(rowClasses: rowClasses)
-
-        var changed = false
-        for y in 0..<height {
-            let shouldWhiteRow = rowClasses[y] == .green || {
-                guard let cutY = yCut else { return false }
-                return y >= cutY
-            }()
-            if !shouldWhiteRow { continue }
-            let rowStart = y * bytesPerRow
-            for i in rowStart..<(rowStart + bytesPerRow) {
-                buffer[i] = 255
-            }
-            changed = true
-        }
-
-        let processedImage = changed ? ctx.makeImage() : image
-
-        return (
-            processedImage,
-            InboundPreprocessDebug(
-                laneX: laneX,
-                yCut: yCut,
-                greenRows: greenRows,
-                expandedGreenRows: greenRows,
-                cutApplied: yCut != nil,
-                frameSkippedNoCut: yCut == nil
-            )
-        )
-    }
-
-    private static func findBottomCutY(rowClasses: [LaneRowClass]) -> Int? {
-        let height = rowClasses.count
-        guard height > 0 else { return nil }
-
-        let searchStart = max(0, Int(Double(height) * 0.55))
-        let minRun = max(minBottomWhiteRun, height / 120)
-        let minAcceptedCutY = Int(Double(height) * minAcceptedCutRatioFromTop)
-
-        var run = 0
-        var runStart: Int?
-        for y in stride(from: height - 1, through: searchStart, by: -1) {
-            if rowClasses[y] == .white {
-                run += 1
-                runStart = y
-            } else {
-                if run >= minRun, let start = runStart {
-                    return start >= minAcceptedCutY ? start : nil
-                }
-                run = 0
-                runStart = nil
-            }
-        }
-        if run >= minRun, let start = runStart {
-            return start >= minAcceptedCutY ? start : nil
-        }
-        return nil
-    }
-
-    private static func isOutgoingGreenPixel(r: Int, g: Int, b: Int) -> Bool {
-        g > 130 && g > r + 10 && g > b + 16
-    }
-
-    private static func isNearWhitePixel(r: Int, g: Int, b: Int) -> Bool {
-        r >= whiteThreshold && g >= whiteThreshold && b >= whiteThreshold
     }
 
     private static func performOCR(on image: CGImage, config: OCRConfig = .default) -> String? {

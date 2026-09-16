@@ -803,6 +803,34 @@ Three detection signals fused:
 |--------|--------|-------|
 | AXRow | Structural change in chat rows | 70 (count) / 58 (bottom) |
 | PixelDiff | Image hash change + OCR | 62 (text change) / 35 (no text) |
+
+### Inbound OCR image boundary
+
+LINE inbound OCR selects the interiors of left-aligned, neutral-gray text
+bubbles in the visible conversation. Shape, fill continuity, and position must
+agree; color alone is insufficient. Outgoing green bubbles, avatars, dates,
+unread separators, external timestamps, photos, and stickers are not message
+text inputs. Unsupported or ambiguous surfaces fail closed, without retrying
+unrestricted full-frame OCR. A bubble clipped at the viewport boundary is not
+finalized from its visible fragment.
+
+Selected regions retain native resolution and are packed with white gutters
+into one OCR atlas. Every recognized observation maps back to its original
+screen coordinates before positional deduplication. OCR results may be reused
+for identical bubble pixels within the same conversation; this cache is not
+delivery deduplication and must preserve separate occurrences of repeated text.
+Changing conversations or resetting the watcher clears the cache.
+
+Only geometry-verified bubble text bypasses UI-label text filtering. A body
+consisting of a time, a date word, or a short reply is valid content. Unverified
+AX fallback text retains its existing sanitizer. Failed detection/recognition
+must not consume the prior readable frame or advance the emitted cursor.
+
+Debug artifacts include the capture, selection overlay, selected rectangles and
+status, and bubble atlas. Private captures remain outside tracked fixtures.
+Regression tests use generated images; optional local captured-image tests do
+not send messages or instantiate persistent application models. Performance
+comparisons report input pixels and cold/warm latency separately.
 | NotificationBanner | macOS notification | 95 (highest confidence) |
 
 ---

@@ -10,6 +10,7 @@ enum OCRDebugArtifactStore {
         raw: CGImage?,
         anchor: CGImage?,
         preprocessed: CGImage?,
+        overlay: CGImage? = nil,
         metadata: [String: String],
         retention: Int = 50
     ) {
@@ -24,6 +25,7 @@ enum OCRDebugArtifactStore {
                 if let raw { writePNG(raw, to: eventURL.appendingPathComponent("raw.png")) }
                 if let anchor { writePNG(anchor, to: eventURL.appendingPathComponent("anchor.png")) }
                 if let preprocessed { writePNG(preprocessed, to: eventURL.appendingPathComponent("preprocessed.png")) }
+                if let overlay { writePNG(overlay, to: eventURL.appendingPathComponent("selection.png")) }
 
                 let encoder = JSONEncoder()
                 encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

@@ -1,6 +1,14 @@
 import Foundation
 
 enum LineTextSanitizer {
+    /// Geometry-verified bubble content: words such as "0:04" or "today" are data.
+    static func bubbleBody(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+
     private static let standaloneNoiseTokens: Set<String> = [
         "既読", "未読", "もっと見る", "続きを読む", "入力中", "オンライン",
     ]

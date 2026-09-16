@@ -54,7 +54,7 @@ enum LinePixelContinuity {
     }
 
     private static func lines(_ text: String) -> [String] {
-        LineTextSanitizer.sanitize(text).split(separator: "\n")
+        LineTextSanitizer.bubbleBody(text).split(separator: "\n")
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
     }
@@ -296,6 +296,7 @@ final class LINEInboundWatcher {
     private var baselineCaptured: Bool = false
     private var lastPixelOCRAt: Date = .distantPast
     private var pixelConversation = ""
+    private var pixelOCRScope = ""
 
     /// Exposed for debug snapshot endpoint/logging
     private var lastSignalNames: [String] = []
@@ -450,6 +451,8 @@ final class LINEInboundWatcher {
         baselineCaptured = false
         lastPixelOCRAt = .distantPast
         pixelConversation = ""
+        pixelOCRScope = ""
+        InboundBubbleOCR.clearCache()
         lastSignalNames = []
         lastScore = 0
         lastConfidence = "low"
@@ -651,7 +654,9 @@ final class LINEInboundWatcher {
             return
         }
 
-        let filteredDecisionText = LineTextSanitizer.sanitize(decision.text)
+        let selectedSignal = signals.first(where: { !$0.text.isEmpty })
+        let filteredDecisionText = selectedSignal?.details["bubble_verified"] == "1"
+            ? LineTextSanitizer.bubbleBody(decision.text) : LineTextSanitizer.sanitize(decision.text)
         guard !filteredDecisionText.isEmpty else {
             logger.log(.debug, "LINEInboundWatcher: dropped empty/standalone-ui text after sanitize")
             savePipelineResult(
@@ -721,7 +726,8 @@ final class LINEInboundWatcher {
     }
 
     private func emitFromSignal(_ signal: LineDetectionSignal) {
-        let filtered = LineTextSanitizer.sanitize(signal.text)
+        let filtered = signal.details["bubble_verified"] == "1"
+            ? LineTextSanitizer.bubbleBody(signal.text) : LineTextSanitizer.sanitize(signal.text)
         guard !filtered.isEmpty else { return }
         let dedupEvaluation = evaluateInboundDedup(text: filtered, conversation: signal.conversation, details: signal.details)
         if dedupEvaluation.shouldSuppress {
@@ -889,7 +895,7 @@ final class LINEInboundWatcher {
     }
 
     private func recordEmittedTextCursor(text: String, conversation: String) {
-        let lines = LineTextSanitizer.sanitize(text)
+        let lines = LineTextSanitizer.bubbleBody(text)
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -1015,15 +1021,16 @@ final class LINEInboundWatcher {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let anchorAreaText = collectAnchorAreaOCR(chatList: chatList, lineWindowID: lineWindowID)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let axFallbackText = extractTextFromRows(incomingRows)
         let structuralFallbackOCR = collectStructuralFallbackOCR(
             lastFrame: lastFrame,
             lineWindowID: lineWindowID
         )
+        let bubbleVerified = !ocrText.isEmpty || !anchorAreaText.isEmpty || !structuralFallbackOCR.isEmpty
+        let axFallbackText = bubbleVerified ? "" : extractTextFromRows(incomingRows)
         let observedFragments = buildStructuralObservedFragments(
             ocrRowResults: ocrRowResults,
-            incomingRows: incomingRows,
-            incomingFrames: incomingFrames,
+            incomingRows: bubbleVerified ? [] : incomingRows,
+            incomingFrames: bubbleVerified ? [] : incomingFrames,
             anchorAreaText: anchorAreaText,
             axFallbackText: axFallbackText,
             structuralFallbackOCR: structuralFallbackOCR,
@@ -1031,13 +1038,14 @@ final class LINEInboundWatcher {
         )
         let mergedText: String
         let mergedCandidates = mergeCandidatesPreservingLines(
-            [ocrText, anchorAreaText, axFallbackText, structuralFallbackOCR]
+            [ocrText, anchorAreaText, axFallbackText, structuralFallbackOCR], bubbleVerified: bubbleVerified
         )
         mergedText = stripWindowTitlePrefix(from: mergedCandidates, windowTitle: conversation)
 
         lastStructuralDiag = ["structural_row_count": "\(currentCount)", "structural_previous_count": "\(previousCount)", "structural_signal_result": "fired"]
 
         var details: [String: String] = [
+            "bubble_verified": bubbleVerified ? "1" : "0",
             "row_count_delta": String(newRowCount),
             "total_rows": String(currentCount),
             "ax_bottom_changed": bottomChanged ? "1" : "0",
@@ -1067,7 +1075,7 @@ final class LINEInboundWatcher {
 
     private func collectStructuralFallbackOCR(lastFrame: CGRect, lineWindowID: CGWindowID) -> String {
         // Fallback 1: OCR from latest row with wider padding.
-        let rowText = (VisionOCR.extractTextLineInbound(from: inboundCropRect(for: lastFrame, horizontalRatio: 0.82), windowID: lineWindowID, config: ocrConfig) ?? "")
+        let rowText = (VisionOCR.extractTextLineInbound(from: inboundCropRect(for: lastFrame, horizontalRatio: 1), windowID: lineWindowID, config: ocrConfig) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return rowText
     }
@@ -1078,10 +1086,10 @@ final class LINEInboundWatcher {
         let ordered = incomingFrames.sorted { $0.origin.y < $1.origin.y }
         var rows: [(frame: CGRect, text: String)] = []
         for frame in ordered {
-            let crop = inboundCropRect(for: frame, horizontalRatio: 0.90)
+            let crop = inboundCropRect(for: frame, horizontalRatio: 1)
             let text = (VisionOCR.extractTextLineInbound(from: crop, windowID: lineWindowID, config: ocrConfig) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            let normalized = LineTextSanitizer.sanitize(text)
+            let normalized = LineTextSanitizer.bubbleBody(text)
             if !normalized.isEmpty {
                 rows.append((frame, normalized))
             }
@@ -1105,14 +1113,14 @@ final class LINEInboundWatcher {
         }
         let anchored = computeInboundAnchorCrop(in: image, baseRect: bottomHalf)
         let text = VisionOCR.extractTextLineInbound(from: anchored, windowID: lineWindowID, config: ocrConfig) ?? ""
-        return LineTextSanitizer.sanitize(text)
+        return LineTextSanitizer.bubbleBody(text)
     }
 
-    private func mergeCandidatesPreservingLines(_ candidates: [String]) -> String {
+    private func mergeCandidatesPreservingLines(_ candidates: [String], bubbleVerified: Bool = false) -> String {
         var lines: [String] = []
         var seen = Set<String>()
         for candidate in candidates {
-            let clean = LineTextSanitizer.sanitize(candidate)
+            let clean = bubbleVerified ? LineTextSanitizer.bubbleBody(candidate) : LineTextSanitizer.sanitize(candidate)
             guard !clean.isEmpty else { continue }
             let parts = clean
                 .split(separator: "\n", omittingEmptySubsequences: true)
@@ -1162,7 +1170,8 @@ final class LINEInboundWatcher {
     }
 
     private func observedFragments(from text: String, observedY: Int, source: String, nextOrder: inout Int) -> [LineObservedFragment] {
-        let sanitized = LineTextSanitizer.sanitize(text)
+        let sanitized = source == "ax_row_text" || source == "ax_fallback"
+            ? LineTextSanitizer.sanitize(text) : LineTextSanitizer.bubbleBody(text)
         guard !sanitized.isEmpty else { return [] }
 
         let parts = sanitized
@@ -1342,6 +1351,15 @@ final class LINEInboundWatcher {
             .flatMap { AXQuery.copyFrameAttribute($0.element) }
             .map(\.origin.y)
         let fixedAnchor = computeInboundAnchorCropFixed(windowFrame: windowFrame, messageAreaFrame: chatListFrame, inputFieldY: inputFieldY)
+        let headerHeight = max(0, min(CGFloat(image.height),
+            (chatListFrame.minY - windowFrame.minY) * CGFloat(image.height) / windowFrame.height))
+        let header = InboundBubbleOCR.contextFingerprint(image,
+            rect: CGRect(x: 0, y: 0, width: image.width, height: Int(headerHeight)))
+        let scope = header.map { "\(lineWindowID)|\(conversation)|\($0)" } ?? ""
+        if scope != pixelOCRScope {
+            InboundBubbleOCR.clearCache()
+            pixelOCRScope = scope
+        }
         stateLock.lock()
         lastSeparatorAnchorY = Int(fixedAnchor.origin.y)
         lastSeparatorAnchorConfidence = 99
@@ -1361,6 +1379,7 @@ final class LINEInboundWatcher {
         let hash = computeImageHash(image)
 
         if pixelConversation != conversation {
+            InboundBubbleOCR.clearCache()
             baselineCaptured = false
             lastOCRText = ""
             lastPixelOCRAt = .distantPast
@@ -1368,7 +1387,6 @@ final class LINEInboundWatcher {
         }
 
         if !baselineCaptured {
-            lastImageHash = hash
             let baseline = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
             guard baseline.succeeded else {
                 lastPixelDiag = ["pixel_baseline_captured": "false", "pixel_signal_result": "nil_baseline_ocr_retry"]
@@ -1379,6 +1397,7 @@ final class LINEInboundWatcher {
             }
             let baselineHead = String(baseline.text.prefix(60)).replacingOccurrences(of: "\n", with: "↵")
             lastOCRText = baseline.text
+            lastImageHash = hash
             lastPixelOCRAt = Date()
             baselineCaptured = true
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash), lane=\(baseline.laneXDescription), y_cut=\(baseline.cutYDescription), text_head=[\(baselineHead)])")
@@ -1396,6 +1415,12 @@ final class LINEInboundWatcher {
 
         let burst = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
         lastPixelOCRAt = Date()
+        guard burst.succeeded else {
+            lastPixelDiag = burst.bubbleDiagnostics.merging([
+                "pixel_baseline_captured": "true", "pixel_signal_result": "nil_bubble_ocr_retry"
+            ]) { _, new in new }
+            return nil
+        }
         if burst.frameSkippedNoCutDescription == "1" {
             logger.log(.debug, "LINEInboundWatcher: frame fallback without y-cut (continuing)")
         }
@@ -1440,8 +1465,9 @@ final class LINEInboundWatcher {
             "pixel_post_cursor_novel_lines": String(cursorResult.postCursorNovelLineCount),
             "pixel_cursor_recovered": cursorResult.status == .notFound && !deltaText.isEmpty ? "1" : "0",
         ]
+        lastPixelDiag.merge(burst.bubbleDiagnostics) { _, new in new }
 
-        var pixelDetails: [String: String] = [:]
+        var pixelDetails: [String: String] = ["bubble_verified": "1"]
         if !deltaText.isEmpty {
             var nextOrder = 0
             let observed = burst.observations.flatMap {
@@ -1464,7 +1490,7 @@ final class LINEInboundWatcher {
         return LineDetectionSignal(
             name: "pixel_diff",
             score: textChanged ? 62 : 35,
-            text: textChanged ? LineTextSanitizer.sanitize(deltaText) : "",
+            text: textChanged ? LineTextSanitizer.bubbleBody(deltaText) : "",
             conversation: conversation,
             details: pixelDetails.merging([
                 "pixel_hash_prev": String(previousHash),
@@ -1489,8 +1515,8 @@ final class LINEInboundWatcher {
     }
 
     private func extractDeltaText(previous: String, current: String) -> String {
-        let normalizedPrevious = LineTextSanitizer.sanitize(previous)
-        let normalizedCurrent = LineTextSanitizer.sanitize(current)
+        let normalizedPrevious = LineTextSanitizer.bubbleBody(previous)
+        let normalizedCurrent = LineTextSanitizer.bubbleBody(current)
         guard !normalizedCurrent.isEmpty else { return "" }
         guard !normalizedPrevious.isEmpty else { return normalizedCurrent }
 
@@ -1668,7 +1694,8 @@ final class LINEInboundWatcher {
         cutYDescription: String,
         greenRowsDescription: String,
         expandedGreenRowsDescription: String,
-        frameSkippedNoCutDescription: String
+        frameSkippedNoCutDescription: String,
+        bubbleDiagnostics: [String: String]
     ) {
         let delays = [0]
         var best = ""
@@ -1693,11 +1720,12 @@ final class LINEInboundWatcher {
                 cutApplied: false,
                 frameSkippedNoCut: false
             )
-            let result = VisionOCR.extractTextLineInboundPositioned(from: rect, windowID: windowID, debug: &debug, config: ocrConfig)
+            let result = VisionOCR.extractTextLineInboundPositioned(from: rect, windowID: windowID, debug: &debug,
+                config: ocrConfig, cacheScope: pixelOCRScope)
             succeeded = succeeded || result != nil
             let observations = result ?? []
             let raw = observations.map(\.text).joined(separator: "\n")
-            let sanitized = LineTextSanitizer.sanitize(raw)
+            let sanitized = LineTextSanitizer.bubbleBody(raw)
             lengths.append(sanitized.count)
             if sanitized.count > best.count {
                 best = sanitized
@@ -1718,7 +1746,13 @@ final class LINEInboundWatcher {
             cutYDescription: selectedDebug.yCut.map(String.init) ?? "",
             greenRowsDescription: String(selectedDebug.greenRows),
             expandedGreenRowsDescription: String(selectedDebug.expandedGreenRows),
-            frameSkippedNoCutDescription: selectedDebug.frameSkippedNoCut ? "1" : "0"
+            frameSkippedNoCutDescription: selectedDebug.frameSkippedNoCut ? "1" : "0",
+            bubbleDiagnostics: [
+                "ocr_bubble_status": selectedDebug.bubbleStatus,
+                "ocr_bubble_count": String(selectedDebug.bubbleCount),
+                "ocr_input_pixels": String(selectedDebug.recognizedPixels),
+                "ocr_cache_hits": String(selectedDebug.cacheHits),
+            ]
         )
     }
 
@@ -1894,7 +1928,7 @@ final class LINEInboundWatcher {
     ) {
         guard logger.isDebugEnabled else { return }
 
-        let debug: (raw: CGImage, preprocessed: CGImage?)?
+        let debug: (raw: CGImage, preprocessed: CGImage?, overlay: CGImage?, status: String, rects: String)?
         if let anchorRect {
             debug = VisionOCR.captureInboundDebugImages(from: anchorRect, windowID: lineWindowID)
         } else {
@@ -1915,6 +1949,9 @@ final class LINEInboundWatcher {
             "separator_method": separatorMethod,
             "window_id": String(lineWindowID),
             "frame_action": frameAction,
+            "bubble_status": debug?.status ?? "unavailable",
+            "bubble_rects": debug?.rects ?? "",
+            "preprocessing": "inbound-bubble-atlas",
             "line_found": anchorRect == nil ? "0" : "1",
         ]
         OCRDebugArtifactStore.saveEvent(
@@ -1922,6 +1959,7 @@ final class LINEInboundWatcher {
             raw: rawImage,
             anchor: debug?.raw,
             preprocessed: debug?.preprocessed,
+            overlay: debug?.overlay,
             metadata: meta,
             retention: 50
         )
