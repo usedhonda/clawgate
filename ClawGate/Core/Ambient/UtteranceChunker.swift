@@ -20,18 +20,20 @@ struct UtteranceChunker {
     static let sampleRate = 16_000
     static let frameSamples = 480                 // 30 ms
 
-    let minChunkSamples: Int                      // never cut before this (3 s)
+    let minChunkSamples: Int                      // never cut before this (5 s)
     let maxChunkSamples: Int                      // always cut by this (30 s)
-    let pauseSamples: Int                         // pause long enough to cut in (0.7 s)
+    let pauseSamples: Int                         // pause long enough to cut in (0.8 s)
     let forcedOverlapSamples: Int                 // overlap after a forced cut (1 s)
 
     private(set) var chunkSamples = 0
     private var quietRun = 0
     private var sawSpeech = false
+    private var loudSamples = 0
+    private let minSpeechSamples = Int(0.5 * Double(UtteranceChunker.sampleRate))
     private var noiseFloor: Double = 0.003
     private var pending: [Float] = []
 
-    init(minSeconds: Double = 3, maxSeconds: Double = 30, pauseSeconds: Double = 0.7, forcedOverlapSeconds: Double = 1) {
+    init(minSeconds: Double = 5, maxSeconds: Double = 30, pauseSeconds: Double = 0.8, forcedOverlapSeconds: Double = 1) {
         minChunkSamples = Int(minSeconds * Double(Self.sampleRate))
         maxChunkSamples = Int(maxSeconds * Double(Self.sampleRate))
         pauseSamples = Int(pauseSeconds * Double(Self.sampleRate))
@@ -70,6 +72,7 @@ struct UtteranceChunker {
     mutating func didStartChunk(primed: Int) {
         chunkSamples = primed
         quietRun = 0
+        loudSamples = 0
         sawSpeech = primed > 0
     }
 
@@ -82,7 +85,10 @@ struct UtteranceChunker {
             noiseFloor = noiseFloor * 0.95 + rms * 0.05
         } else {
             quietRun = 0
-            sawSpeech = true
+            // A click or a cough is not an utterance: it takes ~0.5s of sound
+            // before a following pause may end the chunk.
+            loudSamples += Self.frameSamples
+            if loudSamples >= minSpeechSamples { sawSpeech = true }
             // Minutes, not seconds: a long monologue must not become the floor,
             // but a fan switched on must eventually stop counting as speech.
             noiseFloor = noiseFloor * 0.9999 + rms * 0.0001

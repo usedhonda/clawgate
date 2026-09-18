@@ -32,9 +32,9 @@ final class UtteranceChunkerTests: XCTestCase {
 
     func testCutsInsideThePauseAfterAnUtterance() {
         var chunker = UtteranceChunker()
-        let found = cuts(tone(4) + silence(1.5) + tone(4), chunker: &chunker)
+        let found = cuts(tone(6) + silence(1.5) + tone(4), chunker: &chunker)
         XCTAssertEqual(found.count, 1)
-        XCTAssertEqual(found[0].at, 4.7, accuracy: 0.1)
+        XCTAssertEqual(found[0].at, 6.8, accuracy: 0.1)
         XCTAssertEqual(found[0].overlap, 0)
     }
 
