@@ -46,6 +46,7 @@ final class BridgeRouteMatrixTests: XCTestCase {
         (.POST, "/v1/ambient/stream/start"),
         (.POST, "/v1/ambient/stream/stop"),
         (.POST, "/v1/ambient/capture/pause"),
+        (.POST, "/v1/ambient/meeting"),
         (.POST, "/v1/ambient/capture/resume"),
         (.POST, "/v1/ambient/capture/recover"),
         (.POST, "/v1/ambient/capture/_simulate_wedge"),

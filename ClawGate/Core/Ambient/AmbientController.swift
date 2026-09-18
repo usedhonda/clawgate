@@ -58,6 +58,12 @@ final class AmbientController {
         /// Present means: do not open the microphone on launch until a person
         /// starts it again.
         var autoResumeBlockedReason: String?
+        /// Google Meet second stream (Chrome output = the remote party).
+        var meetingActive: Bool = false
+        var systemTapState: String = "idle"
+        var systemTapError: String? = nil
+        var systemChunksSurfaced: Int = 0
+        var lastSystemChunkAgeSeconds: Int = -1   // -1 when none yet
     }
 
     private let configStore: ConfigStore
@@ -82,6 +88,18 @@ final class AmbientController {
     private var ingestSent = 0
     private var ingestLastError: String?
 
+    /// Google Meet: while the Chrome extension reports a call, Chrome's output
+    /// (the remote party) is recorded as a second stream. The report is a
+    /// heartbeat; silence past `meetingHeartbeatTTL` ends the call, so a closed
+    /// tab or a stopped extension never leaves the tap running.
+    private let systemTap: SystemAudioTap
+    private var meetingActive = false
+    private var meetingLastSeen: Date?
+    private var meetingExpiryTimer: DispatchSourceTimer?
+    private var recentSystemSegments: [TranscriptSegment] = []
+    static let meetingHeartbeatTTL: TimeInterval = 30
+    static let echoHoldSeconds = 35
+
     /// Gateway delivery (ambient.ingest). Starts/stops with the stream; send
     /// failures never disturb capture/transcription (log + retry next window).
     private lazy var ingest = AmbientIngestProducer(
@@ -105,7 +123,11 @@ final class AmbientController {
         self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.transcriber = AmbientTranscriber()
         self.diarizer = AmbientDiarizer(log: log)
+        self.systemTap = SystemAudioTap(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.capture.onChunkReady = { [weak self] chunk in
+            self?.handleChunk(chunk)
+        }
+        self.systemTap.onChunkReady = { [weak self] chunk in
             self?.handleChunk(chunk)
         }
         self.capture.onQuarantine = { [weak self] reason in
@@ -168,6 +190,7 @@ final class AmbientController {
                         Task { await self.ingest.start(sessionID: sid) }
                     }
                     self.healthMonitor.start()
+                    self.reconcileSystemTapLocked()
                     self.log("ambient stream started session=\(self.sessionID ?? "?")")
                     completion(.success(()))
                 } catch {
@@ -189,6 +212,7 @@ final class AmbientController {
             if self.capture.state != .capturing {
                 self.healthMonitor.stop()
             }
+            self.reconcileSystemTapLocked()
             Task { await self.ingest.stop() }
             self.log("ambient stream stopped (capture continues=\(self.capture.state == .capturing))")
         }
@@ -200,9 +224,90 @@ final class AmbientController {
             self.streaming = false
             self.setWasStreaming(false)
             self.healthMonitor.stop()
+            self.reconcileSystemTapLocked()
             Task { await self.ingest.stop() }
             self.capture.stop()
         }
+    }
+
+    // MARK: - Google Meet (second stream)
+
+    /// Heartbeat from the Chrome extension: `inCall` while a Meet call is up.
+    func meetingHeartbeat(inCall: Bool) {
+        state.async {
+            let wasActive = self.meetingActive
+            self.meetingActive = inCall
+            self.meetingLastSeen = inCall ? Date() : nil
+            if wasActive != inCall { self.log("ambient meeting \(inCall ? "started" : "ended")") }
+            self.reconcileSystemTapLocked()
+        }
+    }
+
+    /// Run the Chrome tap exactly when streaming during a call. Called on `state`.
+    private func reconcileSystemTapLocked() {
+        let want = streaming && meetingActive
+        systemTap.setActive(want)
+        if meetingActive, meetingExpiryTimer == nil {
+            let timer = DispatchSource.makeTimerSource(queue: state)
+            timer.schedule(deadline: .now() + 10, repeating: 10)
+            timer.setEventHandler { [weak self] in self?.expireMeetingIfSilentLocked() }
+            timer.resume()
+            meetingExpiryTimer = timer
+        } else if !meetingActive, let timer = meetingExpiryTimer {
+            timer.cancel()
+            meetingExpiryTimer = nil
+            recentSystemSegments = []
+        }
+    }
+
+    private func expireMeetingIfSilentLocked() {
+        guard meetingActive else { return }
+        if let seen = meetingLastSeen, Date().timeIntervalSince(seen) < Self.meetingHeartbeatTTL {
+            systemTap.setActive(streaming)   // re-checks Chrome's audio processes
+            return
+        }
+        meetingActive = false
+        meetingLastSeen = nil
+        log("ambient meeting ended (no heartbeat for \(Int(Self.meetingHeartbeatTTL))s)")
+        reconcileSystemTapLocked()
+    }
+
+    /// A microphone segment that repeats what Chrome played a moment earlier is
+    /// the remote party leaking out of the Mac's speakers, not the owner.
+    static func isMeetingEcho(_ mic: TranscriptSegment, against system: [TranscriptSegment],
+                              window: Double = 5, threshold: Double = 0.6) -> Bool {
+        guard let micAt = mic.capturedAt else { return false }
+        let micText = normalizedForEcho(mic.text)
+        guard micText.count >= 2 else { return false }
+        for seg in system {
+            guard let at = seg.capturedAt, abs(at - micAt) <= window else { continue }
+            let other = normalizedForEcho(seg.text)
+            guard !other.isEmpty else { continue }
+            if micText.count >= 4, other.contains(micText) || micText.contains(other) { return true }
+            if similarity(micText, other) >= threshold { return true }
+        }
+        return false
+    }
+
+    private static func normalizedForEcho(_ text: String) -> String {
+        String(text.lowercased().filter { $0.isLetter || $0.isNumber })
+    }
+
+    /// 1 - (edit distance / longer length).
+    static func similarity(_ a: String, _ b: String) -> Double {
+        let x = Array(a), y = Array(b)
+        guard !x.isEmpty, !y.isEmpty else { return x.isEmpty && y.isEmpty ? 1 : 0 }
+        var previous = Array(0...y.count)
+        for i in 1...x.count {
+            var current = [i] + Array(repeating: 0, count: y.count)
+            for j in 1...y.count {
+                current[j] = x[i - 1] == y[j - 1]
+                    ? previous[j - 1]
+                    : 1 + min(previous[j - 1], previous[j], current[j - 1])
+            }
+            previous = current
+        }
+        return 1 - Double(previous[y.count]) / Double(max(x.count, y.count))
     }
 
     /// Hard-recover a wedged capture in-process (in-app monitor trigger,
@@ -366,7 +471,12 @@ final class AmbientController {
                 backendPhase: live.backendPhase.rawValue,
                 backendPhaseAgeSeconds: Int(now.timeIntervalSince(live.backendPhaseSince)),
                 backendGeneration: live.backendGeneration,
-                autoResumeBlockedReason: autoResumeBlockedReason
+                autoResumeBlockedReason: autoResumeBlockedReason,
+                meetingActive: meetingActive,
+                systemTapState: systemTap.state.rawValue,
+                systemTapError: systemTap.lastError,
+                systemChunksSurfaced: systemTap.chunksSurfaced,
+                lastSystemChunkAgeSeconds: systemTap.lastChunkAt.map { Int(now.timeIntervalSince($0)) } ?? -1
             )
         }
     }
@@ -388,7 +498,15 @@ final class AmbientController {
     // MARK: - Chunk handling
 
     private func handleChunk(_ chunk: AmbientCaptureManager.CompletedChunk) {
-        work.async { [weak self] in
+        // On the Mac's own speakers the remote party leaks into the microphone.
+        // Hold such mic chunks until the Chrome chunk covering the same period
+        // (finalized at most one chunk later) has been transcribed, so the leak
+        // can be recognised against it.
+        let holdForEcho = chunk.source == .mic
+            && state.sync { meetingActive }
+            && SystemAudioTap.outputIsBuiltInSpeaker()
+        let delay: DispatchTimeInterval = holdForEcho ? .seconds(Self.echoHoldSeconds) : .seconds(0)
+        work.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             let shouldRun = self.state.sync { self.streaming }
             guard shouldRun else { return }
@@ -414,32 +532,55 @@ final class AmbientController {
                     return
                 }
                 let result = try self.transcriber.transcribe(chunk: chunk.url)
-                // Speaker labels (self/other) — fail-soft: nil turns leave
-                // segments unlabeled, transcription is never blocked.
-                let turns = result.kept.isEmpty ? nil : self.diarizer.diarize(chunk: chunk.url)
-                let labeled = turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
-                    ?? result.kept
+                let inMeeting = self.state.sync { self.meetingActive }
+                let labeled: [TranscriptSegment]
+                if chunk.source == .system {
+                    // Chrome never plays the owner back to themself: all of it is the other party.
+                    labeled = result.kept.map { var s = $0; s.speaker = "other"; return s }
+                } else if inMeeting {
+                    // During a call the other party arrives through Chrome, so the
+                    // microphone is the owner. The stream decides, not a guess.
+                    labeled = result.kept.map { var s = $0; s.speaker = "self"; return s }
+                } else {
+                    // Speaker labels (self/other) — fail-soft: nil turns leave
+                    // segments unlabeled, transcription is never blocked.
+                    let turns = result.kept.isEmpty ? nil : self.diarizer.diarize(chunk: chunk.url)
+                    labeled = turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
+                        ?? result.kept
+                }
                 // Stamp absolute utterance time: chunk start + in-chunk offset.
                 let stamped = labeled.map { seg -> TranscriptSegment in
                     var s = seg
                     if let startedAt = chunk.startedAt {
                         s.capturedAt = startedAt.timeIntervalSince1970 + seg.startSeconds
                     }
+                    s.stream = chunk.source.rawValue
                     return s
                 }
                 var kept: [TranscriptSegment] = []
                 var rollingSkipped: [SkippedSegment] = []
                 self.state.sync {
+                    // The two streams hear different people, so a short reply that
+                    // both sides say ("はい") must not cancel the other side's.
+                    let prefix = chunk.source.rawValue + ":"
                     for seg in stamped {
-                        if self.recentKeptTexts.contains(seg.text) {
+                        if self.recentKeptTexts.contains(prefix + seg.text) {
                             rollingSkipped.append(SkippedSegment(reason: "rolling_duplicate", segment: seg))
+                        } else if holdForEcho,
+                                  Self.isMeetingEcho(seg, against: self.recentSystemSegments) {
+                            rollingSkipped.append(SkippedSegment(reason: "meeting_echo", segment: seg))
                         } else {
                             kept.append(seg)
-                            self.recentKeptTexts.append(seg.text)
+                            self.recentKeptTexts.append(prefix + seg.text)
                         }
                     }
                     if self.recentKeptTexts.count > 40 {
                         self.recentKeptTexts.removeFirst(self.recentKeptTexts.count - 40)
+                    }
+                    if chunk.source == .system {
+                        self.recentSystemSegments.append(contentsOf: kept)
+                        let horizon = Date().timeIntervalSince1970 - 180
+                        self.recentSystemSegments.removeAll { ($0.capturedAt ?? 0) < horizon }
                     }
                 }
                 let allSkipped = result.skipped + rollingSkipped

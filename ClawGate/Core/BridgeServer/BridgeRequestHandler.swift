@@ -117,6 +117,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         RouteKey(.POST, "/v1/ambient/stream/start"): { core, _, _, _ in core.ambientStreamStart() },
         RouteKey(.POST, "/v1/ambient/stream/stop"): { core, _, _, _ in core.ambientStreamStop() },
         RouteKey(.POST, "/v1/ambient/capture/pause"): { core, _, _, _ in core.ambientCapturePause() },
+        RouteKey(.POST, "/v1/ambient/meeting"): { core, _, _, body in core.ambientMeeting(body: body) },
         RouteKey(.POST, "/v1/ambient/capture/resume"): { core, _, _, _ in core.ambientCaptureResume() },
         RouteKey(.POST, "/v1/ambient/capture/recover"): { core, _, _, _ in core.ambientCaptureRecover() },
         RouteKey(.POST, "/v1/ambient/capture/_simulate_wedge"): { core, _, _, _ in core.ambientSimulateWedge() },

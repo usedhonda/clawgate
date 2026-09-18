@@ -27,6 +27,12 @@ final class AmbientCaptureManager {
         let sampleRate: Double
         /// Whether overlap was proven by a successful overlap write.
         let provenOverlap: Bool
+        /// Which audio stream this chunk came from: the microphone (the owner,
+        /// plus whoever is in the room) or Chrome's output during a Meet call
+        /// (the remote party only).
+        var source: Source = .mic
+
+        enum Source: String { case mic, system }
     }
 
     struct ChunkTimingState {

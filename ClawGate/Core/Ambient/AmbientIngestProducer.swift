@@ -363,6 +363,22 @@ actor AmbientIngestProducer {
     /// (no speaker head when unlabeled). Same 1500-char recent-tail cap as
     /// windowTranscript. With no speakers and no timestamps this degrades to
     /// the plain joined transcript.
+    /// Stable sort by `capturedAt`. An undated line inherits the time of the
+    /// nearest dated line before it, so it stays where it arrived.
+    static func orderedBySpeechTime(_ lines: [Line]) -> [Line] {
+        var carried: Date? = nil
+        let keyed = lines.enumerated().map { index, line -> (Date?, Int, Line) in
+            if let t = line.capturedAt { carried = t }
+            return (line.capturedAt ?? carried, index, line)
+        }
+        return keyed.sorted { a, b in
+            switch (a.0, b.0) {
+            case let (x?, y?) where x != y: return x < y
+            default: return a.1 < b.1
+            }
+        }.map { $0.2 }
+    }
+
     static func dialogueSummary(_ lines: [Line],
                                 maxChars: Int = 1500,
                                 timeZone: TimeZone = .current) -> String {
@@ -372,7 +388,11 @@ actor AmbientIngestProducer {
             var texts: [String]
         }
         var utterances: [Utterance] = []
-        for line in lines {
+        // Lines arrive per stream (microphone and, during a Meet call, Chrome),
+        // each a chunk at a time, so arrival order is not speech order. Order by
+        // utterance time; lines without one keep their arrival position.
+        let ordered = Self.orderedBySpeechTime(lines)
+        for line in ordered {
             let trimmed = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             if !utterances.isEmpty, utterances[utterances.count - 1].speaker == line.speaker {

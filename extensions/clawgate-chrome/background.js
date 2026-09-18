@@ -156,6 +156,22 @@ async function handleMessengerFlushAlarmTick() {
   await captureMessengerNow(tab);
 }
 
+// Google Meet call heartbeat -> local ClawGate, which records Chrome's output
+// (the remote party) only while heartbeats keep arriving.
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== 'meet_call_state') {
+    return undefined;
+  }
+  getSettings()
+    .then(({ bridgePort }) => fetch(`http://127.0.0.1:${bridgePort}/v1/ambient/meeting`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inCall: message.inCall === true }),
+    }))
+    .catch(() => undefined);
+  return undefined;
+});
+
 chrome.runtime.onMessage.addListener((message, sender) => {
   if (message?.type !== 'messenger_content_changed' || !sender?.tab?.id) {
     return undefined;

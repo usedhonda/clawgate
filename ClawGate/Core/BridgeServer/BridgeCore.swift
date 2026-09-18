@@ -815,6 +815,19 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
     }
 
+    /// Google Meet call heartbeat from the Chrome extension: `{"inCall": Bool}`.
+    func ambientMeeting(body: Data) -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        struct Body: Decodable { let inCall: Bool }
+        guard let parsed = try? JSONDecoder().decode(Body.self, from: body) else {
+            let payload = ErrorPayload(code: "invalid_body", message: "expected {\"inCall\": Bool}",
+                                       retriable: false, failedStep: "ambient", details: nil)
+            return jsonResponse(status: .badRequest, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+        }
+        c.meetingHeartbeat(inCall: parsed.inCall)
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.snapshot(), error: nil)))
+    }
+
     func ambientCapturePause() -> HTTPResult {
         guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
         c.pauseCapture()

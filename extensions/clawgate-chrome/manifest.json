@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ClawGate",
   "description": "Send pages to Chi, your AI companion",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "permissions": [
     "tabs",
     "activeTab",
@@ -19,6 +19,13 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["meet.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_title": "ClawGate",
     "default_popup": "popup/popup.html"

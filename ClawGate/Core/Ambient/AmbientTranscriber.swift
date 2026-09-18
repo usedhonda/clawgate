@@ -12,6 +12,9 @@ struct TranscriptSegment: Codable, Equatable {
     /// Speaker label from diarization: "self" (ご主人様) or "other". nil when
     /// the diarizer is unavailable (old Macs) or for legacy lines.
     var speaker: String? = nil
+    /// Which capture stream produced this segment: "mic" or "system" (Chrome's
+    /// output during a Meet call). nil for lines written before streams existed.
+    var stream: String? = nil
 }
 
 /// A segment dropped during filtering, with the reason (for skipped.jsonl audit).
