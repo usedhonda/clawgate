@@ -18,7 +18,17 @@ final class WhisperServer {
     private var readyAt: Date?
     private var startedAt: Date?
     private var consecutiveFailures = 0
+    private var launches = 0
+    private var served = 0
+    private var lastFailure: String?
     private let log: (String) -> Void
+
+    /// Status line for /v1/ambient/status (the app's stdout is not kept).
+    var diagnostics: String {
+        lock.withLock {
+            "launches=\(launches) served=\(served) running=\(process?.isRunning ?? false) ready=\(readyAt != nil) failures=\(consecutiveFailures) last=\(lastFailure ?? "-")"
+        }
+    }
 
     init(log: @escaping (String) -> Void = { _ in }) {
         self.log = log
@@ -36,10 +46,14 @@ final class WhisperServer {
         }
         do {
             let segments = try post(chunk: chunk)
-            lock.withLock { consecutiveFailures = 0 }
+            lock.withLock { consecutiveFailures = 0; served += 1 }
             return segments
         } catch {
-            let failures = lock.withLock { () -> Int in consecutiveFailures += 1; return consecutiveFailures }
+            let failures = lock.withLock { () -> Int in
+                consecutiveFailures += 1
+                lastFailure = "\(error)"
+                return consecutiveFailures
+            }
             log("whisper-server request failed (\(failures)): \(error)")
             if failures >= 3 { stop() }   // restart on the next chunk
             return nil
@@ -102,6 +116,7 @@ final class WhisperServer {
         lock.withLock {
             process = proc
             startedAt = Date()
+            launches += 1
         }
         log("whisper-server launched pid=\(proc.processIdentifier)")
         return probeReady()
@@ -120,6 +135,7 @@ final class WhisperServer {
         }
         if let startedAt, Date().timeIntervalSince(startedAt) > 60 {
             log("whisper-server not ready after 60s; stopping it")
+            lastFailure = "not ready after 60s"
             process?.terminate()
             process = nil
         }
@@ -162,9 +178,13 @@ final class WhisperServer {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(Self.port)/inference")!)
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        // The server drops idle keep-alive connections; a reused one fails at
+        // once ("did not answer" while the server is healthy). One connection
+        // per request, and one retry.
+        request.setValue("close", forHTTPHeaderField: "Connection")
         request.httpBody = body
         request.timeoutInterval = 120
-        guard let data = Self.send(request, timeout: 125) else {
+        guard let data = Self.send(request, timeout: 125) ?? Self.send(request, timeout: 125) else {
             throw AmbientTranscriber.TranscribeError.launchFailed("whisper-server did not answer")
         }
         do {
