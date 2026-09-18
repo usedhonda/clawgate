@@ -166,7 +166,11 @@ chrome.runtime.onMessage.addListener((message) => {
     .then(({ bridgePort }) => fetch(`http://127.0.0.1:${bridgePort}/v1/ambient/meeting`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inCall: message.inCall === true }),
+      body: JSON.stringify({
+        inCall: message.inCall === true,
+        ...(message.speakerEdge ? { speakerEdge: message.speakerEdge } : {}),
+        ...(message.signal ? { signal: message.signal } : {}),
+      }),
     }))
     .catch(() => undefined);
   return undefined;

@@ -66,6 +66,18 @@ final class AmbientController {
         var lastSystemChunkAgeSeconds: Int = -1   // -1 when none yet
         var systemTapDiagnostics: String? = nil
         var whisperServer: String? = nil
+        /// Meet speaking-tile detection health from the extension, and how many
+        /// Chrome-stream segments got a participant name versus stayed "相手".
+        var meetingSpeakerSignal: String? = nil
+        var namedSegments: Int = 0
+        var unnamedSegments: Int = 0
+    }
+
+    /// One participant's speaking span from Meet's tile indicator (unix seconds).
+    struct SpeakerInterval: Equatable {
+        let name: String
+        let start: Double
+        var end: Double?
     }
 
     private let configStore: ConfigStore
@@ -99,7 +111,13 @@ final class AmbientController {
     private var meetingLastSeen: Date?
     private var meetingExpiryTimer: DispatchSourceTimer?
     private var recentSystemSegments: [TranscriptSegment] = []
+    private var speakerIntervals: [SpeakerInterval] = []
+    private var meetingSpeakerSignal: String?
+    private var namedSegments = 0
+    private var unnamedSegments = 0
     static let meetingHeartbeatTTL: TimeInterval = 30
+    /// Chrome chunks wait this long so speaking edges for their span arrive first.
+    static let speakerEdgeWaitSeconds = 3
     static let echoHoldSeconds = 35
 
     /// Gateway delivery (ambient.ingest). Starts/stops with the stream; send
@@ -248,6 +266,40 @@ final class AmbientController {
         }
     }
 
+    /// A Meet tile started or stopped showing its speaking indicator.
+    func meetingSpeakerEdge(name: String, speaking: Bool, at: Double) {
+        state.async {
+            if speaking {
+                guard !self.speakerIntervals.contains(where: { $0.name == name && $0.end == nil }) else { return }
+                self.speakerIntervals.append(SpeakerInterval(name: name, start: at, end: nil))
+            } else if let i = self.speakerIntervals.lastIndex(where: { $0.name == name && $0.end == nil }) {
+                self.speakerIntervals[i].end = at
+            }
+            let horizon = Date().timeIntervalSince1970 - 300
+            self.speakerIntervals.removeAll { ($0.end ?? .infinity) < horizon }
+        }
+    }
+
+    func meetingSpeakerSignal(_ text: String) {
+        state.async { self.meetingSpeakerSignal = text }
+    }
+
+    /// The participant who spoke over this span, only when unambiguous: one name
+    /// covers at least half of it and every other name under a fifth. Otherwise
+    /// nil, and the segment stays "相手" -- never a wrong name.
+    static func attributeSpeaker(start: Double, end: Double, intervals: [SpeakerInterval], now: Double) -> String? {
+        let span = max(end - start, 0.3)
+        var overlap: [String: Double] = [:]
+        for interval in intervals {
+            let shared = min(end, interval.end ?? now) - max(start, interval.start)
+            if shared > 0 { overlap[interval.name, default: 0] += shared }
+        }
+        let ranked = overlap.sorted { $0.value > $1.value }
+        guard let top = ranked.first, top.value / span >= 0.5 else { return nil }
+        guard ranked.dropFirst().allSatisfy({ $0.value / span < 0.2 }) else { return nil }
+        return top.key
+    }
+
     /// Run the Chrome tap exactly when streaming during a call. Called on `state`.
     private func reconcileSystemTapLocked() {
         let want = streaming && meetingActive
@@ -262,6 +314,7 @@ final class AmbientController {
             timer.cancel()
             meetingExpiryTimer = nil
             recentSystemSegments = []
+            speakerIntervals = []
         }
     }
 
@@ -483,7 +536,10 @@ final class AmbientController {
                 systemChunksSurfaced: systemTap.chunksSurfaced,
                 lastSystemChunkAgeSeconds: systemTap.lastChunkAt.map { Int(now.timeIntervalSince($0)) } ?? -1,
                 systemTapDiagnostics: systemTap.diagnostics,
-                whisperServer: transcriber.server?.diagnostics
+                whisperServer: transcriber.server?.diagnostics,
+                meetingSpeakerSignal: meetingSpeakerSignal,
+                namedSegments: namedSegments,
+                unnamedSegments: unnamedSegments
             )
         }
     }
@@ -512,7 +568,9 @@ final class AmbientController {
         let holdForEcho = chunk.source == .mic
             && state.sync { meetingActive }
             && SystemAudioTap.outputIsBuiltInSpeaker()
-        let delay: DispatchTimeInterval = holdForEcho ? .seconds(Self.echoHoldSeconds) : .seconds(0)
+        let delay: DispatchTimeInterval = holdForEcho
+            ? .seconds(Self.echoHoldSeconds)
+            : (chunk.source == .system ? .seconds(Self.speakerEdgeWaitSeconds) : .seconds(0))
         work.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             let shouldRun = self.state.sync { self.streaming }
@@ -556,13 +614,28 @@ final class AmbientController {
                         ?? result.kept
                 }
                 // Stamp absolute utterance time: chunk start + in-chunk offset.
-                let stamped = labeled.map { seg -> TranscriptSegment in
+                var stamped = labeled.map { seg -> TranscriptSegment in
                     var s = seg
                     if let startedAt = chunk.startedAt {
                         s.capturedAt = startedAt.timeIntervalSince1970 + seg.startSeconds
                     }
                     s.stream = chunk.source.rawValue
                     return s
+                }
+                if chunk.source == .system {
+                    stamped = self.state.sync {
+                        let now = Date().timeIntervalSince1970
+                        return stamped.map { seg -> TranscriptSegment in
+                            var s = seg
+                            if let at = seg.capturedAt {
+                                s.speakerName = Self.attributeSpeaker(
+                                    start: at, end: at + max(0, seg.endSeconds - seg.startSeconds),
+                                    intervals: self.speakerIntervals, now: now)
+                            }
+                            if s.speakerName != nil { self.namedSegments += 1 } else { self.unnamedSegments += 1 }
+                            return s
+                        }
+                    }
                 }
                 var kept: [TranscriptSegment] = []
                 var rollingSkipped: [SkippedSegment] = []

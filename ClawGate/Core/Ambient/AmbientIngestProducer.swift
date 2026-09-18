@@ -95,6 +95,9 @@ actor AmbientIngestProducer {
         let text: String
         let speaker: String?   // "self" | "other" | nil (no diarization)
         let capturedAt: Date?
+        /// A Google Meet participant's display name, when the speaking tile
+        /// identified them (speaker is then "other").
+        var speakerName: String? = nil
     }
 
     private struct WindowSegment {
@@ -155,7 +158,8 @@ actor AmbientIngestProducer {
             WindowSegment(
                 line: Line(text: $0.text,
                            speaker: $0.speaker,
-                           capturedAt: $0.capturedAt.map { Date(timeIntervalSince1970: $0) }),
+                           capturedAt: $0.capturedAt.map { Date(timeIntervalSince1970: $0) },
+                           speakerName: $0.speakerName),
                 addedAt: now
             )
         })
@@ -384,6 +388,7 @@ actor AmbientIngestProducer {
                                 timeZone: TimeZone = .current) -> String {
         struct Utterance {
             let speaker: String?
+            let name: String?
             let time: Date?
             var texts: [String]
         }
@@ -395,10 +400,12 @@ actor AmbientIngestProducer {
         for line in ordered {
             let trimmed = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            if !utterances.isEmpty, utterances[utterances.count - 1].speaker == line.speaker {
+            if !utterances.isEmpty, utterances[utterances.count - 1].speaker == line.speaker,
+               utterances[utterances.count - 1].name == line.speakerName {
                 utterances[utterances.count - 1].texts.append(trimmed)
             } else {
-                utterances.append(Utterance(speaker: line.speaker, time: line.capturedAt, texts: [trimmed]))
+                utterances.append(Utterance(speaker: line.speaker, name: line.speakerName,
+                                            time: line.capturedAt, texts: [trimmed]))
             }
         }
         guard !utterances.isEmpty else { return "" }
@@ -412,7 +419,7 @@ actor AmbientIngestProducer {
             if let t = u.time { head += "[" + fmt.string(from: t) + "] " }
             switch u.speaker {
             case "self": head += "ご主人様: "
-            case "other": head += "相手: "
+            case "other": head += u.name.map { "\($0): " } ?? "相手: "
             default: break
             }
             return head + u.texts.joined(separator: " ")

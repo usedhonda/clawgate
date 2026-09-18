@@ -15,6 +15,9 @@ struct TranscriptSegment: Codable, Equatable {
     /// Which capture stream produced this segment: "mic" or "system" (Chrome's
     /// output during a Meet call). nil for lines written before streams existed.
     var stream: String? = nil
+    /// Google Meet participant name for a Chrome-stream segment, set only when
+    /// exactly one speaking tile clearly overlapped it. nil otherwise.
+    var speakerName: String? = nil
 }
 
 /// A segment dropped during filtering, with the reason (for skipped.jsonl audit).

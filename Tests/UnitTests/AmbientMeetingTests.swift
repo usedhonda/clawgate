@@ -51,6 +51,50 @@ final class AmbientMeetingTests: XCTestCase {
         XCTAssertEqual(ordered, ["資料を共有しますね", "わかりました", "見えていますか", "それでは始めます"])
     }
 
+    // MARK: - Speaker attribution from Meet's speaking tiles
+
+    private typealias Interval = AmbientController.SpeakerInterval
+
+    func testSingleClearSpeakerIsNamed() {
+        let intervals = [Interval(name: "田中", start: 100, end: 110)]
+        XCTAssertEqual(AmbientController.attributeSpeaker(start: 101, end: 105, intervals: intervals, now: 200), "田中")
+    }
+
+    func testTwoOverlappingSpeakersStayUnnamed() {
+        let intervals = [Interval(name: "田中", start: 100, end: 110), Interval(name: "佐藤", start: 102, end: 108)]
+        XCTAssertNil(AmbientController.attributeSpeaker(start: 101, end: 105, intervals: intervals, now: 200))
+    }
+
+    func testNobodyLitStaysUnnamed() {
+        XCTAssertNil(AmbientController.attributeSpeaker(start: 101, end: 105, intervals: [], now: 200))
+    }
+
+    func testWeakOverlapStaysUnnamed() {
+        let intervals = [Interval(name: "田中", start: 104, end: 110)]   // covers 1s of a 4s line
+        XCTAssertNil(AmbientController.attributeSpeaker(start: 101, end: 105, intervals: intervals, now: 200))
+    }
+
+    func testOpenIntervalCountsUpToNow() {
+        let intervals = [Interval(name: "田中", start: 100, end: nil)]
+        XCTAssertEqual(AmbientController.attributeSpeaker(start: 101, end: 105, intervals: intervals, now: 106), "田中")
+    }
+
+    func testSummaryShowsParticipantNamesAndSplitsByName() {
+        typealias Line = AmbientIngestProducer.Line
+        let t = Date(timeIntervalSince1970: 1_000)
+        let lines = [
+            Line(text: "資料を共有します", speaker: "other", capturedAt: t, speakerName: "田中"),
+            Line(text: "見えています", speaker: "other", capturedAt: t.addingTimeInterval(5), speakerName: "佐藤"),
+            Line(text: "よろしく", speaker: "other", capturedAt: t.addingTimeInterval(8), speakerName: nil),
+        ]
+        let summary = AmbientIngestProducer.dialogueSummary(lines, timeZone: TimeZone(identifier: "UTC")!)
+        XCTAssertEqual(summary.components(separatedBy: "\n"), [
+            "[00:16] 田中: 資料を共有します",
+            "[00:16] 佐藤: 見えています",
+            "[00:16] 相手: よろしく",
+        ])
+    }
+
     func testUndatedLineKeepsItsArrivalPosition() {
         typealias Line = AmbientIngestProducer.Line
         let t = Date(timeIntervalSince1970: 1_000)
