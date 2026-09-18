@@ -64,6 +64,7 @@ final class AmbientController {
         var systemTapError: String? = nil
         var systemChunksSurfaced: Int = 0
         var lastSystemChunkAgeSeconds: Int = -1   // -1 when none yet
+        var systemTapDiagnostics: String? = nil
     }
 
     private let configStore: ConfigStore
@@ -476,7 +477,8 @@ final class AmbientController {
                 systemTapState: systemTap.state.rawValue,
                 systemTapError: systemTap.lastError,
                 systemChunksSurfaced: systemTap.chunksSurfaced,
-                lastSystemChunkAgeSeconds: systemTap.lastChunkAt.map { Int(now.timeIntervalSince($0)) } ?? -1
+                lastSystemChunkAgeSeconds: systemTap.lastChunkAt.map { Int(now.timeIntervalSince($0)) } ?? -1,
+                systemTapDiagnostics: systemTap.diagnostics
             )
         }
     }

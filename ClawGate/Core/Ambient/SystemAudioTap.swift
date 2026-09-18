@@ -50,6 +50,12 @@ final class SystemAudioTap {
     private var _chunksSurfaced = 0
     private var _lastChunkAt: Date?
     private var _lastError: String?
+    // IO diagnostics: tells "IOProc never fires" from "fires but nothing converts".
+    private var _ioCallbacks = 0
+    private var _framesIn = 0
+    private var _wrapFailures = 0
+    private var _convertFailures = 0
+    private var _tapFormat = ""
 
     // Writer state, confined to ioQueue.
     private let recordFormat = AVAudioFormat(
@@ -86,6 +92,11 @@ final class SystemAudioTap {
     var chunksSurfaced: Int { stateLock.withLock { _chunksSurfaced } }
     var lastChunkAt: Date? { stateLock.withLock { _lastChunkAt } }
     var lastError: String? { stateLock.withLock { _lastError } }
+    var diagnostics: String {
+        stateLock.withLock {
+            "callbacks=\(_ioCallbacks) framesIn=\(_framesIn) wrapFail=\(_wrapFailures) convertFail=\(_convertFailures) format=\(_tapFormat)"
+        }
+    }
 
     /// Converge on the wanted state. Asynchronous: the caller never waits on
     /// Core Audio. While running, a changed set of Chrome audio processes (Chrome
@@ -154,6 +165,11 @@ final class SystemAudioTap {
         status = AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &asbd)
         guard status == noErr else { throw TapError.osStatus("read tap format", status) }
         guard let tapFormat = AVAudioFormat(streamDescription: &asbd) else { throw TapError.badFormat }
+        let formatText = "\(Int(asbd.mSampleRate))Hz ch=\(asbd.mChannelsPerFrame) flags=\(asbd.mFormatFlags) bits=\(asbd.mBitsPerChannel) procs=\(processes.count)"
+        stateLock.withLock {
+            _tapFormat = formatText
+            _ioCallbacks = 0; _framesIn = 0; _wrapFailures = 0; _convertFailures = 0
+        }
 
         let outputUID = Self.defaultOutputDeviceUID() ?? ""
         var aggregate: [String: Any] = [
@@ -227,8 +243,13 @@ final class SystemAudioTap {
     }
 
     private func handleInput(_ input: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
+        stateLock.withLock { _ioCallbacks += 1 }
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input, deallocator: nil),
-              buffer.frameLength > 0 else { return }
+              buffer.frameLength > 0 else {
+            stateLock.withLock { _wrapFailures += 1 }
+            return
+        }
+        stateLock.withLock { _framesIn += Int(buffer.frameLength) }
         let arrivedAt = Date()
         if converter == nil || converterInput != format {
             converter = AVAudioConverter(from: format, to: recordFormat)
@@ -246,7 +267,10 @@ final class SystemAudioTap {
             inStatus.pointee = .haveData
             return buffer
         }
-        guard status != .error, out.frameLength > 0 else { return }
+        guard status != .error, out.frameLength > 0 else {
+            stateLock.withLock { _convertFailures += 1 }
+            return
+        }
         write(out, arrivedAt: arrivedAt)
     }
 
