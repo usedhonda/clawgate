@@ -81,6 +81,7 @@ final class SystemAudioTap {
     private var firstLiveSampleAt: Date?
     private var sumSquares = 0.0
     private var overlapTail: [Float] = []
+    private var chunker = UtteranceChunker(forcedOverlapSeconds: 1)
 
     init(chunkSeconds: Int = 30, overlapSeconds: Int = 3, log: @escaping (String) -> Void) {
         self.chunkFrames = AVAudioFrameCount(max(5, chunkSeconds) * 16_000)
@@ -240,6 +241,7 @@ final class SystemAudioTap {
         firstLiveSampleAt = nil
         sumSquares = 0
         overlapTail = []
+        chunker = UtteranceChunker(forcedOverlapSeconds: 1)
     }
 
     private func handleInput(_ input: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
@@ -296,10 +298,18 @@ final class SystemAudioTap {
                     }
                 }
             }
-            if framesInChunk >= chunkFrames {
+            var cut = framesInChunk >= chunkFrames
+            var overlapLimit = overlapFrames
+            if let samples = buffer.floatChannelData?[0],
+               case .cut(let overlap) = chunker.consume(UnsafeBufferPointer(start: samples, count: n)) {
+                cut = true
+                overlapLimit = overlap
+            }
+            if cut {
                 finalizeChunk()
                 try openChunk()
-                primeOverlap()
+                primeOverlap(limit: overlapLimit)
+                chunker.didStartChunk(primed: Int(primedFrames))
             }
         } catch {
             log("ambient system tap write error: \(error)")
@@ -320,8 +330,12 @@ final class SystemAudioTap {
         sumSquares = 0
     }
 
-    /// Lead the new chunk with the previous chunk's last 3s, matching the mic path.
-    private func primeOverlap() {
+    /// Lead the new chunk with the previous chunk's tail: none after a pause cut,
+    /// a little after a forced cut in continuous speech.
+    private func primeOverlap(limit: Int) {
+        if limit < overlapTail.count {
+            overlapTail.removeFirst(overlapTail.count - max(0, limit))
+        }
         guard overlapFrames > 0, !overlapTail.isEmpty, let file,
               let buffer = AVAudioPCMBuffer(pcmFormat: recordFormat,
                                             frameCapacity: AVAudioFrameCount(overlapTail.count)),

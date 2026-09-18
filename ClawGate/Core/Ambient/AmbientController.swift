@@ -121,8 +121,9 @@ final class AmbientController {
     init(configStore: ConfigStore, log: @escaping (String) -> Void = { _ in }) {
         self.configStore = configStore
         self.log = log
-        self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, log: log)
+        self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, utteranceChunking: true, log: log)
         self.transcriber = AmbientTranscriber()
+        self.transcriber.server = WhisperServer(log: log)
         self.diarizer = AmbientDiarizer(log: log)
         self.systemTap = SystemAudioTap(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.capture.onChunkReady = { [weak self] chunk in
@@ -214,6 +215,7 @@ final class AmbientController {
                 self.healthMonitor.stop()
             }
             self.reconcileSystemTapLocked()
+            self.transcriber.server?.stop()   // frees the resident model; relaunched on the next chunk
             Task { await self.ingest.stop() }
             self.log("ambient stream stopped (capture continues=\(self.capture.state == .capturing))")
         }
@@ -226,6 +228,7 @@ final class AmbientController {
             self.setWasStreaming(false)
             self.healthMonitor.stop()
             self.reconcileSystemTapLocked()
+            self.transcriber.server?.stop()
             Task { await self.ingest.stop() }
             self.capture.stop()
         }

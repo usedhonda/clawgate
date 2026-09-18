@@ -328,8 +328,14 @@ final class AmbientCaptureManager {
     var onChunkReady: ((CompletedChunk) -> Void)?
     private let log: (String) -> Void
 
+    /// Cuts chunks inside speech pauses instead of on the fixed grid. Off by
+    /// default so the fixed-grid timing tests keep their meaning; the controller
+    /// turns it on for live capture.
+    private var utteranceChunker: UtteranceChunker?
+
     init(chunkSeconds: Int = 30,
          overlapSeconds: Int = 3,
+         utteranceChunking: Bool = false,
          retentionSeconds: TimeInterval = 6 * 3600,
          resolveAudioDeviceID: @escaping (String) -> AudioDeviceID? = MicrophoneDeviceService.resolveAudioDeviceID,
          tapTimeToDate: @escaping (AVAudioTime) -> Date? = AmbientCaptureManager.hostTapTimeToDate,
@@ -339,6 +345,9 @@ final class AmbientCaptureManager {
          },
          log: @escaping (String) -> Void = { _ in }) {
         self.chunkSeconds = max(5, chunkSeconds)
+        self.utteranceChunker = utteranceChunking
+            ? UtteranceChunker(maxSeconds: Double(max(5, chunkSeconds)), forcedOverlapSeconds: 1)
+            : nil
         self.overlapFrames = max(0, overlapSeconds) * 16_000
         self.retentionSeconds = retentionSeconds
         self.resolveAudioDeviceID = resolveAudioDeviceID
@@ -655,6 +664,9 @@ final class AmbientCaptureManager {
         converter = nil
         converterInputFormat = nil
         overlapTail.removeAll()
+        if utteranceChunker != nil {
+            utteranceChunker = UtteranceChunker(maxSeconds: Double(chunkSeconds), forcedOverlapSeconds: 1)
+        }
     }
 
     // MARK: - Chunk files (lock held except onChunkReady dispatch)
@@ -780,11 +792,23 @@ final class AmbientCaptureManager {
             currentChunkTiming.markFirstLiveSample(at: firstLiveSampleDate)
             accumulateSumSquares(buf, frameLength: normalizedWrittenFrames)
             appendOverlapTail(buf, frameLength: normalizedWrittenFrames)
-            if framesInCurrentChunk >= chunkFrameLimit {
+            // Pause-aligned cuts when enabled; the fixed limit stays as the cap.
+            var overlapLimit: Int? = nil
+            var rollover = framesInCurrentChunk >= chunkFrameLimit
+            if var chunker = utteranceChunker, let ch = buf.floatChannelData {
+                let decision = chunker.consume(UnsafeBufferPointer(start: ch[0], count: Int(normalizedWrittenFrames)))
+                utteranceChunker = chunker
+                if case .cut(let overlap) = decision {
+                    rollover = true
+                    overlapLimit = overlap
+                }
+            }
+            if rollover {
                 _ = finalizeChunkLocked()
                 try openNewChunkLocked()
-                let primedFrames = primeOverlapLocked()
+                let primedFrames = primeOverlapLocked(limit: overlapLimit)
                 currentChunkTiming.markPrimeResult(primedFrames)
+                utteranceChunker?.didStartChunk(primed: Int(primedFrames))
             }
         } catch {
             log("ambient capture write error: \(error)")
@@ -810,8 +834,12 @@ final class AmbientCaptureManager {
         }
     }
 
-    /// Prepend the retained tail to a freshly opened chunk (3s overlap).
-    private func primeOverlapLocked() -> AVAudioFrameCount {
+    /// Prepend the retained tail to a freshly opened chunk (3s overlap), or only
+    /// its last `limit` samples (a pause cut needs none).
+    private func primeOverlapLocked(limit: Int? = nil) -> AVAudioFrameCount {
+        if let limit, limit < overlapTail.count {
+            overlapTail.removeFirst(overlapTail.count - max(0, limit))
+        }
         guard overlapFrames > 0, !overlapTail.isEmpty,
               let file = currentFile,
               let buf = AVAudioPCMBuffer(pcmFormat: recordFormat,

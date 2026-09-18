@@ -103,8 +103,16 @@ final class AmbientTranscriber {
             && FileManager.default.fileExists(atPath: model.path)
     }
 
+    /// Resident server for pause-aligned chunks; nil keeps the CLI-only path.
+    var server: WhisperServer?
+
     /// Transcribe a WAV chunk. `language` nil → auto-detect.
     func transcribe(chunk: URL, language: String? = nil) throws -> TranscriptionResult {
+        if let server, FileManager.default.fileExists(atPath: model.path),
+           let segments = server.transcribe(chunk: chunk, model: model, preset: preset,
+                                            prompt: prompt, language: language) {
+            return Self.classify(segments)
+        }
         guard FileManager.default.isExecutableFile(atPath: binary.path) else {
             throw TranscribeError.binaryMissing(binary.path)
         }
