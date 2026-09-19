@@ -294,8 +294,10 @@ final class SystemAudioTap {
     private func write(_ buffer: AVAudioPCMBuffer, arrivedAt: Date) {
         do {
             if file == nil { try openChunk() }
-            guard let file else { return }
-            try file.write(from: buffer)
+            // Not bound locally: finalizeChunk below must be able to release the
+            // file so its WAV header is complete before the chunk is handed on.
+            guard file != nil else { return }
+            try file?.write(from: buffer)
             let n = Int(buffer.frameLength)
             if firstLiveSampleAt == nil {
                 firstLiveSampleAt = arrivedAt.addingTimeInterval(-Double(n) / 16_000)
@@ -375,6 +377,7 @@ final class SystemAudioTap {
         let primed = primedFrames
         let squares = sumSquares
         let firstLive = firstLiveSampleAt
+        if #available(macOS 15.0, *) { file?.close() }
         file = nil
         fileURL = nil
         guard live > 16_000, total > 0 else {  // under ~1s of new audio

@@ -104,8 +104,13 @@ final class WhisperServer {
             args.append(contentsOf: ["--vad", "-vm", vadModel.path])
         }
         proc.arguments = args
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        // Keep the server's own log (one launch's worth) for diagnosing rejected
+        // requests; its HTTP errors are masked as "Invalid request".
+        let logURL = Self.root.appendingPathComponent("whisper-server.log")
+        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        let logHandle = (try? FileHandle(forWritingTo: logURL)) ?? FileHandle.nullDevice
+        proc.standardOutput = logHandle
+        proc.standardError = logHandle
         do {
             try proc.run()
         } catch {
@@ -127,6 +132,7 @@ final class WhisperServer {
     private func probeReady() -> Bool {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(Self.port)/")!)
         request.timeoutInterval = 1
+        request.setValue("close", forHTTPHeaderField: "Connection")
         let ok = Self.send(request, timeout: 2) != nil
         lock.lock(); defer { lock.unlock() }
         if ok {
@@ -182,10 +188,13 @@ final class WhisperServer {
         // once ("did not answer" while the server is healthy). One connection
         // per request, and one retry.
         request.setValue("close", forHTTPHeaderField: "Connection")
+        // An explicit length keeps the body out of chunked transfer encoding,
+        // which the server answers with "400 Invalid request" for multipart.
+        request.setValue("\(body.count)", forHTTPHeaderField: "Content-Length")
         request.httpBody = body
         request.timeoutInterval = 120
         guard let data = Self.send(request, timeout: 125) ?? Self.send(request, timeout: 125) else {
-            throw AmbientTranscriber.TranscribeError.launchFailed("whisper-server did not answer")
+            throw AmbientTranscriber.TranscribeError.launchFailed("whisper-server: \(Self.lastSendProblem)")
         }
         do {
             let decoded = try JSONDecoder().decode(VerboseJSON.self, from: data)
@@ -200,19 +209,40 @@ final class WhisperServer {
 
     /// Synchronous request for the transcription queue, which is already off
     /// the main thread and processes one chunk at a time.
+    /// Why the last request produced no data, for the status line.
+    private static let lastSendProblemLock = NSLock()
+    private static var _lastSendProblem = ""
+    static var lastSendProblem: String { lastSendProblemLock.withLock { _lastSendProblem } }
+
     private static func send(_ request: URLRequest, timeout: TimeInterval) -> Data? {
         let done = DispatchSemaphore(value: 0)
         var result: Data?
-        let task = URLSession.shared.dataTask(with: request) { data, response, _ in
-            if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) || request.httpMethod != "POST" {
-                result = data ?? Data()
+        var problem = ""
+        // A fresh session per request: a pooled connection left half-read by a
+        // cancelled probe made the next POST arrive as garbage ("400 Invalid
+        // request") while the server itself was healthy.
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.finishTasksAndInvalidate() }
+        let task = session.dataTask(with: request) { data, response, error in
+            if let http = response as? HTTPURLResponse {
+                if (200..<300).contains(http.statusCode) || request.httpMethod != "POST" {
+                    result = data ?? Data()
+                } else {
+                    let body = data.flatMap { String(data: $0.prefix(160), encoding: .utf8) } ?? ""
+                    problem = "http \(http.statusCode): \(body)"
+                }
+            } else if let error {
+                problem = "\(error.localizedDescription) (\((error as NSError).code))"
             }
             done.signal()
         }
         task.resume()
         if done.wait(timeout: .now() + timeout) == .timedOut {
             task.cancel()
-            return nil
+            problem = "timeout after \(Int(timeout))s"
+        }
+        if result == nil, request.httpMethod == "POST" {
+            lastSendProblemLock.withLock { _lastSendProblem = problem }
         }
         return result
     }

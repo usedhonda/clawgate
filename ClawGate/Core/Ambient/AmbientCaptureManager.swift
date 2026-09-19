@@ -700,6 +700,7 @@ final class AmbientCaptureManager {
         guard let url = currentChunkURL else { return nil }
         let frames = framesInCurrentChunk
         let sumSquares = sumSquaresInCurrentChunk
+        if #available(macOS 15.0, *) { currentFile?.close() }
         currentFile = nil
         currentChunkURL = nil
         framesInCurrentChunk = 0
@@ -783,9 +784,13 @@ final class AmbientCaptureManager {
     // MARK: - Write + overlap (lock held)
 
     private func writeBufferLocked(_ buf: AVAudioPCMBuffer, firstLiveSampleDate: Date?) {
-        guard let file = currentFile else { return }
+        guard currentFile != nil else { return }
         do {
-            let writtenFrames = try writeAudioFile(file, buf)
+            // No local binding of the file: a rollover below must release it so
+            // AVAudioFile writes the WAV header before the chunk is handed on.
+            // Held here, the chunk shipped with a data size of 0 and the resident
+            // whisper-server rejected it ("failed to read audio data").
+            let writtenFrames = try writeAudioFile(currentFile!, buf)
             let normalizedWrittenFrames = min(writtenFrames, buf.frameLength)
             guard normalizedWrittenFrames > 0 else { return }
             framesInCurrentChunk += normalizedWrittenFrames
