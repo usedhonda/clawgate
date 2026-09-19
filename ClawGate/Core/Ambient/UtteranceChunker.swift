@@ -20,7 +20,7 @@ struct UtteranceChunker {
     static let sampleRate = 16_000
     static let frameSamples = 480                 // 30 ms
 
-    let minChunkSamples: Int                      // never cut before this (5 s)
+    let minChunkSamples: Int                      // never cut before this (20 s: whisper needs context)
     let maxChunkSamples: Int                      // always cut by this (30 s)
     let pauseSamples: Int                         // pause long enough to cut in (0.8 s)
     let forcedOverlapSamples: Int                 // overlap after a forced cut (1 s)
@@ -33,7 +33,7 @@ struct UtteranceChunker {
     private var noiseFloor: Double = 0.003
     private var pending: [Float] = []
 
-    init(minSeconds: Double = 5, maxSeconds: Double = 30, pauseSeconds: Double = 0.8, forcedOverlapSeconds: Double = 1) {
+    init(minSeconds: Double = 20, maxSeconds: Double = 30, pauseSeconds: Double = 0.8, forcedOverlapSeconds: Double = 1) {
         minChunkSamples = Int(minSeconds * Double(Self.sampleRate))
         maxChunkSamples = Int(maxSeconds * Double(Self.sampleRate))
         pauseSamples = Int(pauseSeconds * Double(Self.sampleRate))

@@ -32,15 +32,15 @@ final class UtteranceChunkerTests: XCTestCase {
 
     func testCutsInsideThePauseAfterAnUtterance() {
         var chunker = UtteranceChunker()
-        let found = cuts(tone(6) + silence(1.5) + tone(4), chunker: &chunker)
+        let found = cuts(tone(21) + silence(1.5) + tone(4), chunker: &chunker)
         XCTAssertEqual(found.count, 1)
-        XCTAssertEqual(found[0].at, 6.8, accuracy: 0.1)
+        XCTAssertEqual(found[0].at, 21.8, accuracy: 0.1)
         XCTAssertEqual(found[0].overlap, 0)
     }
 
     func testDoesNotCutAShortUtterance() {
         var chunker = UtteranceChunker()
-        XCTAssertTrue(cuts(tone(1.5) + silence(1) + tone(0.5), chunker: &chunker).isEmpty)
+        XCTAssertTrue(cuts(tone(8) + silence(1.5) + tone(8), chunker: &chunker).isEmpty)
     }
 
     func testContinuousSpeechIsForcedAtTheCapWithOverlap() {
