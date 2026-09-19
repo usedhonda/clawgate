@@ -109,10 +109,26 @@ final class AmbientTranscriber {
     /// Resident server for pause-aligned chunks; nil keeps the CLI-only path.
     var server: WhisperServer?
 
+    /// STT engine: "apple" (on-device SpeechTranscriber, the default: light on
+    /// memory and heat) or "whisper". Apple falls back to whisper when the OS or
+    /// its Japanese model is missing, or when a chunk fails.
+    static let engineKey = "clawgate.ambient.sttEngine"
+    var requestedEngine: String { UserDefaults.standard.string(forKey: Self.engineKey) ?? "apple" }
+    var activeEngine: String { requestedEngine == "apple" && AppleSpeechEngine.isAvailable ? "apple" : "whisper" }
+    private(set) var appleFallbacks = 0
+
     /// Transcribe a WAV chunk. `language` nil → auto-detect. `context` is the
     /// tail of what the same stream said just before; whisper reads the prompt
     /// as preceding text, so this carries the conversation across chunks.
-    func transcribe(chunk: URL, language: String? = nil, context: String? = nil) throws -> TranscriptionResult {
+    func transcribe(chunk: URL, language: String? = nil, context: String? = nil,
+                    turns: [SpeakerTurn]? = nil) throws -> TranscriptionResult {
+        if activeEngine == "apple" {
+            do {
+                return Self.classify(try AppleSpeechEngine.transcribe(chunk: chunk, turns: turns))
+            } catch {
+                appleFallbacks += 1   // keep the chunk: fall through to whisper
+            }
+        }
         let prompt = Self.prompt(base: self.prompt, context: context)
         if let server, FileManager.default.fileExists(atPath: model.path),
            let segments = server.transcribe(chunk: chunk, model: model, preset: preset,

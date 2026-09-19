@@ -69,6 +69,8 @@ final class AmbientController {
         /// Meet speaking-tile detection health from the extension, and how many
         /// Chrome-stream segments got a participant name versus stayed "相手".
         var meetingSpeakerSignal: String? = nil
+        var sttEngine: String? = nil
+        var appleFallbacks: Int = 0
         var namedSegments: Int = 0
         var unnamedSegments: Int = 0
     }
@@ -540,6 +542,8 @@ final class AmbientController {
                 systemTapDiagnostics: systemTap.diagnostics,
                 whisperServer: transcriber.server?.diagnostics,
                 meetingSpeakerSignal: meetingSpeakerSignal,
+                sttEngine: transcriber.activeEngine,
+                appleFallbacks: transcriber.appleFallbacks,
                 namedSegments: namedSegments,
                 unnamedSegments: unnamedSegments
             )
@@ -602,8 +606,13 @@ final class AmbientController {
                     return
                 }
                 let context = self.state.sync { self.transcriptContext[chunk.source.rawValue] }
-                let result = try self.transcriber.transcribe(chunk: chunk.url, context: context)
                 let inMeeting = self.state.sync { self.meetingActive }
+                // Apple's engine splits its text at speaker changes itself, so it
+                // needs the diarizer's turns before transcription, not after.
+                let appleEngine = self.transcriber.activeEngine == "apple"
+                let preTurns = (appleEngine && chunk.source == .mic && !inMeeting)
+                    ? self.diarizer.diarize(chunk: chunk.url) : nil
+                let result = try self.transcriber.transcribe(chunk: chunk.url, context: context, turns: preTurns)
                 let labeled: [TranscriptSegment]
                 if chunk.source == .system {
                     // Chrome never plays the owner back to themself: all of it is the other party.
@@ -615,8 +624,8 @@ final class AmbientController {
                 } else {
                     // Speaker labels (self/other) — fail-soft: nil turns leave
                     // segments unlabeled, transcription is never blocked.
-                    let turns = result.kept.isEmpty ? nil : self.diarizer.diarize(chunk: chunk.url)
-                    labeled = turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
+                    let turns = preTurns ?? (result.kept.isEmpty || appleEngine ? nil : self.diarizer.diarize(chunk: chunk.url))
+                    labeled = (appleEngine && preTurns != nil) ? result.kept : turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
                         ?? result.kept
                 }
                 // Stamp absolute utterance time: chunk start + in-chunk offset.
