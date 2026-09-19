@@ -56,6 +56,7 @@ final class SystemAudioTap {
     private var _wrapFailures = 0
     private var _convertFailures = 0
     private var _tapFormat = ""
+    private var _bufferCount = 0
 
     // Writer state, confined to ioQueue.
     private let recordFormat = AVAudioFormat(
@@ -95,7 +96,7 @@ final class SystemAudioTap {
     var lastError: String? { stateLock.withLock { _lastError } }
     var diagnostics: String {
         stateLock.withLock {
-            "callbacks=\(_ioCallbacks) framesIn=\(_framesIn) wrapFail=\(_wrapFailures) convertFail=\(_convertFailures) format=\(_tapFormat)"
+            "callbacks=\(_ioCallbacks) buffers=\(_bufferCount) framesIn=\(_framesIn) wrapFail=\(_wrapFailures) convertFail=\(_convertFailures) format=\(_tapFormat)"
         }
     }
 
@@ -246,7 +247,21 @@ final class SystemAudioTap {
 
     private func handleInput(_ input: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
         stateLock.withLock { _ioCallbacks += 1 }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: input, deallocator: nil),
+        // The aggregate carries the output device as its clock. When that device
+        // has a microphone (AirPods, a headset), its input stream arrives in the
+        // same list ahead of the tap, and wrapping the whole list in the tap's
+        // format fails. The tap's stream is the last buffer with its channels.
+        let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
+        stateLock.withLock { _bufferCount = list.count }
+        guard let tapBuffer = list.last(where: { $0.mNumberChannels == format.channelCount && $0.mDataByteSize > 0 }) else {
+            stateLock.withLock { _wrapFailures += 1 }
+            return
+        }
+        // Kept alive for the whole callback: the PCM buffer references it.
+        let single = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
+        single.pointee = AudioBufferList(mNumberBuffers: 1, mBuffers: tapBuffer)
+        defer { single.deallocate() }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: single, deallocator: nil),
               buffer.frameLength > 0 else {
             stateLock.withLock { _wrapFailures += 1 }
             return
