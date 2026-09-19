@@ -109,8 +109,11 @@ final class AmbientTranscriber {
     /// Resident server for pause-aligned chunks; nil keeps the CLI-only path.
     var server: WhisperServer?
 
-    /// Transcribe a WAV chunk. `language` nil → auto-detect.
-    func transcribe(chunk: URL, language: String? = nil) throws -> TranscriptionResult {
+    /// Transcribe a WAV chunk. `language` nil → auto-detect. `context` is the
+    /// tail of what the same stream said just before; whisper reads the prompt
+    /// as preceding text, so this carries the conversation across chunks.
+    func transcribe(chunk: URL, language: String? = nil, context: String? = nil) throws -> TranscriptionResult {
+        let prompt = Self.prompt(base: self.prompt, context: context)
         if let server, FileManager.default.fileExists(atPath: model.path),
            let segments = server.transcribe(chunk: chunk, model: model, preset: preset,
                                             prompt: prompt, language: language) {
@@ -174,6 +177,14 @@ final class AmbientTranscriber {
         }
         let segments = try Self.parse(data)
         return Self.classify(segments)
+    }
+
+    /// The fixed domain prompt followed by the previous chunk's last words
+    /// (capped: a long carried prompt invites whisper to repeat it).
+    static func prompt(base: String, context: String?, maxContextChars: Int = 120) -> String {
+        let tail = (context ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !tail.isEmpty else { return base }
+        return base + "\n" + String(tail.suffix(maxContextChars))
     }
 
     // MARK: - whisper.cpp JSON shape

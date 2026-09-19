@@ -111,6 +111,8 @@ final class AmbientController {
     private var meetingLastSeen: Date?
     private var meetingExpiryTimer: DispatchSourceTimer?
     private var recentSystemSegments: [TranscriptSegment] = []
+    /// Last words each stream said, carried into its next whisper call.
+    private var transcriptContext: [String: String] = [:]
     private var speakerIntervals: [SpeakerInterval] = []
     private var meetingSpeakerSignal: String?
     private var namedSegments = 0
@@ -593,10 +595,14 @@ final class AmbientController {
                         reason: "zero_audio",
                         segment: TranscriptSegment(startSeconds: 0, endSeconds: 0,
                                                    text: String(format: "(zero_audio chunk rms=%.6f)", rms)))])
-                    self.state.sync { self.skippedTotal += 1 }
+                    self.state.sync {
+                        self.skippedTotal += 1
+                        self.transcriptContext[chunk.source.rawValue] = nil
+                    }
                     return
                 }
-                let result = try self.transcriber.transcribe(chunk: chunk.url)
+                let context = self.state.sync { self.transcriptContext[chunk.source.rawValue] }
+                let result = try self.transcriber.transcribe(chunk: chunk.url, context: context)
                 let inMeeting = self.state.sync { self.meetingActive }
                 let labeled: [TranscriptSegment]
                 if chunk.source == .system {
@@ -654,6 +660,11 @@ final class AmbientController {
                             self.recentKeptTexts.append(prefix + seg.text)
                         }
                     }
+                    // Silence ends the thread of conversation, and dropping stale
+                    // context also stops a carried phrase from feeding a loop.
+                    self.transcriptContext[chunk.source.rawValue] = kept.isEmpty
+                        ? nil
+                        : kept.map(\.text).joined(separator: " ")
                     if self.recentKeptTexts.count > 40 {
                         self.recentKeptTexts.removeFirst(self.recentKeptTexts.count - 40)
                     }

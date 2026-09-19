@@ -45,7 +45,7 @@ final class WhisperServer {
             return nil
         }
         do {
-            let segments = try post(chunk: chunk)
+            let segments = try post(chunk: chunk, prompt: prompt)
             lock.withLock { consecutiveFailures = 0; served += 1 }
             return segments
         } catch {
@@ -168,7 +168,7 @@ final class WhisperServer {
         let segments: [Segment]
     }
 
-    private func post(chunk: URL) throws -> [TranscriptSegment] {
+    private func post(chunk: URL, prompt: String) throws -> [TranscriptSegment] {
         let audio = try Data(contentsOf: chunk)
         let boundary = "clawgate-\(UUID().uuidString)"
         var body = Data()
@@ -177,6 +177,7 @@ final class WhisperServer {
         }
         field("response_format", "verbose_json")
         field("temperature", "0.0")
+        field("prompt", prompt)
         body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"chunk.wav\"\r\nContent-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
         body.append(audio)
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)

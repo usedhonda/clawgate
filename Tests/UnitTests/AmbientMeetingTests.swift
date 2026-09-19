@@ -51,6 +51,21 @@ final class AmbientMeetingTests: XCTestCase {
         XCTAssertEqual(ordered, ["資料を共有しますね", "わかりました", "見えていますか", "それでは始めます"])
     }
 
+    // MARK: - Context carried across chunks
+
+    func testPromptAppendsOnlyTheTailOfThePreviousChunk() {
+        let long = String(repeating: "あ", count: 200) + "最後の言葉"
+        let prompt = AmbientTranscriber.prompt(base: "BASE", context: long)
+        XCTAssertTrue(prompt.hasPrefix("BASE\n"))
+        XCTAssertTrue(prompt.hasSuffix("最後の言葉"))
+        XCTAssertEqual(prompt.count, "BASE\n".count + 120)
+    }
+
+    func testNoContextLeavesTheBasePrompt() {
+        XCTAssertEqual(AmbientTranscriber.prompt(base: "BASE", context: nil), "BASE")
+        XCTAssertEqual(AmbientTranscriber.prompt(base: "BASE", context: "  "), "BASE")
+    }
+
     // MARK: - Speaker attribution from Meet's speaking tiles
 
     private typealias Interval = AmbientController.SpeakerInterval
