@@ -33,4 +33,29 @@ final class AppleSpeechEngineTests: XCTestCase {
         XCTAssertEqual(out.map(\.text), ["ながいぶん"])
         XCTAssertEqual(out.first?.speaker, "self")
     }
+
+    // MARK: - Detecting speech the Japanese model cannot handle
+
+    func testEnglishSpeechThroughTheJapaneseModelIsDetected() {
+        // Real lines from the 2026-09-21 English meeting's raw.jsonl.
+        XCTAssertTrue(AppleSpeechEngine.looksNonPrimary(
+            "Bene ofe thstoo theactoill o understand th Manatnaseone tinone Soeteatnat tis"))
+        XCTAssertTrue(AppleSpeechEngine.looksNonPrimary(
+            "So that is down wod you kings Iink wo was beasons byery reomingin prorteay was youre tenit"))
+        // The lowest-latin segment of that meeting (0.600), short and mixed.
+        XCTAssertTrue(AppleSpeechEngine.looksNonPrimary("Arennos Soapsファーストアクセ"))
+    }
+
+    func testJapaneseIsNeverDetectedAsAnotherLanguage() {
+        XCTAssertFalse(AppleSpeechEngine.looksNonPrimary(
+            "基本的にはちゃんと見れば、この子は昔やってたけど、今はそんなことないじゃん。"))
+        // The most latin-heavy real Japanese segment measured (0.370).
+        XCTAssertFalse(AppleSpeechEngine.looksNonPrimary(
+            "I tal yo Iil let younoとか言いたくなるけど、そういうのはダメって言われたらチャット GPT強すぎます。"))
+    }
+
+    func testShortRepliesStayBelowTheLengthFloor() {
+        XCTAssertFalse(AppleSpeechEngine.looksNonPrimary("OK, thanks"))
+        XCTAssertFalse(AppleSpeechEngine.looksNonPrimary(""))
+    }
 }

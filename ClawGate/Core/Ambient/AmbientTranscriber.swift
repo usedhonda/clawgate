@@ -30,6 +30,10 @@ struct SkippedSegment: Codable, Equatable {
 struct TranscriptionResult {
     let kept: [TranscriptSegment]
     let skipped: [SkippedSegment]
+    /// True when the engine already split its text at the diarizer's speaker
+    /// turns and stamped `speaker` on each segment (Apple's path). whisper's
+    /// segments arrive unlabeled and still need `AmbientDiarizer.label`.
+    var speakerLabeled = false
 }
 
 /// Named STT quality preset — noisy-room tuned defaults from
@@ -116,6 +120,9 @@ final class AmbientTranscriber {
     var requestedEngine: String { UserDefaults.standard.string(forKey: Self.engineKey) ?? "apple" }
     var activeEngine: String { requestedEngine == "apple" && AppleSpeechEngine.isAvailable ? "apple" : "whisper" }
     private(set) var appleFallbacks = 0
+    /// Chunks Apple transcribed as Japanese but that read as another language,
+    /// so they were re-run through whisper's language auto-detect.
+    private(set) var nonPrimaryChunks = 0
 
     /// Transcribe a WAV chunk. `language` nil → auto-detect. `context` is the
     /// tail of what the same stream said just before; whisper reads the prompt
@@ -124,7 +131,18 @@ final class AmbientTranscriber {
                     turns: [SpeakerTurn]? = nil) throws -> TranscriptionResult {
         if activeEngine == "apple" {
             do {
-                return Self.classify(try AppleSpeechEngine.transcribe(chunk: chunk, turns: turns))
+                let segments = try AppleSpeechEngine.transcribe(chunk: chunk, turns: turns)
+                // Apple's transcriber is locked to one language, so speech in
+                // another one comes back as garbled Japanese-model output (real
+                // example: "Bene ofe thstoo theactoill o understand th"). whisper
+                // detects the language itself, so hand those chunks to it.
+                if AppleSpeechEngine.looksNonPrimary(segments.map(\.text).joined()) {
+                    nonPrimaryChunks += 1
+                } else {
+                    var result = Self.classify(segments)
+                    result.speakerLabeled = turns != nil
+                    return result
+                }
             } catch {
                 appleFallbacks += 1   // keep the chunk: fall through to whisper
             }

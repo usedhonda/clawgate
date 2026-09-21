@@ -53,6 +53,32 @@ enum AppleSpeechEngine {
         return try outcome.get()
     }
 
+    /// Whether this text reads as a language other than the transcriber's.
+    ///
+    /// Apple's SpeechTranscriber is locked to one locale, and the Japanese model
+    /// fed English speech returns near-pure latin gibberish, so the script mix of
+    /// its own output is the cheapest possible detector — Japanese chunks cost
+    /// nothing extra. Measured over 984 real segments of at least `minScripted`
+    /// letters: the English meeting's output ran 0.600–1.000 latin, real Japanese
+    /// 0.000–0.381 (mean 0.007). The threshold sits below that gap on purpose.
+    /// A false positive is cheap — whisper detects the language itself and
+    /// transcribes Japanese just as well, so the only cost is a second pass —
+    /// while a false negative leaves the chunk as gibberish. Short replies
+    /// ("OK, thanks" inside a Japanese meeting) are below the length floor and
+    /// never trip it.
+    static func looksNonPrimary(_ text: String, threshold: Double = 0.4, minScripted: Int = 15) -> Bool {
+        var latin = 0, scripted = 0
+        for scalar in text.unicodeScalars {
+            if CharacterSet.whitespacesAndNewlines.contains(scalar) { continue }
+            if CharacterSet.punctuationCharacters.contains(scalar) { continue }
+            if CharacterSet.decimalDigits.contains(scalar) { continue }
+            scripted += 1
+            if (0x41...0x5A).contains(scalar.value) || (0x61...0x7A).contains(scalar.value) { latin += 1 }
+        }
+        guard scripted >= minScripted else { return false }
+        return Double(latin) / Double(scripted) >= threshold
+    }
+
     /// One timed piece of recognized text (Apple times each character).
     struct Piece: Equatable {
         let text: String

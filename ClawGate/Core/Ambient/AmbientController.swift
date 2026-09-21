@@ -71,6 +71,9 @@ final class AmbientController {
         var meetingSpeakerSignal: String? = nil
         var sttEngine: String? = nil
         var appleFallbacks: Int = 0
+        /// Chunks whose Apple (Japanese) transcript read as another language and
+        /// were re-run through whisper's language auto-detect.
+        var nonPrimaryChunks: Int = 0
         var namedSegments: Int = 0
         var unnamedSegments: Int = 0
     }
@@ -544,6 +547,7 @@ final class AmbientController {
                 meetingSpeakerSignal: meetingSpeakerSignal,
                 sttEngine: transcriber.activeEngine,
                 appleFallbacks: transcriber.appleFallbacks,
+                nonPrimaryChunks: transcriber.nonPrimaryChunks,
                 namedSegments: namedSegments,
                 unnamedSegments: unnamedSegments
             )
@@ -625,7 +629,7 @@ final class AmbientController {
                     // Speaker labels (self/other) — fail-soft: nil turns leave
                     // segments unlabeled, transcription is never blocked.
                     let turns = preTurns ?? (result.kept.isEmpty || appleEngine ? nil : self.diarizer.diarize(chunk: chunk.url))
-                    labeled = (appleEngine && preTurns != nil) ? result.kept : turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
+                    labeled = result.speakerLabeled ? result.kept : turns.map { AmbientDiarizer.label(segments: result.kept, with: $0) }
                         ?? result.kept
                 }
                 // Stamp absolute utterance time: chunk start + in-chunk offset.
