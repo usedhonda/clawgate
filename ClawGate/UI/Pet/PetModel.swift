@@ -2161,7 +2161,17 @@ final class PetModel: NSObject, ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
+                // Minutes must come back as strict JSON, so they ride the same
+                // structured request the Log pipeline uses: pinned model and,
+                // crucially, `nonprojection` — without it the reply is written
+                // in persona prose and the parser rejects it (seen 2026-09-22).
+                let runId: String
+                if source == Self.minutesSource {
+                    runId = try await wsClient.sendMessageAwaitingPetLogDispatchAck(
+                        prompt, sessionKey: sessionKey).runId
+                } else {
+                    runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
+                }
                 await MainActor.run {
                     guard var owner = self.sharedSummonOwner, owner.token == token else { return }
                     owner.runId = runId
@@ -2713,7 +2723,10 @@ final class PetModel: NSObject, ObservableObject {
             addNotificationEntry(text: "議事録ができました: \(minutes.title ?? record.title ?? "会議")",
                                  source: Self.minutesSource)
         } catch {
-            finishMinutes(id: id, state: "failed", error: "\(error)")
+            // Keep the head of what came back: without it "notJSON" says
+            // nothing about whether the model refused, chatted, or truncated.
+            let excerpt = text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)
+            finishMinutes(id: id, state: "failed", error: "\(error) — 返答: \(excerpt)")
         }
     }
 
