@@ -2659,6 +2659,13 @@ final class PetModel: NSObject, ObservableObject {
         pendingMinutesMeetingID = record.id
         markMinutes(id: record.id, state: "pending", error: nil, store: store)
         sendSummon(message, source: Self.minutesSource)
+        // sendSummon returns quietly when it cannot claim the slot. Without
+        // this check the meeting would stay `pending` forever and block every
+        // later request, since only one can be in flight.
+        if sharedSummonOwner?.source != Self.minutesSource {
+            pendingMinutesMeetingID = nil
+            finishMinutes(id: record.id, state: "failed", error: "送信できませんでした")
+        }
     }
 
     /// Every meeting on disk, newest first.
