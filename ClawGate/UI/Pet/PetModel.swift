@@ -2161,17 +2161,7 @@ final class PetModel: NSObject, ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                // Minutes must come back as strict JSON, so they ride the same
-                // structured request the Log pipeline uses: pinned model and,
-                // crucially, `nonprojection` — without it the reply is written
-                // in persona prose and the parser rejects it (seen 2026-09-22).
-                let runId: String
-                if source == Self.minutesSource {
-                    runId = try await wsClient.sendMessageAwaitingPetLogDispatchAck(
-                        prompt, sessionKey: sessionKey).runId
-                } else {
-                    runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
-                }
+                let runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
                 await MainActor.run {
                     guard var owner = self.sharedSummonOwner, owner.token == token else { return }
                     owner.runId = runId
