@@ -70,6 +70,11 @@ final class MeetingRecorder {
     init(store: MeetingStore = MeetingStore(), log: @escaping (String) -> Void = { _ in }) {
         self.store = store
         self.log = log
+        // A meeting left open by a crash or an app restart would otherwise stay
+        // open forever, and its transcript range would keep growing.
+        for closed in store.closeOpenMeetings() {
+            log("meeting closed on startup \(closed.id)")
+        }
     }
 
     enum Event: Equatable {
@@ -163,6 +168,22 @@ struct MeetingStore {
         let url = directory(for: id).appendingPathComponent("meeting.json")
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(MeetingRecord.self, from: data)
+    }
+
+    /// Ends any meeting still marked open, using the record's own last write as
+    /// the last sign of life. Returns what it closed.
+    @discardableResult
+    func closeOpenMeetings() -> [MeetingRecord] {
+        var closed: [MeetingRecord] = []
+        for var record in all() where record.isOpen {
+            let file = directory(for: record.id).appendingPathComponent("meeting.json")
+            let lastWrite = (try? FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+                .flatMap { $0 }?.timeIntervalSince1970
+            record.endedAt = max(record.startedAt, lastWrite ?? record.startedAt) + MeetingRecorder.tailSeconds
+            save(record)
+            closed.append(record)
+        }
+        return closed
     }
 
     /// Newest first.

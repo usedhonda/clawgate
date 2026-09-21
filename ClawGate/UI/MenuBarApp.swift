@@ -100,6 +100,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // toggling the avatar back on works without a restart.
         petWindowController = PetWindowController(model: petModel)
         petModel.start()
+        wireMeetingMinutes()
         petWindowController?.refreshMaximizedWindowSuppression()
         if petModel.isVisible {
             petWindowController?.show()
@@ -179,6 +180,25 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Clear menu so left-click goes back to toggle action
         DispatchQueue.main.async { [weak self] in
             self?.statusItem?.menu = nil
+        }
+    }
+
+    /// Minutes are written after a call ends. The wait covers the last chunk:
+    /// a chunk is up to 30s of audio and is only transcribed once it closes, so
+    /// asking any sooner would read a meeting that is still being written down.
+    private static let minutesAfterCallSeconds: TimeInterval = 90
+
+    private func wireMeetingMinutes() {
+        guard let ambient = runtime.ambient() else { return }
+        petModel.meetingTranscriptProvider = { [weak ambient] record in
+            ambient?.meetingTranscript(record) ?? []
+        }
+        ambient.onMeetingEnded = { [weak self] record in
+            // Called on the ambient state queue; the model is main-only.
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesAfterCallSeconds) {
+                guard let self, let fresh = MeetingStore().load(id: record.id) else { return }
+                self.petModel.requestMinutes(for: fresh)
+            }
         }
     }
 

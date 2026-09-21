@@ -2130,7 +2130,7 @@ final class PetModel: NSObject, ObservableObject {
         // token as the timeout, so started/timeout correlate in log show. Body-
         // free: fixed source + owner prefix only (no prompt/STT).
         Self.petLogTelemetry.info("sharedSummonStarted source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public)")
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.summonReplyTimeoutSeconds) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.replyTimeout(for: source)) { [weak self] in
             guard let self else { return }
             guard let owner = self.sharedSummonOwner,
                   owner.token == token, owner.source == source else { return }
@@ -2145,7 +2145,7 @@ final class PetModel: NSObject, ObservableObject {
             } else {
                 Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) slotReclaimed=1")
                 self.addSummonResult(
-                    text: "Error: no reply received within \(Int(Self.summonReplyTimeoutSeconds))s",
+                    text: "Error: no reply received within \(Int(Self.replyTimeout(for: source)))s",
                     source: source,
                     owner: owner)
             }
@@ -2601,7 +2601,101 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    // MARK: - Meeting minutes
+
+    /// Supplies a meeting's transcript when minutes are about to be asked for.
+    /// Set by the app, which owns the ambient controller.
+    var meetingTranscriptProvider: ((MeetingRecord) -> [TranscriptSegment])?
+    /// Bumped whenever a meeting record changes, so the Minutes tab reloads.
+    @Published private(set) var meetingsRevision = 0
+    /// The meeting whose minutes are in flight, if any.
+    private var pendingMinutesMeetingID: String?
+    /// Attempts per meeting, so a permanently busy slot gives up instead of
+    /// retrying forever.
+    private var minutesAttempts: [String: Int] = [:]
+
+    static let minutesSource = "minutes"
+    static let minutesMaxAttempts = 3
+    static let minutesRetrySeconds: TimeInterval = 120
+    /// Minutes are a long read of a whole meeting; the shared 180s watchdog is
+    /// sized for a one-line summon and would reclaim the slot mid-thought.
+    static let minutesReplyTimeoutSeconds: TimeInterval = 600
+
+    static func replyTimeout(for source: String) -> TimeInterval {
+        source == minutesSource ? minutesReplyTimeoutSeconds : summonReplyTimeoutSeconds
+    }
+
+    /// Ask for minutes of one meeting. Waits its turn rather than preempting:
+    /// a Log question the owner just asked matters more than a background write.
+    func requestMinutes(for record: MeetingRecord) {
+        guard let provider = meetingTranscriptProvider else { return }
+        let store = MeetingStore()
+        let segments = provider(record)
+        guard !segments.isEmpty else {
+            finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
+            return
+        }
+        let attempts = minutesAttempts[record.id, default: 0]
+        guard attempts < Self.minutesMaxAttempts else {
+            finishMinutes(id: record.id, state: "failed", error: "生成を \(Self.minutesMaxAttempts) 回試しましたが順番が空きませんでした")
+            return
+        }
+        guard connectionState == .connected, sessionKey != nil, !isSummonBusy, pendingMinutesMeetingID == nil else {
+            minutesAttempts[record.id] = attempts + 1
+            markMinutes(id: record.id, state: "pending", error: nil, store: store)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesRetrySeconds) { [weak self] in
+                guard let self, let fresh = MeetingStore().load(id: record.id) else { return }
+                guard fresh.minutesState == "pending" else { return }
+                self.requestMinutes(for: fresh)
+            }
+            return
+        }
+        let envelope = MeetingMinutesEnvelope.build(record: record, segments: segments)
+        guard let message = try? MeetingMinutesPrompt.buildMessage(envelope: envelope) else {
+            finishMinutes(id: record.id, state: "failed", error: "envelope を組み立てられませんでした")
+            return
+        }
+        minutesAttempts[record.id] = attempts + 1
+        pendingMinutesMeetingID = record.id
+        markMinutes(id: record.id, state: "pending", error: nil, store: store)
+        sendSummon(message, source: Self.minutesSource)
+    }
+
+    private func handleMinutesReply(_ text: String) {
+        guard let id = pendingMinutesMeetingID else { return }
+        pendingMinutesMeetingID = nil
+        guard let record = MeetingStore().load(id: id) else { return }
+        do {
+            guard let minutes = try MeetingMinutesParser.parse(text) else {
+                finishMinutes(id: id, state: "failed", error: "根拠となる発言が足りませんでした")
+                return
+            }
+            MeetingStore().saveMinutes(minutes, for: record)
+            finishMinutes(id: id, state: "ready", error: nil)
+            addNotificationEntry(text: "議事録ができました: \(minutes.title ?? record.title ?? "会議")",
+                                 source: Self.minutesSource)
+        } catch {
+            finishMinutes(id: id, state: "failed", error: "\(error)")
+        }
+    }
+
+    private func markMinutes(id: String, state: String, error: String?, store: MeetingStore = MeetingStore()) {
+        guard var record = store.load(id: id) else { return }
+        record.minutesState = state
+        record.minutesError = error
+        store.save(record)
+        meetingsRevision += 1
+    }
+
+    private func finishMinutes(id: String, state: String, error: String?) {
+        markMinutes(id: id, state: state, error: error)
+    }
+
     private func appendSummonEntry(text: String, source: String, parseAsStructured: Bool = false) {
+        if source == Self.minutesSource {
+            handleMinutesReply(text)
+            return
+        }
         if source == "log_scene_naming" {
             let names = Self.parseSceneNaming(text)
             for (number, name) in names {
