@@ -61,6 +61,17 @@ final class MeetingRecorderTests: XCTestCase {
         XCTAssertNil(recorder.current)
     }
 
+    func testAHandStartedMeetingEndsWhenItIsStopped() {
+        let recorder = MeetingRecorder(store: store)
+        recorder.heartbeat(inCall: true, source: "manual", now: at(1_000))
+        // No heartbeats arrive for a meeting in a room; the click is the end.
+        guard case .ended(let record) = recorder.heartbeat(inCall: false, now: at(4_600)) else {
+            return XCTFail("expected an end edge")
+        }
+        XCTAssertEqual(record.source, "manual")
+        XCTAssertEqual(record.endedAt, 4_600 + MeetingRecorder.tailSeconds)
+    }
+
     func testTitleDropsMeetsOwnChromeDecoration() {
         XCTAssertEqual(MeetingHeartbeatMeta.cleanTitle("Meet - Weekly sync", code: "abc-defg-hij"), "Weekly sync")
         XCTAssertEqual(MeetingHeartbeatMeta.cleanTitle("Weekly sync - Google Meet", code: nil), "Weekly sync")

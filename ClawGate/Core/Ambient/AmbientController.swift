@@ -352,6 +352,22 @@ final class AmbientController {
 
     // MARK: - Meetings
 
+    /// Start recording a meeting that Chrome cannot see — people in a room.
+    /// It deliberately does not touch `meetingActive`: that flag exists to run
+    /// the Chrome tap and is expired by the call heartbeat's TTL, which a
+    /// hand-started meeting never receives.
+    func startManualMeeting() {
+        state.async { self.meetings.heartbeat(inCall: true, source: "manual") }
+    }
+
+    /// End whichever meeting is open.
+    func endManualMeeting() {
+        state.async { self.handleMeetingEvent(self.meetings.heartbeat(inCall: false)) }
+    }
+
+    /// The meeting being recorded right now, if any.
+    func openMeeting() -> MeetingRecord? { state.sync { meetings.current } }
+
     /// Every recorded meeting, newest first.
     func meetingRecords() -> [MeetingRecord] { MeetingStore().all() }
 

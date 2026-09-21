@@ -110,7 +110,11 @@ final class MeetingRecorder {
             return .none
         }
         guard var record = current else { return .none }
-        record.endedAt = max(record.startedAt, lastSeen) + Self.tailSeconds
+        // A Meet call ends when its heartbeat has been silent for a while, so
+        // the last heartbeat is the last sign of life. A meeting ended by hand
+        // has no heartbeat: the click itself is that moment.
+        let lastAlive = record.source == "manual" ? t : lastSeen
+        record.endedAt = max(record.startedAt, lastAlive) + Self.tailSeconds
         current = nil
         lastSeen = 0
         store.save(record)

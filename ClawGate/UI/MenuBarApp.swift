@@ -150,6 +150,15 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 menu.addItem(withTitle: "⚪️ Start Recording", action: #selector(ambientStartStream), keyEquivalent: "")
             }
             menu.addItem(NSMenuItem.separator())
+            // Meetings in a room: Chrome cannot see those, so they are marked by
+            // hand. A Meet call marks itself and needs no menu item.
+            if ambient.openMeeting() != nil {
+                menu.addItem(withTitle: "⏹ 会議を終える", action: #selector(meetingEnd), keyEquivalent: "")
+            } else {
+                menu.addItem(withTitle: "📝 会議を記録する", action: #selector(meetingStart), keyEquivalent: "")
+            }
+            menu.addItem(withTitle: "📋 議事録を開く", action: #selector(meetingOpenMinutes), keyEquivalent: "")
+            menu.addItem(NSMenuItem.separator())
             let microphoneItem = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
             let microphoneMenu = NSMenu()
             let selectedUID = ambient.selectedMicDeviceUID
@@ -200,6 +209,21 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 self.petModel.requestMinutes(for: fresh)
             }
         }
+    }
+
+    @objc private func meetingStart() {
+        // Recording a meeting is pointless while the stream is off, so start it.
+        if runtime.ambient()?.snapshot().streaming == false {
+            runtime.ambient()?.startStream { _ in }
+        }
+        runtime.ambient()?.startManualMeeting()
+    }
+
+    @objc private func meetingEnd() { runtime.ambient()?.endManualMeeting() }
+
+    @objc private func meetingOpenMinutes() {
+        petModel.requestTab("minutes")
+        petWindowController?.show()
     }
 
     @objc private func ambientStartStream() {
