@@ -29,12 +29,13 @@ function makePage() {
   }
 
   const document = {
+    title: 'Meet - Weekly sync',
     querySelector: (sel) => (sel.includes('Leave call') && page.inCall ? {} : null),
     querySelectorAll: (sel) => ({ forEach: (fn) => (sel === '[data-participant-id]' ? page.tiles : []).forEach(fn) }),
   };
   const context = {
     document,
-    window: { addEventListener() {} },
+    window: { addEventListener() {}, location: { pathname: '/abc-defg-hij' } },
     chrome: { runtime: { sendMessage: (m) => sent.push(m) } },
     Date: { now: () => now },
     setInterval: (fn, ms) => intervals.push({ fn, ms }),
@@ -97,4 +98,32 @@ test('leaving the call closes open speakers and reports the end once', () => {
   p.heartbeat();
   assert.deepEqual(p.edges().map((e) => [e.name, e.speaking]), [['田中', true], ['田中', false]]);
   assert.equal(p.sent.filter((m) => m.inCall === false).length, 1);
+});
+
+test('the heartbeat carries the meeting code, title and everyone seen', () => {
+  const p = makePage();
+  p.page.tiles = [p.tile({ id: 'a', name: '田中', speaking: true })];
+  p.tick(250);
+  // 佐藤 joins later and 田中 leaves before the end; both belong in the roster.
+  p.page.tiles = [p.tile({ id: 'b', name: '佐藤' })];
+  p.tick(250);
+  p.heartbeat();
+  const meeting = JSON.parse(JSON.stringify(p.sent.filter((m) => m.meeting).pop().meeting));
+  assert.equal(meeting.code, 'abc-defg-hij');
+  assert.equal(meeting.title, 'Meet - Weekly sync');
+  assert.deepEqual(meeting.roster, ['田中', '佐藤']);
+});
+
+test('the roster is forgotten when the call ends', () => {
+  const p = makePage();
+  p.page.tiles = [p.tile({ id: 'a', name: '田中' })];
+  p.tick(250);
+  p.page.inCall = false;
+  p.heartbeat();
+  p.page.inCall = true;
+  p.page.tiles = [p.tile({ id: 'b', name: '佐藤' })];
+  p.tick(250);
+  p.heartbeat();
+  const meeting = JSON.parse(JSON.stringify(p.sent.filter((m) => m.meeting).pop().meeting));
+  assert.deepEqual(meeting.roster, ['佐藤']);
 });

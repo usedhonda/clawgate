@@ -820,13 +820,17 @@ final class BridgeCore {
         guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
         struct Edge: Decodable { let name: String; let speaking: Bool; let at: Double }  // at: unix ms
         struct Signal: Decodable { let tiles: Int; let named: Int; let knownClassHits: Int }
-        struct Body: Decodable { let inCall: Bool; let speakerEdge: Edge?; let signal: Signal? }
+        struct Meeting: Decodable { let code: String?; let title: String?; let roster: [String]? }
+        struct Body: Decodable { let inCall: Bool; let speakerEdge: Edge?; let signal: Signal?; let meeting: Meeting? }
         guard let parsed = try? JSONDecoder().decode(Body.self, from: body) else {
             let payload = ErrorPayload(code: "invalid_body", message: "expected {\"inCall\": Bool}",
                                        retriable: false, failedStep: "ambient", details: nil)
             return jsonResponse(status: .badRequest, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
-        c.meetingHeartbeat(inCall: parsed.inCall)
+        let meta = parsed.meeting.map {
+            MeetingHeartbeatMeta(code: $0.code, title: $0.title, roster: $0.roster ?? [])
+        }
+        c.meetingHeartbeat(inCall: parsed.inCall, meta: meta)
         if let edge = parsed.speakerEdge {
             c.meetingSpeakerEdge(name: edge.name, speaking: edge.speaking, at: edge.at / 1000)
         }

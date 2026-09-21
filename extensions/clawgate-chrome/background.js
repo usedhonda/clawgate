@@ -170,6 +170,7 @@ chrome.runtime.onMessage.addListener((message) => {
         inCall: message.inCall === true,
         ...(message.speakerEdge ? { speakerEdge: message.speakerEdge } : {}),
         ...(message.signal ? { signal: message.signal } : {}),
+        ...(message.meeting ? { meeting: message.meeting } : {}),
       }),
     }))
     .catch(() => undefined);

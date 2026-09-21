@@ -57,6 +57,17 @@
   const speaking = new Map();   // name -> last time seen lit (ms)
   let knownClassHits = 0;
   let lastSignal = { tiles: 0, named: 0 };
+  // Everyone whose tile was seen at any point in this call, so the minutes can
+  // list people who never spoke and people who joined late or left early.
+  let roster = new Set();
+
+  // The meeting code identifies the call, and a calendar entry's hangoutLink
+  // contains it, so the minutes can find the right entry without guessing from
+  // the clock.
+  function meetingCode() {
+    const path = window.location.pathname.replace(/^\//, '');
+    return /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/.test(path) ? path : null;
+  }
 
   function scanTiles() {
     const now = Date.now();
@@ -73,6 +84,7 @@
       const name = tileName(tile);
       if (!name) return;
       named += 1;
+      roster.add(name);
       if (tileSpeaking(tile)) {
         knownClassHits += 1;
         lit.add(name);
@@ -111,11 +123,16 @@
     if (!current && lastReported === false) return;
     lastReported = current;
     if (current) {
-      send({ inCall: true, signal: { ...lastSignal, knownClassHits } });
+      send({
+        inCall: true,
+        signal: { ...lastSignal, knownClassHits },
+        meeting: { code: meetingCode(), title: document.title, roster: [...roster] },
+      });
       knownClassHits = 0;
     } else {
       endAllSpeaking();
       send({ inCall: false });
+      roster = new Set();   // the next call in this tab starts with nobody
     }
   }
 
