@@ -2661,6 +2661,22 @@ final class PetModel: NSObject, ObservableObject {
         sendSummon(message, source: Self.minutesSource)
     }
 
+    /// Every meeting on disk, newest first.
+    func meetingList() -> [MeetingRecord] { MeetingStore().all() }
+
+    func minutes(for id: String) -> MeetingMinutes? { MeetingStore().loadMinutes(id: id) }
+
+    func meetingTranscript(for record: MeetingRecord) -> [TranscriptSegment] {
+        meetingTranscriptProvider?(record) ?? []
+    }
+
+    /// Ask again for a meeting whose minutes failed, or replace ones already
+    /// written. Attempts are reset: this is a fresh request by hand.
+    func regenerateMinutes(for record: MeetingRecord) {
+        minutesAttempts[record.id] = 0
+        requestMinutes(for: record)
+    }
+
     private func handleMinutesReply(_ text: String) {
         guard let id = pendingMinutesMeetingID else { return }
         pendingMinutesMeetingID = nil

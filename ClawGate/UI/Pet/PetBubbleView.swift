@@ -412,6 +412,7 @@ private final class PetTabHeaderNSView: NSView {
     private var buttons: [PetTabButton] = []
     private let tabs: [(title: String, id: String)] = [
         ("Log", "log"),
+        ("Minutes", "minutes"),
         ("Chat", "chat"),
         ("Summon", "summon"),
         ("Notifs", "notifications"),
@@ -577,6 +578,8 @@ struct PetChatContainerView: View {
                 LocalResultsView(model: model)
             case "log":
                 AmbientLogPetView(model: model)
+            case "minutes":
+                MeetingMinutesPetView(model: model)
             default:
                 NotificationListView(model: model)
             }
