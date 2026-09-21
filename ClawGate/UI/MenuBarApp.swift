@@ -202,6 +202,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         petModel.meetingTranscriptProvider = { [weak ambient] record in
             ambient?.meetingTranscript(record) ?? []
         }
+        ambient.onMinutesRequested = { [weak self] record in
+            DispatchQueue.main.async { self?.petModel.regenerateMinutes(for: record) }
+        }
         ambient.onMeetingEnded = { [weak self] record in
             // Called on the ambient state queue; the model is main-only.
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesAfterCallSeconds) {

@@ -900,6 +900,16 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
     }
 
+    /// Write (or rewrite) one meeting's minutes now.
+    func ambientMeetingMinutes(id: String) -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        guard c.requestMinutes(id: id) else {
+            let payload = ErrorPayload(code: "not_found", message: "meeting not found", retriable: false, failedStep: "ambient", details: nil)
+            return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+        }
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.meetingRecord(id: id), error: nil)))
+    }
+
     func tprojMsgDeliver(body: Data) -> HTTPResult {
         struct TprojMsgDeliverRequest: Codable {
             let session: String

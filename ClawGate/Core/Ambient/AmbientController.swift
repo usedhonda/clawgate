@@ -126,6 +126,8 @@ final class AmbientController {
     private lazy var meetings = MeetingRecorder(log: log)
     /// Set by the app to react when a call finishes (minutes generation).
     var onMeetingEnded: ((MeetingRecord) -> Void)?
+    /// Set by the app to write minutes for a meeting on demand.
+    var onMinutesRequested: ((MeetingRecord) -> Void)?
     static let meetingHeartbeatTTL: TimeInterval = 30
     /// Chrome chunks wait this long so speaking edges for their span arrive first.
     static let speakerEdgeWaitSeconds = 3
@@ -363,6 +365,15 @@ final class AmbientController {
     /// End whichever meeting is open.
     func endManualMeeting() {
         state.async { self.handleMeetingEvent(self.meetings.heartbeat(inCall: false)) }
+    }
+
+    /// Ask for a meeting's minutes to be written now. Returns false when there
+    /// is no such meeting or nothing is listening.
+    @discardableResult
+    func requestMinutes(id: String) -> Bool {
+        guard let record = meetingRecord(id: id), let handler = onMinutesRequested else { return false }
+        handler(record)
+        return true
     }
 
     /// The meeting being recorded right now, if any.
