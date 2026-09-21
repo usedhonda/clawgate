@@ -369,7 +369,10 @@ final class AmbientLogModel: ObservableObject {
     @Published var selectedDay: Date
     var sceneNames: [String: String] = [:]
     private var requestedNamingDay: Date?
-    private let timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+    /// The log reads in the timezone the Mac is actually in: it decides the day
+    /// boundary and every HH:mm label, so a pinned zone makes both wrong the
+    /// moment the owner travels.
+    private let timeZone = TimeZone.current
     // D21: computed (not a lazy var) so the background query build never races a
     // first-access lazy initialization — `Calendar`/`TimeZone` are value types,
     // so a fresh local copy per access is thread-safe with no shared mutation.
@@ -416,7 +419,7 @@ final class AmbientLogModel: ObservableObject {
 
     init() {
         var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "Asia/Tokyo") ?? .current
+        cal.timeZone = TimeZone.current
         selectedDay = cal.startOfDay(for: Date())
         let size = min(max(ConfigStore().load().ambientLogFontSize, petLogMinFontSize), petLogMaxFontSize)
         fontSize = size
