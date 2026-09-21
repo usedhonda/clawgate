@@ -122,6 +122,10 @@ final class AmbientController {
     private var meetingSpeakerSignal: String?
     private var namedSegments = 0
     private var unnamedSegments = 0
+    /// Durable record of each call, so minutes can be made of it afterwards.
+    private lazy var meetings = MeetingRecorder(log: log)
+    /// Set by the app to react when a call finishes (minutes generation).
+    var onMeetingEnded: ((MeetingRecord) -> Void)?
     static let meetingHeartbeatTTL: TimeInterval = 30
     /// Chrome chunks wait this long so speaking edges for their span arrive first.
     static let speakerEdgeWaitSeconds = 3
@@ -262,15 +266,23 @@ final class AmbientController {
 
     // MARK: - Google Meet (second stream)
 
-    /// Heartbeat from the Chrome extension: `inCall` while a Meet call is up.
-    func meetingHeartbeat(inCall: Bool) {
+    /// Heartbeat from the Chrome extension: `inCall` while a Meet call is up,
+    /// with whatever the page can tell us about the meeting itself.
+    func meetingHeartbeat(inCall: Bool, meta: MeetingHeartbeatMeta? = nil) {
         state.async {
             let wasActive = self.meetingActive
             self.meetingActive = inCall
             self.meetingLastSeen = inCall ? Date() : nil
             if wasActive != inCall { self.log("ambient meeting \(inCall ? "started" : "ended")") }
+            self.handleMeetingEvent(self.meetings.heartbeat(inCall: inCall, meta: meta))
             self.reconcileSystemTapLocked()
         }
+    }
+
+    /// Called on `state` for every meeting lifecycle edge.
+    private func handleMeetingEvent(_ event: MeetingRecorder.Event) {
+        guard case .ended(let record) = event else { return }
+        onMeetingEnded?(record)
     }
 
     /// A Meet tile started or stopped showing its speaking indicator.
@@ -334,7 +346,34 @@ final class AmbientController {
         meetingActive = false
         meetingLastSeen = nil
         log("ambient meeting ended (no heartbeat for \(Int(Self.meetingHeartbeatTTL))s)")
+        handleMeetingEvent(meetings.heartbeat(inCall: false))
         reconcileSystemTapLocked()
+    }
+
+    // MARK: - Meetings
+
+    /// Every recorded meeting, newest first.
+    func meetingRecords() -> [MeetingRecord] { MeetingStore().all() }
+
+    func meetingRecord(id: String) -> MeetingRecord? { MeetingStore().load(id: id) }
+
+    /// What was said during a meeting, read back out of the session transcripts.
+    /// The end is trimmed so a meeting never reaches into the one after it.
+    func meetingTranscript(_ record: MeetingRecord, now: Date = Date()) -> [TranscriptSegment] {
+        let end = Self.trimmedEnd(of: record, against: meetingRecords(), now: now.timeIntervalSince1970)
+        return AmbientStorage.segmentsInRange(start: record.startedAt, end: end)
+    }
+
+    /// A meeting's transcript runs `tailSeconds` past its last heartbeat, but
+    /// back-to-back calls must not swallow each other's opening, so the tail
+    /// stops at the next meeting's start.
+    static func trimmedEnd(of record: MeetingRecord, against all: [MeetingRecord], now: Double) -> Double {
+        let end = record.endedAt ?? now
+        let nextStart = all
+            .filter { $0.id != record.id && $0.startedAt > record.startedAt }
+            .map(\.startedAt)
+            .min()
+        return min(end, nextStart ?? end)
     }
 
     /// A microphone segment that repeats what Chrome played a moment earlier is

@@ -985,6 +985,23 @@ enum AmbientStorage {
                                                  window: (capEpoch, anchorEpoch)))
     }
 
+    /// Segments whose utterance time falls inside `[start, end)`, from the same
+    /// canonical snapshots as every other read. Used for a meeting, whose range
+    /// comes from the call itself and can straddle a day boundary.
+    static func segmentsInRange(start: Double, end: Double,
+                                sessionsRoot: URL = AmbientStorage.sessionsRoot) -> [TranscriptSegment] {
+        let (snaps, _) = canonicalSnapshots(sessionsRoot: sessionsRoot)
+        var out: [TranscriptSegment] = []
+        for snap in snaps {
+            for seg in snap.dated {
+                guard let at = seg.capturedAt, at >= start, at < end else { continue }
+                out.append(seg)
+            }
+        }
+        out.sort { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
+        return out
+    }
+
     /// D159/D163/A3-25 explicit path (A3-01): the day's segments plus typed source
     /// issues, derived from the SAME canonical snapshots as display/scan so an
     /// explicit scene selection fails closed on a broken/undated source and never

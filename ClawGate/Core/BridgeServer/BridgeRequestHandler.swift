@@ -126,6 +126,11 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
             let sessionID = components?.queryItems?.first(where: { $0.name == "session_id" })?.value ?? ""
             return core.ambientTranscript(sessionID: sessionID)
         },
+        RouteKey(.GET, "/v1/ambient/meetings"): { core, _, _, _ in core.ambientMeetings() },
+        RouteKey(.GET, "/v1/ambient/meeting/transcript"): { core, components, _, _ in
+            let id = components?.queryItems?.first(where: { $0.name == "id" })?.value ?? ""
+            return core.ambientMeetingTranscript(id: id)
+        },
     ]
 
     /// Canonical (method, path) table used for the 405/404 decision. Derived

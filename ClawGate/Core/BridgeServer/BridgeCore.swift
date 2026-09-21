@@ -878,6 +878,24 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: TranscriptResult(sessionID: sessionID, text: text), error: nil)))
     }
 
+    /// Every recorded Meet call, newest first.
+    func ambientMeetings() -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: c.meetingRecords(), error: nil)))
+    }
+
+    /// One meeting plus what was said during it.
+    func ambientMeetingTranscript(id: String) -> HTTPResult {
+        guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
+        guard let record = c.meetingRecord(id: id) else {
+            let payload = ErrorPayload(code: "not_found", message: "meeting not found", retriable: false, failedStep: "ambient", details: nil)
+            return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+        }
+        struct MeetingTranscript: Codable { let meeting: MeetingRecord; let segments: [TranscriptSegment] }
+        let result = MeetingTranscript(meeting: record, segments: c.meetingTranscript(record))
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: result, error: nil)))
+    }
+
     func tprojMsgDeliver(body: Data) -> HTTPResult {
         struct TprojMsgDeliverRequest: Codable {
             let session: String

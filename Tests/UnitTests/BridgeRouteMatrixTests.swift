@@ -11,7 +11,7 @@ import XCTest
 /// route change) is provably behavior-preserving.
 final class BridgeRouteMatrixTests: XCTestCase {
 
-    /// Canonical expected route table (37 entries). Any add/remove/method
+    /// Canonical expected route table (39 entries). Any add/remove/method
     /// change to `BridgeRequestHandler.routes` breaks this freeze.
     private static let expectedRoutes: [(HTTPMethod, String)] = [
         (.GET, "/v1/health"),
@@ -52,6 +52,8 @@ final class BridgeRouteMatrixTests: XCTestCase {
         (.POST, "/v1/ambient/capture/_simulate_wedge"),
         (.GET, "/v1/ambient/sessions"),
         (.GET, "/v1/ambient/transcript"),
+        (.GET, "/v1/ambient/meetings"),
+        (.GET, "/v1/ambient/meeting/transcript"),
     ]
 
     /// Routes reachable via the in-process federation switch
@@ -97,7 +99,7 @@ final class BridgeRouteMatrixTests: XCTestCase {
         let expected = Set(Self.expectedRoutes.map { Self.key($0.0, $0.1) })
         XCTAssertEqual(
             BridgeRequestHandler.routes.count, Self.expectedRoutes.count,
-            "route count drift (expected 37)"
+            "route count drift (expected 39)"
         )
         XCTAssertEqual(
             actual, expected,
@@ -115,7 +117,7 @@ final class BridgeRouteMatrixTests: XCTestCase {
     /// Replicates the predicate used by `BridgeRequestHandler.handleRequest`:
     /// a known path invoked with an unsupported method returns 405; an unknown
     /// path returns 404. Driving it off the frozen table locks the observable
-    /// contract for all 37 routes without needing a live NIO channel.
+    /// contract for all 39 routes without needing a live NIO channel.
     func testMethodMismatchAnd404Matrix() {
         let routes = BridgeRequestHandler.routes
         let knownPaths = Set(routes.map(\.1))
