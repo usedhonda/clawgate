@@ -2665,6 +2665,21 @@ final class PetModel: NSObject, ObservableObject {
         if sharedSummonOwner?.source != Self.minutesSource {
             pendingMinutesMeetingID = nil
             finishMinutes(id: record.id, state: "failed", error: "送信できませんでした")
+            return
+        }
+        armMinutesWatchdog(id: record.id)
+    }
+
+    /// The shared summon's own watchdog only fires while it still owns the
+    /// slot, so a reply lost across a gateway restart (the slot is released by
+    /// the disconnect) would leave the meeting pending forever and block every
+    /// later request. This one is keyed on the meeting alone. Observed for real
+    /// on 2026-09-22, when a request went out mid-restart.
+    private func armMinutesWatchdog(id: String) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesReplyTimeoutSeconds + 30) { [weak self] in
+            guard let self, self.pendingMinutesMeetingID == id else { return }
+            self.pendingMinutesMeetingID = nil
+            self.finishMinutes(id: id, state: "failed", error: "返事が返ってきませんでした")
         }
     }
 
