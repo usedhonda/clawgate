@@ -767,7 +767,7 @@ final class BridgeCore {
     /// redacted in the unified log here.
     func debugReminders() -> HTTPResult {
         let traces = ReminderReadoutService.shared.recentTracesMerged()
-        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: traces, error: nil)))
+        return jsonResponse(status: .ok, body: encodeWithISODates(APIResponse(ok: true, result: traces, error: nil)))
     }
 
     /// Live view of every registered Gateway WS socket (Pet + Ambient
@@ -785,7 +785,7 @@ final class BridgeCore {
             sem.signal()
         }
         _ = sem.wait(timeout: .now() + 5)
-        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: snapshots, error: nil)))
+        return jsonResponse(status: .ok, body: encodeWithISODates(APIResponse(ok: true, result: snapshots, error: nil)))
     }
 
     func resetLineBaseline() -> HTTPResult {
@@ -1675,6 +1675,17 @@ final class BridgeCore {
 
     private func encode<T: Codable>(_ value: T) -> Data {
         (try? jsonEncoder.encode(value)) ?? Data("{\"ok\":false}".utf8)
+    }
+
+    /// Same as `encode`, but dates come out as ISO-8601 instead of a raw
+    /// `timeIntervalSinceReferenceDate` number. Only the human-facing debug
+    /// routes use it: `jsonEncoder` is shared by every wire payload, and the
+    /// date form there is part of contracts the peers already parse.
+    private func encodeWithISODates<T: Codable>(_ value: T) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        return (try? encoder.encode(value)) ?? Data("{\"ok\":false}".utf8)
     }
 
     private func jsonResponse(status: HTTPResponseStatus, body: Data, traceID: String? = nil) -> HTTPResult {

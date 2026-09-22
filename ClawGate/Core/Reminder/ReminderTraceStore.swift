@@ -48,8 +48,16 @@ enum ReminderTraceStore {
 
     /// `(reminderId, at)` as a single string key — the identity the store
     /// dedupes on, shared with `ReminderReadoutService.recentTracesMerged`.
+    ///
+    /// `at` is rounded to whole seconds on purpose: the on-disk form is
+    /// ISO-8601, which carries no sub-second part, so a trace still held in
+    /// memory (full precision) and its own line on disk would otherwise key
+    /// differently and the merged view would show the same reminder twice.
+    /// Two genuinely distinct traces for one reminder id inside the same
+    /// second do not occur — an id is claimed in `ReminderMemory` before it
+    /// is spoken.
     static func dedupeKey(_ trace: ReminderTrace) -> String {
-        "\(trace.reminderId ?? "")|\(trace.at.timeIntervalSince1970)"
+        "\(trace.reminderId ?? "")|\(trace.at.timeIntervalSince1970.rounded(.down))"
     }
 
     private static func fileURL(for date: Date, root: URL) -> URL {

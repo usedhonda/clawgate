@@ -361,6 +361,29 @@ final class ReminderReadoutTests: XCTestCase {
         XCTAssertEqual(merged[0].reminderId, "disk-only")
     }
 
+    /// Regression for the duplicate row seen on `/v1/debug/reminders` on
+    /// 2026-09-22: the in-memory trace keeps sub-second precision, its own
+    /// line on disk is ISO-8601 (whole seconds), so a key built from the raw
+    /// interval made one reminder look like two.
+    func testTheMergedViewShowsOneRowWhenMemoryAndDiskHoldTheSameTrace() throws {
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let root = tempTraceRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let svc = service(suite: suite, traceStoreRoot: root)
+        let fractional = now.addingTimeInterval(0.482381)
+
+        XCTAssertTrue(svc.handle(payload(), now: fractional))
+
+        XCTAssertEqual(svc.recentTraces().count, 1)
+        XCTAssertEqual(ReminderTraceStore.recent(now: fractional, root: root).count, 1)
+        let merged = svc.recentTracesMerged()
+        XCTAssertEqual(merged.count, 1)
+        // Memory wins for the same key, so the full-precision time survives.
+        XCTAssertEqual(merged[0].at.timeIntervalSince1970,
+                       fractional.timeIntervalSince1970, accuracy: 0.0001)
+    }
+
     func testANonReminderPayloadIsTracedAsIgnored() throws {
         let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
         defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
