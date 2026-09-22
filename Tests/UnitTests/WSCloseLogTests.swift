@@ -18,11 +18,12 @@ final class WSCloseLogTests: XCTestCase {
     }
 
     private func entry(role: String, connectedAt: Date?, closedAt: Date,
-                       code: Int? = nil) -> WSCloseLog.Entry {
+                       code: Int? = nil, reason: String = "quit") -> WSCloseLog.Entry {
         WSCloseLog.Entry(
             role: role, pid: 4242,
             connectedAt: connectedAt, closedAt: closedAt,
             durationSeconds: connectedAt.map { closedAt.timeIntervalSince($0) },
+            reason: reason,
             observedCloseCode: code, connectAttempts: 1, generation: 3)
     }
 
@@ -58,6 +59,23 @@ final class WSCloseLogTests: XCTestCase {
 
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].durationSeconds, 42)
+    }
+
+    /// The path that closed the socket has to be on the row: a 1005 seen on the
+    /// quit path and a 1005 seen from a watchdog mean different things, and
+    /// without this the observed code has to be attributed by guesswork.
+    func testTheClosingPathIsRecordedAlongsideTheCode() throws {
+        let t = Date(timeIntervalSince1970: 1_790_000_000)
+        WSCloseLog.append(entry(role: "pet", connectedAt: t, closedAt: t + 7.5,
+                                code: 1005, reason: "quit"), root: root)
+        WSCloseLog.append(entry(role: "pet", connectedAt: t + 10, closedAt: t + 120,
+                                code: 1006, reason: "frame-watchdog"), root: root)
+
+        let rows = WSCloseLog.recent(now: t, root: root)
+
+        XCTAssertEqual(rows.map(\.reason), ["quit", "frame-watchdog"])
+        XCTAssertEqual(rows[0].observedCloseCode, 1005)
+        XCTAssertEqual(rows[1].observedCloseCode, 1006)
     }
 
     /// A connect that never completed is worth a line too, and a nil duration

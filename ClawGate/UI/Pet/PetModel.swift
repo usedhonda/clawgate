@@ -281,7 +281,7 @@ final class PetModel: NSObject, ObservableObject {
         eventTask = nil
         let done = DispatchSemaphore(value: 0)
         Task {
-            await wsClient.disconnect()
+            await wsClient.disconnect(reason: "quit")
             done.signal()
         }
         _ = done.wait(timeout: .now() + timeout)

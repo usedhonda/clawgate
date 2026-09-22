@@ -19,6 +19,12 @@ enum WSCloseLog {
         let connectedAt: Date?
         let closedAt: Date
         let durationSeconds: Double?
+        /// Which path closed it: "quit", "frame-watchdog", "health-timeout",
+        /// "health-send-failed", "receive-failed", "handshake-timeout",
+        /// "requested". Without this, the observed close code cannot be
+        /// attributed to a path — a 1005 on the quit path and a 1005 from a
+        /// watchdog mean completely different things.
+        let reason: String
         /// The code on the task before this side cancelled: 1006 means it was
         /// already gone, 1001 means an intentional close. See
         /// `OpenClawWSClient.lastObservedCloseCode`.

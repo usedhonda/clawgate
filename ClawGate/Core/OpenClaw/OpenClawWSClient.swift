@@ -226,14 +226,18 @@ actor OpenClawWSClient {
             guard stuck else { return }
             logger.warning("Handshake timeout — no challenge in 10s")
             ws?.cancel(with: .abnormalClosure, reason: "handshake timeout".data(using: .utf8))
-            await self.teardown()
+            await self.teardown(reason: "handshake-timeout")
         }
 
         return stream
     }
 
-    func disconnect() {
-        teardown()
+    /// `reason` is recorded in the close log, so a row can say whether this
+    /// socket was closed on the way out of the app or by one of the watchdogs.
+    /// Without it, the code observed on the task (1001 vs 1005 vs 1006) cannot
+    /// be attributed to a path and has to be guessed at.
+    func disconnect(reason: String = "requested") {
+        teardown(reason: reason)
     }
 
     /// Poll Gateway's HTTP /ready endpoint with exponential backoff until 200 OK or total ~60s elapsed.
@@ -280,7 +284,7 @@ actor OpenClawWSClient {
         throw OpenClawError.connectionFailed("Gateway not ready within \(Int(maxElapsed))s")
     }
 
-    private func teardown() {
+    private func teardown(reason: String) {
         // Captured before the fields below are cleared: this connection's own
         // start, and the generation as it was while it was alive. The log line
         // written near the end of this function needs both.
@@ -318,6 +322,7 @@ actor OpenClawWSClient {
                 connectedAt: openedAt,
                 closedAt: closedAt,
                 durationSeconds: openedAt.map { closedAt.timeIntervalSince($0) },
+                reason: reason,
                 observedCloseCode: lastObservedCloseCode,
                 connectAttempts: connectAttempts,
                 generation: closingGeneration))
@@ -577,7 +582,7 @@ actor OpenClawWSClient {
             } catch {
                 guard connectionGeneration == gen else { return }
                 if isConnected {
-                    teardown()
+                    teardown(reason: "receive-failed")
                 }
                 break
             }
@@ -920,7 +925,7 @@ actor OpenClawWSClient {
         let age = Date().timeIntervalSince(floor)
         guard Self.isStale(lastFrameAge: age) else { return }
         logger.warning("Frame watchdog stale — role=\(self.role, privacy: .public) gen=\(gen, privacy: .public) frameAgeSeconds=\(Int(age), privacy: .public) — tearing down")
-        teardown()
+        teardown(reason: "frame-watchdog")
     }
 
     private func sendHealthCheck(generation gen: UInt64) async {
@@ -960,7 +965,7 @@ actor OpenClawWSClient {
             // and the connection sits in a false-.connected state forever
             // (observed: 10h silent drop with CLOSED socket, no reconnect).
             logger.warning("Health check failed: \(error.localizedDescription, privacy: .public) — tearing down")
-            teardown()
+            teardown(reason: "health-send-failed")
         }
     }
 
@@ -985,7 +990,7 @@ actor OpenClawWSClient {
         }
         logger.warning("Health timeout — tearing down connection")
         failHealthAckIfPending(requestId: requestId, error: OpenClawError.timeout)
-        teardown()
+        teardown(reason: "health-timeout")
     }
 
     // internal (not private): test seam for OpenClawWSClientHealthLivenessTests.

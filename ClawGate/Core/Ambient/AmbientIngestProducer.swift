@@ -171,7 +171,7 @@ actor AmbientIngestProducer {
     /// own view until pings stop being answered ~100s later.
     func closeSocket() async {
         drainTask?.cancel(); drainTask = nil
-        if let c = client { await c.disconnect() }
+        if let c = client { await c.disconnect(reason: "quit") }
         client = nil
         connected = false
     }
