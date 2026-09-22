@@ -132,6 +132,20 @@ actor OpenClawWSClient {
     private var pendingRequestId: String?
     private var handshakeComplete = false
 
+    /// Diagnostics counters, reported on `/v1/debug/ws`. `connectionGeneration`
+    /// cannot answer these: it is bumped by connect AND teardown, at the top of
+    /// connect before the handshake, so it counts attempts and failures
+    /// together and matches nothing the Gateway logs.
+    ///
+    /// `connectAttempts` counts every call that got as far as opening a
+    /// session. `closeFramesSent` counts only the teardowns that had a live
+    /// task to close, which is exactly the population that can appear as a
+    /// clean close in the Gateway's log. The difference between that and the
+    /// Gateway's total is the number of connections that died without anyone
+    /// saying so.
+    private(set) var connectAttempts = 0
+    private(set) var closeFramesSent = 0
+
     // MARK: - Connection
 
     /// Connect to local OpenClaw Gateway
@@ -141,6 +155,7 @@ actor OpenClawWSClient {
         }
 
         connectionGeneration &+= 1
+        connectAttempts += 1
         let gen = connectionGeneration
 
         authToken = token
@@ -258,6 +273,9 @@ actor OpenClawWSClient {
         pendingRequestId = nil
         failAllAcks(error: OpenClawError.connectionFailed("Disconnected"))
 
+        if webSocketTask != nil {
+            closeFramesSent += 1
+        }
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
 
@@ -946,6 +964,13 @@ actor OpenClawWSClient {
         let generation: UInt64
         let connectedAt: Date?
         let lastFrameAgeSeconds: Double?
+        /// Every counter above restarts at zero when the app does, so each row
+        /// carries who it was counted by. Without this, "the socket held all
+        /// night" and "the app restarted an hour ago" read identically.
+        let pid: Int32
+        let processStartedAt: Date
+        let connectAttempts: Int
+        let closeFramesSent: Int
     }
 
     func snapshot() -> WSClientSnapshot {
@@ -963,7 +988,11 @@ actor OpenClawWSClient {
             connected: isConnected,
             generation: connectionGeneration,
             connectedAt: connectedAt,
-            lastFrameAgeSeconds: frameAge
+            lastFrameAgeSeconds: frameAge,
+            pid: ProcessIdentity.pid,
+            processStartedAt: ProcessIdentity.startedAt,
+            connectAttempts: connectAttempts,
+            closeFramesSent: closeFramesSent
         )
     }
 
