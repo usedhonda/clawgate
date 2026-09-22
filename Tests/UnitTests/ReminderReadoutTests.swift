@@ -247,9 +247,118 @@ final class ReminderReadoutTests: XCTestCase {
 
     // MARK: - Observability: recent decisions
 
-    private func service(suite: String) -> ReminderReadoutService {
+    private func service(suite: String, traceStoreRoot: URL? = nil) -> ReminderReadoutService {
         let defaults = UserDefaults(suiteName: suite)!
-        return ReminderReadoutService(memory: ReminderMemory(defaults: defaults), receipts: { nil })
+        // Never let a trace test touch the real Application Support tree —
+        // default to a fresh temp dir per call.
+        let root = traceStoreRoot ?? tempTraceRoot()
+        return ReminderReadoutService(memory: ReminderMemory(defaults: defaults), receipts: { nil },
+                                      traceStoreRoot: root)
+    }
+
+    // MARK: - Persisted traces (ReminderTraceStore)
+
+    private func tempTraceRoot() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("clawgate-tests-reminder-store-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private func dayString(_ date: Date) -> String {
+        let fmt = DateFormatter()
+        fmt.calendar = Calendar(identifier: .gregorian)
+        fmt.timeZone = .current
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy-MM-dd"
+        return fmt.string(from: date)
+    }
+
+    func testAppendedTraceRoundTripsWithPidAndProcessStart() throws {
+        let root = tempTraceRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let trace = ReminderTrace(at: now, reminderId: "r1", kind: ReminderPayload.calendarImminent,
+                                  speakOn: "mac", expiresAt: nil, decision: "speak", outcome: nil,
+                                  receiptStatus: nil, receiptError: nil,
+                                  pid: 4242, processStartedAt: now.addingTimeInterval(-100))
+
+        ReminderTraceStore.append(trace, root: root)
+
+        let recent = ReminderTraceStore.recent(now: now, root: root)
+        XCTAssertEqual(recent, [trace])
+    }
+
+    func testTheLaterWrittenLineWinsForTheSameKey() throws {
+        let root = tempTraceRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let base = ReminderTrace(at: now, reminderId: "r2", kind: nil, speakOn: nil, expiresAt: nil,
+                                 decision: "speak", outcome: nil, receiptStatus: nil, receiptError: nil,
+                                 pid: 1, processStartedAt: now)
+        ReminderTraceStore.append(base, root: root)
+        var updated = base
+        updated.outcome = "played"
+        updated.receiptStatus = 200
+        ReminderTraceStore.append(updated, root: root)
+
+        let recent = ReminderTraceStore.recent(now: now, root: root)
+
+        XCTAssertEqual(recent.count, 1)
+        XCTAssertEqual(recent[0].outcome, "played")
+        XCTAssertEqual(recent[0].receiptStatus, 200)
+    }
+
+    func testAnUndecodableLineIsSkippedWithoutLosingTheGoodOnes() throws {
+        let root = tempTraceRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let good = ReminderTrace(at: now, reminderId: "r3", kind: nil, speakOn: nil, expiresAt: nil,
+                                 decision: "ignore", outcome: nil, receiptStatus: nil, receiptError: nil,
+                                 pid: 1, processStartedAt: now)
+        ReminderTraceStore.append(good, root: root)
+        let dayFile = root.appendingPathComponent("traces-\(dayString(now)).jsonl")
+        let handle = try XCTUnwrap(FileHandle(forWritingAtPath: dayFile.path))
+        handle.seekToEndOfFile()
+        handle.write(Data("not json at all\n".utf8))
+        try handle.close()
+
+        let recent = ReminderTraceStore.recent(now: now, root: root)
+
+        XCTAssertEqual(recent.count, 1)
+        XCTAssertEqual(recent[0].reminderId, "r3")
+    }
+
+    func testAServiceHandlingAReminderAlsoLeavesATraceOnDisk() throws {
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let root = tempTraceRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let svc = service(suite: suite, traceStoreRoot: root)
+
+        let handled = svc.handle(payload(), now: now)
+
+        XCTAssertTrue(handled)
+        let onDisk = ReminderTraceStore.recent(now: now, root: root)
+        XCTAssertEqual(onDisk.count, 1)
+        XCTAssertEqual(onDisk[0].reminderId, "calendar_imminent:evt-1:2026-09-22T13:30:00Z")
+        XCTAssertEqual(onDisk[0].decision, "speak")
+    }
+
+    func testTheMergedViewReturnsADiskOnlyTraceWhenMemoryIsEmpty() throws {
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let root = tempTraceRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let svc = service(suite: suite, traceStoreRoot: root)
+        // As if written by an earlier process, or lost from the ring buffer —
+        // nothing here comes from this instance's memory.
+        let diskOnly = ReminderTrace(at: now, reminderId: "disk-only", kind: nil, speakOn: nil,
+                                     expiresAt: nil, decision: "speak", outcome: "played",
+                                     receiptStatus: 200, receiptError: nil,
+                                     pid: 999, processStartedAt: now.addingTimeInterval(-500))
+        ReminderTraceStore.append(diskOnly, root: root)
+
+        XCTAssertTrue(svc.recentTraces().isEmpty)
+        let merged = svc.recentTracesMerged()
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].reminderId, "disk-only")
     }
 
     func testANonReminderPayloadIsTracedAsIgnored() throws {

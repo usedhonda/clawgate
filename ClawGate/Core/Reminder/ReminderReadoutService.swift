@@ -82,6 +82,13 @@ struct ReminderTrace: Codable, Equatable {
     var outcome: String?
     var receiptStatus: Int?
     var receiptError: String?
+    /// This process's pid and the moment it was first observed by this type
+    /// (a `static let`, so every trace this process writes carries the same
+    /// pair). Two lines for the same reminder with different pids prove a
+    /// second process ran between them; a gap in the trace with one pid
+    /// unchanged rules that out and points at an in-memory loss instead.
+    var pid: Int32
+    var processStartedAt: Date
 }
 
 /// Remembers which reminders have already been read, so a resend or a
@@ -145,22 +152,46 @@ final class ReminderReadoutService {
     private var traces: [ReminderTrace] = []
     private let tracesLock = NSLock()
     private static let maxTraces = 50
+    /// Where this instance mirrors every trace to disk. Injectable so tests
+    /// never touch the real Application Support tree.
+    private let traceStoreRoot: URL
+
+    /// This process's pid, and the moment this type was first touched —
+    /// captured once so every trace this process writes carries the same
+    /// pair. See `ReminderTrace.pid`/`processStartedAt`.
+    static let processPid = ProcessInfo.processInfo.processIdentifier
+    static let processStartedAt = Date()
 
     init(synthesizer: VoicevoxSynthesizer = VoicevoxSynthesizer(),
          memory: ReminderMemory = ReminderMemory(),
          receipts: @escaping () -> ReminderReceiptClient?,
-         log: @escaping (String) -> Void = { _ in }) {
+         log: @escaping (String) -> Void = { _ in },
+         traceStoreRoot: URL = ReminderTraceStore.root) {
         self.synthesizer = synthesizer
         self.memory = memory
         self.receipts = receipts
         self.log = log
+        self.traceStoreRoot = traceStoreRoot
     }
 
-    /// Newest first.
+    /// Newest first, from the in-memory ring buffer only (the fast path).
     func recentTraces() -> [ReminderTrace] {
         tracesLock.lock()
         defer { tracesLock.unlock() }
         return traces
+    }
+
+    /// Newest first, merged from memory and disk and deduped by
+    /// `(reminderId, at)` — so `/v1/debug/reminders` can still answer a
+    /// trace that memory has already lost, whatever the cause. What this
+    /// process still holds in memory is authoritative over what is on disk
+    /// for the same key.
+    func recentTracesMerged(limit: Int = maxTraces) -> [ReminderTrace] {
+        let diskTraces = ReminderTraceStore.recent(limit: limit, root: traceStoreRoot)
+        var byKey: [String: ReminderTrace] = [:]
+        for trace in diskTraces { byKey[ReminderTraceStore.dedupeKey(trace)] = trace }
+        for trace in recentTraces() { byKey[ReminderTraceStore.dedupeKey(trace)] = trace }
+        return Array(byKey.values.sorted { $0.at > $1.at }.prefix(limit))
     }
 
     private func recordTrace(_ trace: ReminderTrace) {
@@ -170,19 +201,27 @@ final class ReminderReadoutService {
             traces.removeLast(traces.count - Self.maxTraces)
         }
         tracesLock.unlock()
+        ReminderTraceStore.append(trace, root: traceStoreRoot)
     }
 
     /// Matches the most recent trace for `reminderId` — safe because a given
     /// id is claimed in `memory` before it is spoken, so at most one "speak"
-    /// trace exists per id for the life of this service.
+    /// trace exists per id for the life of this service. The updated copy is
+    /// also appended to disk as a new line — the store is append-only, never
+    /// rewritten in place.
     private func updateTrace(reminderId: String, outcome: String? = nil,
                               receiptStatus: Int?? = nil, receiptError: String?? = nil) {
         tracesLock.lock()
-        defer { tracesLock.unlock() }
-        guard let index = traces.firstIndex(where: { $0.reminderId == reminderId }) else { return }
+        guard let index = traces.firstIndex(where: { $0.reminderId == reminderId }) else {
+            tracesLock.unlock()
+            return
+        }
         if let outcome { traces[index].outcome = outcome }
         if let receiptStatus { traces[index].receiptStatus = receiptStatus }
         if let receiptError { traces[index].receiptError = receiptError }
+        let updated = traces[index]
+        tracesLock.unlock()
+        ReminderTraceStore.append(updated, root: traceStoreRoot)
     }
 
     private func receiptCompletion(for id: String) -> (Int?, String?) -> Void {
@@ -199,7 +238,8 @@ final class ReminderReadoutService {
         func trace(decision: String, outcome: String?, reminderId: String?) -> ReminderTrace {
             ReminderTrace(at: now, reminderId: reminderId, kind: payload.kind, speakOn: payload.speakOn,
                           expiresAt: payload.expiresAt, decision: decision, outcome: outcome,
-                          receiptStatus: nil, receiptError: nil)
+                          receiptStatus: nil, receiptError: nil,
+                          pid: Self.processPid, processStartedAt: Self.processStartedAt)
         }
         switch decision {
         case .ignore:

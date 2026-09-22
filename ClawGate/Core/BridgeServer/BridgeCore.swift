@@ -766,7 +766,7 @@ final class BridgeCore {
     /// that never sounds is otherwise invisible, since NSLog bodies are
     /// redacted in the unified log here.
     func debugReminders() -> HTTPResult {
-        let traces = ReminderReadoutService.shared.recentTraces()
+        let traces = ReminderReadoutService.shared.recentTracesMerged()
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: traces, error: nil)))
     }
 
