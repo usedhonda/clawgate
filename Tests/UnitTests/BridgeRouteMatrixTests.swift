@@ -39,6 +39,7 @@ final class BridgeRouteMatrixTests: XCTestCase {
         (.GET, "/v1/debug/tmux-direct"),
         (.GET, "/v1/debug/reminders"),
         (.GET, "/v1/debug/ws"),
+        (.GET, "/v1/debug/ws-closes"),
         (.GET, "/v1/tmux/prompt-state"),
         (.POST, "/v1/tproj-msg-deliver"),
         (.GET, "/v1/project-context-read"),
@@ -102,7 +103,7 @@ final class BridgeRouteMatrixTests: XCTestCase {
         let expected = Set(Self.expectedRoutes.map { Self.key($0.0, $0.1) })
         XCTAssertEqual(
             BridgeRequestHandler.routes.count, Self.expectedRoutes.count,
-            "route count drift (expected 42)"
+            "route count drift (expected 44)"
         )
         XCTAssertEqual(
             actual, expected,

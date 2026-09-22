@@ -63,6 +63,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         RouteKey(.GET, "/v1/debug/tmux-direct"): { core, _, _, _ in core.handleTmuxDirectDebug() },
         RouteKey(.GET, "/v1/debug/reminders"): { core, _, _, _ in core.debugReminders() },
         RouteKey(.GET, "/v1/debug/ws"): { core, _, _, _ in core.debugWS() },
+        RouteKey(.GET, "/v1/debug/ws-closes"): { core, _, _, _ in core.debugWSCloses() },
         RouteKey(.POST, "/v1/debug/inject"): { core, _, _, body in core.debugInject(body: body) },
         RouteKey(.POST, "/v1/oauth/safari-open"): { core, _, _, body in core.oauthSafariOpen(body: body) },
         RouteKey(.POST, "/v1/send"): { core, _, head, body in

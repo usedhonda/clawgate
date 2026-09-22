@@ -770,6 +770,18 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encodeWithISODates(APIResponse(ok: true, result: traces, error: nil)))
     }
 
+    /// Every Gateway socket this Mac closed today and yesterday, WITH its role.
+    /// The Gateway logs closes too, but both of this Mac's sockets share one
+    /// device id there, so its rows cannot be attributed to one of them — 72% of
+    /// a day's gaps between consecutive closes came out negative when read as a
+    /// single chain (2026-09-22). This is the same population, separated.
+    func debugWSCloses() -> HTTPResult {
+        let entries = WSCloseLog.recent()
+        return jsonResponse(status: .ok,
+                            body: encodeWithISODates(APIResponse(ok: true, result: entries,
+                                                                 error: nil)))
+    }
+
     /// Live view of every registered Gateway WS socket (Pet + Ambient
     /// ingest), for `/v1/debug/ws`. `OpenClawWSClient.snapshots()` is async
     /// (actor-isolated); this route handler is synchronous like the rest of

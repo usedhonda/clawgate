@@ -281,6 +281,11 @@ actor OpenClawWSClient {
     }
 
     private func teardown() {
+        // Captured before the fields below are cleared: this connection's own
+        // start, and the generation as it was while it was alive. The log line
+        // written near the end of this function needs both.
+        let openedAt = connectedAt
+        let closingGeneration = connectionGeneration
         connectionGeneration &+= 1
         isConnected = false
         handshakeComplete = false
@@ -301,6 +306,21 @@ actor OpenClawWSClient {
         // WE pass, so afterwards it can no longer say who closed first.
         if let observed = webSocketTask?.closeCode, observed != .invalid {
             lastObservedCloseCode = observed.rawValue
+        }
+        // One durable line per closed socket, with the role the Gateway's own
+        // log cannot attribute — see `WSCloseLog`. Written for a failed attempt
+        // too, where `connectedAt` is nil.
+        if webSocketTask != nil {
+            let closedAt = Date()
+            WSCloseLog.append(WSCloseLog.Entry(
+                role: role,
+                pid: ProcessIdentity.pid,
+                connectedAt: openedAt,
+                closedAt: closedAt,
+                durationSeconds: openedAt.map { closedAt.timeIntervalSince($0) },
+                observedCloseCode: lastObservedCloseCode,
+                connectAttempts: connectAttempts,
+                generation: closingGeneration))
         }
         // Counted as an attempt, not as a send: see `closeFramesSent`.
         if webSocketTask != nil {
