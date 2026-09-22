@@ -13,6 +13,9 @@ struct AppConfig: Codable {
     // General
     var debugLogging: Bool
 
+    // Jev (TypeSafe)
+    var jevEnabled: Bool
+
     // LINE
     var lineEnabled: Bool
     var lineDefaultConversation: String
@@ -66,6 +69,7 @@ struct AppConfig: Codable {
     static let `default` = AppConfig(
         nodeRole: .client,
         debugLogging: false,
+        jevEnabled: true,
         lineEnabled: true,
         lineDefaultConversation: "",
         linePollIntervalSeconds: 1,
@@ -95,6 +99,7 @@ struct AppConfig: Codable {
 final class ConfigStore {
     private enum Keys {
         static let debugLogging = "clawgate.debugLogging"
+        static let jevEnabled = "clawgate.jevEnabled"
         static let nodeRole = "clawgate.nodeRole"
         // Removed: includeMessageBodyInLogs (always-on, purged from UserDefaults on save)
         static let legacyIncludeMessageBodyInLogs = "clawgate.includeMessageBodyInLogs"
@@ -145,6 +150,9 @@ final class ConfigStore {
 
         if defaults.object(forKey: Keys.debugLogging) != nil {
             cfg.debugLogging = defaults.bool(forKey: Keys.debugLogging)
+        }
+        if defaults.object(forKey: Keys.jevEnabled) != nil {
+            cfg.jevEnabled = defaults.bool(forKey: Keys.jevEnabled)
         }
         if let roleRaw = defaults.string(forKey: Keys.nodeRole),
            let role = NodeRole(rawValue: roleRaw) {
@@ -243,6 +251,7 @@ final class ConfigStore {
 
     func save(_ cfg: AppConfig) {
         defaults.set(cfg.debugLogging, forKey: Keys.debugLogging)
+        defaults.set(cfg.jevEnabled, forKey: Keys.jevEnabled)
         defaults.removeObject(forKey: Keys.nodeRole)
         defaults.removeObject(forKey: Keys.legacyIncludeMessageBodyInLogs)
         defaults.set(cfg.lineEnabled, forKey: Keys.lineEnabled)

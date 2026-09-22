@@ -53,6 +53,9 @@ struct InlineSettingsView: View {
     @State private var gatewayState: ConnectivityState = .unknown
     @State private var probeTimer: Timer?
     @State private var tailscalePeers: [TailscalePeer] = []
+    @State private var draftJevKey: String = ""
+    @State private var jevStatus: String = ""
+    @State private var jevCheck: String = ""
 
     private var contentView: some View {
         VStack(alignment: .leading, spacing: PanelTheme.sectionSpacing) {
@@ -60,6 +63,7 @@ struct InlineSettingsView: View {
                 lineSection
             }
             gatewaySection
+            jevSection
             systemSection
             chromeSection
         }
@@ -101,11 +105,13 @@ struct InlineSettingsView: View {
             refreshConnectivity()
             loadTailscalePeers()
             startProbeTimer()
+            refreshJevStatus()
         }
         .onDisappear {
             stopProbeTimer()
         }
         .onChange(of: model.config.debugLogging) { _ in model.save() }
+        .onChange(of: model.config.jevEnabled) { _ in model.save() }
         .onChange(of: model.config.lineEnabled) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.lineDefaultConversation) { _ in model.save() }
         .onChange(of: model.config.linePollIntervalSeconds) { _ in model.save() }
@@ -200,6 +206,85 @@ struct InlineSettingsView: View {
                     .modifier(PanelInputModifier())
             }
         }
+    }
+
+    private var jevSection: some View {
+        PanelCard {
+            Text("Jev (TypeSafe)")
+                .font(PanelTheme.titleFont)
+                .foregroundStyle(PanelTheme.textPrimary)
+            Text("有効にすると、会話の文字起こしが TypeSafe 社の API に送られます（判定だけを返し、文章は生成しません）。")
+                .font(PanelTheme.bodyFont)
+                .foregroundStyle(PanelTheme.textSecondary)
+            fieldRow("API key") {
+                SecureField("sk-...", text: $draftJevKey)
+                    .textFieldStyle(.plain)
+                    .modifier(PanelInputModifier())
+                Button("保存") {
+                    try? JevKeyStore().save(draftJevKey)
+                    draftJevKey = ""
+                    refreshJevStatus()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                if JevKeyStore().isConfigured {
+                    Button("削除") {
+                        JevKeyStore().delete()
+                        refreshJevStatus()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            fieldRow("状態") {
+                Text(jevStatus)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textSecondary)
+            }
+            fieldRow("") {
+                Button("接続を確認") {
+                    jevCheck = "確認中…"
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        let result = JevClient().verifyKey()
+                        DispatchQueue.main.async {
+                            switch result {
+                            case .valid:
+                                jevCheck = "接続できました"
+                            case .invalid:
+                                jevCheck = "鍵が無効です（401/403）"
+                            case .unreachable(let reason):
+                                jevCheck = "到達できません: \(reason)"
+                            }
+                            refreshJevStatus()
+                        }
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!JevKeyStore().isConfigured)
+                Text(jevCheck)
+                    .font(PanelTheme.bodyFont)
+                    .foregroundStyle(PanelTheme.textSecondary)
+            }
+            Toggle("Jev を使う", isOn: $model.config.jevEnabled)
+        }
+    }
+
+    /// Rebuilds the status line from three facts: whether a key is on disk,
+    /// today's usage from the ledger, and whether the breaker has tripped —
+    /// never the key itself.
+    private func refreshJevStatus() {
+        guard JevKeyStore().isConfigured else {
+            jevStatus = "未設定"
+            return
+        }
+        let totals = JevLedger().daily(on: Date())
+        let cost = String(format: "$%.4f", totals.costUSD)
+        var status = "設定済み · 今日 \(totals.calls) 回 · \(cost)"
+        if JevBreaker().shouldSkip() {
+            status += " · 遮断中（失敗が続いたため一時停止）"
+        }
+        jevStatus = status
     }
 
     private func loadTailscalePeers() {

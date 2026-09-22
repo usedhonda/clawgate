@@ -15,6 +15,7 @@ final class ConfigStoreTests: XCTestCase {
 
         XCTAssertEqual(cfg.nodeRole, .client)
         XCTAssertEqual(cfg.debugLogging, false)
+        XCTAssertEqual(cfg.jevEnabled, true)
         XCTAssertEqual(cfg.lineDefaultConversation, "")
         XCTAssertEqual(cfg.linePollIntervalSeconds, 1)
         XCTAssertEqual(cfg.tmuxStatusBarURL, "ws://localhost:8080/ws/sessions")
@@ -34,6 +35,7 @@ final class ConfigStoreTests: XCTestCase {
 
         var cfg = AppConfig.default
         cfg.debugLogging = true
+        cfg.jevEnabled = false
         cfg.lineDefaultConversation = "Test User"
         cfg.linePollIntervalSeconds = 5
         cfg.tmuxSessionModes = ["cc:project-a": "autonomous", "cc:project-b": "observe"]
@@ -46,6 +48,7 @@ final class ConfigStoreTests: XCTestCase {
         let loaded = store.load()
 
         XCTAssertEqual(loaded.debugLogging, true)
+        XCTAssertEqual(loaded.jevEnabled, false)
         XCTAssertEqual(loaded.lineDefaultConversation, "Test User")
         XCTAssertEqual(loaded.linePollIntervalSeconds, 5)
         XCTAssertEqual(loaded.tmuxSessionModes["cc:project-a"], "autonomous")
