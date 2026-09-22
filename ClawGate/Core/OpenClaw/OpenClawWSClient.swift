@@ -312,8 +312,10 @@ actor OpenClawWSClient {
             lastObservedCloseCode = observed.rawValue
         }
         // One durable line per closed socket, with the role the Gateway's own
-        // log cannot attribute — see `WSCloseLog`. Written for a failed attempt
-        // too, where `connectedAt` is nil.
+        // log cannot attribute — see `WSCloseLog`. A teardown that finds no task
+        // at all writes nothing: there was no socket to have a lifetime. A
+        // connect that opened a task but never completed the handshake DOES get
+        // a row, with `connectedAt` nil.
         if webSocketTask != nil {
             let closedAt = Date()
             WSCloseLog.append(WSCloseLog.Entry(

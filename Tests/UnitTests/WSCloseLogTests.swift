@@ -91,6 +91,31 @@ final class WSCloseLogTests: XCTestCase {
         XCTAssertNil(rows[0].durationSeconds)
     }
 
+    /// Regression: `reason` was added as a required field, which made every line
+    /// written before it undecodable — the route went from two rows to zero, and
+    /// a log kept for diagnosis quietly lost its history.
+    func testALineWrittenBeforeReasonExistedStillDecodes() throws {
+        let closed = Date(timeIntervalSince1970: 1_790_000_000)
+        let day = DateFormatter()
+        day.calendar = Calendar(identifier: .gregorian)
+        day.timeZone = .current
+        day.locale = Locale(identifier: "en_US_POSIX")
+        day.dateFormat = "yyyy-MM-dd"
+        let url = root.appendingPathComponent("closes-\(day.string(from: closed)).jsonl")
+        let legacy = """
+        {"observedCloseCode":1005,"pid":91607,"connectAttempts":1,\
+        "connectedAt":"2026-09-22T15:44:49Z","closedAt":"2026-09-22T15:44:56Z",\
+        "durationSeconds":7.55,"generation":1,"role":"pet"}
+        """
+        try Data((legacy + "\n").utf8).write(to: url)
+
+        let rows = WSCloseLog.recent(now: closed, root: root)
+
+        XCTAssertEqual(rows.count, 1, "a row from before the field existed is still readable")
+        XCTAssertNil(rows[0].reason)
+        XCTAssertEqual(rows[0].observedCloseCode, 1005)
+    }
+
     func testAnUndecodableLineIsSkippedInsteadOfFailingTheRead() throws {
         let closed = Date(timeIntervalSince1970: 1_790_000_000)
         WSCloseLog.append(entry(role: "pet", connectedAt: closed - 5, closedAt: closed), root: root)

@@ -24,7 +24,13 @@ enum WSCloseLog {
         /// "requested". Without this, the observed close code cannot be
         /// attributed to a path — a 1005 on the quit path and a 1005 from a
         /// watchdog mean completely different things.
-        let reason: String
+        ///
+        /// Optional only for the lines written before it existed. Making it
+        /// required silently emptied the whole route: every earlier row failed
+        /// to decode and was skipped, so a log kept for diagnosis lost the two
+        /// rows it had. Any field added here later must be optional for the
+        /// same reason.
+        let reason: String?
         /// The code on the task before this side cancelled: 1006 means it was
         /// already gone, 1001 means an intentional close. See
         /// `OpenClawWSClient.lastObservedCloseCode`.
@@ -39,6 +45,10 @@ enum WSCloseLog {
 
     /// Never throws out: a failure to record must not affect the teardown that
     /// is calling this.
+    ///
+    /// Note what is NOT here: a teardown with no socket at all writes nothing,
+    /// so a connect that never opened a task leaves no row. The caller's guard
+    /// decides that; this function records whatever it is handed.
     static func append(_ entry: Entry, root: URL = WSCloseLog.root) {
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let encoder = JSONEncoder()
