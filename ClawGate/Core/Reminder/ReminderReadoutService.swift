@@ -24,10 +24,20 @@ struct ReminderReceiptClient {
                                      token: OpenClawGatewayInfo.load()?.token, log: log)
     }
 
-    func send(reminderId: String, outcome: String, at: Date = Date()) {
-        guard var components = URLComponents(string: "http://\(host):\(port)") else { return }
+    /// `completion` reports the receipt POST's own outcome (HTTP status, or the
+    /// transport error's class name) — used only to keep a diagnostic trace up
+    /// to date, never for control flow.
+    func send(reminderId: String, outcome: String, at: Date = Date(),
+              completion: ((Int?, String?) -> Void)? = nil) {
+        guard var components = URLComponents(string: "http://\(host):\(port)") else {
+            completion?(nil, "bad_host")
+            return
+        }
         components.path = "/api/reminder-receipt"
-        guard let url = components.url else { return }
+        guard let url = components.url else {
+            completion?(nil, "bad_url")
+            return
+        }
         let iso = ISO8601DateFormatter()
         iso.timeZone = TimeZone(identifier: "UTC")
         iso.formatOptions = [.withInternetDateTime]
@@ -45,14 +55,33 @@ struct ReminderReceiptClient {
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         URLSession.shared.dataTask(with: request) { _, response, error in
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let status = (response as? HTTPURLResponse)?.statusCode
             if let error {
                 log("reminder receipt failed \(reminderId) \(outcome): \(error)")
-            } else if !(200...299).contains(status) {
+                completion?(status, String(describing: type(of: error)))
+            } else if let status, !(200...299).contains(status) {
                 log("reminder receipt rejected \(reminderId) \(outcome): HTTP \(status)")
+                completion?(status, nil)
+            } else {
+                completion?(status, nil)
             }
         }.resume()
     }
+}
+
+/// One reminder payload's path through `ReminderReadoutService`, kept for
+/// after-the-fact diagnosis. No speech text, key, or other payload body ever
+/// goes in here — only ids and the agreed outcome vocabulary.
+struct ReminderTrace: Codable, Equatable {
+    var at: Date
+    var reminderId: String?
+    var kind: String?
+    var speakOn: String?
+    var expiresAt: String?
+    var decision: String
+    var outcome: String?
+    var receiptStatus: Int?
+    var receiptError: String?
 }
 
 /// Remembers which reminders have already been read, so a resend or a
@@ -93,6 +122,19 @@ final class ReminderReadoutService {
     /// clip has finished.
     private var player: AVAudioPlayer?
 
+    /// The one instance the app runs (a `private lazy var` on `PetModel`),
+    /// exposed so `BridgeCore` can serve `/v1/debug/reminders` without a
+    /// direct reference to `PetModel`. Weak: it must never keep the service
+    /// alive past whatever owns it.
+    static weak var shared: ReminderReadoutService?
+
+    /// Last 50 reminder decisions, newest first, for `/v1/debug/reminders`.
+    /// Never carries speech text or the receipt token — ids and the agreed
+    /// outcome vocabulary only.
+    private var traces: [ReminderTrace] = []
+    private let tracesLock = NSLock()
+    private static let maxTraces = 50
+
     init(synthesizer: VoicevoxSynthesizer = VoicevoxSynthesizer(),
          memory: ReminderMemory = ReminderMemory(),
          receipts: @escaping () -> ReminderReceiptClient?,
@@ -101,23 +143,68 @@ final class ReminderReadoutService {
         self.memory = memory
         self.receipts = receipts
         self.log = log
+        Self.shared = self
+    }
+
+    /// Newest first.
+    func recentTraces() -> [ReminderTrace] {
+        tracesLock.lock()
+        defer { tracesLock.unlock() }
+        return traces
+    }
+
+    private func recordTrace(_ trace: ReminderTrace) {
+        tracesLock.lock()
+        traces.insert(trace, at: 0)
+        if traces.count > Self.maxTraces {
+            traces.removeLast(traces.count - Self.maxTraces)
+        }
+        tracesLock.unlock()
+    }
+
+    /// Matches the most recent trace for `reminderId` — safe because a given
+    /// id is claimed in `memory` before it is spoken, so at most one "speak"
+    /// trace exists per id for the life of this service.
+    private func updateTrace(reminderId: String, outcome: String? = nil,
+                              receiptStatus: Int?? = nil, receiptError: String?? = nil) {
+        tracesLock.lock()
+        defer { tracesLock.unlock() }
+        guard let index = traces.firstIndex(where: { $0.reminderId == reminderId }) else { return }
+        if let outcome { traces[index].outcome = outcome }
+        if let receiptStatus { traces[index].receiptStatus = receiptStatus }
+        if let receiptError { traces[index].receiptError = receiptError }
+    }
+
+    private func receiptCompletion(for id: String) -> (Int?, String?) -> Void {
+        { [weak self] status, error in
+            self?.updateTrace(reminderId: id, receiptStatus: .some(status), receiptError: .some(error))
+        }
     }
 
     /// Entry point for a chat payload that may carry a reminder. Returns true
     /// when the payload was one (so the caller knows it was handled here).
     @discardableResult
     func handle(_ payload: ReminderPayload, now: Date = Date()) -> Bool {
-        switch ReminderReadoutDecider.decide(payload, now: now, seen: memory.ids(now: now)) {
+        let decision = ReminderReadoutDecider.decide(payload, now: now, seen: memory.ids(now: now))
+        func trace(decision: String, outcome: String?, reminderId: String?) -> ReminderTrace {
+            ReminderTrace(at: now, reminderId: reminderId, kind: payload.kind, speakOn: payload.speakOn,
+                          expiresAt: payload.expiresAt, decision: decision, outcome: outcome,
+                          receiptStatus: nil, receiptError: nil)
+        }
+        switch decision {
         case .ignore:
+            recordTrace(trace(decision: "ignore", outcome: nil, reminderId: payload.reminderId))
             return false
         case .skip(let id, let outcome):
             log("reminder \(id) \(outcome)")
-            receipts()?.send(reminderId: id, outcome: outcome)
+            recordTrace(trace(decision: outcome, outcome: outcome, reminderId: id))
+            receipts()?.send(reminderId: id, outcome: outcome, completion: receiptCompletion(for: id))
             return true
         case .speak(let id, let speech):
             // Claim it before speaking: a second copy arriving while this one is
             // still being synthesized must not start a second readout.
             memory.remember(id, now: now)
+            recordTrace(trace(decision: "speak", outcome: nil, reminderId: id))
             queue.async { [weak self] in self?.speak(id: id, speech: speech) }
             return true
         }
@@ -126,7 +213,8 @@ final class ReminderReadoutService {
     private func speak(id: String, speech: String) {
         if let blocked = ReminderAudioOutput.blockingOutcome() {
             log("reminder \(id) \(blocked)")
-            receipts()?.send(reminderId: id, outcome: blocked)
+            updateTrace(reminderId: id, outcome: blocked)
+            receipts()?.send(reminderId: id, outcome: blocked, completion: receiptCompletion(for: id))
             return
         }
         let wav: Data
@@ -135,7 +223,8 @@ final class ReminderReadoutService {
         } catch {
             let outcome = "failed:synthesis"
             log("reminder \(id) \(outcome): \(error)")
-            receipts()?.send(reminderId: id, outcome: outcome)
+            updateTrace(reminderId: id, outcome: outcome)
+            receipts()?.send(reminderId: id, outcome: outcome, completion: receiptCompletion(for: id))
             return
         }
         DispatchQueue.main.async { [weak self] in
@@ -145,11 +234,13 @@ final class ReminderReadoutService {
                 self.player = player
                 guard player.play() else { throw ReminderPlaybackError.playRefused }
                 self.log("reminder \(id) played")
-                self.receipts()?.send(reminderId: id, outcome: "played")
+                self.updateTrace(reminderId: id, outcome: "played")
+                self.receipts()?.send(reminderId: id, outcome: "played", completion: self.receiptCompletion(for: id))
             } catch {
                 let outcome = "failed:playback"
                 self.log("reminder \(id) \(outcome): \(error)")
-                self.receipts()?.send(reminderId: id, outcome: outcome)
+                self.updateTrace(reminderId: id, outcome: outcome)
+                self.receipts()?.send(reminderId: id, outcome: outcome, completion: self.receiptCompletion(for: id))
             }
         }
     }

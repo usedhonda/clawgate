@@ -245,6 +245,57 @@ final class ReminderReadoutTests: XCTestCase {
         }
     }
 
+    // MARK: - Observability: recent decisions
+
+    private func service(suite: String) -> ReminderReadoutService {
+        let defaults = UserDefaults(suiteName: suite)!
+        return ReminderReadoutService(memory: ReminderMemory(defaults: defaults), receipts: { nil })
+    }
+
+    func testANonReminderPayloadIsTracedAsIgnored() throws {
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let svc = service(suite: suite)
+
+        let handled = svc.handle(payload(kind: "calendar_soon"), now: now)
+
+        XCTAssertFalse(handled)
+        let traces = svc.recentTraces()
+        XCTAssertEqual(traces.count, 1)
+        XCTAssertEqual(traces[0].decision, "ignore")
+        XCTAssertNil(traces[0].outcome)
+    }
+
+    func testAnExpiredReminderIsTracedAsSkipped() throws {
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let svc = service(suite: suite)
+        let late = Date(timeIntervalSince1970: 1_790_000_000 + 10 * 86_400)
+
+        let handled = svc.handle(payload(), now: late)
+
+        XCTAssertTrue(handled)
+        let traces = svc.recentTraces()
+        XCTAssertEqual(traces.count, 1)
+        XCTAssertEqual(traces[0].decision, "skipped:expired")
+        XCTAssertEqual(traces[0].outcome, "skipped:expired")
+    }
+
+    func testTracesAreKeptToFiftyNewestFirst() throws {
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let svc = service(suite: suite)
+
+        for i in 0..<60 {
+            svc.handle(payload(kind: "calendar_soon", reminderId: "unused-\(i)"), now: now)
+        }
+
+        let traces = svc.recentTraces()
+        XCTAssertEqual(traces.count, 50)
+        // Newest first: the very last handled payload leads.
+        XCTAssertEqual(traces.first?.reminderId, "unused-59")
+    }
+
     func testTheDataChunkIsFoundPastAnExtraChunk() throws {
         // A LIST chunk before `data` is legal; assuming a 44-byte header is not.
         var padded = wav(peak: 1_000)
