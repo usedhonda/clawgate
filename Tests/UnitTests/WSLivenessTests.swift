@@ -78,7 +78,8 @@ final class WSLivenessTests: XCTestCase {
             pid: 4242,
             processStartedAt: Date(timeIntervalSince1970: 1_699_999_000),
             connectAttempts: 4,
-            closeFramesSent: 3
+            closeFramesSent: 3,
+            lastObservedCloseCode: 1006
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(OpenClawWSClient.WSClientSnapshot.self, from: data)
@@ -95,7 +96,8 @@ final class WSLivenessTests: XCTestCase {
             pid: 1,
             processStartedAt: Date(timeIntervalSince1970: 1_700_000_000),
             connectAttempts: 0,
-            closeFramesSent: 0
+            closeFramesSent: 0,
+            lastObservedCloseCode: nil
         )
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(OpenClawWSClient.WSClientSnapshot.self, from: data)

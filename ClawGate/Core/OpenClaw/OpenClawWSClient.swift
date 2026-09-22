@@ -63,14 +63,19 @@ actor OpenClawWSClient {
     /// Inactivity timeout for the Gateway socket's URLSession (`timeoutIntervalForRequest`).
     /// This is NOT a connect timeout — it is how long URLSession tolerates silence on an
     /// already-open task, and the Gateway keeps the socket idle between raw-WS pings sent
-    /// every 25s. Measured 2026-09-22 on this Mac: 440 Gateway-side `heartbeat-timeout`
-    /// disconnects in one day, with `durationMs` clustering at exact multiples of that 25s
-    /// cadence — mode at 125s (207/440 cases), next at 100-104s (162/440), only 3/440 at the
-    /// 50s floor a socket hits if it never pongs at all. That distribution implies pings at
-    /// t=25/50/75s WERE answered and the one at t=100 typically was not, i.e. whatever answers
-    /// pings at the URLSession/network-stack level stops working roughly 100s into the
-    /// connection. Control: the same binary on another host, same day, had 1 such disconnect
-    /// vs 440 here (this Mac's path to the Gateway is relayed; the other host's is direct).
+    /// every 25s. Measured 2026-09-22, 17:00-20:00 JST on this Mac: 57 Gateway-side closes,
+    /// 45 of them `heartbeat-timeout`, with `durationMs` clustering at multiples of that 25s
+    /// cadence — mode at 4 ticks (24 cases), then 5 ticks (11), and a thin tail out to 44.
+    /// That clustering implies the pings at t=25/50/75s WERE answered and the one around
+    /// t=100 typically was not, i.e. whatever answers pings at the URLSession/network-stack
+    /// level stops working roughly 100s in. Control: the same binary on the host beside the
+    /// Gateway logged 7 closes in the same window, none of them `heartbeat-timeout` (this
+    /// Mac's path to the Gateway is relayed; that host's is direct).
+    ///
+    /// An earlier revision of this comment cited "440 in one day, control 1". Those numbers
+    /// were a mid-afternoon snapshot mislabelled as a full day, and their tick breakdown did
+    /// not sum to its own total. The window above is the one both sides agreed to measure in,
+    /// and is what tomorrow is compared against.
     /// The previous value (15s) was sized for a short HTTP request, not a socket idle between
     /// 25s pings, and raising it is a PLAUSIBLE, UNPROVEN fix — to be judged by whether
     /// `heartbeat-timeout` terminations drop, not by this reasoning alone.
@@ -153,6 +158,17 @@ actor OpenClawWSClient {
     ///                                                 teardown at all
     private(set) var connectAttempts = 0
     private(set) var closeFramesSent = 0
+
+    /// The WebSocket close code on the task as it was torn down, read BEFORE
+    /// this side cancels (cancelling overwrites it with our own code). Non-nil
+    /// means the peer or the stack had already closed the socket and this
+    /// teardown was reacting to it, not initiating it — so a `.goingAway` sent
+    /// afterwards had nothing to travel over.
+    ///
+    /// Reported because "the Gateway could not attribute a reason" and "the
+    /// client closed politely" are different things that were read as the same
+    /// thing: an intentional close arrives as 1001, an abnormal one as 1006.
+    private(set) var lastObservedCloseCode: Int?
 
     // MARK: - Connection
 
@@ -281,6 +297,11 @@ actor OpenClawWSClient {
         pendingRequestId = nil
         failAllAcks(error: OpenClawError.connectionFailed("Disconnected"))
 
+        // Read before cancelling: `cancel(with:)` sets `closeCode` to the code
+        // WE pass, so afterwards it can no longer say who closed first.
+        if let observed = webSocketTask?.closeCode, observed != .invalid {
+            lastObservedCloseCode = observed.rawValue
+        }
         // Counted as an attempt, not as a send: see `closeFramesSent`.
         if webSocketTask != nil {
             closeFramesSent += 1
@@ -298,14 +319,19 @@ actor OpenClawWSClient {
         // websocket task is already cancelled by `cancel(with:)`, so nothing
         // here waits indefinitely — this only lets the close handshake flush.
         //
-        // Measured 2026-09-22: of the Gateway's connection closes for this Mac,
-        // 440/440 were `heartbeat-timeout` (the server noticing pongs stopped)
-        // and NOT ONE was a clean close, while the Mac sitting next to the
-        // Gateway on localhost logged 23 clean closes against 1 timeout. Same
-        // code, same settings. A close frame racing its own session teardown
-        // wins that race over a loopback and loses it over a relay, which fits
-        // the asymmetry. Unproven: judge it by whether clean closes start
-        // appearing for this Mac, not by this reasoning.
+        // This stands on the API contract alone, and deliberately no longer
+        // rests on the measurement that prompted it. That measurement — "this
+        // Mac logged no clean closes while the host on loopback logged 23" —
+        // does not survive: it counted the Gateway's `cause=n/a` as "closed
+        // politely", but `cause=n/a` only means the Gateway could not attribute
+        // a reason, and most of those carry code 1006, an abnormal close. An
+        // intentional `.goingAway` would arrive as 1001, so the asymmetry was
+        // never evidence of a destroyed close frame either way.
+        //
+        // What remains is simply that cancelling a session does not wait for a
+        // close frame queued a moment earlier, and this call does. Whether it
+        // changes anything observable is open: judge it by whether code-1001
+        // closes start appearing for this Mac.
         session?.finishTasksAndInvalidate()
         session = nil
     }
@@ -982,6 +1008,11 @@ actor OpenClawWSClient {
         let processStartedAt: Date
         let connectAttempts: Int
         let closeFramesSent: Int
+        /// nil when no teardown has seen a code yet. 1006 means the socket was
+        /// already gone; 1001 means an intentional close was the last thing on
+        /// it. This is the distinction `cause=n/a` on the Gateway side cannot
+        /// make.
+        let lastObservedCloseCode: Int?
     }
 
     func snapshot() -> WSClientSnapshot {
@@ -1003,7 +1034,8 @@ actor OpenClawWSClient {
             pid: ProcessIdentity.pid,
             processStartedAt: ProcessIdentity.startedAt,
             connectAttempts: connectAttempts,
-            closeFramesSent: closeFramesSent
+            closeFramesSent: closeFramesSent,
+            lastObservedCloseCode: lastObservedCloseCode
         )
     }
 
