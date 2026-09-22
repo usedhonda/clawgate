@@ -11,7 +11,7 @@ import XCTest
 /// `AmbientLogModel`, nothing that could touch the owner's real ambient tree.
 final class AmbientLogCapturedZoneTests: XCTestCase {
     // 1_700_007_000 == 2023-11-15 00:10:00 UTC == 09:10 JST == 05:40 IST
-    // (Asia/Kolkata's Foundation abbreviation is "GMT+5:30", not "IST").
+    // (Asia/Kolkata's Foundation abbreviation is "Kolkata", not "IST").
     private static let base = 1_700_007_000.0
 
     private static func seg(_ text: String, at epoch: Double, zone: String?) -> TranscriptSegment {
@@ -34,7 +34,7 @@ final class AmbientLogCapturedZoneTests: XCTestCase {
 
         XCTAssertEqual(blocks.count, 2)
         XCTAssertEqual(blocks[0].timeLabel, "09:10", "Tokyo segment matches the passed-in zone, no suffix")
-        XCTAssertEqual(blocks[1].timeLabel, "05:43 GMT+5:30", "Kolkata segment renders in its own zone with an abbreviation")
+        XCTAssertEqual(blocks[1].timeLabel, "05:43 Kolkata", "Kolkata segment renders in its own zone with the place named")
     }
 
     /// A scene's start/end each resolve in their own captured zone too.
@@ -47,7 +47,20 @@ final class AmbientLogCapturedZoneTests: XCTestCase {
             timeZone: TimeZone(identifier: "Asia/Tokyo")!)
 
         XCTAssertEqual(scenes.count, 1)
-        XCTAssertEqual(scenes[0].timeLabel, "09:10–05:50 GMT+5:30")
+        XCTAssertEqual(scenes[0].timeLabel, "09:10–05:50 Kolkata")
+    }
+
+    /// A scene that straddled the flight itself: the owner started talking in
+    /// one place and finished in another, so each end names its own place.
+    func testASceneThatStraddlesAZoneChangeNamesBothEnds() {
+        let scenes = AmbientLogGrouping.scenes(
+            from: [Self.seg("a", at: Self.base, zone: "Asia/Kolkata"),
+                   Self.seg("b", at: Self.base + 600, zone: "Asia/Singapore")],
+            timeZone: TimeZone(identifier: "Asia/Singapore")!)
+
+        XCTAssertEqual(scenes.count, 1)
+        XCTAssertEqual(scenes[0].timeLabel, "05:40 Kolkata–08:20",
+                       "the foreign end is named; the end matching the Mac's zone is not")
     }
 
     /// Legacy segments (written before `timeZone` existed) have no stamped

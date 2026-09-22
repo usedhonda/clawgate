@@ -212,7 +212,9 @@ enum AmbientLogGrouping {
         func closeBlock() {
             guard !currentTexts.isEmpty else { return }
             let label = currentStart.map {
-                formattedCapturedTime(at: $0, segmentZoneID: currentStartZone, defaultZone: timeZone, fmt: fmt)
+                formattedCapturedTime(at: $0, segmentZoneID: currentStartZone,
+                                      defaultZone: timeZone, fmt: fmt)
+                    + zoneSuffix(currentStartZone, defaultZone: timeZone)
             }
             result.append(Block(timeLabel: label,
                                 speaker: currentSpeaker,
@@ -247,22 +249,30 @@ enum AmbientLogGrouping {
     /// Formats one absolute time using the segment's own captured zone
     /// (`TranscriptSegment.timeZone`) when present, falling back to
     /// `defaultZone` — the zone passed into `blocks`/`scenes`, which stays the
-    /// zone used for day grouping. When the segment's zone differs from
-    /// `defaultZone`, the short zone abbreviation is appended (e.g. "09:00
-    /// IST") so a stamp made in another timezone is visible instead of
-    /// silently re-rendering in whatever zone the Mac is in now.
+    /// zone used for day grouping. The bare HH:mm only; `zoneSuffix` names the
+    /// place, and the callers append it once per label rather than per end.
     private static func formattedCapturedTime(at epoch: Double, segmentZoneID: String?,
                                               defaultZone: TimeZone, fmt: DateFormatter) -> String {
         let date = Date(timeIntervalSince1970: epoch)
-        guard let segmentZoneID, let segmentZone = TimeZone(identifier: segmentZoneID) else {
+        if let segmentZoneID, let segmentZone = TimeZone(identifier: segmentZoneID) {
+            fmt.timeZone = segmentZone
+        } else {
             fmt.timeZone = defaultZone
-            return fmt.string(from: date)
         }
-        fmt.timeZone = segmentZone
-        let hhmm = fmt.string(from: date)
-        guard segmentZoneID != defaultZone.identifier else { return hhmm }
-        let abbr = segmentZone.abbreviation(for: date) ?? segmentZoneID
-        return "\(hhmm) \(abbr)"
+        return fmt.string(from: date)
+    }
+
+    /// The place a segment was recorded, to sit after the time — empty when it
+    /// matches where the Mac is now, so an ordinary day carries no noise.
+    ///
+    /// The city out of the IANA identifier ("Asia/Kolkata" -> "Kolkata"), not
+    /// `TimeZone.abbreviation`: Foundation answers "GMT+5:30" for half the
+    /// world, which tells the owner nothing about where they were. A city does.
+    static func zoneSuffix(_ segmentZoneID: String?, defaultZone: TimeZone) -> String {
+        guard let segmentZoneID, segmentZoneID != defaultZone.identifier,
+              TimeZone(identifier: segmentZoneID) != nil else { return "" }
+        let city = segmentZoneID.split(separator: "/").last.map(String.init) ?? segmentZoneID
+        return " " + city.replacingOccurrences(of: "_", with: " ")
     }
 
     /// One conversation scene (a meeting): a run of segments with no gap longer
@@ -293,8 +303,17 @@ enum AmbientLogGrouping {
         func closeScene() {
             guard !current.isEmpty else { return }
             if let first = firstEpoch, let last = lastEpoch {
-                let label = formattedCapturedTime(at: first, segmentZoneID: firstZone, defaultZone: timeZone, fmt: fmt)
-                    + "–" + formattedCapturedTime(at: last, segmentZoneID: lastZone, defaultZone: timeZone, fmt: fmt)
+                // The place is named once at the end of the range, unless the
+                // scene itself straddled a zone change — then each end carries
+                // its own, because they genuinely differ.
+                let straddles = firstZone != lastZone
+                let startSuffix = straddles ? zoneSuffix(firstZone, defaultZone: timeZone) : ""
+                let label = formattedCapturedTime(at: first, segmentZoneID: firstZone,
+                                                  defaultZone: timeZone, fmt: fmt)
+                    + startSuffix + "–"
+                    + formattedCapturedTime(at: last, segmentZoneID: lastZone,
+                                            defaultZone: timeZone, fmt: fmt)
+                    + zoneSuffix(lastZone, defaultZone: timeZone)
                 result.append(Scene(id: String(Int(first)),
                                     startEpoch: first, endEpoch: last,
                                     timeLabel: label, segments: current))
