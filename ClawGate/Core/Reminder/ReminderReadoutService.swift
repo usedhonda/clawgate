@@ -156,11 +156,28 @@ final class ReminderReadoutService {
     /// never touch the real Application Support tree.
     private let traceStoreRoot: URL
 
-    /// This process's pid, and the moment this type was first touched —
-    /// captured once so every trace this process writes carries the same
-    /// pair. See `ReminderTrace.pid`/`processStartedAt`.
+    /// This process's pid and its real start time, so every trace carries the
+    /// same pair and two traces can be told apart as "same process" or "a
+    /// process that restarted in between". See `ReminderTrace.pid`.
     static let processPid = ProcessInfo.processInfo.processIdentifier
-    static let processStartedAt = Date()
+
+    /// Asked of the kernel rather than taken as `Date()` at first touch: a
+    /// lazily initialised `static let` is initialised when the first reminder
+    /// arrives, which would make `processStartedAt` equal `at` for that
+    /// reminder and answer nothing. Falls back to now if the call fails —
+    /// wrong but harmless, and this is diagnostics only.
+    static let processStartedAt: Date = kernelProcessStartTime(pid: processPid) ?? Date()
+
+    private static func kernelProcessStartTime(pid: pid_t) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0 else { return nil }
+        let started = info.kp_proc.p_un.__p_starttime
+        guard started.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: Double(started.tv_sec)
+                    + Double(started.tv_usec) / 1_000_000)
+    }
 
     init(synthesizer: VoicevoxSynthesizer = VoicevoxSynthesizer(),
          memory: ReminderMemory = ReminderMemory(),
