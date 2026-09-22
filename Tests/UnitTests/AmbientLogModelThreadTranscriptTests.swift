@@ -185,7 +185,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let segs = (1...count).map { seg("utterance \($0)", at: dayStart + Double($0)) }
         try writeSession("ctx-big", segs, under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(pastDay)
         let envelope = model.buildQueryEnvelope(actionId: "free", instruction: "全部まとめて",
                                                 now: Date(), sessionsRoot: root)
@@ -212,7 +212,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             seg("real content B", at: dayStart + 20),
         ], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = ["stale-scene-id-that-does-not-exist"]
         // D21: the pure resolver does not publish; the main-thread commit does.
@@ -256,7 +256,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
 
         // The chip id is the scene id derived from the UNCAPPED day.
         let sceneID = AmbientLogGrouping.scenes(from: segs, timeZone: jst)[0].id
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [sceneID]
         let envelope = model.buildQueryEnvelope(actionId: "slot-0", instruction: "このシーン",
@@ -285,7 +285,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let newID = AmbientLogGrouping.scenes(from: backfilled, timeZone: jst)[0].id
         XCTAssertNotEqual(oldID, newID, "precondition: the backfill changed the scene id")
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [oldID]
         let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "このシーン",
@@ -312,7 +312,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         try writeSession("ctx-two", a + b, under: root)
         let sceneA = AmbientLogGrouping.scenes(from: a + b, timeZone: jst)[0].id
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.sessionsRootOverrideForTesting = root
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [sceneA]
@@ -346,7 +346,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
         try writeSession("ctx-stop", [seg("A1", at: dayStart + 100)], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(pastDay)
         let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "A", sessionsRoot: root)
 
@@ -376,7 +376,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         try writeSession("ctx-two", a + b, under: root)
         let sceneA = AmbientLogGrouping.scenes(from: a + b, timeZone: jst)[0].id
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.sessionsRootOverrideForTesting = root
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [sceneA]
@@ -413,7 +413,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         let dayStart = startOfDayJST(pastDay).timeIntervalSince1970
         try writeSession("ctx-one", [seg("A", at: dayStart + 100)], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(pastDay)
 
         var dispatched = 0
@@ -442,7 +442,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             seg("after anchor", at: nowEpoch + 3600),
         ], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = todayStart
         let envelope = model.buildQueryEnvelope(actionId: "free", instruction: "今の状況",
                                                 now: now, sessionsRoot: root)
@@ -468,7 +468,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             seg("日付をまたいで継続", at: dayStart + 5 * 60), // 00:05 (selected day)
         ], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(day)
         let env = model.buildQueryEnvelope(actionId: "free", instruction: "まとめて",
                                            now: Date(), sessionsRoot: root)
@@ -492,7 +492,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             seg("今日の新しい会議", at: dayStart + 5 * 60),  // 00:05 (selected day)
         ], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(day)
         let env = model.buildQueryEnvelope(actionId: "free", instruction: "まとめて",
                                            now: Date(), sessionsRoot: root)
@@ -516,7 +516,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             seg("午後MTG", at: dayStart + 14 * 3600),  // 14:00 (4h lunch gap)
         ], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(day)
         let env = model.buildQueryEnvelope(actionId: "free", instruction: "今日を全部",
                                            now: Date(), sessionsRoot: root)
@@ -537,7 +537,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         // Data only on the PREVIOUS day (1h before the empty day's start).
         try writeSession("ctx-prev", [seg("前日の会議", at: emptyStart - 3600)], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(emptyDay)
         let env = model.buildQueryEnvelope(actionId: "free", instruction: "この日をまとめて", sessionsRoot: root)
         XCTAssertTrue(env.segments.isEmpty,
@@ -1584,7 +1584,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: raw.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: raw.path) }
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(pastDay)
         model.selectedSceneIDs = [sceneID]
         let prepared = model.prepareLogQuery(actionId: "slot-0", instruction: "x", sessionsRoot: root)
@@ -1612,7 +1612,7 @@ final class AmbientLogModelThreadTranscriptTests: XCTestCase {
             seg("0時04分", at: dayStart + 4 * 60),
         ], under: root)
 
-        let model = AmbientLogModel()
+        let model = AmbientLogModel(zoneProvider: { self.jst })
         model.selectedDay = startOfDayJST(day)
         let env = model.buildQueryEnvelope(actionId: "free", instruction: "まとめて",
                                            now: Date(), sessionsRoot: root)
