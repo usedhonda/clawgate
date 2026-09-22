@@ -60,6 +60,31 @@ enum TransportLog {
 actor OpenClawWSClient {
     private static let chatSendAckTimeout: UInt64 = 15_000_000_000
 
+    /// Inactivity timeout for the Gateway socket's URLSession (`timeoutIntervalForRequest`).
+    /// This is NOT a connect timeout — it is how long URLSession tolerates silence on an
+    /// already-open task, and the Gateway keeps the socket idle between raw-WS pings sent
+    /// every 25s. Measured 2026-09-22 on this Mac: 440 Gateway-side `heartbeat-timeout`
+    /// disconnects in one day, with `durationMs` clustering at exact multiples of that 25s
+    /// cadence — mode at 125s (207/440 cases), next at 100-104s (162/440), only 3/440 at the
+    /// 50s floor a socket hits if it never pongs at all. That distribution implies pings at
+    /// t=25/50/75s WERE answered and the one at t=100 typically was not, i.e. whatever answers
+    /// pings at the URLSession/network-stack level stops working roughly 100s into the
+    /// connection. Control: the same binary on another host, same day, had 1 such disconnect
+    /// vs 440 here (this Mac's path to the Gateway is relayed; the other host's is direct).
+    /// The previous value (15s) was sized for a short HTTP request, not a socket idle between
+    /// 25s pings, and raising it is a PLAUSIBLE, UNPROVEN fix — to be judged by whether
+    /// `heartbeat-timeout` terminations drop, not by this reasoning alone.
+    static let webSocketInactivityTimeout: TimeInterval = 300
+
+    /// Effectively-unbounded lifetime cap for the Gateway socket's URLSession
+    /// (`timeoutIntervalForResource`). The socket is meant to stay open for hours; a
+    /// finite cap here (the previous value was 60s) guarantees a periodic forced disconnect
+    /// regardless of liveness. Uses a large-but-finite sentinel (10 years) rather than
+    /// `.infinity` to avoid relying on Foundation's handling of an infinite TimeInterval in
+    /// internal date/timer arithmetic. See `webSocketInactivityTimeout` above for the
+    /// measurement motivating this change.
+    static let webSocketLifetimeCap: TimeInterval = 315_360_000 // 10 years
+
     /// Local-only label distinguishing which app subsystem owns this socket —
     /// "pet" (PetModel) or "ingest" (AmbientIngestProducer). Never sent on the
     /// wire: `sendConnectRequest` still hard-codes "cli" for both
@@ -120,8 +145,8 @@ actor OpenClawWSClient {
 
         authToken = token
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 60
+        config.timeoutIntervalForRequest = Self.webSocketInactivityTimeout
+        config.timeoutIntervalForResource = Self.webSocketLifetimeCap
         session = URLSession(configuration: config)
 
         // Wait for Gateway to be ready. Gateway init (bonjour/telegram/model-pricing)

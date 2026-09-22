@@ -94,4 +94,20 @@ final class WSLivenessTests: XCTestCase {
         XCTAssertEqual(decoded, original)
         XCTAssertNil(decoded.lastFrameAgeSeconds)
     }
+
+    // MARK: - Gateway socket URLSession timeouts (2026-09-22 heartbeat-timeout fix)
+
+    /// Guards against silently reintroducing a short HTTP-style timeout pair
+    /// (15s/60s) on a socket meant to stay open for hours between the
+    /// Gateway's 25s pings. See the comments above these constants in
+    /// OpenClawWSClient.swift for the measurement that motivated the values.
+    func testWebSocketInactivityTimeoutIsWellAboveGatewayPingCadence() {
+        XCTAssertGreaterThanOrEqual(OpenClawWSClient.webSocketInactivityTimeout, 300)
+    }
+
+    func testWebSocketLifetimeCapIsEffectivelyUnbounded() {
+        // Larger than any plausible connection lifetime (10+ years), so it
+        // cannot act as a periodic forced-disconnect timer in practice.
+        XCTAssertGreaterThan(OpenClawWSClient.webSocketLifetimeCap, 60 * 60 * 24 * 365 * 5)
+    }
 }
