@@ -372,7 +372,22 @@ final class AmbientLogModel: ObservableObject {
     /// The log reads in the timezone the Mac is actually in: it decides the day
     /// boundary and every HH:mm label, so a pinned zone makes both wrong the
     /// moment the owner travels.
-    private let timeZone = TimeZone.current
+    ///
+    /// Asked for on every read, never stored: this model lives as long as the
+    /// app, so a `let` captured the zone at launch and the Log kept showing the
+    /// departure city's clock until the next restart. The owner travels
+    /// constantly, so that is the normal case here, not an edge one.
+    /// `systemZoneChanged()` below reacts to the change; this makes every read
+    /// see it.
+    private var timeZone: TimeZone { zoneProvider() }
+
+    /// Injected so a test can move the Mac without touching process-global
+    /// zone state. Production always reads the live system zone.
+    private let zoneProvider: () -> TimeZone
+
+    /// The zone the currently selected day was expressed in, so a zone change
+    /// can carry a chosen calendar date across instead of sliding it.
+    private var lastKnownZone: TimeZone
     // D21: computed (not a lazy var) so the background query build never races a
     // first-access lazy initialization — `Calendar`/`TimeZone` are value types,
     // so a fresh local copy per access is thread-safe with no shared mutation.
@@ -393,6 +408,9 @@ final class AmbientLogModel: ObservableObject {
     private var cachedTranscriptFontSize: CGFloat
     private var cachedThreadSignature = ""
     private var timer: Timer?
+    /// Live for as long as the poll timer: the owner can cross a timezone while
+    /// the Log is open.
+    private var timeZoneObserver: NSObjectProtocol?
     // D21: heavy load work (storage scan, scene/block rebuild, transcript
     // render) runs on this serial background queue; only the publish returns to
     // main. `lastLoadedFingerprint` lets an unchanged poll skip the rebuild.
@@ -417,9 +435,11 @@ final class AmbientLogModel: ObservableObject {
     // status while the envelope is built off-main; the commit clears it.
     @Published private(set) var isPreparingLogQuery = false
 
-    init() {
+    init(zoneProvider: @escaping () -> TimeZone = { .current }) {
+        self.zoneProvider = zoneProvider
+        self.lastKnownZone = zoneProvider()
         var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone.current
+        cal.timeZone = zoneProvider()
         selectedDay = cal.startOfDay(for: Date())
         let size = min(max(ConfigStore().load().ambientLogFontSize, petLogMinFontSize), petLogMaxFontSize)
         fontSize = size
@@ -440,6 +460,56 @@ final class AmbientLogModel: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             self?.load()
         }
+        if timeZoneObserver == nil {
+            timeZoneObserver = NotificationCenter.default.addObserver(
+                forName: NSNotification.Name.NSSystemTimeZoneDidChange,
+                object: nil, queue: .main) { [weak self] _ in
+                    self?.systemZoneChanged()
+                }
+        }
+    }
+
+    /// The Mac moved to another timezone. Everything the day caches hold is
+    /// keyed by a start-of-day computed in the old zone, so it is not merely
+    /// stale — the keys no longer mean what they say. Drop them, re-anchor the
+    /// selected day, and reload.
+    private func systemZoneChanged() {
+        // Foundation caches the system zone; without this reset, `.current`
+        // can keep answering the old one for the life of the process.
+        NSTimeZone.resetSystemTimeZone()
+        let previous = lastKnownZone
+        let current = timeZone
+        lastKnownZone = current
+        if Date().timeIntervalSince(selectedDay) < 36 * 3600 {
+            // The owner was looking at today, and today now starts at a
+            // different instant. Re-anchor, clearing the scene selection for the
+            // same reason `moveDay` does — the old ids belong to the old
+            // grouping. 36 hours cannot catch a past day the owner chose: the
+            // largest shift on Earth is about 26.
+            selectedSceneIDs = []
+            selectedDay = today
+        } else {
+            // A past day the owner chose is a CALENDAR DATE, not an instant.
+            // "September 17th" must stay September 17th after a flight, so the
+            // date is read in the zone it was chosen in and rebuilt in the new
+            // one. Keeping the instant instead silently slid the Log a day back.
+            var old = Calendar(identifier: .gregorian)
+            old.timeZone = previous
+            let ymd = old.dateComponents([.year, .month, .day], from: selectedDay)
+            var new = Calendar(identifier: .gregorian)
+            new.timeZone = current
+            if let sameDate = new.date(from: DateComponents(year: ymd.year, month: ymd.month,
+                                                           day: ymd.day)) {
+                selectedDay = sameDate
+            }
+        }
+        cachedScenesByDay.removeAll()
+        cachedRawSegmentsByDay.removeAll()
+        cachedDayFingerprintByDay.removeAll()
+        lastLoadedFingerprint = nil
+        lastPublishedDay = nil
+        queryGeneration += 1
+        load()
     }
 
     func stop() {
@@ -451,10 +521,17 @@ final class AmbientLogModel: ObservableObject {
         queryLifecycleActive = false
         queryGeneration += 1
         isPreparingLogQuery = false
+        if let timeZoneObserver {
+            NotificationCenter.default.removeObserver(timeZoneObserver)
+            self.timeZoneObserver = nil
+        }
     }
 
     deinit {
         timer?.invalidate()
+        if let timeZoneObserver {
+            NotificationCenter.default.removeObserver(timeZoneObserver)
+        }
     }
 
     #if DEBUG
@@ -468,6 +545,12 @@ final class AmbientLogModel: ObservableObject {
     /// root, so a test that triggers `load()` (e.g. via selectAllScenes) never
     /// reads — or writes provenance sidecars into — the user's real ambient data.
     var sessionsRootOverrideForTesting: URL?
+    /// Test seam: the zone every label and the day boundary are read in, so a
+    /// test can prove it follows the Mac instead of freezing at launch.
+    var timeZoneForTesting: TimeZone { timeZone }
+    /// Test seam: the system-zone-change handler, so a test can drive it
+    /// without posting a real system notification.
+    func systemZoneChangedForTesting() { systemZoneChanged() }
     #endif
 
     func moveDay(by days: Int) {
