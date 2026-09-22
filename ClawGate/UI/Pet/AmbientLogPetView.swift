@@ -201,6 +201,7 @@ enum AmbientLogGrouping {
         var result: [Block] = []
         var currentTexts: [String] = []
         var currentStart: Double?
+        var currentStartZone: String?
         var currentSpeaker: String?
         var lastTime: Double?
 
@@ -210,12 +211,15 @@ enum AmbientLogGrouping {
 
         func closeBlock() {
             guard !currentTexts.isEmpty else { return }
-            let label = currentStart.map { fmt.string(from: Date(timeIntervalSince1970: $0)) }
+            let label = currentStart.map {
+                formattedCapturedTime(at: $0, segmentZoneID: currentStartZone, defaultZone: timeZone, fmt: fmt)
+            }
             result.append(Block(timeLabel: label,
                                 speaker: currentSpeaker,
                                 text: currentTexts.joined(separator: " ")))
             currentTexts = []
             currentStart = nil
+            currentStartZone = nil
         }
 
         for seg in segments {
@@ -226,7 +230,10 @@ enum AmbientLogGrouping {
                 if let last = lastTime, t - last > gapSeconds {
                     closeBlock()
                 }
-                if currentStart == nil { currentStart = t }
+                if currentStart == nil {
+                    currentStart = t
+                    currentStartZone = seg.timeZone
+                }
                 lastTime = t
             }
             currentSpeaker = seg.speaker
@@ -235,6 +242,27 @@ enum AmbientLogGrouping {
         }
         closeBlock()
         return result
+    }
+
+    /// Formats one absolute time using the segment's own captured zone
+    /// (`TranscriptSegment.timeZone`) when present, falling back to
+    /// `defaultZone` — the zone passed into `blocks`/`scenes`, which stays the
+    /// zone used for day grouping. When the segment's zone differs from
+    /// `defaultZone`, the short zone abbreviation is appended (e.g. "09:00
+    /// IST") so a stamp made in another timezone is visible instead of
+    /// silently re-rendering in whatever zone the Mac is in now.
+    private static func formattedCapturedTime(at epoch: Double, segmentZoneID: String?,
+                                              defaultZone: TimeZone, fmt: DateFormatter) -> String {
+        let date = Date(timeIntervalSince1970: epoch)
+        guard let segmentZoneID, let segmentZone = TimeZone(identifier: segmentZoneID) else {
+            fmt.timeZone = defaultZone
+            return fmt.string(from: date)
+        }
+        fmt.timeZone = segmentZone
+        let hhmm = fmt.string(from: date)
+        guard segmentZoneID != defaultZone.identifier else { return hhmm }
+        let abbr = segmentZone.abbreviation(for: date) ?? segmentZoneID
+        return "\(hhmm) \(abbr)"
     }
 
     /// One conversation scene (a meeting): a run of segments with no gap longer
@@ -255,6 +283,8 @@ enum AmbientLogGrouping {
         var current: [TranscriptSegment] = []
         var firstEpoch: Double?
         var lastEpoch: Double?
+        var firstZone: String?
+        var lastZone: String?
 
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm"
@@ -263,8 +293,8 @@ enum AmbientLogGrouping {
         func closeScene() {
             guard !current.isEmpty else { return }
             if let first = firstEpoch, let last = lastEpoch {
-                let label = fmt.string(from: Date(timeIntervalSince1970: first))
-                    + "–" + fmt.string(from: Date(timeIntervalSince1970: last))
+                let label = formattedCapturedTime(at: first, segmentZoneID: firstZone, defaultZone: timeZone, fmt: fmt)
+                    + "–" + formattedCapturedTime(at: last, segmentZoneID: lastZone, defaultZone: timeZone, fmt: fmt)
                 result.append(Scene(id: String(Int(first)),
                                     startEpoch: first, endEpoch: last,
                                     timeLabel: label, segments: current))
@@ -275,6 +305,8 @@ enum AmbientLogGrouping {
             current = []
             firstEpoch = nil
             lastEpoch = nil
+            firstZone = nil
+            lastZone = nil
         }
 
         for seg in segments {
@@ -282,8 +314,12 @@ enum AmbientLogGrouping {
                 if let last = lastEpoch, t - last > gapSeconds {
                     closeScene()
                 }
-                if firstEpoch == nil { firstEpoch = t }
+                if firstEpoch == nil {
+                    firstEpoch = t
+                    firstZone = seg.timeZone
+                }
                 lastEpoch = t
+                lastZone = seg.timeZone
             }
             current.append(seg)
         }

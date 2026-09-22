@@ -729,6 +729,7 @@ final class AmbientController {
                     var s = seg
                     if let startedAt = chunk.startedAt {
                         s.capturedAt = startedAt.timeIntervalSince1970 + seg.startSeconds
+                        s.timeZone = TimeZone.current.identifier
                     }
                     s.stream = chunk.source.rawValue
                     return s

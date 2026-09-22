@@ -9,6 +9,12 @@ struct TranscriptSegment: Codable, Equatable {
     /// chunk-capture time. Optional for backward compatibility with raw.jsonl
     /// lines written before timestamps existed.
     var capturedAt: Double? = nil
+    /// The Mac's IANA timezone identifier at the moment `capturedAt` was
+    /// stamped (e.g. "Asia/Tokyo"). Lets a past utterance keep the wall-clock
+    /// time it actually had after the owner crosses timezones, instead of
+    /// re-rendering in whatever zone the Mac is in now. nil for lines written
+    /// before this existed (legacy path: render in the current/passed-in zone).
+    var timeZone: String? = nil
     /// Speaker label from diarization: "self" (ご主人様) or "other". nil when
     /// the diarizer is unavailable (old Macs) or for legacy lines.
     var speaker: String? = nil
