@@ -2646,6 +2646,7 @@ final class PetModel: NSObject, ObservableObject {
             finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
             return
         }
+        shadowMinutesWithJev(record: record, segments: segments)
         let attempts = minutesAttempts[record.id, default: 0]
         guard attempts < Self.minutesMaxAttempts else {
             finishMinutes(id: record.id, state: "failed", error: "生成を \(Self.minutesMaxAttempts) 回試しましたが順番が空きませんでした")
@@ -2701,6 +2702,16 @@ final class PetModel: NSObject, ObservableObject {
 
     func meetingTranscript(for record: MeetingRecord) -> [TranscriptSegment] {
         meetingTranscriptProvider?(record) ?? []
+    }
+
+    /// Asks Jev the fixed ambient questions about this request's transcript,
+    /// once, off the main thread — shadow only. Never touches the envelope,
+    /// the summon, or `minutesState`; see `JevMeetingTagger`.
+    private func shadowMinutesWithJev(record: MeetingRecord, segments: [TranscriptSegment]) {
+        DispatchQueue.global(qos: .utility).async {
+            let shadow = JevMeetingTagger().shadow(record: record, segments: segments)
+            MeetingStore().saveJevShadow(shadow, for: record)
+        }
     }
 
     /// Ask again for a meeting whose minutes failed, or replace ones already
