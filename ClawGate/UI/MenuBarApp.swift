@@ -54,6 +54,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var activationObserver: NSObjectProtocol?
     private var petVisibilityObserver: AnyCancellable?
     private var didTeardown = false
+    /// Held for the process's life: a cancelled/deallocated signal source stops
+    /// delivering. See `installTerminationSignalHandler`.
+    private var sigtermSource: DispatchSourceSignal?
+    private var sigintSource: DispatchSourceSignal?
     private var lastAppliedPanelLevel: NSWindow.Level?
     private let mainPanelLogLimit = 30
     private let ghosttyBundleID = "com.mitchellh.ghostty"
@@ -89,6 +93,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         configureMainPanel()
         startWindowLevelObserver()
 
+        installTerminationSignalHandler()
+
         runtime.startServer()
         refreshSessionsMenu(sessions: runtime.allCCSessions())
         refreshStatsAndTimeline()
@@ -122,6 +128,34 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     func applicationWillTerminate(_ notification: Notification) {
         performTeardown()
+    }
+
+    /// Turn SIGTERM into a real quit.
+    ///
+    /// AppKit only runs `applicationWillTerminate` for `NSApplication.terminate`
+    /// — the Quit menu, an Apple event, logout. A plain `pkill` sends SIGTERM,
+    /// whose default disposition kills the process outright, so none of the
+    /// teardown ran and the Gateway sockets were dropped without a close frame.
+    /// Every deploy restart in this repo goes through `pkill`, which is why the
+    /// Gateway never saw an intentional close from this Mac even once in a day.
+    ///
+    /// The handler runs on the main queue via `DispatchSource`, not in signal
+    /// context, so calling AppKit from it is legitimate. `SIG_IGN` first, or the
+    /// default disposition kills us before the source ever fires. If teardown
+    /// takes too long the restart script escalates to SIGKILL after 5s, which is
+    /// the old behaviour — this can only improve on it.
+    private func installTerminationSignalHandler() {
+        for (sig, keep) in [(SIGTERM, true), (SIGINT, false)] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in
+                guard let self else { return }
+                self.performTeardown()
+                NSApplication.shared.terminate(nil)
+            }
+            source.resume()
+            if keep { sigtermSource = source } else { sigintSource = source }
+        }
     }
 
     private func configureStatusButton() {
