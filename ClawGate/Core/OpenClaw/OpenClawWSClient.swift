@@ -265,7 +265,21 @@ actor OpenClawWSClient {
         continuation?.finish()
         continuation = nil
 
-        session?.invalidateAndCancel()
+        // `finishTasksAndInvalidate`, NOT `invalidateAndCancel`: the line above
+        // queues a `.goingAway` close frame, and cancelling the session
+        // immediately can destroy that frame before it reaches the network. The
+        // websocket task is already cancelled by `cancel(with:)`, so nothing
+        // here waits indefinitely — this only lets the close handshake flush.
+        //
+        // Measured 2026-09-22: of the Gateway's connection closes for this Mac,
+        // 440/440 were `heartbeat-timeout` (the server noticing pongs stopped)
+        // and NOT ONE was a clean close, while the Mac sitting next to the
+        // Gateway on localhost logged 23 clean closes against 1 timeout. Same
+        // code, same settings. A close frame racing its own session teardown
+        // wins that race over a loopback and loses it over a relay, which fits
+        // the asymmetry. Unproven: judge it by whether clean closes start
+        // appearing for this Mac, not by this reasoning.
+        session?.finishTasksAndInvalidate()
         session = nil
     }
 
