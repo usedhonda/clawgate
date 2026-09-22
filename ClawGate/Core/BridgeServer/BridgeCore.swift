@@ -764,10 +764,9 @@ final class BridgeCore {
 
     /// The last 50 reminder decisions this Mac made, newest first — a reminder
     /// that never sounds is otherwise invisible, since NSLog bodies are
-    /// redacted in the unified log here. `ReminderReadoutService.shared` is
-    /// nil until `PetModel` first touches its lazy reminder readout.
+    /// redacted in the unified log here.
     func debugReminders() -> HTTPResult {
-        let traces = ReminderReadoutService.shared?.recentTraces() ?? []
+        let traces = ReminderReadoutService.shared.recentTraces()
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: traces, error: nil)))
     }
 

@@ -122,11 +122,22 @@ final class ReminderReadoutService {
     /// clip has finished.
     private var player: AVAudioPlayer?
 
-    /// The one instance the app runs (a `private lazy var` on `PetModel`),
-    /// exposed so `BridgeCore` can serve `/v1/debug/reminders` without a
-    /// direct reference to `PetModel`. Weak: it must never keep the service
-    /// alive past whatever owns it.
-    static weak var shared: ReminderReadoutService?
+    /// The one readout for this process. ClawGate holds two Gateway
+    /// connections — `PetModel`'s own `OpenClawWSClient` and
+    /// `AmbientIngestProducer`'s separate one for `ambient.ingest` — and both
+    /// authenticate as the same device identity, so the Gateway sees one
+    /// device and a `broadcast("chat")` reminder lands on whichever socket
+    /// happens to be open. Observed 2026-09-22: a live test fired three
+    /// reminders and the ingest socket silently dropped two of them, because
+    /// its drain loop only switched on `.connected`/`.disconnected`. Routing
+    /// both connections' `.reminder` events to this single shared instance
+    /// means it no longer matters which socket receives the broadcast. Also
+    /// read by `BridgeCore` for `/v1/debug/reminders`, without a direct
+    /// reference to `PetModel`.
+    static let shared = ReminderReadoutService(
+        receipts: { ReminderReceiptClient.fromConfig(ConfigStore().load()) { NSLog("[Reminder] %@", $0) } },
+        log: { NSLog("[Reminder] %@", $0) }
+    )
 
     /// Last 50 reminder decisions, newest first, for `/v1/debug/reminders`.
     /// Never carries speech text or the receipt token — ids and the agreed
@@ -143,7 +154,6 @@ final class ReminderReadoutService {
         self.memory = memory
         self.receipts = receipts
         self.log = log
-        Self.shared = self
     }
 
     /// Newest first.

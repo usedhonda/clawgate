@@ -296,6 +296,38 @@ final class ReminderReadoutTests: XCTestCase {
         XCTAssertEqual(traces.first?.reminderId, "unused-59")
     }
 
+    // MARK: - One shared readout for both Gateway connections
+
+    func testHandleRecordsATraceOnAnIsolatedInstance() throws {
+        // Either of ClawGate's two Gateway connections may be the one that
+        // receives a given reminder broadcast (they authenticate as the same
+        // device identity, so the Gateway sees one device). Both must be able
+        // to reach a readout that actually records the decision.
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let svc = service(suite: suite)
+
+        let handled = svc.handle(payload(), now: now)
+
+        XCTAssertTrue(handled)
+        let traces = svc.recentTraces()
+        XCTAssertEqual(traces.count, 1)
+        XCTAssertEqual(traces[0].decision, "speak")
+    }
+
+    func testConstructingAnInstanceDoesNotHijackTheSharedOne() throws {
+        // Regression guard: `init` used to assign `Self.shared = self`, so
+        // building an isolated test instance silently replaced the
+        // process-wide readout every other connection and BridgeCore read
+        // from — which is exactly the kind of bug that would have hidden the
+        // dropped-reminder defect this shared instance now fixes.
+        let suite = "clawgate.tests.reminder.\(UUID().uuidString)"
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let svc = service(suite: suite)
+
+        XCTAssertFalse(svc === ReminderReadoutService.shared)
+    }
+
     func testTheDataChunkIsFoundPastAnExtraChunk() throws {
         // A LIST chunk before `data` is legal; assuming a 44-byte header is not.
         var padded = wav(peak: 1_000)

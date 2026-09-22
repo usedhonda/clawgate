@@ -313,6 +313,12 @@ actor AmbientIngestProducer {
                     await self?.setConnected(true)
                 case .disconnected:
                     await self?.setConnected(false)
+                case .reminder(let payload):
+                    // Same device identity as PetModel's own connection, so a
+                    // reminder broadcast can land here instead — route it to
+                    // the one shared readout rather than dropping it (see
+                    // ReminderReadoutService.shared, 2026-09-22).
+                    ReminderReadoutService.shared.handle(payload)
                 default:
                     break
                 }
