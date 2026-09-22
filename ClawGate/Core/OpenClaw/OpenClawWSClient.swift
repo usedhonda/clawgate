@@ -503,7 +503,20 @@ actor OpenClawWSClient {
                     role: role, scopes: scopes,
                     auth: AuthParams(token: token),
                     locale: "ja-JP",
-                    userAgent: "clawgate-macos/1.0",
+                    // The socket's purpose rides in the user agent because the
+                    // protocol has nowhere else to put it: `role` here is the
+                    // AUTH role ("operator", shadowed above) and is part of the
+                    // signed payload, and `ClientInfo.id`/`mode` are matched by
+                    // the Gateway for routing — none of the three can carry it.
+                    // `userAgent` is not signed (see the components above) and
+                    // is already transmitted, so this needs no contract change.
+                    //
+                    // Why it matters: this Mac opens TWO sockets under one
+                    // device id (Pet and ambient ingest), and the Gateway's log
+                    // could not tell them apart. Their closes interleave, so
+                    // 72% of a day's inter-close gaps came out negative and
+                    // nothing downstream could be attributed to one socket.
+                    userAgent: "clawgate-macos/1.0 (\(self.role))",
                     device: ConnectDeviceParams(
                         id: identity.deviceId,
                         publicKey: identity.publicKeyRawBase64URL,
