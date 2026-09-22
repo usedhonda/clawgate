@@ -146,6 +146,19 @@ final class AmbientController {
 
     /// Gateway delivery (ambient.ingest). Starts/stops with the stream; send
     /// failures never disturb capture/transcription (log + retry next window).
+    /// Close the ingest socket on the way out, waiting for it, so the Gateway
+    /// is told instead of being left to notice. Bounded: a timeout just lets the
+    /// app exit, which is what happened before this existed. Called from the
+    /// app's termination teardown, where blocking briefly is acceptable.
+    func closeIngestSocketBlocking(timeout: TimeInterval = 1.0) {
+        let done = DispatchSemaphore(value: 0)
+        Task { [ingest] in
+            await ingest.closeSocket()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + timeout)
+    }
+
     private lazy var ingest = AmbientIngestProducer(
         log: log,
         onUpdate: { [weak self] update in

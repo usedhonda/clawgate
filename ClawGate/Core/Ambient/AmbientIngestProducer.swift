@@ -161,6 +161,21 @@ actor AmbientIngestProducer {
         log("ambient ingest producer stopped")
     }
 
+    /// Close the Gateway socket and nothing else, for app termination.
+    ///
+    /// Deliberately does NOT `flush()` like `stop()` does: at quit there is no
+    /// time to wait on a network send, and the segments in the window are
+    /// already on disk in the session's `raw.jsonl` — what is lost is the
+    /// window's delivery, not the transcript. Sending a close frame matters
+    /// because otherwise the Gateway keeps this device's socket alive in its
+    /// own view until pings stop being answered ~100s later.
+    func closeSocket() async {
+        drainTask?.cancel(); drainTask = nil
+        if let c = client { await c.disconnect() }
+        client = nil
+        connected = false
+    }
+
     func add(_ segments: [TranscriptSegment]) {
         guard running, !segments.isEmpty else { return }
         let now = Date()

@@ -261,6 +261,34 @@ final class PetModel: NSObject, ObservableObject {
         stateMachine.handle(.disconnected)
     }
 
+    /// `disconnect()` for the one case where this process is about to stop
+    /// existing: it waits for the socket to actually close instead of leaving it
+    /// to a detached Task.
+    ///
+    /// On quit, `applicationWillTerminate` returns and the process exits, so a
+    /// `Task { await ... }` started there usually never runs — the `.goingAway`
+    /// close frame is composed and then dies with the process. The Gateway
+    /// therefore learns nothing and only notices ~100s later when pings stop
+    /// going unanswered. Measured 2026-09-22: across a whole day, neither this
+    /// Mac nor the one on the Gateway's own loopback delivered a single code
+    /// 1001 close. Not a relay problem — no intentional close was ever sent.
+    ///
+    /// Blocking the main thread is acceptable here and nowhere else: the app is
+    /// exiting, and the wait is bounded. A timeout just proceeds to exit, which
+    /// is exactly the old behaviour.
+    func disconnectBlocking(timeout: TimeInterval = 1.0) {
+        eventTask?.cancel()
+        eventTask = nil
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            await wsClient.disconnect()
+            done.signal()
+        }
+        _ = done.wait(timeout: .now() + timeout)
+        connectionState = .disconnected
+        stateMachine.handle(.disconnected)
+    }
+
     // MARK: - Send
 
     func send() {
@@ -1325,7 +1353,9 @@ final class PetModel: NSObject, ObservableObject {
     func cleanup() {
         guard !didCleanup else { return }
         didCleanup = true
-        disconnect()
+        // cleanup() runs only from the app's teardown on quit/terminate, so the
+        // socket gets the blocking close — see `disconnectBlocking`.
+        disconnectBlocking()
         moveController.stop()
         reconnectTimer?.invalidate()
         reconnectTimer = nil

@@ -1319,6 +1319,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         petWindowController?.teardown()
         petWindowController = nil
         petModel.cleanup()
+        // Same reason as PetModel.disconnectBlocking: the ingest socket is a
+        // second connection with this device's identity, and it was also being
+        // dropped without a word on quit.
+        runtime.ambient()?.closeIngestSocketBlocking()
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
             self.activationObserver = nil
