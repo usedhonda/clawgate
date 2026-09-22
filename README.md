@@ -29,6 +29,51 @@ Beyond session monitoring, ClawGate can give the agent a sense of what is happen
 
 This feature is off until you start Recording.
 
+## Jev (TypeSafe) Integration (optional)
+
+[Jev](https://typesafe.ai) is TypeSafe's typed-decision API: given a block of text and a set of yes/no questions, it returns a confidence (0–1) per question — it never generates prose. ClawGate uses it only to *label* transcript it already captured (via Ambient Context above); Jev's answers never become anything a person reads. It is off until you supply an API key — no key, no calls, no cost.
+
+### Setting it up
+
+In Settings → **Jev (TypeSafe)**: paste your API key and click **保存** (save). Click **接続を確認** (verify connection) to confirm it — this calls `GET /v1/models` and consumes no tokens, returning 接続できました (connected) / 鍵が無効です (invalid key) / 到達できません (unreachable). The key is written to `~/.clawgate/secrets/typesafe.json` with owner-only permissions (`0600`); it is deliberately kept out of UserDefaults and out of `GET /v1/config`. Deleting it (削除) stops all calls on the next request, since the key is read fresh from disk every time rather than cached.
+
+### What leaves your machine
+
+When enabled, the transcript text of the window being labelled is sent to `https://api.typesafe.ai/v1/systemone` along with the fixed questions below. This happens in three places:
+
+- Every ~60-second ambient window (that window's transcript, up to ~1,500 characters).
+- Each meeting-minutes request, in batches (the meeting's transcript, up to ~6,000 characters / 80 segments per batch).
+- Each Log-tab question, once per day of transcript (up to ~24,000 characters) plus your question text.
+
+Answers are stored locally only, under `ambient-context/jev/` (ambient windows and Log-tab scoring) and `meetings/<id>/jev.json` (per-meeting shadow scores).
+
+### What it asks
+
+Every call asks the same fixed set of eight questions (`JevQuestions`, versioned as `JevQuestions.version`; the version is recorded with every answer so old answers can be matched back to the definition that produced them):
+
+| Question | Meaning |
+|----------|---------|
+| `my_promise` | Did you (the owner) promise to do something? |
+| `their_promise` | Did the other person promise to do something? |
+| `task_for_me` | Did a new task or ask for you come up? |
+| `appointment` | Was a dated appointment set or proposed? |
+| `belonging` | Was something to bring or prepare mentioned? |
+| `decision` | Was something settled decisively (not left pending)? |
+| `is_media` | Is this playback (TV/video/podcast) rather than a live conversation? |
+| `is_meeting` | Is this a multi-person, agenda-driven meeting? |
+
+### Cost and limits
+
+Billing is input tokens only (output is free), at $0.042 per million input tokens; a typical ambient window costs a fraction of a cent. Today's running total is shown in the Settings status line. The model is pinned to `jev-1.13.0`. Each call has a 10-second timeout and is retried once, only on HTTP 429. After three consecutive failures, ClawGate stops calling Jev for 30 minutes and then tries again on its own.
+
+### Right now it only records
+
+Nothing Jev answers changes what ClawGate sends to OpenClaw, what meeting minutes say, or which transcript the Log tab uses. Its answers are written down alongside the existing rule-based extraction so the two can be compared before anything is wired to act on Jev's output.
+
+### Turning it off
+
+Use the **Jev を使う** toggle (`clawgate.jevEnabled`, on by default but inert without a key), or delete the key from Settings.
+
 ## Installation
 
 ### Download
@@ -367,6 +412,7 @@ ClawGate stores all configuration in UserDefaults, readable via `GET /v1/config`
 |-----|------|---------|-------------|
 | `nodeRole` | String | `"standalone"` | `standalone`, `server`, or `client` |
 | `debugLogging` | Bool | `false` | Verbose logging |
+| `clawgate.jevEnabled` | Bool | `true` | Enable Jev (TypeSafe) shadow-tagging; inert until an API key is saved (see [Jev Integration](#jev-typesafe-integration-optional)) |
 | `includeMessageBodyInLogs` | Bool | `false` | Include message text in logs |
 | `remoteAccessEnabled` | Bool | `false` | Bind to `0.0.0.0` instead of `127.0.0.1` |
 | `remoteAccessToken` | String | `""` | Bearer token for remote access |
