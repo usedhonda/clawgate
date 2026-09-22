@@ -60,6 +60,16 @@ enum TransportLog {
 actor OpenClawWSClient {
     private static let chatSendAckTimeout: UInt64 = 15_000_000_000
 
+    /// Local-only label distinguishing which app subsystem owns this socket —
+    /// "pet" (PetModel) or "ingest" (AmbientIngestProducer). Never sent on the
+    /// wire: `sendConnectRequest` still hard-codes "cli" for both
+    /// `ClientInfo.id` and the signature payload, unchanged by this.
+    let role: String
+
+    init(role: String = "unknown") {
+        self.role = role
+    }
+
     private var webSocketTask: URLSessionWebSocketTask?
     private var session: URLSession?
     private var continuation: AsyncStream<OpenClawEvent>.Continuation?
@@ -71,12 +81,21 @@ actor OpenClawWSClient {
     var connectionGeneration: UInt64 = 0
     private var healthDeadlineTask: Task<Void, Never>?
     private var healthLoopTask: Task<Void, Never>?
+    /// Frame-freshness watchdog task; cancelled in teardown() alongside
+    /// healthLoopTask. See `isStale(lastFrameAge:threshold:)`.
+    private var frameWatchdogTask: Task<Void, Never>?
     /// internal (not private): test seam for OpenClawWSClientHealthLivenessTests.
     var consecutiveHealthTimeouts = 0
     /// Last time any WS frame arrived. Used to veto health-timeout kills: frames
     /// flowing = the socket is provably alive, the health ack is just queued
     /// behind inbound load. internal (not private): test seam.
     var lastFrameReceivedAt = Date.distantPast
+    /// When the current connection came up. A fresh reconnect has flowed zero
+    /// frames yet, so `lastFrameReceivedAt` still holds the *previous*
+    /// connection's (possibly very old) timestamp — this is the honest floor
+    /// the frame watchdog measures age against instead. internal (not
+    /// private): test seam.
+    var connectedAt: Date?
     private var inFlightAcks: [String: CheckedContinuation<Void, Error>] = [:]
     /// Requests that need the response payload back (e.g. ambient.ingest's
     /// stateAccepted), not just an ok/err ACK.
@@ -127,9 +146,12 @@ actor OpenClawWSClient {
 
         webSocketTask?.resume()
         isConnected = true
+        connectedAt = Date()
+        Self.registry.register(self)
 
         Task { await receiveLoop(generation: gen) }
         startHealthCheckTask(generation: gen)
+        startFrameWatchdogTask(generation: gen)
 
         // Handshake timeout
         let ws = webSocketTask
@@ -199,10 +221,14 @@ actor OpenClawWSClient {
         isConnected = false
         handshakeComplete = false
         consecutiveHealthTimeouts = 0
+        connectedAt = nil
         healthLoopTask?.cancel()
         healthLoopTask = nil
         healthDeadlineTask?.cancel()
         healthDeadlineTask = nil
+        frameWatchdogTask?.cancel()
+        frameWatchdogTask = nil
+        Self.registry.unregister(self)
         authToken = nil
         pendingRequestId = nil
         failAllAcks(error: OpenClawError.connectionFailed("Disconnected"))
@@ -726,6 +752,52 @@ actor OpenClawWSClient {
         }
     }
 
+    // MARK: - Frame Freshness Watchdog
+    //
+    // The Gateway terminates a socket it believes dead, and that termination
+    // has been observed NOT to surface as a receive() failure — leaving this
+    // client believing it is connected while nothing arrives, so nothing
+    // reconnects (18- and 78-minute holes measured 2026-09-22, three
+    // reminders lost). Frame age is the one signal that cannot lie: the
+    // Gateway pings every 25s, so silence well past that means the socket is
+    // gone whatever `isConnected` still says. This is independent of the
+    // health req/res liveness check above — a stuck ack still relies on
+    // `sendJSON` succeeding, which a truly dead socket may not even surface
+    // as an error for.
+
+    /// Pure predicate: is `lastFrameAge` old enough that the socket must be
+    /// considered dead? `threshold` is a parameter (not a hidden wall-clock
+    /// read) so this is deterministically testable.
+    static func isStale(lastFrameAge: TimeInterval, threshold: TimeInterval = 45) -> Bool {
+        lastFrameAge > threshold
+    }
+
+    private func startFrameWatchdogTask(generation gen: UInt64) {
+        frameWatchdogTask?.cancel()
+        frameWatchdogTask = Task { [weak self] in
+            while await self?.shouldKeepHealthChecking(generation: gen) == true {
+                do {
+                    // 10s cadence, generation-guarded exactly like the health task.
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    guard await self?.isCurrentGeneration(gen) == true else { return }
+                    await self?.checkFrameFreshness(generation: gen)
+                } catch { break }
+            }
+        }
+    }
+
+    private func checkFrameFreshness(generation gen: UInt64) {
+        guard connectionGeneration == gen, isConnected else { return }
+        // Floor against connectedAt: a fresh connection has flowed zero
+        // frames yet, so lastFrameReceivedAt may still hold a stale timestamp
+        // from a previous connection on this same actor instance.
+        let floor = max(lastFrameReceivedAt, connectedAt ?? .distantPast)
+        let age = Date().timeIntervalSince(floor)
+        guard Self.isStale(lastFrameAge: age) else { return }
+        logger.warning("Frame watchdog stale — role=\(self.role, privacy: .public) gen=\(gen, privacy: .public) frameAgeSeconds=\(Int(age), privacy: .public) — tearing down")
+        teardown()
+    }
+
     private func sendHealthCheck(generation gen: UInt64) async {
         guard connectionGeneration == gen else { return }
         // A health req sent before hello-ok races the connect request on slow
@@ -823,6 +895,91 @@ actor OpenClawWSClient {
 
     private func isHandshakeStuck(generation gen: UInt64) -> Bool {
         connectionGeneration == gen && isConnected && !handshakeComplete
+    }
+
+    // MARK: - Debug Snapshot
+
+    /// Point-in-time view of one socket, for `/v1/debug/ws`. Never carries a
+    /// token, URL, or payload body.
+    struct WSClientSnapshot: Codable, Equatable {
+        let role: String
+        let connected: Bool
+        let generation: UInt64
+        let connectedAt: Date?
+        let lastFrameAgeSeconds: Double?
+    }
+
+    func snapshot() -> WSClientSnapshot {
+        let frameAge: Double?
+        if let connectedAt, lastFrameReceivedAt >= connectedAt {
+            frameAge = Date().timeIntervalSince(lastFrameReceivedAt)
+        } else {
+            // No frame has arrived on THIS connection yet (or there is no
+            // connection at all) — reporting the previous connection's stale
+            // lastFrameReceivedAt here would be misleading.
+            frameAge = nil
+        }
+        return WSClientSnapshot(
+            role: role,
+            connected: isConnected,
+            generation: connectionGeneration,
+            connectedAt: connectedAt,
+            lastFrameAgeSeconds: frameAge
+        )
+    }
+
+    // MARK: - Process-Wide Debug Registry
+    //
+    // Exists ONLY to answer /v1/debug/ws — never read by any connect/reconnect
+    // decision, which stays entirely inside each actor instance's own state.
+    // A `let` holding a lock-protected Sendable box (not a bare static var),
+    // so registration carries no concurrency-checking warnings.
+    private static let registry = WSClientRegistryBox()
+
+    /// Snapshots of every currently registered socket (both the Pet and the
+    /// Ambient ingest client register themselves). A torn-down client is
+    /// unregistered in teardown(), and even if unregistration raced a reader,
+    /// its own `isConnected` is already false — a dead client can never be
+    /// reported as connected.
+    static func snapshots() async -> [WSClientSnapshot] {
+        var result: [WSClientSnapshot] = []
+        for client in registry.liveClients() {
+            result.append(await client.snapshot())
+        }
+        return result
+    }
+}
+
+/// Weak-referencing, lock-protected registry of live `OpenClawWSClient`
+/// instances. A plain `weak` map so a registry entry never keeps a
+/// torn-down/deallocated client alive; `@unchecked Sendable` because all
+/// mutable state is behind `lock`.
+private final class WSClientRegistryBox: @unchecked Sendable {
+    private final class WeakBox {
+        weak var client: OpenClawWSClient?
+        init(_ client: OpenClawWSClient) { self.client = client }
+    }
+
+    private let lock = NSLock()
+    private var entries: [ObjectIdentifier: WeakBox] = [:]
+
+    func register(_ client: OpenClawWSClient) {
+        lock.lock()
+        entries[ObjectIdentifier(client)] = WeakBox(client)
+        lock.unlock()
+    }
+
+    func unregister(_ client: OpenClawWSClient) {
+        lock.lock()
+        entries.removeValue(forKey: ObjectIdentifier(client))
+        lock.unlock()
+    }
+
+    func liveClients() -> [OpenClawWSClient] {
+        lock.lock()
+        let clients = entries.values.compactMap { $0.client }
+        lock.unlock()
+        return clients
     }
 }
 

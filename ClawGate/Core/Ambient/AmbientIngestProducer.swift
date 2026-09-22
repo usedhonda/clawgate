@@ -303,7 +303,7 @@ actor AmbientIngestProducer {
             throw OpenClawError.connectionFailed("invalid gateway host/port")
         }
 
-        let c = OpenClawWSClient()
+        let c = OpenClawWSClient(role: "ingest")
         let stream = try await c.connect(url: url, token: gw.token)
         client = c
         drainTask = Task { [weak self] in

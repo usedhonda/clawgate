@@ -146,9 +146,16 @@ final class PetModel: NSObject, ObservableObject {
     let characterManager = CharacterManager()
     lazy var moveController = MoveController(stateMachine: stateMachine)
 
-    private let wsClient = OpenClawWSClient()
+    private let wsClient = OpenClawWSClient(role: "pet")
     private var sessionKey: String?
     private var eventTask: Task<Void, Never>?
+    /// When `connectionState` last became `.connecting`. Cleared once it
+    /// leaves `.connecting` (to `.connected`, `.disconnected`, or `.error`).
+    /// Used by `shouldForceReconnect` to detect a connect attempt stuck
+    /// forever in `.connecting` (measured 18- and 78-minute holes,
+    /// 2026-09-22) — that state is otherwise invisible to the reconnect
+    /// timer, which skips `.connecting` outright.
+    private var connectingSince: Date?
     private var streamingMessageId: String?
     private var streamingRunId: String?
     private var whisperDismissTask: Task<Void, Never>?
@@ -220,6 +227,7 @@ final class PetModel: NSObject, ObservableObject {
         NSLog("[Pet] Connecting to Gateway: %@", url.absoluteString)
 
         connectionState = .connecting
+        connectingSince = Date()
 
         eventTask = Task { [weak self] in
             guard let self else { return }
@@ -231,12 +239,14 @@ final class PetModel: NSObject, ObservableObject {
                 // Stream ended
                 await MainActor.run {
                     self.connectionState = .disconnected
+                    self.connectingSince = nil
                     self.stateMachine.handle(.disconnected)
                 }
             } catch {
                 NSLog("[Pet] Connection error: %@", "\(error)")
                 await MainActor.run {
                     self.connectionState = .error("\(error)")
+                    self.connectingSince = nil
                     self.stateMachine.handle(.disconnected)
                 }
             }
@@ -320,6 +330,7 @@ final class PetModel: NSObject, ObservableObject {
                 let wasConnected = (self.connectionState == .connected)
                 self.sessionKey = key
                 self.connectionState = .connected
+                self.connectingSince = nil
                 self.stateMachine.handle(.reconnected)
                 NSLog("[Pet] Connected to Gateway, sessionKey=%@", key)
                 if self.hasEverConnected && !wasConnected {
@@ -473,10 +484,12 @@ final class PetModel: NSObject, ObservableObject {
                 default:
                     self.connectionState = .error("\(err)")
                 }
+                self.connectingSince = nil
 
             case .disconnected:
                 let wasConnected = (self.connectionState == .connected)
                 self.connectionState = .disconnected
+                self.connectingSince = nil
                 self.stateMachine.handle(.disconnected)
                 if self.hasEverConnected && wasConnected {
                     self.showWhisper("link lost")
@@ -1267,6 +1280,23 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    /// True only when a connect attempt has sat in `.connecting` past `limit`
+    /// without resolving to `.connected`/`.disconnected`/`.error` — the
+    /// Gateway-side termination this guards against never surfaces as a
+    /// receive() failure, so `connectionState` alone never leaves
+    /// `.connecting` on its own (measured 18- and 78-minute holes,
+    /// 2026-09-22; a real calendar reminder was lost in one). Pure and
+    /// deterministically testable: no wall-clock read inside.
+    static func shouldForceReconnect(
+        isConnecting: Bool,
+        connectingSince: Date?,
+        now: Date,
+        limit: TimeInterval = 90
+    ) -> Bool {
+        guard isConnecting, let connectingSince else { return false }
+        return now.timeIntervalSince(connectingSince) > limit
+    }
+
     /// Retry connection every 15s if not connected (handles Gateway-after-ClawGate startup
     /// and recovers from stuck .error states after transient failures like /ready timeout).
     private func startReconnectTimer() {
@@ -1274,7 +1304,17 @@ final class PetModel: NSObject, ObservableObject {
         reconnectTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             guard let self else { return }
             switch self.connectionState {
-            case .connected, .connecting:
+            case .connected:
+                return
+            case .connecting:
+                if Self.shouldForceReconnect(
+                    isConnecting: true,
+                    connectingSince: self.connectingSince,
+                    now: Date()
+                ) {
+                    self.disconnect()
+                    self.connect()
+                }
                 return
             case .disconnected, .error:
                 self.connect()

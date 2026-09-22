@@ -770,6 +770,24 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: traces, error: nil)))
     }
 
+    /// Live view of every registered Gateway WS socket (Pet + Ambient
+    /// ingest), for `/v1/debug/ws`. `OpenClawWSClient.snapshots()` is async
+    /// (actor-isolated); this route handler is synchronous like the rest of
+    /// this file, so it bridges the same way `ambientRunControl` above
+    /// bridges a completion handler — a semaphore blocking on a `Task`, with
+    /// a short timeout and an empty result on timeout so a wedged actor
+    /// cannot hang the HTTP route.
+    func debugWS() -> HTTPResult {
+        let sem = DispatchSemaphore(value: 0)
+        var snapshots: [OpenClawWSClient.WSClientSnapshot] = []
+        Task {
+            snapshots = await OpenClawWSClient.snapshots()
+            sem.signal()
+        }
+        _ = sem.wait(timeout: .now() + 5)
+        return jsonResponse(status: .ok, body: encode(APIResponse(ok: true, result: snapshots, error: nil)))
+    }
+
     func resetLineBaseline() -> HTTPResult {
         guard let watcher = lineInboundWatcher else {
             let payload = ErrorPayload(code: "no_watcher", message: "LINE inbound watcher not initialized", retriable: false, failedStep: "reset_baseline", details: "")
