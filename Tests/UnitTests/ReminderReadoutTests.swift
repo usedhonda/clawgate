@@ -159,6 +159,64 @@ final class ReminderReadoutTests: XCTestCase {
         XCTAssertNil(WavPeakNormalizer.dataChunkRange(Data()))
     }
 
+    // MARK: - The Gateway's own payload
+
+    /// The exact example oc-general sent from their implementation
+    /// (2026-09-22). The six fields sit at the payload's top level, beside
+    /// runId/state/sessionKey, and only the terminal state carries them.
+    private static let gatewayExample = """
+    {"sessionKey":"agent:main:main","sessionId":"agent:main:main","state":"final",
+     "runId":"11111111-2222-3333-4444-555555555555",
+     "text":"18時30分から、打ち合わせ。あと10分だよ。オンライン。",
+     "kind":"calendar_imminent",
+     "speech":"18時30分から、打ち合わせ。あと10分だよ。オンライン。",
+     "speakOn":"mac",
+     "reminderId":"calendar_imminent:evt-abc123:2026-09-22T09:30:00.000Z",
+     "startUtc":"2026-09-22T09:30:00.000Z",
+     "expiresAt":"2026-09-22T09:30:00.000Z"}
+    """
+
+    private func decodePayload(_ json: String) throws -> IncomingPayload {
+        try JSONDecoder().decode(IncomingPayload.self, from: Data(json.utf8))
+    }
+
+    func testTheGatewaysPayloadBecomesAReminderEvent() throws {
+        let payload = try decodePayload(Self.gatewayExample)
+        let events = OpenClawWSClient.routeIncomingEvent(name: "chat", payload: payload)
+        guard events.count == 1, case .reminder(let reminder) = events[0] else {
+            return XCTFail("expected exactly one reminder event, got \(events)")
+        }
+        XCTAssertEqual(reminder.kind, ReminderPayload.calendarImminent)
+        XCTAssertEqual(reminder.speakOn, "mac")
+        XCTAssertEqual(reminder.reminderId, "calendar_imminent:evt-abc123:2026-09-22T09:30:00.000Z")
+        XCTAssertEqual(reminder.expiresAt, "2026-09-22T09:30:00.000Z")
+        // Before the event starts it is read; the same payload after is not.
+        let before = Date(timeIntervalSince1970: 1_790_000_000)   // well before
+        guard case .speak = ReminderReadoutDecider.decide(reminder, now: before, seen: []) else {
+            return XCTFail("expected to speak before the event starts")
+        }
+    }
+
+    func testAReminderIsNotTakenOffANonTerminalState() throws {
+        // The Gateway only fills these on the final build; taking them off a
+        // delta too would be a second readout of the same reminder.
+        let delta = Self.gatewayExample.replacingOccurrences(of: "\"state\":\"final\"", with: "\"state\":\"delta\"")
+        let events = OpenClawWSClient.routeIncomingEvent(name: "chat", payload: try decodePayload(delta))
+        XCTAssertFalse(events.contains { if case .reminder = $0 { return true } else { return false } })
+    }
+
+    func testAnOrdinaryChatReplyIsStillAMessage() throws {
+        let reply = """
+        {"sessionKey":"agent:main:main","state":"final","runId":"abc",
+         "message":{"role":"assistant","content":[{"type":"text","text":"はい"}]}}
+        """
+        let events = OpenClawWSClient.routeIncomingEvent(name: "chat", payload: try decodePayload(reply))
+        guard events.count == 1, case .message(let msg) = events[0] else {
+            return XCTFail("the reminder path must not swallow ordinary replies: \(events)")
+        }
+        XCTAssertEqual(msg.text, "はい")
+    }
+
     // MARK: - Real VOICEVOX synthesis (opt-in)
 
     /// Needs the local VOICEVOX engine. Run with:
