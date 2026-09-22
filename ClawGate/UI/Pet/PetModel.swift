@@ -2465,6 +2465,16 @@ final class PetModel: NSObject, ObservableObject {
             coverageEnd: envelope.coverageEnd,
             retrievalTruncatedBeforeCoverage: envelope.retrievalTruncatedBeforeCoverage
         )
+        // Shadow-score the day's transcript blocks for relevance to this
+        // instruction, off the main thread — measurement only, runs after
+        // every admission/budget guard has already accepted the envelope for
+        // dispatch, and never affects `message` or the dispatch below.
+        let shadowEnvelope = envelope
+        DispatchQueue.global(qos: .utility).async {
+            let blocks = JevLogRelevanceLayout.groupBlocks(segments: shadowEnvelope.segments)
+            let record = JevLogRelevance().shadow(envelope: shadowEnvelope, blocks: blocks)
+            JevLogRelevanceStore.append(record)
+        }
         sendLogSummon(message, requestId: envelope.requestId)
         return true
     }
@@ -2822,6 +2832,16 @@ final class PetModel: NSObject, ObservableObject {
                         }
                         // A real answer clears any prior dispatch status.
                         logDispatchStatus = nil
+                        // Attach the model's own segment choice to the shadow
+                        // scoring already written for this request, joined
+                        // later by requestId — measurement only, never
+                        // affects the entry below.
+                        let requestId = pending.requestId
+                        let includedSegmentIds = result.contextDecision.includedSegmentIds
+                        DispatchQueue.global(qos: .utility).async {
+                            JevLogRelevanceStore.attachModelDecision(
+                                requestId: requestId, includedSegmentIds: includedSegmentIds)
+                        }
                         entry = NotificationEntry(
                             id: UUID().uuidString, text: result.answer ?? "",
                             source: source, timestamp: Date(),
