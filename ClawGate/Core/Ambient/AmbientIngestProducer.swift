@@ -77,6 +77,12 @@ actor AmbientIngestProducer {
     struct Update {
         let sent: Int
         let lastError: String?
+        /// The latest Jev window-tag attempt (shadow only). Always the
+        /// producer's current known state, not reset by an unrelated
+        /// ingest-only update, so a consumer that only cares about ingest
+        /// health can keep ignoring these two fields.
+        var jevLastLatencyMs: Int? = nil
+        var jevLastError: String? = nil
     }
 
     private let log: (String) -> Void
@@ -103,6 +109,10 @@ actor AmbientIngestProducer {
     private struct WindowSegment {
         let line: Line
         let addedAt: Date
+        /// Stable id for this exact segment (`PetLogSegmentID.make(for:)`),
+        /// carried through to the Jev window tagger so it can key a window on
+        /// its own content rather than on send timing.
+        let segmentId: String
     }
     private var window: [WindowSegment] = []
     private var sentTotal = 0
@@ -160,7 +170,8 @@ actor AmbientIngestProducer {
                            speaker: $0.speaker,
                            capturedAt: $0.capturedAt.map { Date(timeIntervalSince1970: $0) },
                            speakerName: $0.speakerName),
-                addedAt: now
+                addedAt: now,
+                segmentId: PetLogSegmentID.make(for: $0)
             )
         })
         if window.count > Self.windowCap {
@@ -230,12 +241,46 @@ actor AmbientIngestProducer {
             let dupCount = receipts.filter { $0.dedup == "duplicate" }.count
             log("ambient ingest ok seq=\(params.sourceSeq) accepted=\(accepted) segs=\(segments.count) events=\(events.count) receipts=\(receipts.count) dup=\(dupCount)")
             onUpdate(Update(sent: sentTotal, lastError: nil))
+            // Shadow-only Jev tagging of this same window, strictly after the
+            // send it never influences. Runs detached so a slow or failing
+            // Jev call can never delay the next 60s flush; a failed send above
+            // never reaches here, so a retried window is simply asked once
+            // when it finally succeeds (windowKey dedupes on content, not on
+            // send attempt).
+            scheduleJevTag(lines: lines, segmentIds: segments.map { $0.segmentId },
+                           ruleEventTypes: drafts.map { $0.eventType })
         } catch {
             // Keep the window; the next 60s tick retries once. No hammering.
             lastError = "\(error)"
             log("ambient ingest failed (retry next window): \(error)")
             onUpdate(Update(sent: sentTotal, lastError: "\(error)"))
         }
+    }
+
+    // MARK: - Jev shadow tagging
+
+    /// Fresh `JevWindowTagger` per window: `JevBreaker` and `JevLedger` both
+    /// persist to disk (UserDefaults / JSONL), so a new value each call is as
+    /// correct as a shared one and needs no actor-isolated mutable state here.
+    private func scheduleJevTag(lines: [Line], segmentIds: [String], ruleEventTypes: [String]) {
+        Task.detached(priority: .utility) { [weak self] in
+            var tagger = JevWindowTagger()
+            let outcome = tagger.tag(lines: lines, segmentIds: segmentIds, ruleEventTypes: ruleEventTypes)
+            guard let self else { return }
+            switch outcome {
+            case .asked(let result):
+                await self.reportJevUpdate(latencyMs: result.latencyMs, error: nil)
+            case .failed(let error):
+                await self.reportJevUpdate(latencyMs: nil, error: "\(error)")
+            case .skipped:
+                break  // routine (disabled/unconfigured/already-asked/breaker) — not a status change
+            }
+        }
+    }
+
+    private func reportJevUpdate(latencyMs: Int?, error: String?) {
+        onUpdate(Update(sent: sentTotal, lastError: lastError,
+                        jevLastLatencyMs: latencyMs, jevLastError: error))
     }
 
     // MARK: - Connection (same recipe as PetModel: local openclaw.json token + AppConfig host)

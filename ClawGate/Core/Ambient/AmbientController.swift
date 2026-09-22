@@ -76,6 +76,15 @@ final class AmbientController {
         var nonPrimaryChunks: Int = 0
         var namedSegments: Int = 0
         var unnamedSegments: Int = 0
+        // Jev shadow tagging (read-only reflection of JevWindowTagger's own
+        // state; this controller never drives it, only reports it).
+        var jevConfigured: Bool = false
+        var jevEnabled: Bool = true
+        var jevCallsToday: Int = 0
+        var jevCostTodayUSD: Double = 0
+        var jevBreakerOpen: Bool = false
+        var jevLastLatencyMs: Int? = nil
+        var jevLastError: String? = nil
     }
 
     /// One participant's speaking span from Meet's tile indicator (unix seconds).
@@ -106,6 +115,8 @@ final class AmbientController {
     private var recentKeptTexts: [String] = []
     private var ingestSent = 0
     private var ingestLastError: String?
+    private var jevLastLatencyMs: Int?
+    private var jevLastError: String?
 
     /// Google Meet: while the Chrome extension reports a call, Chrome's output
     /// (the remote party) is recorded as a second stream. The report is a
@@ -142,6 +153,14 @@ final class AmbientController {
             self.state.async {
                 self.ingestSent = update.sent
                 self.ingestLastError = update.lastError
+                // The producer's ingest-only updates carry both jev fields as
+                // nil (nothing to report this call); only a call that came
+                // from the tagger itself sets one of them, so this never
+                // clobbers the last known jev status with "unknown".
+                if update.jevLastLatencyMs != nil || update.jevLastError != nil {
+                    self.jevLastLatencyMs = update.jevLastLatencyMs
+                    self.jevLastError = update.jevLastError
+                }
             }
         }
     )
@@ -615,7 +634,14 @@ final class AmbientController {
                 appleFallbacks: transcriber.appleFallbacks,
                 nonPrimaryChunks: transcriber.nonPrimaryChunks,
                 namedSegments: namedSegments,
-                unnamedSegments: unnamedSegments
+                unnamedSegments: unnamedSegments,
+                jevConfigured: JevKeyStore().isConfigured,
+                jevEnabled: configStore.load().jevEnabled,
+                jevCallsToday: JevLedger().daily(on: now).calls,
+                jevCostTodayUSD: JevLedger().daily(on: now).costUSD,
+                jevBreakerOpen: JevBreaker().shouldSkip(now: now),
+                jevLastLatencyMs: jevLastLatencyMs,
+                jevLastError: jevLastError
             )
         }
     }

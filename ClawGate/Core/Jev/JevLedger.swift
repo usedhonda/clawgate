@@ -20,6 +20,11 @@ struct JevTagEntry: Codable, Equatable {
     var usage: Usage
     var latencyMs: Int
     var at: Date
+    /// The rule extractor's `eventType`s for the same window (e.g.
+    /// `["todo", "appointment"]`), carried alongside Jev's answers so one
+    /// ledger line holds both sides for later comparison. Optional so lines
+    /// written before this field existed still decode.
+    var ruleEventTypes: [String]? = nil
 }
 
 struct JevDailyTotals: Equatable {
