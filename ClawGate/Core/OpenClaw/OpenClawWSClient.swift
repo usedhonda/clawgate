@@ -138,11 +138,19 @@ actor OpenClawWSClient {
     /// together and matches nothing the Gateway logs.
     ///
     /// `connectAttempts` counts every call that got as far as opening a
-    /// session. `closeFramesSent` counts only the teardowns that had a live
-    /// task to close, which is exactly the population that can appear as a
-    /// clean close in the Gateway's log. The difference between that and the
-    /// Gateway's total is the number of connections that died without anyone
-    /// saying so.
+    /// session.
+    ///
+    /// `closeFramesSent` counts teardowns where a task reference was still
+    /// held — so it is the number of times this client ATTEMPTED to send a
+    /// close frame, not the number that reached the wire. A `URLSessionTask`
+    /// object outlives the connection it failed on, so the reference being
+    /// non-nil does not prove the socket was alive. Naming it as proof of a
+    /// live socket would be the same overclaim these counters exist to avoid.
+    ///
+    /// Read against the Gateway's log, the decomposition is:
+    ///   closeFramesSent − (Gateway's clean closes)  = frames that never arrived
+    ///   (Gateway's total) − closeFramesSent         = deaths that never reached
+    ///                                                 teardown at all
     private(set) var connectAttempts = 0
     private(set) var closeFramesSent = 0
 
@@ -273,6 +281,7 @@ actor OpenClawWSClient {
         pendingRequestId = nil
         failAllAcks(error: OpenClawError.connectionFailed("Disconnected"))
 
+        // Counted as an attempt, not as a send: see `closeFramesSent`.
         if webSocketTask != nil {
             closeFramesSent += 1
         }
@@ -967,6 +976,8 @@ actor OpenClawWSClient {
         /// Every counter above restarts at zero when the app does, so each row
         /// carries who it was counted by. Without this, "the socket held all
         /// night" and "the app restarted an hour ago" read identically.
+        /// `connectAttempts`/`closeFramesSent` are attempts by this client;
+        /// whether they arrived is only answerable from the Gateway's side.
         let pid: Int32
         let processStartedAt: Date
         let connectAttempts: Int
