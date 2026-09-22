@@ -16,6 +16,8 @@ enum OpenClawEvent {
     case delta(messageId: OpenClawEventOwnerIdentity, text: String)
     case messageComplete(messageId: OpenClawEventOwnerIdentity)
     case history([OpenClawChatMessage])
+    /// A calendar reminder the Gateway asked this Mac to read aloud.
+    case reminder(ReminderPayload)
     case error(OpenClawError)
     case disconnected(reason: String?)
 }
@@ -360,6 +362,15 @@ struct IncomingPayload: Decodable {
     let stateAccepted: Bool?
     /// ambient.ingest response: per-event receipts (eventId/status/dedup).
     let events: [AmbientEventReceipt]?
+    /// Calendar reminder readout (oc-general plans/260918 §2.3): the Gateway
+    /// marks which device should speak, with the script and an id to report
+    /// against. Absent on every other payload.
+    let kind: String?
+    let speech: String?
+    let speakOn: String?
+    let reminderId: String?
+    let startUtc: String?
+    let expiresAt: String?
     let hasFallbackReason: Bool
     let hasResultRetentionExpiresAt: Bool
 
@@ -388,6 +399,12 @@ struct IncomingPayload: Decodable {
         case messages
         case stateAccepted
         case events
+        case kind
+        case speech
+        case speakOn
+        case reminderId
+        case startUtc
+        case expiresAt
     }
 
     init(from decoder: Decoder) throws {
@@ -416,8 +433,22 @@ struct IncomingPayload: Decodable {
         messages = try container.decodeIfPresent([HistoryMessage].self, forKey: .messages)
         stateAccepted = try container.decodeIfPresent(Bool.self, forKey: .stateAccepted)
         events = try container.decodeIfPresent([AmbientEventReceipt].self, forKey: .events)
+        kind = try container.decodeIfPresent(String.self, forKey: .kind)
+        speech = try container.decodeIfPresent(String.self, forKey: .speech)
+        speakOn = try container.decodeIfPresent(String.self, forKey: .speakOn)
+        reminderId = try container.decodeIfPresent(String.self, forKey: .reminderId)
+        startUtc = try container.decodeIfPresent(String.self, forKey: .startUtc)
+        expiresAt = try container.decodeIfPresent(String.self, forKey: .expiresAt)
         hasFallbackReason = container.contains(.fallbackReason)
         hasResultRetentionExpiresAt = container.contains(.resultRetentionExpiresAt)
+    }
+}
+
+extension IncomingPayload {
+    /// The reminder fields as their own value, for the readout path.
+    var reminder: ReminderPayload {
+        ReminderPayload(kind: kind, speech: speech, speakOn: speakOn,
+                        reminderId: reminderId, startUtc: startUtc, expiresAt: expiresAt)
     }
 }
 

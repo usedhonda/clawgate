@@ -525,6 +525,14 @@ actor OpenClawWSClient {
             return [.delta(messageId: owner, text: delta)]
 
         case "chat":
+            // A reminder readout is not a chat reply: it carries no assistant
+            // text and may carry no runId, so it is taken off this event before
+            // the guards that shape a message. Only the terminal state is read,
+            // and a repeated id is dropped later by the readout itself.
+            if payload?.kind == ReminderPayload.calendarImminent, payload?.state == "final",
+               let reminder = payload?.reminder {
+                return [.reminder(reminder)]
+            }
             guard let state = payload?.state,
                   let runId = payload?.runId,
                   let owner = OpenClawEventOwnerIdentity.fromPayload(messageId: runId, runId: runId, sessionKey: payload?.sessionKey) else { return [] }

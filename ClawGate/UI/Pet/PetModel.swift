@@ -333,6 +333,9 @@ final class PetModel: NSObject, ObservableObject {
                     try? await self.wsClient.subscribeToSession(sessionKey: "agent:main:proactive:heartbeat")
                 }
 
+            case .reminder(let payload):
+                self.reminderReadout.handle(payload)
+
             case .message(let msg):
                 // Bounded, non-content metadata only — never the message body,
                 // which for Pet Log answers can contain private
@@ -2600,6 +2603,14 @@ final class PetModel: NSObject, ObservableObject {
             appendSummonEntry(text: fullText, source: source)
         }
     }
+
+    /// Reads calendar reminders aloud when the Gateway marks them for this Mac.
+    /// The receipt client is resolved per send so a Settings change to the host
+    /// takes effect without a restart.
+    private lazy var reminderReadout = ReminderReadoutService(
+        receipts: { ReminderReceiptClient.fromConfig(ConfigStore().load()) { NSLog("[Reminder] %@", $0) } },
+        log: { NSLog("[Reminder] %@", $0) }
+    )
 
     // MARK: - Meeting minutes
 
