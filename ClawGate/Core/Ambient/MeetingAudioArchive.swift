@@ -48,6 +48,21 @@ final class MeetingAudioArchive {
         return allChunks().filter { $0.startedAt < end && $0.endedAt > start }
     }
 
+    func coveredSeconds(start: Double, end: Double, source: String) -> Double {
+        guard start < end else { return 0 }
+        let intervals = chunks(start: start, end: end)
+            .filter { $0.source == source }
+            .map { (max(start, $0.startedAt), min(end, $0.endedAt)) }
+            .sorted { $0.0 < $1.0 }
+        var covered = 0.0
+        var through = start
+        for (begin, finish) in intervals {
+            covered += max(0, finish - max(begin, through))
+            through = max(through, finish)
+        }
+        return covered
+    }
+
     func allChunks() -> [Chunk] {
         let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.pathExtension == "json" }.compactMap { url -> Chunk? in

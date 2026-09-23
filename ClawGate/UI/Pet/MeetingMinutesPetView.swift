@@ -11,14 +11,18 @@ struct MeetingMinutesPetView: View {
     @State private var selectedID: String?
     @State private var minutes: MeetingMinutes?
     @State private var showTranscript = false
+    @State private var evidenceSegment: Int?
     @State private var copied = false
     @State private var archiveStart = Date().addingTimeInterval(-3600)
     @State private var archiveEnd = Date()
     @State private var archiveBusy = false
     @State private var archiveError: String?
+    @State private var archiveCoverage: (mic: Double, system: Double)?
+    @State private var coverageRequest = UUID()
     @State private var candidates: [MeetingCandidate] = []
     @State private var calendarError: String?
     @State private var calendarBusy = false
+    @State private var calendarConnecting = false
     @State private var speakerSegment: TranscriptSegment?
     @State private var speakerLabel = ""
     @State private var audioPlayer: AVAudioPlayer?
@@ -39,7 +43,9 @@ struct MeetingMinutesPetView: View {
                 detail
             }
         }
-        .onAppear { reload(); loadCandidates() }
+        .onAppear { reload(); loadCandidates(); loadCoverage() }
+        .onChange(of: archiveStart) { _ in loadCoverage() }
+        .onChange(of: archiveEnd) { _ in loadCoverage() }
         .onChange(of: model.meetingsRevision) { _ in reload() }
     }
 
@@ -51,6 +57,8 @@ struct MeetingMinutesPetView: View {
                 Spacer()
                 Button(calendarBusy ? "読込中…" : "予定を更新") { loadCandidates() }
                     .disabled(calendarBusy)
+                Button(calendarConnecting ? "接続中…" : "Googleを接続") { connectCalendar() }
+                    .disabled(calendarConnecting)
             }
             if let calendarError {
                 Text(calendarError).foregroundColor(.yellow.opacity(0.8))
@@ -68,6 +76,12 @@ struct MeetingMinutesPetView: View {
                 .font(.system(size: 11, weight: .semibold))
             DatePicker("開始", selection: $archiveStart, displayedComponents: [.date, .hourAndMinute])
             DatePicker("終了", selection: $archiveEnd, displayedComponents: [.date, .hourAndMinute])
+            if let coverage = archiveCoverage, archiveStart < archiveEnd {
+                let duration = archiveEnd.timeIntervalSince(archiveStart)
+                Text("保存済み区間: マイク \(Int(100 * coverage.mic / duration))% / PC音声 \(Int(100 * coverage.system / duration))%（欠落は無音を意味しません）")
+                    .foregroundColor(coverage.mic < duration * 0.9 ? .yellow : .white.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 Button(archiveBusy ? "音声を処理中…" : "この範囲を文字起こし") {
                     archiveBusy = true
@@ -115,8 +129,10 @@ struct MeetingMinutesPetView: View {
                         switch failure {
                         case .clientUnavailable:
                             calendarError = "カレンダー連携ツールがありません。日時指定は使えます。"
-                        case .calendarUnavailable:
+                        case .calendarUnavailable(.service):
                             calendarError = "Google Calendarを読み取れません。認証状態を確認してください。"
+                        case .calendarUnavailable(.unauthenticated):
+                            calendarError = "Google Calendarの認証がありません。アカウント接続後に更新してください。"
                         case .incompleteCalendarResult:
                             calendarError = "予定が多く、候補を完全に取得できません。日時指定を使ってください。"
                         }
@@ -124,6 +140,51 @@ struct MeetingMinutesPetView: View {
                         calendarError = "予定の取得に失敗しました。日時指定は使えます。"
                     }
                 }
+            }
+        }
+    }
+
+    private func connectCalendar() {
+        guard !calendarConnecting else { return }
+        calendarConnecting = true
+        DispatchQueue.global(qos: .utility).async {
+            let paths = ["/opt/homebrew/bin/gog", "/usr/local/bin/gog"]
+            guard let binary = paths.first(where: FileManager.default.isExecutableFile(atPath:)) else {
+                DispatchQueue.main.async {
+                    calendarConnecting = false
+                    calendarError = "カレンダー連携ツールがありません。"
+                }
+                return
+            }
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: binary)
+            process.arguments = ["auth", "manage", "--services=calendar", "--timeout=10m"]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            let opened = (try? process.run()) != nil
+            if opened { process.waitUntilExit() }
+            DispatchQueue.main.async {
+                calendarConnecting = false
+                if opened, process.terminationStatus == 0 { loadCandidates() }
+                else { calendarError = "Googleの接続を完了できませんでした。" }
+            }
+        }
+    }
+
+    private func loadCoverage() {
+        let request = UUID()
+        coverageRequest = request
+        archiveCoverage = nil
+        let start = archiveStart.timeIntervalSince1970
+        let end = archiveEnd.timeIntervalSince1970
+        guard start < end else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.3) {
+            let archive = MeetingAudioArchive()
+            let mic = archive.coveredSeconds(start: start, end: end, source: "mic")
+            let system = archive.coveredSeconds(start: start, end: end, source: "system")
+            DispatchQueue.main.async {
+                guard coverageRequest == request else { return }
+                archiveCoverage = (mic, system)
             }
         }
     }
@@ -211,18 +272,31 @@ struct MeetingMinutesPetView: View {
     private var detail: some View {
         if let meeting = selected {
             VStack(alignment: .leading, spacing: 0) {
-                ScrollView(.vertical, showsIndicators: true) {
-                    if showTranscript {
-                        transcriptRows(meeting)
-                    } else {
-                        Text(bodyText(meeting))
-                            .font(.system(size: 12))
-                            .foregroundColor(.white.opacity(0.85))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical, showsIndicators: true) {
+                        if showTranscript {
+                            transcriptRows(meeting)
+                        } else {
+                            Text(citedBody(meeting))
+                                .font(.system(size: 12))
+                                .foregroundColor(.white.opacity(0.85))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                        }
                     }
+                    .onChange(of: showTranscript) { showing in
+                        guard showing, let segment = evidenceSegment else { return }
+                        DispatchQueue.main.async { proxy.scrollTo(segment, anchor: .top) }
+                    }
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard url.scheme == "clawgate-segment",
+                              let number = Int(url.host ?? ""), number > 0 else { return .discarded }
+                        evidenceSegment = number
+                        showTranscript = true
+                        return .handled
+                    })
                 }
                 if showTranscript, speakerSegment != nil {
                     HStack {
@@ -246,6 +320,30 @@ struct MeetingMinutesPetView: View {
         case "failed": return "作れませんでした: " + (meeting.minutesError ?? "理由不明")
         default: return "まだ議事録はありません。「作る」を押してください。"
         }
+    }
+
+    private func citedBody(_ meeting: MeetingRecord) -> AttributedString {
+        let body = bodyText(meeting)
+        let allowed = Set(minutes?.evidence?.flatMap(\.segmentIds) ?? [])
+        let expression = try! NSRegularExpression(pattern: #"\[seg-([1-9][0-9]*)\]"#)
+        let nsBody = body as NSString
+        let matches = expression.matches(in: body, range: NSRange(location: 0, length: nsBody.length))
+        var output = AttributedString()
+        var offset = 0
+        for match in matches {
+            let token = nsBody.substring(with: match.range)
+            let id = String(token.dropFirst().dropLast())
+            guard allowed.contains(id) else { continue }
+            output.append(AttributedString(nsBody.substring(with: NSRange(location: offset,
+                                                                          length: match.range.location - offset))))
+            var linked = AttributedString(token)
+            linked.link = URL(string: "clawgate-segment://\(id.dropFirst(4))")
+            linked.foregroundColor = .cyan
+            output.append(linked)
+            offset = match.range.location + match.range.length
+        }
+        output.append(AttributedString(nsBody.substring(from: offset)))
+        return output
     }
 
     private func transcriptText(_ meeting: MeetingRecord) -> String {
@@ -285,6 +383,8 @@ struct MeetingMinutesPetView: View {
                     }
                 }
                 .buttonStyle(.plain)
+                .id(index + 1)
+                .background(evidenceSegment == index + 1 ? Color.yellow.opacity(0.12) : Color.clear)
             }
         }
         .font(.system(size: 11))
@@ -346,6 +446,7 @@ struct MeetingMinutesPetView: View {
     private func select(_ meeting: MeetingRecord) {
         selectedID = meeting.id
         showTranscript = false
+        evidenceSegment = nil
         copied = false
         speakerSegment = nil
         minutes = model.minutes(for: meeting.id)

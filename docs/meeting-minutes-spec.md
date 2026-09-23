@@ -32,6 +32,8 @@ compressed into a separate 16 kHz mono AAC archive even if context streaming is
 off. On macOS 14.2+, the system-output tap likewise archives PC playback as a
 separate `system` stream while capture is on. A failed capture or archive write
 is a gap, not evidence of silence. Unselected audio expires after seven days.
+The selection UI reports saved mic and system seconds as a share of the chosen
+range; missing coverage is never labeled silence.
 
 The Minutes tab can take an explicit start/end range from that archive and
 create a manual meeting. Before it is saved, selected archive chunks are
@@ -40,10 +42,15 @@ A separate `transcript.json` is
 generated from their audio. That transcript takes precedence over ambient
 `raw.jsonl` for this meeting. Pinned audio expires after 30 days; the meeting
 record, transcript, and minutes remain. The existing recording start/stop
-control is unchanged. The calendar adapter reads scheduled events through the
-locally installed Google Calendar CLI and suggests only events overlapping
-retained microphone audio; it does not assert attendance. Without authorized
-calendar access, the explicit date range remains available. Per-utterance
+control is unchanged. Deep recognition runs through the one-off Whisper CLI,
+not the resident live-stream server, so it cannot terminate that server. The
+calendar adapter reads scheduled events through the locally installed Google
+Calendar CLI. It enumerates authenticated accounts and each account's
+calendars, follows all pages, and rejects partial results rather than silently
+omitting meetings. Only events overlapping retained microphone audio are
+suggested; this does not assert attendance. The tab offers the CLI's Google
+account manager. Without authorized calendar access, the explicit date range
+remains available. Per-utterance
 speaker-name corrections persist across retranscription only when stream,
 utterance text, and timestamp still match; uncertain matches remain unnamed.
 There is no cross-utterance voice matching yet.
@@ -155,10 +162,10 @@ The parser is fail-closed. A reply is rejected — never shown as minutes — wh
 - any nonempty summary, topic point, decision, action, or open question lacks
   an `evidence` entry with the same claim and at least one ID from the request.
 
-The rendered minutes show each supporting `seg-N` ID, and the transcript view
-uses those same IDs. Each backfilled transcript row can play its pinned audio
-from the utterance timestamp while the 30-day clip exists. Minute citations
-are not yet clickable; automatic voice identity is also not implemented.
+The rendered minutes show each supporting `seg-N` ID as a link to that row in
+the transcript view. Each backfilled transcript row can play its pinned audio
+from the utterance timestamp while the 30-day clip exists. Automatic voice
+identity is not implemented.
 
 `insufficientEvidence` with `"minutes": null` is the required answer when the
 meeting has too little speech to write from. Inventing items is a defect.

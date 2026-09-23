@@ -13,18 +13,29 @@ struct MeetingCandidate: Identifiable, Equatable {
 /// is used only to suggest an audio interval, never as evidence of attendance.
 struct MeetingCandidateSource {
     enum Failure: Error {
+        enum CalendarReason { case service, unauthenticated }
         case clientUnavailable
-        case calendarUnavailable
+        case calendarUnavailable(CalendarReason = .service)
         case incompleteCalendarResult
     }
 
+    private struct Accounts: Decodable {
+        struct Account: Decodable { let email: String }
+        let accounts: [Account]
+    }
+    private struct Calendars: Decodable {
+        struct Calendar: Decodable { let id: String }
+        let calendars: [Calendar]
+        let nextPageToken: String?
+    }
     private struct Response: Decodable {
         let events: [Event]
         let nextPageToken: String?
     }
-    private struct Event: Decodable {
+    struct Event: Decodable {
         struct Endpoint: Decodable { let dateTime: String? }
         let id: String
+        let iCalUID: String?
         let summary: String?
         let status: String?
         let start: Endpoint?
@@ -70,33 +81,87 @@ struct MeetingCandidateSource {
         }.sorted { $0.start > $1.start }
     }
 
+    typealias Runner = ([String]) throws -> Data
+
     private static func fetchEvents(from: Date, to: Date) throws -> [Event] {
         let locations = ["/opt/homebrew/bin/gog", "/usr/local/bin/gog"]
         guard let binary = locations.first(where: FileManager.default.isExecutableFile(atPath:)) else {
             throw Failure.clientUnavailable
         }
+        return try fetchEvents(from: from, to: to) { arguments in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: binary)
+            process.arguments = arguments + ["--json", "--no-input"]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            do { try process.run() } catch { throw Failure.clientUnavailable }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20) {
+                if process.isRunning { process.terminate() }
+            }
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { throw Failure.calendarUnavailable() }
+            return data
+        }
+    }
+
+    static func fetchEvents(from: Date, to: Date, run: Runner) throws -> [Event] {
         let format = ISO8601DateFormatter()
         format.formatOptions = [.withInternetDateTime]
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = ["calendar", "events", "--all", "--from=" + format.string(from: from),
-                             "--to=" + format.string(from: to), "--max=500", "--json", "--no-input"]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { throw Failure.clientUnavailable }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 20) {
-            if process.isRunning { process.terminate() }
+        let accounts: Accounts
+        do { accounts = try JSONDecoder().decode(Accounts.self, from: run(["auth", "list"])) }
+        catch { throw Failure.clientUnavailable }
+        guard !accounts.accounts.isEmpty else { throw Failure.calendarUnavailable(.unauthenticated) }
+        var events: [Event] = []
+        var seen = Set<String>()
+        var failed = false
+        var readAnyPage = false
+        for account in accounts.accounts {
+            guard !account.email.isEmpty else { failed = true; continue }
+            let accountArg = "--account=" + account.email
+            let calendars: [Calendars.Calendar]
+            do {
+                calendars = try pages { page in
+                    let data = try run(["calendar", "calendars", accountArg, "--max=100"] + (page.map { ["--page=" + $0] } ?? []))
+                    let response = try JSONDecoder().decode(Calendars.self, from: data)
+                    readAnyPage = true
+                    return (response.calendars, response.nextPageToken)
+                }
+            } catch { failed = true; continue }
+            for calendar in calendars where !calendar.id.isEmpty {
+                do {
+                    let found: [Event] = try pages { page in
+                        let args = ["calendar", "events", calendar.id, accountArg,
+                                    "--from=" + format.string(from: from), "--to=" + format.string(from: to),
+                                    "--max=500"] + (page.map { ["--page=" + $0] } ?? [])
+                        let response = try JSONDecoder().decode(Response.self, from: run(args))
+                        readAnyPage = true
+                        return (response.events, response.nextPageToken)
+                    }
+                    for event in found {
+                        let key = (event.iCalUID ?? event.id) + "\u{0}" + (event.start?.dateTime ?? "") + "\u{0}" + (event.end?.dateTime ?? "")
+                        if seen.insert(key).inserted { events.append(event) }
+                    }
+                } catch { failed = true }
+            }
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let response = try? JSONDecoder().decode(Response.self, from: data) else {
-            throw Failure.calendarUnavailable
+        if failed {
+            throw readAnyPage ? Failure.incompleteCalendarResult : Failure.calendarUnavailable()
         }
-        guard response.nextPageToken == nil || response.nextPageToken == "" else {
-            throw Failure.incompleteCalendarResult
-        }
-        return response.events
+        return events
+    }
+
+    private static func pages<T>(_ load: (String?) throws -> ([T], String?)) throws -> [T] {
+        var items: [T] = []
+        var page: String?
+        var tokens = Set<String>()
+        repeat {
+            let (batch, next) = try load(page)
+            items += batch
+            guard let next, !next.isEmpty else { return items }
+            guard tokens.insert(next).inserted else { throw Failure.incompleteCalendarResult }
+            page = next
+        } while true
     }
 }

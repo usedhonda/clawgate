@@ -42,6 +42,9 @@ final class MeetingAudioArchiveTests: XCTestCase {
         XCTAssertGreaterThan(try AVAudioFile(forReading: archive.audioURL(for: indexed)).length, 0)
         XCTAssertTrue(archive.chunks(start: start.timeIntervalSince1970 + 2,
                                      end: start.timeIntervalSince1970 + 3).isEmpty)
+        XCTAssertEqual(archive.coveredSeconds(start: start.timeIntervalSince1970 - 0.5,
+                                              end: start.timeIntervalSince1970 + 0.5,
+                                              source: "mic"), 0.5, accuracy: 0.01)
 
         let store = MeetingStore(root: root.appendingPathComponent("meetings"))
         let selected = MeetingRecord(

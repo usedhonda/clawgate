@@ -19,7 +19,6 @@ final class MeetingBackfill {
          store: MeetingStore = MeetingStore()) {
         self.archive = archive
         self.transcriber = transcriber
-        self.transcriber.server = WhisperServer()
         self.store = store
     }
 
@@ -51,7 +50,6 @@ final class MeetingBackfill {
         let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
-        defer { transcriber.server?.stop() }
 
         var results: [TranscriptSegment] = []
         for source in ["mic", "system"] {
