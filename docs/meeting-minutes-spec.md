@@ -42,7 +42,8 @@ create a manual meeting. Before it is saved, selected archive chunks are
 trimmed to the chosen interval and pinned with an index under that meeting.
 A separate `transcript.json` is
 generated from their audio. That transcript takes precedence over ambient
-`raw.jsonl` for this meeting. Pinned audio expires after 30 days; the meeting
+`raw.jsonl` for this meeting. Pinned audio expires 30 days after selection;
+the meeting
 record, transcript, and minutes remain. The existing recording start/stop
 control is unchanged. Deep recognition runs through the one-off Whisper CLI,
 not the resident live-stream server, so it cannot terminate that server. The

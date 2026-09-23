@@ -4,6 +4,32 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingAudioArchiveTests: XCTestCase {
+    func testPinnedAudioExpiresThirtyDaysAfterSelectionNotMeeting() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let record = MeetingRecord(id: "mtg-retention", source: "manual",
+                                   startedAt: now.addingTimeInterval(-27 * 24 * 3600).timeIntervalSince1970,
+                                   endedAt: now.addingTimeInterval(-26 * 24 * 3600).timeIntervalSince1970,
+                                   timeZone: "UTC", title: nil, conferenceCode: nil,
+                                   participants: [], minutesState: "none", minutesError: nil)
+        store.save(record)
+        let audio = store.directory(for: record.id).appendingPathComponent("audio")
+        try FileManager.default.createDirectory(at: audio, withIntermediateDirectories: true)
+        let index = audio.appendingPathComponent("index.json")
+        try Data("[]".utf8).write(to: index)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-20 * 24 * 3600)],
+                                              ofItemAtPath: index.path)
+        store.pruneArchivedAudio(now: now)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: index.path))
+
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-31 * 24 * 3600)],
+                                              ofItemAtPath: index.path)
+        store.pruneArchivedAudio(now: now)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: audio.path))
+    }
+
     func testArchiveIsIndexedAndSelectedMeetingPinsOnlyItsRange() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

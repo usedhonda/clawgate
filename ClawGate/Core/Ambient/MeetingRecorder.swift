@@ -247,10 +247,12 @@ struct MeetingStore {
 
     /// The transcript and minutes remain; only pinned meeting audio expires.
     func pruneArchivedAudio(now: Date = Date()) {
-        let cutoff = now.timeIntervalSince1970 - 30 * 24 * 3600
-        for record in all() where (record.endedAt ?? .infinity) < cutoff {
+        let cutoff = now.addingTimeInterval(-30 * 24 * 3600)
+        for record in all() {
             let audio = directory(for: record.id).appendingPathComponent("audio", isDirectory: true)
-            guard FileManager.default.fileExists(atPath: audio.appendingPathComponent("index.json").path) else { continue }
+            let index = audio.appendingPathComponent("index.json")
+            guard let pinnedAt = try? index.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+                  pinnedAt < cutoff else { continue }
             try? FileManager.default.removeItem(at: audio)
         }
     }
