@@ -194,10 +194,11 @@ if [[ "$BUILD_HOSTA" == "true" ]]; then
   fi
 else
   # Host A restart (no build/codesign — see header).
-  if ! ./scripts/restart-macmini-openclaw.sh \
-      --remote-host "$REMOTE_HOST" \
-      --project-path "$PROJECT_PATH" \
-      --skip-build; then
+  REMOTE_RESTART_ARGS=(--remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" --skip-build)
+  if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+    REMOTE_RESTART_ARGS+=(--skip-plugin-sync)
+  fi
+  if ! ./scripts/restart-macmini-openclaw.sh "${REMOTE_RESTART_ARGS[@]}"; then
     echo
     echo "[fallback] Host A signing/restart may require local desktop session on macmini."
     echo "[fallback] Run on macmini:"

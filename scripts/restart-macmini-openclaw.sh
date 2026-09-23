@@ -23,6 +23,7 @@ REMOTE_HOST="macmini"
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 STOP_RELAY=false
+SKIP_PLUGIN_SYNC=false
 CLAWGATE_ROLE="host_b_client"
 OPS_SCRIPT_NAME="restart-macmini-openclaw.sh"
 
@@ -36,6 +37,8 @@ while [[ $# -gt 0 ]]; do
       # Accepted for backward-compat with callers (e.g. post-task-restart.sh).
       # Build is always skipped now; this flag is a no-op.
       shift ;;
+    --skip-plugin-sync)
+      SKIP_PLUGIN_SYNC=true; shift ;;
     --stop-relay)
       STOP_RELAY=true; shift ;;
     --keep-relay)
@@ -68,8 +71,12 @@ STOP_RELAY_FLAG="0"
 if [[ "$STOP_RELAY" == "true" ]]; then
   STOP_RELAY_FLAG="1"
 fi
+SKIP_PLUGIN_SYNC_FLAG="0"
+if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+  SKIP_PLUGIN_SYNC_FLAG="1"
+fi
 
-ssh "$REMOTE_HOST" "PROJECT_PATH='$PROJECT_PATH' STOP_RELAY_FLAG='$STOP_RELAY_FLAG' /bin/zsh -lc '
+ssh "$REMOTE_HOST" "PROJECT_PATH='$PROJECT_PATH' STOP_RELAY_FLAG='$STOP_RELAY_FLAG' SKIP_PLUGIN_SYNC_FLAG='$SKIP_PLUGIN_SYNC_FLAG' /bin/zsh -lc '
 set -euo pipefail
 CLAWGATE_ROLE=\"host_a_server\"
 OPS_SCRIPT_NAME=\"restart-macmini-openclaw.remote\"
@@ -105,7 +112,11 @@ case \"\$CURRENT_AUTH\" in
 esac
 
 # Canonical local restart path (single source of truth, no build/sign here).
-./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-sign
+LOCAL_RESTART_ARGS=(--skip-build --skip-sync --skip-sign)
+if [[ "\$SKIP_PLUGIN_SYNC_FLAG" == "1" ]]; then
+  LOCAL_RESTART_ARGS+=(--skip-plugin-sync)
+fi
+./scripts/restart-local-clawgate.sh "\${LOCAL_RESTART_ARGS[@]}"
 sleep 1
 
 launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
