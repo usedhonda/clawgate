@@ -25,20 +25,22 @@ final class MeetingCandidateSourceTests: XCTestCase {
         XCTAssertTrue(candidates.isEmpty)
     }
 
-    func testSystemAudioAloneDoesNotCreateCalendarCandidate() {
+    func testCalendarCandidateWithoutMicIsVisibleButNotReady() {
         let chunks = [MeetingAudioArchive.Chunk(id: "system", source: "system", startedAt: 600,
                                                  endedAt: 900, fileName: "system.m4a")]
         let meeting = event(id: "meeting", start: "1970-01-01T00:10:00Z", end: "1970-01-01T00:15:00Z")
         let candidates = MeetingCandidateSource.makeCandidates(
             events: [meeting],
             chunks: chunks, rough: [], from: from, to: to)
-        XCTAssertTrue(candidates.isEmpty)
+        XCTAssertEqual(candidates.map(\.id), ["meeting"])
+        XCTAssertEqual(candidates.first?.microphoneSeconds, 0)
         let withMic = MeetingCandidateSource.makeCandidates(
             events: [meeting],
             chunks: chunks + [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 600,
                                                          endedAt: 900, fileName: "mic.m4a")],
             rough: [], from: from, to: to)
         XCTAssertEqual(withMic.map(\.id), ["meeting"])
+        XCTAssertEqual(withMic.first?.microphoneSeconds, 300)
     }
 
     func testOutOfOfficeAndTransparentEventsDoNotBecomeMeetingCandidates() {

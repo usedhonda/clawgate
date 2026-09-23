@@ -97,7 +97,6 @@ struct MeetingCandidateSource {
                 if finish > newBegin { covered += finish - newBegin }
                 through = max(through, finish)
             }
-            guard covered > 0 else { return nil }
             let characters = rough.filter { ($0.capturedAt ?? -.infinity) >= first &&
                 ($0.capturedAt ?? .infinity) < last }.reduce(0) { $0 + $1.text.count }
             return MeetingCandidate(id: event.id, title: event.summary ?? "予定",

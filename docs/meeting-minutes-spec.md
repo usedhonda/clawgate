@@ -54,9 +54,15 @@ omitting meetings. Only events with timed RFC3339 `dateTime` endpoints are
 meeting candidates; all-day `date` entries are skipped rather than treated as
 a meeting covering an entire day. Out-of-office/non-default and transparent
 events are likewise excluded from automatic suggestions.
-Only events overlapping retained audio from the `mic`
-stream are suggested; system-output audio alone must not create a candidate,
-and this does not assert attendance. The tab uses the CLI's configured account
+Timed eligible events from the past seven days are listed newest first, even if
+no audio was saved. Rows without retained `mic` audio are marked "録音なし" and
+cannot be selected for transcription; system-output audio alone never counts
+as microphone coverage. A calendar entry does not assert attendance. While the
+Minutes tab is visible it refreshes every two minutes, so newly finished
+meetings become selectable when mic audio is archived. Rows include their
+scheduled start time.
+The manual date range is a collapsed fallback, not the primary path.
+The tab uses the CLI's configured account
 to start `gog auth add` with Calendar-only, read-only scopes; after a successful
 auth command it refreshes candidates in the same view. It does not maintain a
 separate Google login or token store. Without a configured GOG

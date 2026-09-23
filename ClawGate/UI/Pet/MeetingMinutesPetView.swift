@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import SwiftUI
 
 /// The Minutes tab: every recorded meeting, and the minutes written for the one
@@ -21,6 +22,7 @@ struct MeetingMinutesPetView: View {
     @State private var coverageRequest = UUID()
     @State private var candidates: [MeetingCandidate] = []
     @State private var selectedCandidate: MeetingCandidate?
+    @State private var showManualRange = false
     @State private var calendarError: String?
     @State private var calendarBusy = false
     @State private var calendarConnecting = false
@@ -45,6 +47,9 @@ struct MeetingMinutesPetView: View {
             }
         }
         .onAppear { reload(); loadCandidates(); loadCoverage() }
+        .onReceive(Timer.publish(every: 120, on: .main, in: .common).autoconnect()) { _ in
+            loadCandidates()
+        }
         .onChange(of: archiveStart) { _ in loadCoverage() }
         .onChange(of: archiveEnd) { _ in loadCoverage() }
         .onChange(of: model.meetingsRevision) { _ in reload() }
@@ -63,50 +68,67 @@ struct MeetingMinutesPetView: View {
             }
             if let calendarError {
                 Text(calendarError).foregroundColor(.yellow.opacity(0.8))
+            } else if candidates.isEmpty && !calendarBusy {
+                Text("過去7日の会議候補はありません。予定は自動更新します。")
+                    .foregroundColor(.white.opacity(0.55))
             }
-            ForEach(candidates.prefix(5)) { candidate in
-                Button {
-                    selectedCandidate = candidate
-                    archiveStart = candidate.start.addingTimeInterval(-300)
-                    archiveEnd = candidate.end.addingTimeInterval(300)
-                } label: {
-                    Text("\(candidate.title) · \(candidate.microphoneSeconds / 60)分録音 · 約\(candidate.roughCharacters)字")
-                        .lineLimit(1)
+            if !candidates.isEmpty {
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 4) {
+                        ForEach(candidates) { candidate in
+                            Button {
+                                selectedCandidate = candidate
+                                showManualRange = false
+                                archiveStart = candidate.start.addingTimeInterval(-300)
+                                archiveEnd = candidate.end.addingTimeInterval(300)
+                            } label: {
+                                let coverage = candidate.microphoneSeconds > 0
+                                    ? "\(candidate.microphoneSeconds / 60)分録音" : "録音なし"
+                                Text("\(DateFormatter.localizedString(from: candidate.start, dateStyle: .short, timeStyle: .short)) · \(candidate.title) · \(coverage)")
+                                    .lineLimit(1)
+                            }
+                            .disabled(candidate.microphoneSeconds == 0)
+                        }
+                    }
                 }
+                .frame(maxHeight: 160)
             }
-            Text("過去7日の音声から会議を作る")
-                .font(.system(size: 11, weight: .semibold))
-            DatePicker("開始", selection: $archiveStart, displayedComponents: [.date, .hourAndMinute])
-            DatePicker("終了", selection: $archiveEnd, displayedComponents: [.date, .hourAndMinute])
-            if let coverage = archiveCoverage, archiveStart < archiveEnd {
+            DisclosureGroup("日時を手動で指定", isExpanded: $showManualRange) {
+                DatePicker("開始", selection: $archiveStart, displayedComponents: [.date, .hourAndMinute])
+                DatePicker("終了", selection: $archiveEnd, displayedComponents: [.date, .hourAndMinute])
+            }
+            if (selectedCandidate != nil || showManualRange),
+               let coverage = archiveCoverage, archiveStart < archiveEnd {
                 let duration = archiveEnd.timeIntervalSince(archiveStart)
                 Text("保存済み区間: マイク \(Int(100 * coverage.mic / duration))% / PC音声 \(Int(100 * coverage.system / duration))%（欠落は無音を意味しません）")
                     .foregroundColor(coverage.mic < duration * 0.9 ? .yellow : .white.opacity(0.55))
                     .fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
-                Button(archiveBusy ? "音声を処理中…" : "この範囲を文字起こし") {
-                    archiveBusy = true
-                    archiveError = nil
-                    let title = selectedCandidate.flatMap { candidate -> String? in
-                        let overlap = min(archiveEnd, candidate.end).timeIntervalSince(max(archiveStart, candidate.start))
-                        return overlap >= candidate.end.timeIntervalSince(candidate.start) / 2 ? candidate.title : nil
-                    }
-                    model.createArchivedMeeting(start: archiveStart, end: archiveEnd, title: title) { result in
-                        archiveBusy = false
-                        switch result {
-                        case .success(let record):
-                            reload()
-                            select(record)
-                            model.requestMinutes(for: record)
-                        case .failure(let error):
-                            archiveError = "文字起こしできませんでした: \(error)"
+            if selectedCandidate != nil || showManualRange {
+                HStack {
+                    Button(archiveBusy ? "音声を処理中…" : selectedCandidate != nil && !showManualRange ? "この会議を文字起こし" : "この範囲を文字起こし") {
+                        archiveBusy = true
+                        archiveError = nil
+                        let title = selectedCandidate.flatMap { candidate -> String? in
+                            let overlap = min(archiveEnd, candidate.end).timeIntervalSince(max(archiveStart, candidate.start))
+                            return overlap >= candidate.end.timeIntervalSince(candidate.start) / 2 ? candidate.title : nil
+                        }
+                        model.createArchivedMeeting(start: archiveStart, end: archiveEnd, title: title) { result in
+                            archiveBusy = false
+                            switch result {
+                            case .success(let record):
+                                reload()
+                                select(record)
+                                model.requestMinutes(for: record)
+                            case .failure(let error):
+                                archiveError = "文字起こしできませんでした: \(error)"
+                            }
                         }
                     }
+                    .disabled(archiveBusy || archiveStart >= archiveEnd ||
+                              archiveStart < Date().addingTimeInterval(-MeetingAudioArchive.retentionSeconds))
+                    Spacer()
                 }
-                .disabled(archiveBusy || archiveStart >= archiveEnd ||
-                          archiveStart < Date().addingTimeInterval(-MeetingAudioArchive.retentionSeconds))
-                Spacer()
             }
             if let archiveError {
                 Text(archiveError).foregroundColor(.red.opacity(0.8))
@@ -129,6 +151,10 @@ struct MeetingMinutesPetView: View {
                 switch result {
                 case .success(let found):
                     candidates = found
+                    if let selectedCandidate,
+                       !found.contains(where: { $0.id == selectedCandidate.id && $0.microphoneSeconds > 0 }) {
+                        self.selectedCandidate = nil
+                    }
                     calendarError = nil
                 case .failure(let error):
                     if let failure = error as? MeetingCandidateSource.Failure {
