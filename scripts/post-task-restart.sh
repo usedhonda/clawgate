@@ -95,7 +95,7 @@ except Exception:
 # hands-free mono and the ambient subsystem hung for minutes.
 ambient_verify_chunks_after_restart() {
   echo "[verify] Host B ambient capture liveness"
-  local status liveness streaming chunks before elapsed
+  local status liveness streaming chunks before elapsed blocked
   status="$(ambient_status_json)"
   if [[ -z "$status" ]]; then
     echo "WARN: ambient status unavailable, skipping ambient verify" >&2
@@ -114,7 +114,6 @@ ambient_verify_chunks_after_restart() {
   # The app may be refusing to resume on purpose: after a backend timeout it
   # records a typed inhibit and waits for a person to start the stream again.
   # That is correct behaviour, not a failed restart.
-  local blocked
   blocked="$(printf '%s' "$status" | ambient_extract_field autoResumeBlockedReason)"
   if [[ -n "$blocked" && "$blocked" != "None" ]]; then
     echo "skip (auto-resume inhibited by the app: $blocked; a person must start the stream)"
@@ -131,6 +130,11 @@ ambient_verify_chunks_after_restart() {
     fi
     streaming="$(printf '%s' "$status" | ambient_extract_field streaming)"
     liveness="$(printf '%s' "$status" | ambient_extract_field captureLiveness)"
+    blocked="$(printf '%s' "$status" | ambient_extract_field autoResumeBlockedReason)"
+    if [[ -n "$blocked" && "$blocked" != "None" ]]; then
+      echo "FAIL: ambient startup became inhibited during verify ($blocked); no automatic microphone retry" >&2
+      return 1
+    fi
     chunks="$(printf '%s' "$status" | ambient_extract_field chunksSurfaced)"
     [[ "$chunks" =~ ^-?[0-9]+$ ]] || chunks="$(printf '%s' "$status" | ambient_extract_field chunks_surfaced)"
     [[ "$chunks" =~ ^-?[0-9]+$ ]] || chunks=0

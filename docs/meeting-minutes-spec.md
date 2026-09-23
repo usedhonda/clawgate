@@ -30,7 +30,9 @@ same single-flight admission, and the same connection state.
 When the existing capture control is on, each finalized microphone chunk is
 compressed into a separate 16 kHz mono AAC archive even if context streaming is
 off. On macOS 14.2+, the system-output tap likewise archives PC playback as a
-separate `system` stream while capture is on. A failed capture or archive write
+separate `system` stream while capture is on. It starts only after the microphone
+delivers its first buffer, not concurrently with microphone backend startup.
+A failed capture or archive write
 is a gap, not evidence of silence. Unselected audio expires after seven days.
 The selection UI reports saved mic and system seconds as a share of the chosen
 range; missing coverage is never labeled silence.

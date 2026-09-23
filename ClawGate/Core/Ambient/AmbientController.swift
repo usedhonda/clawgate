@@ -105,6 +105,7 @@ final class AmbientController {
     private let work = DispatchQueue(label: "ai.clawgate.ambient.transcribe")
 
     private var streaming = false
+    private var micCaptureReady = false
     private var sessionID: String?
     private var segmentsTotal = 0
     private var skippedTotal = 0
@@ -205,7 +206,12 @@ final class AmbientController {
         // the user started. Clearing on "start accepted" would reopen the
         // microphone on the next launch even when that start never delivered.
         self.capture.onFirstBuffer = { [weak self] _ in
-            self?.setAutoResumeBlocked(reason: nil)
+            guard let self else { return }
+            self.setAutoResumeBlocked(reason: nil)
+            self.state.async {
+                self.micCaptureReady = true
+                self.reconcileSystemTapLocked()
+            }
         }
         self.capture.setPreferredDevice(uid: configStore.load().ambientMicDeviceUID)
         DispatchQueue.global(qos: .utility).async {
@@ -241,6 +247,7 @@ final class AmbientController {
             self.state.async {
                 do {
                     if self.capture.state != .capturing {
+                        self.micCaptureReady = false
                         if self.capture.state == .paused {
                             try self.capture.resume()
                         } else {
@@ -300,6 +307,7 @@ final class AmbientController {
             self.transcriber.server?.stop()
             Task { await self.ingest.stop() }
             self.capture.stop()
+            self.micCaptureReady = false
             self.reconcileSystemTapLocked()
         }
     }
@@ -359,9 +367,18 @@ final class AmbientController {
         return top.key
     }
 
-    /// Run the Chrome tap exactly when streaming during a call. Called on `state`.
+    /// Start system capture only after the microphone backend has opened. Running
+    /// two Core Audio session starts together can make a timed-out mic ambiguous.
+    static func shouldRunSystemTap(capturing: Bool, micReady: Bool,
+                                   backendPhase: AmbientCaptureManager.BackendPhase) -> Bool {
+        capturing && micReady && backendPhase != .timedOut && backendPhase != .failed
+    }
+
+    /// Called on `state`; the first mic buffer calls this again after start.
     private func reconcileSystemTapLocked() {
-        let want = capture.state == .capturing
+        let want = Self.shouldRunSystemTap(capturing: capture.state == .capturing,
+                                            micReady: micCaptureReady,
+                                            backendPhase: capture.livenessSnapshot().backendPhase)
         systemTap.setActive(want)
         if meetingActive, meetingExpiryTimer == nil {
             let timer = DispatchSource.makeTimerSource(queue: state)
@@ -380,7 +397,7 @@ final class AmbientController {
     private func expireMeetingIfSilentLocked() {
         guard meetingActive else { return }
         if let seen = meetingLastSeen, Date().timeIntervalSince(seen) < Self.meetingHeartbeatTTL {
-            systemTap.setActive(capture.state == .capturing)
+            reconcileSystemTapLocked()
             return
         }
         meetingActive = false
@@ -576,8 +593,13 @@ final class AmbientController {
             guard granted else { completion(.failure(.micDenied)); return }
             self.state.async {
                 do {
-                    if self.capture.state == .idle { try self.capture.start() }
-                    else if self.capture.state == .paused { try self.capture.resume() }
+                    if self.capture.state == .idle {
+                        self.micCaptureReady = false
+                        try self.capture.start()
+                    } else if self.capture.state == .paused {
+                        self.micCaptureReady = false
+                        try self.capture.resume()
+                    }
                     // Capture can run without a stream; the monitor still has
                     // to watch the input device while the microphone is open.
                     self.healthMonitor.start()

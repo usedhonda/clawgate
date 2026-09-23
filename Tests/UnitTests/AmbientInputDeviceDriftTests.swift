@@ -123,6 +123,13 @@ final class AmbientInputDeviceDriftTests: XCTestCase {
         XCTAssertFalse(AmbientController.shouldAutoResume(wasStreaming: false, blockedReason: "backend_timeout"))
     }
 
+    func testSystemTapWaitsForMicrophoneBackend() {
+        XCTAssertFalse(AmbientController.shouldRunSystemTap(capturing: true, micReady: false, backendPhase: .starting))
+        XCTAssertFalse(AmbientController.shouldRunSystemTap(capturing: true, micReady: true, backendPhase: .timedOut))
+        XCTAssertFalse(AmbientController.shouldRunSystemTap(capturing: false, micReady: true, backendPhase: .running))
+        XCTAssertTrue(AmbientController.shouldRunSystemTap(capturing: true, micReady: true, backendPhase: .running))
+    }
+
     // MARK: - Automatic recovery budget
 
     /// Every automatic recovery rebuilds the engine, and a rebuilt engine
