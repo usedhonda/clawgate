@@ -52,7 +52,10 @@ calendars, follows all pages, and rejects partial results rather than silently
 omitting meetings. Only events overlapping retained microphone audio are
 suggested; this does not assert attendance. The tab offers the CLI's Google
 account manager. Without authorized calendar access, the explicit date range
-remains available. Per-utterance
+remains available. A candidate explicitly selected by the user contributes its
+title to the saved meeting only while the adjusted range still covers at least
+half of that scheduled interval. The calendar does not supply transcript or
+speaker content. Per-utterance
 speaker-name corrections persist across retranscription only when stream,
 utterance text, and timestamp still match; uncertain matches remain unnamed.
 There is no cross-utterance voice matching yet.

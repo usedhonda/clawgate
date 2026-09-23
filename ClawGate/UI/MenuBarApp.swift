@@ -236,9 +236,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         petModel.meetingTranscriptProvider = { [weak ambient] record in
             ambient?.meetingTranscript(record) ?? []
         }
-        petModel.archivedMeetingCreator = { start, end, completion in
+        petModel.archivedMeetingCreator = { start, end, title, completion in
             DispatchQueue.global(qos: .userInitiated).async {
-                let result = Result { try MeetingBackfill().createMeeting(start: start, end: end) }
+                let result = Result { try MeetingBackfill().createMeeting(start: start, end: end, title: title) }
                 DispatchQueue.main.async { completion(result) }
             }
         }

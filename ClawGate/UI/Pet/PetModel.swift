@@ -2689,7 +2689,7 @@ final class PetModel: NSObject, ObservableObject {
     /// Supplies a meeting's transcript when minutes are about to be asked for.
     /// Set by the app, which owns the ambient controller.
     var meetingTranscriptProvider: ((MeetingRecord) -> [TranscriptSegment])?
-    var archivedMeetingCreator: ((Date, Date, @escaping (Result<MeetingRecord, Error>) -> Void) -> Void)?
+    var archivedMeetingCreator: ((Date, Date, String?, @escaping (Result<MeetingRecord, Error>) -> Void) -> Void)?
     /// Bumped whenever a meeting record changes, so the Minutes tab reloads.
     @Published private(set) var meetingsRevision = 0
     /// The meeting whose minutes are in flight, if any.
@@ -2779,9 +2779,9 @@ final class PetModel: NSObject, ObservableObject {
         meetingTranscriptProvider?(record) ?? []
     }
 
-    func createArchivedMeeting(start: Date, end: Date,
+    func createArchivedMeeting(start: Date, end: Date, title: String? = nil,
                                completion: @escaping (Result<MeetingRecord, Error>) -> Void) {
-        archivedMeetingCreator?(start, end) { [weak self] result in
+        archivedMeetingCreator?(start, end, title) { [weak self] result in
             self?.meetingsRevision += 1
             completion(result)
         }

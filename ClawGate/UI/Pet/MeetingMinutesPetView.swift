@@ -20,6 +20,7 @@ struct MeetingMinutesPetView: View {
     @State private var archiveCoverage: (mic: Double, system: Double)?
     @State private var coverageRequest = UUID()
     @State private var candidates: [MeetingCandidate] = []
+    @State private var selectedCandidate: MeetingCandidate?
     @State private var calendarError: String?
     @State private var calendarBusy = false
     @State private var calendarConnecting = false
@@ -65,6 +66,7 @@ struct MeetingMinutesPetView: View {
             }
             ForEach(candidates.prefix(5)) { candidate in
                 Button {
+                    selectedCandidate = candidate
                     archiveStart = candidate.start.addingTimeInterval(-300)
                     archiveEnd = candidate.end.addingTimeInterval(300)
                 } label: {
@@ -86,7 +88,11 @@ struct MeetingMinutesPetView: View {
                 Button(archiveBusy ? "音声を処理中…" : "この範囲を文字起こし") {
                     archiveBusy = true
                     archiveError = nil
-                    model.createArchivedMeeting(start: archiveStart, end: archiveEnd) { result in
+                    let title = selectedCandidate.flatMap { candidate -> String? in
+                        let overlap = min(archiveEnd, candidate.end).timeIntervalSince(max(archiveStart, candidate.start))
+                        return overlap >= candidate.end.timeIntervalSince(candidate.start) / 2 ? candidate.title : nil
+                    }
+                    model.createArchivedMeeting(start: archiveStart, end: archiveEnd, title: title) { result in
                         archiveBusy = false
                         switch result {
                         case .success(let record):

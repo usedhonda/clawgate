@@ -31,7 +31,8 @@ final class MeetingBackfillIntegrationTests: XCTestCase {
                                   actualPrimedFrames: 0, sampleRate: 16_000,
                                   provenOverlap: false, source: .mic))
         let record = try MeetingBackfill(archive: archive, store: store)
-            .createMeeting(start: start, end: start.addingTimeInterval(duration))
+            .createMeeting(start: start, end: start.addingTimeInterval(duration), title: "Synthetic meeting")
+        XCTAssertEqual(store.load(id: record.id)?.title, "Synthetic meeting")
         let transcript = try XCTUnwrap(store.loadBackfill(id: record.id))
         XCTAssertFalse(transcript.isEmpty)
         XCTAssertTrue(transcript.allSatisfy { $0.stream == "mic" && $0.capturedAt != nil })

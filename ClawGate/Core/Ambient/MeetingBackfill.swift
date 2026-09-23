@@ -22,13 +22,13 @@ final class MeetingBackfill {
         self.store = store
     }
 
-    func createMeeting(start: Date, end: Date) throws -> MeetingRecord {
+    func createMeeting(start: Date, end: Date, title: String? = nil) throws -> MeetingRecord {
         guard start < end else { throw Failure.noAudio }
         let record = MeetingRecord(
             id: MeetingRecorder.makeID(at: start) + "-" + UUID().uuidString.prefix(8),
             source: "manual", startedAt: start.timeIntervalSince1970,
             endedAt: end.timeIntervalSince1970, timeZone: TimeZone.current.identifier,
-            title: nil, conferenceCode: nil, participants: [],
+            title: title, conferenceCode: nil, participants: [],
             minutesState: "none", minutesError: nil)
         do {
             try pinAudio(for: record)
