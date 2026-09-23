@@ -3,6 +3,29 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingBackfillIntegrationTests: XCTestCase {
+    func testBackfillCarriesOnlyUnambiguousLiveSpeakerLabels() {
+        var speech = TranscriptSegment(startSeconds: 0, endSeconds: 2, text: "backfill")
+        speech.capturedAt = 100
+        speech.stream = "system"
+        var live = TranscriptSegment(startSeconds: 0, endSeconds: 2, text: "live")
+        live.capturedAt = 100
+        live.stream = "system"
+        live.speakerName = "Guest"
+        let named = MeetingBackfill.carryLiveSpeakerLabels([speech], from: [live], meetingSource: "meet")
+        XCTAssertEqual(named.first?.speakerName, "Guest")
+        var conflicting = live
+        conflicting.speakerName = "Someone else"
+        XCTAssertNil(MeetingBackfill.carryLiveSpeakerLabels([speech], from: [live, conflicting],
+                     meetingSource: "meet").first?.speakerName)
+        live.stream = "mic"
+        XCTAssertNil(MeetingBackfill.carryLiveSpeakerLabels([speech], from: [live],
+                     meetingSource: "meet").first?.speakerName)
+        speech.stream = "mic"
+        live.speaker = "other"
+        XCTAssertEqual(MeetingBackfill.carryLiveSpeakerLabels([speech], from: [live],
+                       meetingSource: "manual").first?.speaker, "other")
+    }
+
     func testSyntheticSpeechBecomesMeetingTranscript() throws {
         guard ProcessInfo.processInfo.environment["CLAWGATE_MEETING_E2E"] == "1" else {
             throw XCTSkip("opt-in test requires local Whisper model")

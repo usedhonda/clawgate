@@ -74,8 +74,40 @@ final class MeetingBackfill {
             }
         }
         results.sort { ($0.capturedAt ?? 0) < ($1.capturedAt ?? 0) }
+        let live = AmbientStorage.segmentsInRange(start: record.startedAt, end: end)
+        results = Self.carryLiveSpeakerLabels(results, from: live, meetingSource: record.source)
         try store.saveBackfill(results, for: record)
         return results
+    }
+
+    static func carryLiveSpeakerLabels(_ backfill: [TranscriptSegment], from live: [TranscriptSegment],
+                                       meetingSource: String) -> [TranscriptSegment] {
+        backfill.map { segment in
+            guard let at = segment.capturedAt, let stream = segment.stream else { return segment }
+            let duration = max(0.3, segment.endSeconds - segment.startSeconds)
+            let matches = live.compactMap { earlier -> (TranscriptSegment, Double)? in
+                guard earlier.stream == stream, let liveAt = earlier.capturedAt else { return nil }
+                let liveEnd = liveAt + max(0.3, earlier.endSeconds - earlier.startSeconds)
+                let overlap = min(at + duration, liveEnd) - max(at, liveAt)
+                return overlap > 0 ? (earlier, overlap) : nil
+            }
+            func unambiguous(_ label: (TranscriptSegment) -> String?) -> String? {
+                var overlap: [String: Double] = [:]
+                for (earlier, seconds) in matches {
+                    if let value = label(earlier), !value.isEmpty { overlap[value, default: 0] += seconds }
+                }
+                let ranked = overlap.sorted { $0.value > $1.value }
+                guard let top = ranked.first, top.value >= duration * 0.5,
+                      ranked.dropFirst().allSatisfy({ $0.value < duration * 0.2 }) else { return nil }
+                return top.key
+            }
+            var result = segment
+            if let name = unambiguous({ $0.speakerName }) { result.speakerName = name }
+            if meetingSource == "manual" {
+                if let speaker = unambiguous({ $0.speaker }) { result.speaker = speaker }
+            }
+            return result
+        }
     }
 
     func pinAudio(for record: MeetingRecord) throws {

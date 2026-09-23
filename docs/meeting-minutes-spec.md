@@ -67,7 +67,11 @@ half of that scheduled interval. The calendar does not supply transcript or
 speaker content. Per-utterance
 speaker-name corrections persist across retranscription only when stream,
 utterance text, and timestamp still match; uncertain matches remain unnamed.
-There is no cross-utterance voice matching yet.
+When backfill replaces the live transcript, an already-observed speaker name is
+carried over only on the same audio stream with unambiguous time overlap.
+For manually recorded meetings, the live self/other label follows the same
+rule. This does not infer a guest's identity from their voice; there is no
+cross-utterance voice matching yet.
 
 A meeting is created from the Google Meet call heartbeat
 (`POST /v1/ambient/meeting`) and stored at
