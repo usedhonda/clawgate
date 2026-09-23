@@ -50,10 +50,16 @@ not the resident live-stream server, so it cannot terminate that server. The
 calendar adapter reads scheduled events through the locally installed Google
 Calendar CLI. It enumerates authenticated accounts and each account's
 calendars, follows all pages, and rejects partial results rather than silently
-omitting meetings. Only events overlapping retained microphone audio are
-suggested; this does not assert attendance. The tab uses the CLI's configured
-account to start `gog auth add` with Calendar-only, read-only scopes; it does
-not maintain a separate Google login or token store. Without a configured GOG
+omitting meetings. Only events with timed RFC3339 `dateTime` endpoints are
+meeting candidates; all-day `date` entries are skipped rather than treated as
+a meeting covering an entire day. Out-of-office/non-default and transparent
+events are likewise excluded from automatic suggestions.
+Only events overlapping retained audio from the `mic`
+stream are suggested; system-output audio alone must not create a candidate,
+and this does not assert attendance. The tab uses the CLI's configured account
+to start `gog auth add` with Calendar-only, read-only scopes; after a successful
+auth command it refreshes candidates in the same view. It does not maintain a
+separate Google login or token store. Without a configured GOG
 account or authorized calendar access, the explicit date range
 remains available. A candidate explicitly selected by the user contributes its
 title to the saved meeting only while the adjusted range still covers at least

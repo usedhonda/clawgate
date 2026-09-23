@@ -49,31 +49,45 @@ struct MeetingCandidateSource {
         let iCalUID: String?
         let summary: String?
         let status: String?
+        let eventType: String?
+        let transparency: String?
         let start: Endpoint?
         let end: Endpoint?
+    }
+
+    private static func endpointDate(_ endpoint: Event.Endpoint?) -> Date? {
+        guard let dateTime = endpoint?.dateTime else { return nil }
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return parser.date(from: dateTime) ?? plain.date(from: dateTime)
     }
 
     static func candidates(now: Date = Date(),
                            archive: MeetingAudioArchive = MeetingAudioArchive()) throws -> [MeetingCandidate] {
         let from = now.addingTimeInterval(-MeetingAudioArchive.retentionSeconds)
         let events = try fetchEvents(from: from, to: now)
-        let chunks = archive.allChunks().filter { $0.source == "mic" }
         let rough = AmbientStorage.segmentsInRange(start: from.timeIntervalSince1970,
                                                    end: now.timeIntervalSince1970)
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
+        return makeCandidates(events: events, chunks: archive.allChunks(), rough: rough,
+                              from: from, to: now)
+    }
+
+    static func makeCandidates(events: [Event], chunks: [MeetingAudioArchive.Chunk],
+                               rough: [TranscriptSegment], from: Date, to: Date) -> [MeetingCandidate] {
         return events.compactMap { event -> MeetingCandidate? in
             guard event.status != "cancelled",
-                  let startText = event.start?.dateTime,
-                  let endText = event.end?.dateTime,
-                  let start = parser.date(from: startText) ?? plain.date(from: startText),
-                  let end = parser.date(from: endText) ?? plain.date(from: endText),
-                  start < end else { return nil }
+                  (event.eventType ?? "default") == "default",
+                  event.transparency != "transparent",
+                  let start = endpointDate(event.start),
+                  let end = endpointDate(event.end),
+                  start < end,
+                  end > from,
+                  start < to else { return nil }
             let first = start.timeIntervalSince1970
             let last = end.timeIntervalSince1970
-            let intervals = chunks.filter { $0.startedAt < last && $0.endedAt > first }
+            let intervals = chunks.filter { $0.source == "mic" && $0.startedAt < last && $0.endedAt > first }
                 .map { (max(first, $0.startedAt), min(last, $0.endedAt)) }
                 .sorted { $0.0 < $1.0 }
             var covered = 0.0

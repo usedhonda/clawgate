@@ -5,6 +5,52 @@ final class MeetingCandidateSourceTests: XCTestCase {
     private let from = Date(timeIntervalSince1970: 0)
     private let to = Date(timeIntervalSince1970: 3600)
 
+    private func event(id: String, start: String, end: String, dateOnly: Bool = false) -> MeetingCandidateSource.Event {
+        let endpointKey = dateOnly ? "date" : "dateTime"
+        let object: [String: Any] = [
+            "id": id, "summary": "Meeting",
+            "start": [endpointKey: start], "end": [endpointKey: end]
+        ]
+        return try! JSONDecoder().decode(MeetingCandidateSource.Event.self,
+            from: try! JSONSerialization.data(withJSONObject: object))
+    }
+
+    func testAllDayEventsAreNotMistakenForMeetingsWhenMicAudioOverlaps() {
+        let chunks = [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 86_410,
+                                                 endedAt: 86_420, fileName: "mic.m4a")]
+        let candidates = MeetingCandidateSource.makeCandidates(
+            events: [event(id: "all-day", start: "1970-01-02", end: "1970-01-03", dateOnly: true)],
+            chunks: chunks, rough: [], from: Date(timeIntervalSince1970: 0),
+            to: Date(timeIntervalSince1970: 172_800))
+        XCTAssertTrue(candidates.isEmpty)
+    }
+
+    func testSystemAudioAloneDoesNotCreateCalendarCandidate() {
+        let chunks = [MeetingAudioArchive.Chunk(id: "system", source: "system", startedAt: 600,
+                                                 endedAt: 900, fileName: "system.m4a")]
+        let meeting = event(id: "meeting", start: "1970-01-01T00:10:00Z", end: "1970-01-01T00:15:00Z")
+        let candidates = MeetingCandidateSource.makeCandidates(
+            events: [meeting],
+            chunks: chunks, rough: [], from: from, to: to)
+        XCTAssertTrue(candidates.isEmpty)
+        let withMic = MeetingCandidateSource.makeCandidates(
+            events: [meeting],
+            chunks: chunks + [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 600,
+                                                         endedAt: 900, fileName: "mic.m4a")],
+            rough: [], from: from, to: to)
+        XCTAssertEqual(withMic.map(\.id), ["meeting"])
+    }
+
+    func testOutOfOfficeAndTransparentEventsDoNotBecomeMeetingCandidates() {
+        let audio = [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 600,
+                                               endedAt: 900, fileName: "mic.m4a")]
+        let outOfOffice = Data(#"{"id":"ooo","eventType":"outOfOffice","start":{"dateTime":"1970-01-01T00:00:00Z"},"end":{"dateTime":"1970-01-01T01:00:00Z"}}"#.utf8)
+        let transparent = Data(#"{"id":"transparent","transparency":"transparent","start":{"dateTime":"1970-01-01T00:00:00Z"},"end":{"dateTime":"1970-01-01T01:00:00Z"}}"#.utf8)
+        let events = [outOfOffice, transparent].map { try! JSONDecoder().decode(MeetingCandidateSource.Event.self, from: $0) }
+        XCTAssertTrue(MeetingCandidateSource.makeCandidates(events: events, chunks: audio,
+                        rough: [], from: from, to: to).isEmpty)
+    }
+
     func testEnumeratesAccountsCalendarsAndEventPagesWithoutAll() throws {
         var calls: [[String]] = []
         let events = try MeetingCandidateSource.fetchEvents(from: from, to: to) { args in
