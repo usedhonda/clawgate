@@ -2,10 +2,8 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
-/// Records what Chrome plays -- the remote party of a Google Meet call -- through
-/// a Core Audio process tap, into the same 16 kHz mono chunk files (30s chunks,
-/// 3s overlap) the microphone path produces. Meet never plays the owner's own
-/// voice back to them, so everything this tap hears is the other party.
+/// Records outgoing Mac audio independently of the microphone, including calls
+/// outside Chrome, through a Core Audio tap. The two sources are never mixed.
 ///
 /// Threading: every writer field is confined to `ioQueue`, where the IOProc
 /// block runs. HAL calls (create/start/stop/destroy) run on `controlQueue` and
@@ -101,22 +99,16 @@ final class SystemAudioTap {
     }
 
     /// Converge on the wanted state. Asynchronous: the caller never waits on
-    /// Core Audio. While running, a changed set of Chrome audio processes (Chrome
-    /// can respawn its audio service) rebuilds the tap.
+    /// Core Audio. A global tap does not need app-specific process discovery.
     func setActive(_ active: Bool) {
         controlQueue.async { [weak self] in
             guard let self else { return }
             if active {
-                let current = Self.chromeProcessObjects()
-                if self.procID != nil {
-                    guard Set(current) != Set(self.tappedProcesses) else { return }
-                    self.log("ambient system tap: Chrome audio processes changed, rebuilding")
-                    self.teardown()
-                }
+                if self.procID != nil { return }
                 do {
-                    try self.startTap(processes: current)
+                    try self.startTap()
                     self.setState(.running, error: nil)
-                    self.log("ambient system tap started processes=\(current.count)")
+                    self.log("ambient system tap started")
                 } catch {
                     self.teardown()
                     self.setState(.failed, error: "\(error)")
@@ -141,21 +133,19 @@ final class SystemAudioTap {
 
     // MARK: - HAL (controlQueue only)
 
-    private func startTap(processes: [AudioObjectID]) throws {
+    private func startTap() throws {
         guard #available(macOS 14.2, *) else { throw TapError.unsupportedOS }
-        guard !processes.isEmpty else { throw TapError.noChromeProcess }
-
-        let description = CATapDescription(stereoMixdownOfProcesses: processes)
+        let description = CATapDescription(monoGlobalTapButExcludeProcesses: [])
         description.uuid = UUID()
         description.isPrivate = true
         description.muteBehavior = .unmuted
-        description.name = "ClawGate Meet tap"
+        description.name = "ClawGate system audio tap"
 
         var tap = AudioObjectID(kAudioObjectUnknown)
         var status = AudioHardwareCreateProcessTap(description, &tap)
         guard status == noErr else { throw TapError.osStatus("create process tap", status) }
         tapID = tap
-        tappedProcesses = processes
+        tappedProcesses = []
 
         var asbd = AudioStreamBasicDescription()
         var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
@@ -167,7 +157,7 @@ final class SystemAudioTap {
         status = AudioObjectGetPropertyData(tap, &address, 0, nil, &size, &asbd)
         guard status == noErr else { throw TapError.osStatus("read tap format", status) }
         guard let tapFormat = AVAudioFormat(streamDescription: &asbd) else { throw TapError.badFormat }
-        let formatText = "\(Int(asbd.mSampleRate))Hz ch=\(asbd.mChannelsPerFrame) flags=\(asbd.mFormatFlags) bits=\(asbd.mBitsPerChannel) procs=\(processes.count)"
+        let formatText = "\(Int(asbd.mSampleRate))Hz ch=\(asbd.mChannelsPerFrame) flags=\(asbd.mFormatFlags) bits=\(asbd.mBitsPerChannel)"
         stateLock.withLock {
             _tapFormat = formatText
             _ioCallbacks = 0; _framesIn = 0; _wrapFailures = 0; _convertFailures = 0
@@ -175,7 +165,7 @@ final class SystemAudioTap {
 
         let outputUID = Self.defaultOutputDeviceUID() ?? ""
         var aggregate: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "ClawGate Meet tap",
+            kAudioAggregateDeviceNameKey: "ClawGate system audio tap",
             kAudioAggregateDeviceUIDKey: "ai.clawgate.meettap.\(UUID().uuidString)",
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,

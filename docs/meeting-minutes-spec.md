@@ -25,6 +25,29 @@ same single-flight admission, and the same connection state.
 
 ## The meeting record
 
+### Audio retention and retrospective selection
+
+When the existing capture control is on, each finalized microphone chunk is
+compressed into a separate 16 kHz mono AAC archive even if context streaming is
+off. On macOS 14.2+, the system-output tap likewise archives PC playback as a
+separate `system` stream while capture is on. A failed capture or archive write
+is a gap, not evidence of silence. Unselected audio expires after seven days.
+
+The Minutes tab can take an explicit start/end range from that archive and
+create a manual meeting. Before it is saved, selected archive chunks are
+trimmed to the chosen interval and pinned with an index under that meeting.
+A separate `transcript.json` is
+generated from their audio. That transcript takes precedence over ambient
+`raw.jsonl` for this meeting. Pinned audio expires after 30 days; the meeting
+record, transcript, and minutes remain. The existing recording start/stop
+control is unchanged. The calendar adapter reads scheduled events through the
+locally installed Google Calendar CLI and suggests only events overlapping
+retained microphone audio; it does not assert attendance. Without authorized
+calendar access, the explicit date range remains available. Per-utterance
+speaker-name corrections persist across retranscription only when stream,
+utterance text, and timestamp still match; uncertain matches remain unnamed.
+There is no cross-utterance voice matching yet.
+
 A meeting is created from the Google Meet call heartbeat
 (`POST /v1/ambient/meeting`) and stored at
 `ambient-context/meetings/<id>/meeting.json`.
@@ -43,8 +66,9 @@ A meeting is created from the Google Meet call heartbeat
 
 Invariants:
 
-- **The transcript is never copied into the record.** It stays in the session's
-  `raw.jsonl`; a meeting is a time range over it. A second copy would drift.
+- **The transcript is never copied into the record.** Live Meet transcripts
+  remain in the ambient session's `raw.jsonl`; retrospective meetings have a
+  separate, regenerable `transcript.json` generated from selected audio.
 - **The tail.** A meeting's range ends `MeetingRecorder.tailSeconds` (60s) after
   the last heartbeat so the closing words survive, and is then trimmed at the
   next meeting's start so back-to-back calls never swallow each other's opening.
@@ -62,7 +86,7 @@ Read back over HTTP with `GET /v1/ambient/meetings` (records, newest first) and
 
 ## Request envelope
 
-`policyVersion` = `meeting-minutes-v1`. The outbound message is the universal
+`policyVersion` = `meeting-minutes-v2`. The outbound message is the universal
 prefix, a blank line, then the envelope as JSON — never string-concatenated with
 a delimiter, so transcript text cannot break out of the data section.
 
@@ -76,9 +100,10 @@ a delimiter, so transcript text cannot break out of the data section.
 ```
 
 `segments[].id` is `seg-1`, `seg-2`, … in speech order. Unlike the Log envelope,
-a segment carries `stream` and `speakerName`: during a call `stream == "system"`
-is the remote party (Chrome's output) and `stream == "mic"` is the owner, and
-`speakerName` is the participant Meet's own speaking tile identified.
+a segment carries `stream` and `speakerName`: `system` means PC playback and
+`mic` means microphone capture. Neither stream proves a participant's identity:
+an in-person guest can enter the mic and the owner's own voice can play from
+the PC. The model must not infer a named speaker from stream alone.
 
 ## Trust boundary
 
@@ -114,10 +139,11 @@ calendar match, `absent` is empty.
     "decisions": ["…"],
     "actionItems": [{"what": "…", "owner": null, "due": null, "mine": false}],
     "openQuestions": ["…"],
+    "evidence": [{"claim": "…", "segmentIds": ["seg-1"]}],
     "attendance": {"present": ["…"], "absent": ["…"], "calendarEventId": null},
     "language": "ja"
   },
-  "contextDecision": {"policyVersion": "meeting-minutes-v1"} }
+  "contextDecision": {"policyVersion": "meeting-minutes-v2"} }
 ```
 
 The parser is fail-closed. A reply is rejected — never shown as minutes — when:
@@ -126,6 +152,13 @@ The parser is fail-closed. A reply is rejected — never shown as minutes — wh
 - its `contextDecision.policyVersion` is not this spec's;
 - `outcome` is `answer` with no `minutes`, or `insufficientEvidence` with some;
 - `outcome` is neither of those two values.
+- any nonempty summary, topic point, decision, action, or open question lacks
+  an `evidence` entry with the same claim and at least one ID from the request.
+
+The rendered minutes show each supporting `seg-N` ID, and the transcript view
+uses those same IDs. Each backfilled transcript row can play its pinned audio
+from the utterance timestamp while the 30-day clip exists. Minute citations
+are not yet clickable; automatic voice identity is also not implemented.
 
 `insufficientEvidence` with `"minutes": null` is the required answer when the
 meeting has too little speech to write from. Inventing items is a defect.

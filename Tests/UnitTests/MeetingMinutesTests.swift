@@ -66,6 +66,13 @@ final class MeetingMinutesTests: XCTestCase {
      "actionItems": [{"what": "資料を送る", "owner": "田中", "due": null, "mine": false},
                      {"what": "日程を確定する", "owner": null, "due": "金曜", "mine": true}],
      "openQuestions": ["二週目の担当"],
+     "evidence": [
+       {"claim":"来週の段取りを決めた。","segmentIds":["seg-1"]},
+       {"claim":"来週から始める","segmentIds":["seg-1"]},
+       {"claim":"火曜に開始する","segmentIds":["seg-1"]},
+       {"claim":"資料を送る","segmentIds":["seg-1"]},
+       {"claim":"日程を確定する","segmentIds":["seg-1"]},
+       {"claim":"二週目の担当","segmentIds":["seg-1"]}],
      "attendance": {"present": ["田中"], "absent": ["佐藤"], "calendarEventId": null},
      "language": "ja"}
     """
@@ -75,6 +82,14 @@ final class MeetingMinutesTests: XCTestCase {
         XCTAssertEqual(minutes?.decisions, ["火曜に開始する"])
         XCTAssertEqual(minutes?.actionItems.count, 2)
         XCTAssertEqual(minutes?.attendance?.absent, ["佐藤"])
+    }
+
+    func testEvidenceMustResolveToInputSegment() {
+        XCTAssertThrowsError(try MeetingMinutesParser.parse(
+            reply(outcome: "answer", minutes: Self.sampleMinutes),
+            validSegmentIds: ["seg-2"])) {
+            XCTAssertEqual($0 as? MeetingMinutesError, .invalidEvidence)
+        }
     }
 
     func testInsufficientEvidenceParsesAsNoMinutes() throws {
@@ -119,7 +134,7 @@ final class MeetingMinutesTests: XCTestCase {
         let md = minutes.markdown(record: record())
         let lines = md.components(separatedBy: "\n")
         let todo = lines.firstIndex { $0.hasPrefix("- [ ]") }
-        XCTAssertEqual(lines[try XCTUnwrap(todo)], "- [ ] 日程を確定する（金曜）")
+        XCTAssertEqual(lines[try XCTUnwrap(todo)], "- [ ] 日程を確定する（金曜） [seg-1]")
         XCTAssertTrue(md.hasPrefix("# Weekly sync"))
         XCTAssertTrue(md.contains("出席: 田中"))
         XCTAssertTrue(md.contains("欠席: 佐藤"))

@@ -134,8 +134,9 @@ final class AmbientTranscriber {
     /// tail of what the same stream said just before; whisper reads the prompt
     /// as preceding text, so this carries the conversation across chunks.
     func transcribe(chunk: URL, language: String? = nil, context: String? = nil,
-                    turns: [SpeakerTurn]? = nil) throws -> TranscriptionResult {
-        if activeEngine == "apple" {
+                    turns: [SpeakerTurn]? = nil,
+                    engineOverride: String? = nil) throws -> TranscriptionResult {
+        if (engineOverride ?? activeEngine) == "apple" {
             do {
                 let segments = try AppleSpeechEngine.transcribe(chunk: chunk, turns: turns)
                 // Apple's transcriber is locked to one language, so speech in

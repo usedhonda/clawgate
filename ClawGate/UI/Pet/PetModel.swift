@@ -2689,10 +2689,12 @@ final class PetModel: NSObject, ObservableObject {
     /// Supplies a meeting's transcript when minutes are about to be asked for.
     /// Set by the app, which owns the ambient controller.
     var meetingTranscriptProvider: ((MeetingRecord) -> [TranscriptSegment])?
+    var archivedMeetingCreator: ((Date, Date, @escaping (Result<MeetingRecord, Error>) -> Void) -> Void)?
     /// Bumped whenever a meeting record changes, so the Minutes tab reloads.
     @Published private(set) var meetingsRevision = 0
     /// The meeting whose minutes are in flight, if any.
     private var pendingMinutesMeetingID: String?
+    private var pendingMinutesSegmentIDs: Set<String> = []
     /// Attempts per meeting, so a permanently busy slot gives up instead of
     /// retrying forever.
     private var minutesAttempts: [String: Int] = [:]
@@ -2741,6 +2743,7 @@ final class PetModel: NSObject, ObservableObject {
         }
         minutesAttempts[record.id] = attempts + 1
         pendingMinutesMeetingID = record.id
+        pendingMinutesSegmentIDs = Set(envelope.segments.map(\.id))
         markMinutes(id: record.id, state: "pending", error: nil, store: store)
         sendSummon(message, source: Self.minutesSource)
         // sendSummon returns quietly when it cannot claim the slot. Without
@@ -2776,6 +2779,14 @@ final class PetModel: NSObject, ObservableObject {
         meetingTranscriptProvider?(record) ?? []
     }
 
+    func createArchivedMeeting(start: Date, end: Date,
+                               completion: @escaping (Result<MeetingRecord, Error>) -> Void) {
+        archivedMeetingCreator?(start, end) { [weak self] result in
+            self?.meetingsRevision += 1
+            completion(result)
+        }
+    }
+
     /// Asks Jev the fixed ambient questions about this request's transcript,
     /// once, off the main thread — shadow only. Never touches the envelope,
     /// the summon, or `minutesState`; see `JevMeetingTagger`.
@@ -2796,9 +2807,11 @@ final class PetModel: NSObject, ObservableObject {
     private func handleMinutesReply(_ text: String) {
         guard let id = pendingMinutesMeetingID else { return }
         pendingMinutesMeetingID = nil
+        let validSegmentIDs = pendingMinutesSegmentIDs
+        pendingMinutesSegmentIDs = []
         guard let record = MeetingStore().load(id: id) else { return }
         do {
-            guard let minutes = try MeetingMinutesParser.parse(text) else {
+            guard let minutes = try MeetingMinutesParser.parse(text, validSegmentIds: validSegmentIDs) else {
                 finishMinutes(id: id, state: "failed", error: "根拠となる発言が足りませんでした")
                 return
             }

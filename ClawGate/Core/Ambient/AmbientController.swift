@@ -99,6 +99,7 @@ final class AmbientController {
     private let capture: AmbientCaptureManager
     private let transcriber: AmbientTranscriber
     private let diarizer: AmbientDiarizer
+    private let meetingAudioArchive: MeetingAudioArchive
 
     private let state = DispatchQueue(label: "ai.clawgate.ambient.state")
     private let work = DispatchQueue(label: "ai.clawgate.ambient.transcribe")
@@ -189,6 +190,7 @@ final class AmbientController {
         self.transcriber = AmbientTranscriber()
         self.transcriber.server = WhisperServer(log: log)
         self.diarizer = AmbientDiarizer(log: log)
+        self.meetingAudioArchive = MeetingAudioArchive(log: log)
         self.systemTap = SystemAudioTap(chunkSeconds: 30, overlapSeconds: 3, log: log)
         self.capture.onChunkReady = { [weak self] chunk in
             self?.handleChunk(chunk)
@@ -206,6 +208,10 @@ final class AmbientController {
             self?.setAutoResumeBlocked(reason: nil)
         }
         self.capture.setPreferredDevice(uid: configStore.load().ambientMicDeviceUID)
+        DispatchQueue.global(qos: .utility).async {
+            self.meetingAudioArchive.prune()
+            MeetingStore().pruneArchivedAudio()
+        }
     }
 
     /// The feature exists only on the client (host that points at a remote Gateway).
@@ -291,10 +297,10 @@ final class AmbientController {
             self.streaming = false
             self.setWasStreaming(false)
             self.healthMonitor.stop()
-            self.reconcileSystemTapLocked()
             self.transcriber.server?.stop()
             Task { await self.ingest.stop() }
             self.capture.stop()
+            self.reconcileSystemTapLocked()
         }
     }
 
@@ -355,7 +361,7 @@ final class AmbientController {
 
     /// Run the Chrome tap exactly when streaming during a call. Called on `state`.
     private func reconcileSystemTapLocked() {
-        let want = streaming && meetingActive
+        let want = capture.state == .capturing
         systemTap.setActive(want)
         if meetingActive, meetingExpiryTimer == nil {
             let timer = DispatchSource.makeTimerSource(queue: state)
@@ -374,7 +380,7 @@ final class AmbientController {
     private func expireMeetingIfSilentLocked() {
         guard meetingActive else { return }
         if let seen = meetingLastSeen, Date().timeIntervalSince(seen) < Self.meetingHeartbeatTTL {
-            systemTap.setActive(streaming)   // re-checks Chrome's audio processes
+            systemTap.setActive(capture.state == .capturing)
             return
         }
         meetingActive = false
@@ -419,6 +425,7 @@ final class AmbientController {
     /// What was said during a meeting, read back out of the session transcripts.
     /// The end is trimmed so a meeting never reaches into the one after it.
     func meetingTranscript(_ record: MeetingRecord, now: Date = Date()) -> [TranscriptSegment] {
+        if let backfill = MeetingStore().loadBackfill(id: record.id) { return backfill }
         let end = Self.trimmedEnd(of: record, against: meetingRecords(), now: now.timeIntervalSince1970)
         return AmbientStorage.segmentsInRange(start: record.startedAt, end: end)
     }
@@ -574,6 +581,7 @@ final class AmbientController {
                     // Capture can run without a stream; the monitor still has
                     // to watch the input device while the microphone is open.
                     self.healthMonitor.start()
+                    self.reconcileSystemTapLocked()
                     completion(.success(()))
                 } catch {
                     completion(.failure(.captureFailed("\(error)")))
@@ -676,6 +684,7 @@ final class AmbientController {
     // MARK: - Chunk handling
 
     private func handleChunk(_ chunk: AmbientCaptureManager.CompletedChunk) {
+        meetingAudioArchive.enqueue(chunk)
         // On the Mac's own speakers the remote party leaks into the microphone.
         // Hold such mic chunks until the Chrome chunk covering the same period
         // (finalized at most one chunk later) has been transcribed, so the leak
@@ -724,8 +733,9 @@ final class AmbientController {
                 let result = try self.transcriber.transcribe(chunk: chunk.url, context: context, turns: preTurns)
                 let labeled: [TranscriptSegment]
                 if chunk.source == .system {
-                    // Chrome never plays the owner back to themself: all of it is the other party.
-                    labeled = result.kept.map { var s = $0; s.speaker = "other"; return s }
+                    // System playback is a separate source, but outside a known
+                    // call it is not proof of a particular speaker.
+                    labeled = result.kept.map { var s = $0; s.speaker = inMeeting ? "other" : nil; return s }
                 } else if inMeeting {
                     // During a call the other party arrives through Chrome, so the
                     // microphone is the owner. The stream decides, not a guess.

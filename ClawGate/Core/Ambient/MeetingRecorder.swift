@@ -145,6 +145,12 @@ final class MeetingRecorder {
 
 /// Where meeting records live: `ambient-context/meetings/<id>/meeting.json`.
 struct MeetingStore {
+    struct SpeakerCorrection: Codable {
+        let capturedAt: Double
+        let stream: String
+        let text: String
+        let name: String
+    }
     let root: URL
 
     init(root: URL = AmbientStorage.ambientRoot.appendingPathComponent("meetings", isDirectory: true)) {
@@ -172,6 +178,81 @@ struct MeetingStore {
         let url = directory(for: id).appendingPathComponent("meeting.json")
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(MeetingRecord.self, from: data)
+    }
+
+    /// A backfill revision is separate from the ambient session transcript.
+    func saveBackfill(_ segments: [TranscriptSegment], for record: MeetingRecord) throws {
+        let dir = directory(for: record.id)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let corrected = applySpeakerCorrections(segments, id: record.id)
+        try JSONEncoder().encode(corrected).write(to: dir.appendingPathComponent("transcript.json"), options: .atomic)
+    }
+
+    func loadBackfill(id: String) -> [TranscriptSegment]? {
+        let url = directory(for: id).appendingPathComponent("transcript.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode([TranscriptSegment].self, from: data)
+    }
+
+    func audioClip(id: String, segment: TranscriptSegment) -> (url: URL, offset: TimeInterval)? {
+        guard let at = segment.capturedAt, let stream = segment.stream else { return nil }
+        let directory = directory(for: id).appendingPathComponent("audio", isDirectory: true)
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("index.json")),
+              let chunks = try? JSONDecoder().decode([MeetingAudioArchive.Chunk].self, from: data),
+              let chunk = chunks.first(where: { $0.source == stream && $0.startedAt <= at && at < $0.endedAt }) else {
+            return nil
+        }
+        let url = directory.appendingPathComponent(chunk.fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return (url, at - chunk.startedAt)
+    }
+
+    func labelSpeaker(id: String, segment: TranscriptSegment, name: String) throws {
+        guard let at = segment.capturedAt, let stream = segment.stream,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              var transcript = loadBackfill(id: id) else { return }
+        let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var corrections = speakerCorrections(id: id)
+        corrections.removeAll { $0.stream == stream && abs($0.capturedAt - at) < 0.01 }
+        corrections.append(SpeakerCorrection(capturedAt: at, stream: stream,
+                                             text: segment.text, name: label))
+        let dir = directory(for: id)
+        try JSONEncoder().encode(corrections).write(
+            to: dir.appendingPathComponent("speaker-corrections.json"), options: .atomic)
+        transcript = applySpeakerCorrections(transcript, id: id)
+        try JSONEncoder().encode(transcript).write(
+            to: dir.appendingPathComponent("transcript.json"), options: .atomic)
+    }
+
+    private func speakerCorrections(id: String) -> [SpeakerCorrection] {
+        let url = directory(for: id).appendingPathComponent("speaker-corrections.json")
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        return (try? JSONDecoder().decode([SpeakerCorrection].self, from: data)) ?? []
+    }
+
+    private func applySpeakerCorrections(_ segments: [TranscriptSegment], id: String) -> [TranscriptSegment] {
+        let corrections = speakerCorrections(id: id)
+        return segments.map { segment in
+            var changed = segment
+            if let at = segment.capturedAt,
+               let correction = corrections.filter({ $0.stream == segment.stream &&
+                   $0.text == segment.text && abs($0.capturedAt - at) <= 1 }).min(by: {
+                   abs($0.capturedAt - at) < abs($1.capturedAt - at)
+               }) {
+                changed.speakerName = correction.name
+            }
+            return changed
+        }
+    }
+
+    /// The transcript and minutes remain; only pinned meeting audio expires.
+    func pruneArchivedAudio(now: Date = Date()) {
+        let cutoff = now.timeIntervalSince1970 - 30 * 24 * 3600
+        for record in all() where (record.endedAt ?? .infinity) < cutoff {
+            let audio = directory(for: record.id).appendingPathComponent("audio", isDirectory: true)
+            guard FileManager.default.fileExists(atPath: audio.appendingPathComponent("index.json").path) else { continue }
+            try? FileManager.default.removeItem(at: audio)
+        }
     }
 
     /// Ends any meeting still marked open, using the record's own last write as

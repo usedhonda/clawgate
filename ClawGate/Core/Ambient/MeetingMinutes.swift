@@ -12,8 +12,8 @@ import Foundation
 
 /// One transcript line as the model sees it. Unlike the Log envelope this
 /// carries `stream` and `speakerName`: during a call the stream says whether a
-/// line came from the owner's microphone or from Chrome (the remote party), and
-/// the name comes from Meet's own speaking tile.
+/// line came from the microphone or system playback. Neither stream alone
+/// proves who spoke; a name requires an independent label.
 struct MeetingMinutesSegment: Codable, Equatable {
     let id: String
     let capturedAt: Double?
@@ -77,7 +77,7 @@ struct MeetingMinutesEnvelope: Codable, Equatable {
 }
 
 enum MeetingMinutesPrompt {
-    static let policyVersion = "meeting-minutes-v1"
+    static let policyVersion = "meeting-minutes-v2"
 
     /// The instruction text sent ahead of the JSON envelope. Pure, static and
     /// versioned, exactly like the Log prefix, and with the same trust boundary:
@@ -103,9 +103,11 @@ enum MeetingMinutesPrompt {
           補完しないでください（推測で予定を当てはめない）。会議の中身の根拠には決して使わないでください。
 
         話者の読み方:
-        - `stream` が `"system"` の行は相手側の音声です。`speakerName` があればその人の発言です。
-        - `stream` が `"mic"` の行はご主人様本人の発言です（通話中、相手の声はマイクには乗りません）。
-        - `speaker` は補助的な話者ラベル（`"self"` = ご主人様 / `"other"`）です。
+        - `stream` は録音経路です。`"system"` はPC再生音、`"mic"` はマイク音です。
+          どちらも人物を証明しません（対面の他人がマイクに入り、本人の声がPCで再生され得ます）。
+        - `speakerName` があれば利用者が付けた名前、または別の話者手掛かりです。
+          無ければ名前を推測せず「話者不明」としてください。
+        - `speaker` は補助的な推定ラベルであり、本人確認の根拠には使わないでください。
 
         出欠は 2 層で書いてください: `present` は実際にいた人（`participantsSeen` と発言者）、
         `absent` は予定に招待されていたのに `present` に出てこない人だけです。カレンダーが無ければ
@@ -115,6 +117,10 @@ enum MeetingMinutesPrompt {
         書き、決まっていないことを決まったように書かないでください。`actionItems` の `owner` は発言から
         分かるときだけ埋め、分からなければ `null`。ご主人様自身の担当なら `mine` を `true` にしてください。
         `due` は発言に出てきたときだけ入れ、無ければ `null`。
+
+        すべての概要・議題の要点・決定・やること・未解決事項には `evidence` で原文と同じ
+        `claim` を一つずつ挙げ、根拠の `segments[].id` を `segmentIds` に入れてください。
+        発話に根拠のない項目を作らず、IDを推測しないでください。
 
         根拠が足りないとき（発言がほとんど無い、文字化けばかり等）は、項目を創作せず
         `outcome` を `"insufficientEvidence"` にし、`minutes` を JSON の `null` にしてください。
@@ -129,6 +135,7 @@ enum MeetingMinutesPrompt {
             "decisions": ["決まったこと"],
             "actionItems": [{"what": "やること", "owner": "担当者かnull", "due": "期限かnull", "mine": false}],
             "openQuestions": ["未解決のこと"],
+            "evidence": [{"claim": "決まったこと", "segmentIds": ["seg-1"]}],
             "attendance": {"present": ["いた人"], "absent": ["来なかった招待者"], "calendarEventId": null},
             "language": "ja"
           },
@@ -170,6 +177,11 @@ struct MeetingAttendance: Codable, Equatable {
     let calendarEventId: String?
 }
 
+struct MeetingEvidence: Codable, Equatable {
+    let claim: String
+    let segmentIds: [String]
+}
+
 struct MeetingMinutes: Codable, Equatable {
     let title: String?
     let summary: String
@@ -177,6 +189,7 @@ struct MeetingMinutes: Codable, Equatable {
     let decisions: [String]
     let actionItems: [MeetingActionItem]
     let openQuestions: [String]
+    let evidence: [MeetingEvidence]?
     let attendance: MeetingAttendance?
     let language: String?
 }
@@ -188,6 +201,7 @@ enum MeetingMinutesError: Error, Equatable {
     /// `outcome` was "answer" but no minutes came with it, or the reverse.
     case outcomeContradictsBody
     case unknownOutcome(String)
+    case invalidEvidence
 }
 
 enum MeetingMinutesParser {
@@ -200,7 +214,7 @@ enum MeetingMinutesParser {
 
     /// Fail-closed: anything that is not a well-formed answer in this policy
     /// version is an error, never partially-trusted text shown as minutes.
-    static func parse(_ text: String) throws -> MeetingMinutes? {
+    static func parse(_ text: String, validSegmentIds: Set<String>? = nil) throws -> MeetingMinutes? {
         let body = stripCodeFence(text)
         guard let data = body.data(using: .utf8),
               let reply = try? JSONDecoder().decode(Reply.self, from: data) else {
@@ -212,6 +226,16 @@ enum MeetingMinutesParser {
         switch reply.outcome {
         case "answer":
             guard let minutes = reply.minutes else { throw MeetingMinutesError.outcomeContradictsBody }
+            guard let evidence = minutes.evidence else { throw MeetingMinutesError.invalidEvidence }
+            let claims = [minutes.summary]
+                + minutes.topics.flatMap(\.points) + minutes.decisions
+                + minutes.actionItems.map(\.what) + minutes.openQuestions
+            for claim in claims where !claim.isEmpty {
+                guard evidence.contains(where: { item in
+                    item.claim == claim && !item.segmentIds.isEmpty &&
+                    (validSegmentIds == nil || item.segmentIds.allSatisfy { validSegmentIds!.contains($0) })
+                }) else { throw MeetingMinutesError.invalidEvidence }
+            }
             return minutes
         case "insufficientEvidence":
             guard reply.minutes == nil else { throw MeetingMinutesError.outcomeContradictsBody }
@@ -235,6 +259,12 @@ enum MeetingMinutesParser {
 // MARK: - Rendering and storage
 
 extension MeetingMinutes {
+    private func citation(_ claim: String) -> String {
+        guard let ids = evidence?.first(where: { $0.claim == claim })?.segmentIds,
+              !ids.isEmpty else { return "" }
+        return " [" + ids.joined(separator: ", ") + "]"
+    }
+
     /// The minutes as Markdown, for reading and for copying out of the app.
     func markdown(record: MeetingRecord, now: Date = Date()) -> String {
         let zone = TimeZone(identifier: record.timeZone) ?? .current
@@ -251,17 +281,17 @@ extension MeetingMinutes {
             if !attendance.present.isEmpty { out.append("出席: " + attendance.present.joined(separator: ", ")) }
             if !attendance.absent.isEmpty { out.append("欠席: " + attendance.absent.joined(separator: ", ")) }
         }
-        out.append(contentsOf: ["", "## 概要", summary])
+        out.append(contentsOf: ["", "## 概要", summary + citation(summary)])
         if !topics.isEmpty {
             out.append(contentsOf: ["", "## 議題"])
             for topic in topics {
                 out.append("### \(topic.heading)")
-                out.append(contentsOf: topic.points.map { "- \($0)" })
+                out.append(contentsOf: topic.points.map { "- \($0)" + citation($0) })
             }
         }
         if !decisions.isEmpty {
             out.append(contentsOf: ["", "## 決まったこと"])
-            out.append(contentsOf: decisions.map { "- \($0)" })
+            out.append(contentsOf: decisions.map { "- \($0)" + citation($0) })
         }
         if !actionItems.isEmpty {
             out.append(contentsOf: ["", "## やること"])
@@ -270,12 +300,12 @@ extension MeetingMinutes {
                 var line = "- [ ] \(item.what)"
                 if let owner = item.owner { line += " — \(owner)" }
                 if let due = item.due { line += "（\(due)）" }
-                out.append(line)
+                out.append(line + citation(item.what))
             }
         }
         if !openQuestions.isEmpty {
             out.append(contentsOf: ["", "## 宿題"])
-            out.append(contentsOf: openQuestions.map { "- \($0)" })
+            out.append(contentsOf: openQuestions.map { "- \($0)" + citation($0) })
         }
         return out.joined(separator: "\n") + "\n"
     }

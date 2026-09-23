@@ -236,6 +236,12 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         petModel.meetingTranscriptProvider = { [weak ambient] record in
             ambient?.meetingTranscript(record) ?? []
         }
+        petModel.archivedMeetingCreator = { start, end, completion in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = Result { try MeetingBackfill().createMeeting(start: start, end: end) }
+                DispatchQueue.main.async { completion(result) }
+            }
+        }
         ambient.onMinutesRequested = { [weak self] record in
             DispatchQueue.main.async { self?.petModel.regenerateMinutes(for: record) }
         }

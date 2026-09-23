@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 /// The Minutes tab: every recorded meeting, and the minutes written for the one
@@ -11,6 +12,16 @@ struct MeetingMinutesPetView: View {
     @State private var minutes: MeetingMinutes?
     @State private var showTranscript = false
     @State private var copied = false
+    @State private var archiveStart = Date().addingTimeInterval(-3600)
+    @State private var archiveEnd = Date()
+    @State private var archiveBusy = false
+    @State private var archiveError: String?
+    @State private var candidates: [MeetingCandidate] = []
+    @State private var calendarError: String?
+    @State private var calendarBusy = false
+    @State private var speakerSegment: TranscriptSegment?
+    @State private var speakerLabel = ""
+    @State private var audioPlayer: AVAudioPlayer?
 
     private var selected: MeetingRecord? {
         meetings.first { $0.id == selectedID }
@@ -18,6 +29,8 @@ struct MeetingMinutesPetView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            archiveControls
+            Divider().opacity(0.15)
             if meetings.isEmpty {
                 emptyState
             } else {
@@ -26,8 +39,93 @@ struct MeetingMinutesPetView: View {
                 detail
             }
         }
-        .onAppear(perform: reload)
+        .onAppear { reload(); loadCandidates() }
         .onChange(of: model.meetingsRevision) { _ in reload() }
+    }
+
+    private var archiveControls: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text("会議候補")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Button(calendarBusy ? "読込中…" : "予定を更新") { loadCandidates() }
+                    .disabled(calendarBusy)
+            }
+            if let calendarError {
+                Text(calendarError).foregroundColor(.yellow.opacity(0.8))
+            }
+            ForEach(candidates.prefix(5)) { candidate in
+                Button {
+                    archiveStart = candidate.start.addingTimeInterval(-300)
+                    archiveEnd = candidate.end.addingTimeInterval(300)
+                } label: {
+                    Text("\(candidate.title) · \(candidate.microphoneSeconds / 60)分録音 · 約\(candidate.roughCharacters)字")
+                        .lineLimit(1)
+                }
+            }
+            Text("過去7日の音声から会議を作る")
+                .font(.system(size: 11, weight: .semibold))
+            DatePicker("開始", selection: $archiveStart, displayedComponents: [.date, .hourAndMinute])
+            DatePicker("終了", selection: $archiveEnd, displayedComponents: [.date, .hourAndMinute])
+            HStack {
+                Button(archiveBusy ? "音声を処理中…" : "この範囲を文字起こし") {
+                    archiveBusy = true
+                    archiveError = nil
+                    model.createArchivedMeeting(start: archiveStart, end: archiveEnd) { result in
+                        archiveBusy = false
+                        switch result {
+                        case .success(let record):
+                            reload()
+                            select(record)
+                            model.requestMinutes(for: record)
+                        case .failure(let error):
+                            archiveError = "文字起こしできませんでした: \(error)"
+                        }
+                    }
+                }
+                .disabled(archiveBusy || archiveStart >= archiveEnd ||
+                          archiveStart < Date().addingTimeInterval(-MeetingAudioArchive.retentionSeconds))
+                Spacer()
+            }
+            if let archiveError {
+                Text(archiveError).foregroundColor(.red.opacity(0.8))
+            }
+        }
+        .font(.system(size: 10))
+        .foregroundColor(.white.opacity(0.75))
+        .datePickerStyle(.compact)
+        .buttonStyle(.borderless)
+        .padding(9)
+    }
+
+    private func loadCandidates() {
+        guard !calendarBusy else { return }
+        calendarBusy = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try MeetingCandidateSource.candidates() }
+            DispatchQueue.main.async {
+                calendarBusy = false
+                switch result {
+                case .success(let found):
+                    candidates = found
+                    calendarError = nil
+                case .failure(let error):
+                    if let failure = error as? MeetingCandidateSource.Failure {
+                        switch failure {
+                        case .clientUnavailable:
+                            calendarError = "カレンダー連携ツールがありません。日時指定は使えます。"
+                        case .calendarUnavailable:
+                            calendarError = "Google Calendarを読み取れません。認証状態を確認してください。"
+                        case .incompleteCalendarResult:
+                            calendarError = "予定が多く、候補を完全に取得できません。日時指定を使ってください。"
+                        }
+                    } else {
+                        calendarError = "予定の取得に失敗しました。日時指定は使えます。"
+                    }
+                }
+            }
+        }
     }
 
     private var emptyState: some View {
@@ -36,7 +134,7 @@ struct MeetingMinutesPetView: View {
             Image(systemName: "person.2.wave.2")
                 .font(.system(size: 24))
                 .foregroundColor(.white.opacity(0.2))
-            Text("Meet の通話が終わると、ここに議事録が並びます")
+            Text("録音した会議を選ぶと、ここに文字起こしと議事録が並びます")
                 .font(.system(size: 12))
                 .foregroundColor(.white.opacity(0.4))
                 .multilineTextAlignment(.center)
@@ -114,13 +212,25 @@ struct MeetingMinutesPetView: View {
         if let meeting = selected {
             VStack(alignment: .leading, spacing: 0) {
                 ScrollView(.vertical, showsIndicators: true) {
-                    Text(showTranscript ? transcriptText(meeting) : bodyText(meeting))
-                        .font(.system(size: 12))
-                        .foregroundColor(.white.opacity(0.85))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                    if showTranscript {
+                        transcriptRows(meeting)
+                    } else {
+                        Text(bodyText(meeting))
+                            .font(.system(size: 12))
+                            .foregroundColor(.white.opacity(0.85))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    }
+                }
+                if showTranscript, speakerSegment != nil {
+                    HStack {
+                        TextField("話者名", text: $speakerLabel)
+                        Button("この発話に付ける") { saveSpeakerLabel(meeting) }
+                    }
+                    .font(.system(size: 11))
+                    .padding(.horizontal, 12)
                 }
                 actionBar(meeting)
             }
@@ -146,10 +256,63 @@ struct MeetingMinutesPetView: View {
         fmt.dateFormat = "HH:mm"
         let lines = model.meetingTranscript(for: meeting).map { seg -> String in
             let when = seg.capturedAt.map { fmt.string(from: Date(timeIntervalSince1970: $0)) } ?? "--:--"
-            let who = seg.speakerName ?? (seg.stream == "system" ? "相手" : (seg.speaker == "self" ? "ご主人様" : "—"))
+            let who = seg.speakerName ?? (seg.stream == "system" ? "PC音声・話者未確認" : "マイク・話者未確認")
             return "[\(when)] \(who): \(seg.text)"
         }
         return lines.isEmpty ? "この会議の文字起こしは残っていません。" : lines.joined(separator: "\n")
+    }
+
+    private func transcriptRows(_ meeting: MeetingRecord) -> some View {
+        let lines = model.meetingTranscript(for: meeting)
+        let canCorrect = MeetingStore().loadBackfill(id: meeting.id) != nil
+        return LazyVStack(alignment: .leading, spacing: 5) {
+            if lines.isEmpty { Text("この会議の文字起こしは残っていません。") }
+            ForEach(Array(lines.enumerated()), id: \.offset) { index, segment in
+                HStack(alignment: .top) {
+                    Button {
+                        guard canCorrect else { return }
+                        speakerSegment = segment
+                        speakerLabel = segment.speakerName ?? ""
+                    } label: {
+                        let who = segment.speakerName ?? (segment.stream == "system" ? "PC音声・話者未確認" : "マイク・話者未確認")
+                        Text("[seg-\(index + 1)] \(who): \(segment.text)")
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .disabled(!canCorrect)
+                    if let clip = MeetingStore().audioClip(id: meeting.id, segment: segment) {
+                        Button("再生") { play(clip) }
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .font(.system(size: 11))
+        .foregroundColor(.white.opacity(0.85))
+        .padding(12)
+    }
+
+    private func play(_ clip: (url: URL, offset: TimeInterval)) {
+        do {
+            audioPlayer?.stop()
+            let player = try AVAudioPlayer(contentsOf: clip.url)
+            player.currentTime = min(max(0, clip.offset), player.duration)
+            audioPlayer = player
+            player.play()
+        } catch {
+            archiveError = "音声を再生できませんでした: \(error)"
+        }
+    }
+
+    private func saveSpeakerLabel(_ meeting: MeetingRecord) {
+        guard let segment = speakerSegment else { return }
+        do {
+            try MeetingStore().labelSpeaker(id: meeting.id, segment: segment, name: speakerLabel)
+            speakerSegment = nil
+            reload()
+        } catch {
+            archiveError = "話者名を保存できませんでした: \(error)"
+        }
     }
 
     private func actionBar(_ meeting: MeetingRecord) -> some View {
@@ -184,6 +347,7 @@ struct MeetingMinutesPetView: View {
         selectedID = meeting.id
         showTranscript = false
         copied = false
+        speakerSegment = nil
         minutes = model.minutes(for: meeting.id)
     }
 
