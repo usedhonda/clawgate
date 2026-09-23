@@ -23,6 +23,17 @@ struct MeetingCandidateSource {
         struct Account: Decodable { let email: String }
         let accounts: [Account]
     }
+    private struct AuthStatus: Decodable {
+        struct Account: Decodable { let email: String? }
+        let account: Account
+    }
+
+    static func calendarAuthorizationArguments(status: Data) throws -> [String] {
+        let email = try JSONDecoder().decode(AuthStatus.self, from: status).account.email?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let email, !email.isEmpty else { throw Failure.calendarUnavailable(.unauthenticated) }
+        return ["auth", "add", email, "--services=calendar", "--readonly"]
+    }
     private struct Calendars: Decodable {
         struct Calendar: Decodable { let id: String }
         let calendars: [Calendar]

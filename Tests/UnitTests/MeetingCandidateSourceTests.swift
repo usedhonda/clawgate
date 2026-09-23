@@ -44,6 +44,14 @@ final class MeetingCandidateSourceTests: XCTestCase {
         }
     }
 
+    func testCalendarConnectionUsesConfiguredGOGAccountWithReadOnlyScope() throws {
+        let status = Data(#"{"account":{"email":"user@example.test"}}"#.utf8)
+        XCTAssertEqual(try MeetingCandidateSource.calendarAuthorizationArguments(status: status),
+                       ["auth", "add", "user@example.test", "--services=calendar", "--readonly"])
+        XCTAssertThrowsError(try MeetingCandidateSource.calendarAuthorizationArguments(
+            status: Data(#"{"account":{"email":""}}"#.utf8)))
+    }
+
     func testPartialPageFailureIsNotSilentlyAccepted() {
         XCTAssertThrowsError(try MeetingCandidateSource.fetchEvents(from: from, to: to) { args in
             if args == ["auth", "list"] { return Data(#"{"accounts":[{"email":"a@example.test"}]}"#.utf8) }

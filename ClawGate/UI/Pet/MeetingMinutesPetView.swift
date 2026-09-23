@@ -164,14 +164,30 @@ struct MeetingMinutesPetView: View {
             }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: binary)
-            process.arguments = ["auth", "manage", "--services=calendar", "--timeout=10m"]
-            process.standardOutput = FileHandle.nullDevice
+            process.arguments = ["auth", "status", "--json", "--no-input"]
+            let output = Pipe()
+            process.standardOutput = output
             process.standardError = FileHandle.nullDevice
-            let opened = (try? process.run()) != nil
-            if opened { process.waitUntilExit() }
+            let statusStarted = (try? process.run()) != nil
+            let status = statusStarted ? output.fileHandleForReading.readDataToEndOfFile() : Data()
+            if statusStarted { process.waitUntilExit() }
+            let arguments = (try? MeetingCandidateSource.calendarAuthorizationArguments(status: status))
+            let authorized: Bool
+            if statusStarted && process.terminationStatus == 0, let arguments {
+                let auth = Process()
+                auth.executableURL = URL(fileURLWithPath: binary)
+                auth.arguments = arguments
+                auth.standardOutput = FileHandle.nullDevice
+                auth.standardError = FileHandle.nullDevice
+                let started = (try? auth.run()) != nil
+                if started { auth.waitUntilExit() }
+                authorized = started && auth.terminationStatus == 0
+            } else {
+                authorized = false
+            }
             DispatchQueue.main.async {
                 calendarConnecting = false
-                if opened, process.terminationStatus == 0 { loadCandidates() }
+                if authorized { loadCandidates() }
                 else { calendarError = "Googleの接続を完了できませんでした。" }
             }
         }

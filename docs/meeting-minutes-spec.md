@@ -51,8 +51,10 @@ calendar adapter reads scheduled events through the locally installed Google
 Calendar CLI. It enumerates authenticated accounts and each account's
 calendars, follows all pages, and rejects partial results rather than silently
 omitting meetings. Only events overlapping retained microphone audio are
-suggested; this does not assert attendance. The tab offers the CLI's Google
-account manager. Without authorized calendar access, the explicit date range
+suggested; this does not assert attendance. The tab uses the CLI's configured
+account to start `gog auth add` with Calendar-only, read-only scopes; it does
+not maintain a separate Google login or token store. Without a configured GOG
+account or authorized calendar access, the explicit date range
 remains available. A candidate explicitly selected by the user contributes its
 title to the saved meeting only while the adjusted range still covers at least
 half of that scheduled interval. The calendar does not supply transcript or
