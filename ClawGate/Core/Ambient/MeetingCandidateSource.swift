@@ -2,11 +2,19 @@ import Foundation
 
 struct MeetingCandidate: Identifiable, Equatable {
     let id: String
+    let calendarID: String?
+    let calendarEventID: String
     let title: String
     let start: Date
     let end: Date
     let microphoneSeconds: Int
     let roughCharacters: Int
+    let proposedStart: Date?
+    let proposedEnd: Date?
+    let boundaryEvidence: String
+    /// suggested | ambiguous | noConversation
+    let matchStatus: String
+    let matchedMeetingID: String?
 }
 
 /// Read-only Google Calendar adapter. Calendar content stays on this Mac and
@@ -45,6 +53,7 @@ struct MeetingCandidateSource {
     }
     struct Event: Decodable {
         struct Endpoint: Decodable { let dateTime: String? }
+        struct Attendee: Decodable { let displayName: String? }
         let id: String
         let iCalUID: String?
         let summary: String?
@@ -53,6 +62,9 @@ struct MeetingCandidateSource {
         let transparency: String?
         let start: Endpoint?
         let end: Endpoint?
+        let hangoutLink: String?
+        let attendees: [Attendee]?
+        var calendarID: String? = nil
     }
 
     private static func endpointDate(_ endpoint: Event.Endpoint?) -> Date? {
@@ -71,11 +83,12 @@ struct MeetingCandidateSource {
         let rough = AmbientStorage.segmentsInRange(start: from.timeIntervalSince1970,
                                                    end: now.timeIntervalSince1970)
         return makeCandidates(events: events, chunks: archive.allChunks(), rough: rough,
-                              from: from, to: now)
+                              from: from, to: now, records: MeetingStore().all())
     }
 
     static func makeCandidates(events: [Event], chunks: [MeetingAudioArchive.Chunk],
-                               rough: [TranscriptSegment], from: Date, to: Date) -> [MeetingCandidate] {
+                               rough: [TranscriptSegment], from: Date, to: Date,
+                               records: [MeetingRecord] = []) -> [MeetingCandidate] {
         return events.compactMap { event -> MeetingCandidate? in
             guard event.status != "cancelled",
                   (event.eventType ?? "default") == "default",
@@ -99,9 +112,42 @@ struct MeetingCandidateSource {
             }
             let characters = rough.filter { ($0.capturedAt ?? -.infinity) >= first &&
                 ($0.capturedAt ?? .infinity) < last }.reduce(0) { $0 + $1.text.count }
-            return MeetingCandidate(id: event.id, title: event.summary ?? "予定",
+            let proposal = MeetingBoundaryProposal.infer(eventStart: first, eventEnd: last,
+                rough: rough, chunks: chunks, records: records)
+            let competing = events.contains { other in
+                guard other.id != event.id || other.calendarID != event.calendarID,
+                      let otherStart = endpointDate(other.start),
+                      let otherEnd = endpointDate(other.end) else { return false }
+                return otherStart < end && otherEnd > start &&
+                    other.status != "cancelled" && (other.eventType ?? "default") == "default" &&
+                    other.transparency != "transparent"
+            }
+            let exactCode = proposal.record?.conferenceCode.flatMap { code in
+                event.hangoutLink?.contains(code)
+            } ?? false
+            let status = proposal.start == nil ? "noConversation" :
+                ((proposal.ambiguous || (competing && !exactCode)) ? "ambiguous" : "suggested")
+            let observedNames = Set(rough.compactMap { segment -> String? in
+                guard let at = segment.capturedAt, let begin = proposal.start, let finish = proposal.end,
+                      at >= begin, at <= finish, let name = segment.speakerName else { return nil }
+                return name.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "　", with: "")
+            })
+            let invitedNames = Set((event.attendees ?? []).compactMap { attendee -> String? in
+                attendee.displayName?.replacingOccurrences(of: " ", with: "")
+                    .replacingOccurrences(of: "　", with: "")
+            })
+            let nameMatches = observedNames.intersection(invitedNames).count
+            let evidence = proposal.evidence + (nameMatches > 0 ? "・招待者名と話者名 \(nameMatches) 件一致" : "")
+            let candidateID = event.calendarID.map { $0 + ":" + event.id + ":" + String(Int(first)) } ?? event.id
+            return MeetingCandidate(id: candidateID, calendarID: event.calendarID,
+                                    calendarEventID: event.id,
+                                    title: event.summary ?? "予定",
                                     start: start, end: end,
-                                    microphoneSeconds: Int(covered), roughCharacters: characters)
+                                    microphoneSeconds: Int(covered), roughCharacters: characters,
+                                    proposedStart: proposal.start.map(Date.init(timeIntervalSince1970:)),
+                                    proposedEnd: proposal.end.map(Date.init(timeIntervalSince1970:)),
+                                    boundaryEvidence: evidence, matchStatus: status,
+                                    matchedMeetingID: proposal.record?.id)
         }.sorted { $0.start > $1.start }
     }
 
@@ -163,8 +209,9 @@ struct MeetingCandidateSource {
                         readAnyPage = true
                         return (response.events, response.nextPageToken)
                     }
-                    for event in found {
+                    for var event in found {
                         let key = (event.iCalUID ?? event.id) + "\u{0}" + (event.start?.dateTime ?? "") + "\u{0}" + (event.end?.dateTime ?? "")
+                        event.calendarID = calendar.id
                         if seen.insert(key).inserted { events.append(event) }
                     }
                 } catch { failed = true }

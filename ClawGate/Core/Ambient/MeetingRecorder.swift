@@ -23,6 +23,13 @@ struct MeetingRecord: Codable, Equatable {
     /// none | pending | ready | failed
     var minutesState: String
     var minutesError: String?
+    /// Retrospective calendar association, selected by the owner. Optional so
+    /// existing on-disk Meet records remain readable.
+    var calendarEventID: String? = nil
+    var calendarID: String? = nil
+    var calendarEventStart: Double? = nil
+    var calendarEventEnd: Double? = nil
+    var boundaryEvidence: String? = nil
 
     var isOpen: Bool { endedAt == nil }
 

@@ -22,14 +22,24 @@ final class MeetingBackfill {
         self.store = store
     }
 
-    func createMeeting(start: Date, end: Date, title: String? = nil) throws -> MeetingRecord {
+    func createMeeting(start: Date, end: Date, title: String? = nil,
+                       candidate: MeetingCandidate? = nil) throws -> MeetingRecord {
         guard start < end else { throw Failure.noAudio }
-        let record = MeetingRecord(
+        let existing = candidate?.matchedMeetingID.flatMap { store.load(id: $0) }
+        var record = existing ?? MeetingRecord(
             id: MeetingRecorder.makeID(at: start) + "-" + UUID().uuidString.prefix(8),
             source: "manual", startedAt: start.timeIntervalSince1970,
             endedAt: end.timeIntervalSince1970, timeZone: TimeZone.current.identifier,
             title: title, conferenceCode: nil, participants: [],
             minutesState: "none", minutesError: nil)
+        record.startedAt = start.timeIntervalSince1970
+        record.endedAt = end.timeIntervalSince1970
+        if let title { record.title = title }
+        record.calendarEventID = candidate?.calendarEventID
+        record.calendarID = candidate?.calendarID
+        record.calendarEventStart = candidate?.start.timeIntervalSince1970
+        record.calendarEventEnd = candidate?.end.timeIntervalSince1970
+        record.boundaryEvidence = candidate?.boundaryEvidence
         do {
             try pinAudio(for: record)
             let segments = try process(record)
@@ -37,7 +47,7 @@ final class MeetingBackfill {
             store.save(record)
             return record
         } catch {
-            try? FileManager.default.removeItem(at: store.directory(for: record.id))
+            if existing == nil { try? FileManager.default.removeItem(at: store.directory(for: record.id)) }
             throw error
         }
     }

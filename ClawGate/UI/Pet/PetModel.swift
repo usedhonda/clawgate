@@ -2726,7 +2726,7 @@ final class PetModel: NSObject, ObservableObject {
     /// Supplies a meeting's transcript when minutes are about to be asked for.
     /// Set by the app, which owns the ambient controller.
     var meetingTranscriptProvider: ((MeetingRecord) -> [TranscriptSegment])?
-    var archivedMeetingCreator: ((Date, Date, String?, @escaping (Result<MeetingRecord, Error>) -> Void) -> Void)?
+    var archivedMeetingCreator: ((Date, Date, String?, MeetingCandidate?, @escaping (Result<MeetingRecord, Error>) -> Void) -> Void)?
     /// Bumped whenever a meeting record changes, so the Minutes tab reloads.
     @Published private(set) var meetingsRevision = 0
     /// The meeting whose minutes are in flight, if any.
@@ -2858,8 +2858,9 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     func createArchivedMeeting(start: Date, end: Date, title: String? = nil,
+                               candidate: MeetingCandidate? = nil,
                                completion: @escaping (Result<MeetingRecord, Error>) -> Void) {
-        archivedMeetingCreator?(start, end, title) { [weak self] result in
+        archivedMeetingCreator?(start, end, title, candidate) { [weak self] result in
             self?.meetingsRevision += 1
             completion(result)
         }
@@ -2894,7 +2895,7 @@ final class PetModel: NSObject, ObservableObject {
                 finishMinutes(id: id, state: "failed", error: "根拠となる発言が足りませんでした")
                 return
             }
-            minutesStore().saveMinutes(minutes, for: record)
+            minutesStore().saveMinutes(minutes.boundToCalendarEvent(record.calendarEventID), for: record)
             finishMinutes(id: id, state: "ready", error: nil)
             addNotificationEntry(text: "議事録ができました: \(minutes.title ?? record.title ?? "会議")",
                                  source: Self.minutesSource)

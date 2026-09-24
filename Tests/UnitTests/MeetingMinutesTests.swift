@@ -94,6 +94,19 @@ final class MeetingMinutesTests: XCTestCase {
         XCTAssertEqual(env.policyVersion, MeetingMinutesPrompt.policyVersion)
     }
 
+    func testSelectedCalendarAssociationIsPassedWithoutAskingModelToFindAnotherEvent() throws {
+        var selected = record()
+        selected.calendarEventID = "event-1"
+        selected.calendarEventStart = selected.startedAt - 120
+        selected.calendarEventEnd = selected.startedAt + 1800
+        let env = MeetingMinutesEnvelope.build(record: selected, segments: [])
+        XCTAssertEqual(env.calendarEventID, "event-1")
+        XCTAssertNotNil(env.scheduledStartAt)
+        XCTAssertNotNil(env.scheduledEndAt)
+        let prompt = try MeetingMinutesPrompt.buildMessage(envelope: env)
+        XCTAssertTrue(prompt.contains("外部の予定を検索・推測して結び付けない"))
+    }
+
     func testTimesAreWrittenInTheZoneTheMeetingHappenedIn() {
         let env = MeetingMinutesEnvelope.build(record: record(zone: "Asia/Kolkata"), segments: [])
         XCTAssertTrue(env.startedAt.hasSuffix("+05:30"), env.startedAt)
@@ -140,6 +153,15 @@ final class MeetingMinutesTests: XCTestCase {
         XCTAssertEqual(minutes?.decisions, ["火曜に開始する"])
         XCTAssertEqual(minutes?.actionItems.count, 2)
         XCTAssertEqual(minutes?.attendance?.absent, ["佐藤"])
+    }
+
+    func testAttendanceCannotInventAbsenceOrChangeSelectedCalendarEvent() throws {
+        let parsed = try XCTUnwrap(MeetingMinutesParser.parse(
+            reply(outcome: "answer", minutes: Self.sampleMinutes)))
+        let bound = parsed.boundToCalendarEvent("selected-event")
+        XCTAssertEqual(bound.attendance?.present, ["田中"])
+        XCTAssertEqual(bound.attendance?.absent, [])
+        XCTAssertEqual(bound.attendance?.calendarEventId, "selected-event")
     }
 
     func testEvidenceMustResolveToInputSegment() {

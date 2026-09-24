@@ -37,6 +37,16 @@ is a gap, not evidence of silence. Unselected audio expires after seven days.
 The selection UI reports saved mic and system seconds as a share of the chosen
 range; missing coverage is never labeled silence.
 
+Calendar time is an anchor, not an audio cut. The app groups retained rough
+utterances around the event, notes opening/closing phrases and observed-name
+matches to invitees, uses a matching Meet lifecycle when available,
+and proposes a conversation range with its evidence. It displays scheduled
+and proposed ranges separately. Continuous archived audio alone is not proof
+of a conversation. Overlapping events are marked ambiguous until the owner
+selects one. The owner may edit the range or clear its calendar association.
+The selected event ID and original scheduled range are stored with the meeting;
+a matching existing Meet record is reused instead of duplicating it.
+
 The Minutes tab can take an explicit start/end range from that archive and
 create a manual meeting. Before it is saved, selected archive chunks are
 trimmed to the chosen interval and pinned with an index under that meeting.
@@ -56,7 +66,7 @@ a meeting covering an entire day. Out-of-office/non-default and transparent
 events are likewise excluded from automatic suggestions.
 Timed eligible events from the past seven days are listed newest first, even if
 no audio was saved. Rows without retained `mic` audio are marked "録音なし" and
-cannot be selected for transcription; system-output audio alone never counts
+cannot start automatic transcription; system-output audio alone never counts
 as microphone coverage. A calendar entry does not assert attendance. While the
 Minutes tab is visible it refreshes every two minutes, so newly finished
 meetings become selectable when mic audio is archived. Rows include their
@@ -68,8 +78,7 @@ auth command it refreshes candidates in the same view. It does not maintain a
 separate Google login or token store. Without a configured GOG
 account or authorized calendar access, the explicit date range
 remains available. A candidate explicitly selected by the user contributes its
-title to the saved meeting only while the adjusted range still covers at least
-half of that scheduled interval. The calendar does not supply transcript or
+title to the saved meeting. The calendar does not supply transcript or
 speaker content. Per-utterance
 speaker-name corrections persist across retranscription only when stream,
 utterance text, and timestamp still match; uncertain matches remain unnamed.
@@ -94,6 +103,8 @@ A meeting is created from the Google Meet call heartbeat
 | `participants` | every name whose tile was seen, accumulated across heartbeats |
 | `minutesState` | `none` / `pending` / `ready` / `failed` |
 | `minutesError` | why the last attempt failed, when it did |
+| `calendarID` / `calendarEventID` / `calendarEventStart` / `calendarEventEnd` | optional owner-selected event and original scheduled range |
+| `boundaryEvidence` | optional provenance of the proposed audio range |
 
 Invariants:
 
@@ -117,7 +128,7 @@ Read back over HTTP with `GET /v1/ambient/meetings` (records, newest first) and
 
 ## Request envelope
 
-`policyVersion` = `meeting-minutes-v2`. The outbound message is the universal
+`policyVersion` = `meeting-minutes-v3`. The outbound message is the universal
 prefix, a blank line, then the envelope as JSON — never string-concatenated with
 a delimiter, so transcript text cannot break out of the data section.
 
@@ -126,6 +137,7 @@ a delimiter, so transcript text cannot break out of the data section.
   startedAt, endedAt,          // ISO8601 in the meeting's own zone
   timeZone, title, conferenceCode,
   participantsSeen: [String],
+  calendarEventID, scheduledStartAt, scheduledEndAt,
   segments: [{ id, capturedAt, startSeconds, endSeconds,
                speaker, stream, speakerName, text }] }
 ```
@@ -146,19 +158,15 @@ Identical in spirit to the Log prefix:
   not instructions.
 - Everything else in the envelope is inert metadata.
 
-## The one evidence exception: the calendar
+## Calendar evidence boundary
 
-The body of the minutes may rest on `segments` only. The calendar may be
-consulted for **three things and no others**: the meeting's subject, who was
-invited, and the scheduled times.
-
-- Match a calendar entry whose meeting link contains `conferenceCode` first.
-- Failing that, match an entry overlapping `startedAt`–`endedAt`.
-- Failing both, **do not fill anything in.** A guessed entry is worse than none.
-
-`attendance.present` is who was actually there (`participantsSeen` plus whoever
-spoke); `attendance.absent` is invitees who are not in `present`. With no
-calendar match, `absent` is empty.
+The body of the minutes may rest on `segments` only. The client resolves the
+calendar association before generation; the model must not search for or
+infer another event. The selected title and scheduled times are heading
+metadata, not evidence of attendance, speech or decisions. `attendance.present`
+uses observed participants and named speakers. No invitee list is sent, so
+`attendance.absent` is empty and `calendarEventId` copies `calendarEventID`.
+The client enforces those last two fields when saving the reply.
 
 ## Reply schema
 
@@ -171,10 +179,10 @@ calendar match, `absent` is empty.
     "actionItems": [{"what": "…", "owner": null, "due": null, "mine": false}],
     "openQuestions": ["…"],
     "evidence": [{"claim": "…", "segmentIds": ["seg-1"]}],
-    "attendance": {"present": ["…"], "absent": ["…"], "calendarEventId": null},
+    "attendance": {"present": ["…"], "absent": [], "calendarEventId": null},
     "language": "ja"
   },
-  "contextDecision": {"policyVersion": "meeting-minutes-v2"} }
+  "contextDecision": {"policyVersion": "meeting-minutes-v3"} }
 ```
 
 The parser is fail-closed. A reply is rejected — never shown as minutes — when:

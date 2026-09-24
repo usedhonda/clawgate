@@ -15,6 +15,62 @@ final class MeetingCandidateSourceTests: XCTestCase {
             from: try! JSONSerialization.data(withJSONObject: object))
     }
 
+    private func speech(_ text: String, at: Double) -> TranscriptSegment {
+        var segment = TranscriptSegment(startSeconds: 0, endSeconds: 2, text: text)
+        segment.capturedAt = at
+        segment.stream = "mic"
+        return segment
+    }
+
+    func testOverlappingCalendarEventsKeepAmbiguousRealConversationBoundsAndMeetRecord() {
+        let named = try! JSONDecoder().decode(MeetingCandidateSource.Event.self, from: Data(
+            #"{"id":"generic","summary":"Meeting","start":{"dateTime":"1970-01-01T00:10:00Z"},"end":{"dateTime":"1970-01-01T00:40:00Z"},"attendees":[{"displayName":"Example Speaker"}]}"#.utf8))
+        let events = [named,
+                      event(id: "weekly", start: "1970-01-01T00:10:00Z", end: "1970-01-01T00:40:00Z")]
+        let audio = [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 590,
+                                                endedAt: 1_550, fileName: "mic.m4a")]
+        let record = MeetingRecord(id: "mtg-existing", source: "meet", startedAt: 602,
+                                   endedAt: 1_480, timeZone: "UTC", title: nil,
+                                   conferenceCode: nil, participants: [], minutesState: "failed", minutesError: nil)
+        var namedSpeech = speech("よろしくお願いします", at: 610)
+        namedSpeech.speakerName = "Example Speaker"
+        let found = MeetingCandidateSource.makeCandidates(
+            events: events, chunks: audio,
+            rough: [namedSpeech, speech("議題を話します", at: 1_000),
+                    speech("ありがとうございました", at: 1_390)],
+            from: from, to: to, records: [record])
+        XCTAssertEqual(found.count, 2)
+        XCTAssertTrue(found.allSatisfy { $0.matchStatus == "ambiguous" && $0.matchedMeetingID == record.id })
+        XCTAssertEqual(found.first?.proposedStart?.timeIntervalSince1970, 595)
+        XCTAssertEqual(found.first?.proposedEnd?.timeIntervalSince1970, 1_480)
+        XCTAssertTrue(found.first { $0.calendarEventID == "generic" }?.boundaryEvidence.contains("1 件一致") == true)
+    }
+
+    func testContinuousRecordingWithoutConversationDoesNotInventMeetingBounds() {
+        let audio = [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 600,
+                                                endedAt: 1_200, fileName: "mic.m4a")]
+        let found = MeetingCandidateSource.makeCandidates(
+            events: [event(id: "empty", start: "1970-01-01T00:10:00Z", end: "1970-01-01T00:20:00Z")],
+            chunks: audio, rough: [speech("あ", at: 700)], from: from, to: to)
+        XCTAssertEqual(found.first?.microphoneSeconds, 600)
+        XCTAssertEqual(found.first?.matchStatus, "noConversation")
+        XCTAssertNil(found.first?.proposedStart)
+    }
+
+    func testConversationCanStartBeforeAndEndAfterScheduledInterval() {
+        let audio = [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 540,
+                                                endedAt: 1_300, fileName: "mic.m4a")]
+        let found = MeetingCandidateSource.makeCandidates(
+            events: [event(id: "shifted", start: "1970-01-01T00:10:00Z", end: "1970-01-01T00:20:00Z")],
+            chunks: audio,
+            rough: [speech("それでは始めます", at: 580), speech("議題を続けます", at: 900),
+                    speech("これで終わります", at: 1_230)],
+            from: from, to: to)
+        XCTAssertEqual(found.first?.matchStatus, "suggested")
+        XCTAssertEqual(found.first?.proposedStart?.timeIntervalSince1970, 565)
+        XCTAssertEqual(found.first?.proposedEnd?.timeIntervalSince1970, 1_260)
+    }
+
     func testAllDayEventsAreNotMistakenForMeetingsWhenMicAudioOverlaps() {
         let chunks = [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 86_410,
                                                  endedAt: 86_420, fileName: "mic.m4a")]

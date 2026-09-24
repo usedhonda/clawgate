@@ -79,19 +79,35 @@ struct MeetingMinutesPetView: View {
                             Button {
                                 selectedCandidate = candidate
                                 showManualRange = false
-                                archiveStart = candidate.start.addingTimeInterval(-300)
-                                archiveEnd = candidate.end.addingTimeInterval(300)
+                                archiveStart = candidate.proposedStart ?? candidate.start
+                                archiveEnd = candidate.proposedEnd ?? candidate.end
                             } label: {
                                 let coverage = candidate.microphoneSeconds > 0
                                     ? "\(candidate.microphoneSeconds / 60)分録音" : "録音なし"
-                                Text("\(DateFormatter.localizedString(from: candidate.start, dateStyle: .short, timeStyle: .short)) · \(candidate.title) · \(coverage)")
+                                Text("\(DateFormatter.localizedString(from: candidate.start, dateStyle: .short, timeStyle: .short)) · \(candidate.title) · \(coverage)\(candidate.matchStatus == "ambiguous" ? " · 要確認" : "")")
                                     .lineLimit(1)
                             }
-                            .disabled(candidate.microphoneSeconds == 0)
                         }
                     }
                 }
                 .frame(maxHeight: 160)
+            }
+            if let candidate = selectedCandidate {
+                Text("予定: \(formattedRange(candidate.start, candidate.end))")
+                if let proposedStart = candidate.proposedStart, let proposedEnd = candidate.proposedEnd {
+                    Text("録音からの提案: \(formattedRange(proposedStart, proposedEnd))")
+                } else {
+                    Text("録音から会話区間を特定できませんでした")
+                        .foregroundColor(.yellow)
+                }
+                Text("区間の根拠: \(candidate.boundaryEvidence)")
+                    .fixedSize(horizontal: false, vertical: true)
+                if candidate.matchStatus == "ambiguous" {
+                    Text("複数の予定が該当します。この予定を選択しても会議との一致は未確定です。")
+                        .foregroundColor(.yellow)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button("予定選択を解除して日時だけで作成") { selectedCandidate = nil }
             }
             DisclosureGroup("日時を手動で指定", isExpanded: $showManualRange) {
                 DatePicker("開始", selection: $archiveStart, displayedComponents: [.date, .hourAndMinute])
@@ -109,11 +125,9 @@ struct MeetingMinutesPetView: View {
                     Button(archiveBusy ? "音声を処理中…" : selectedCandidate != nil && !showManualRange ? "この会議を文字起こし" : "この範囲を文字起こし") {
                         archiveBusy = true
                         archiveError = nil
-                        let title = selectedCandidate.flatMap { candidate -> String? in
-                            let overlap = min(archiveEnd, candidate.end).timeIntervalSince(max(archiveStart, candidate.start))
-                            return overlap >= candidate.end.timeIntervalSince(candidate.start) / 2 ? candidate.title : nil
-                        }
-                        model.createArchivedMeeting(start: archiveStart, end: archiveEnd, title: title) { result in
+                        let candidate = selectedCandidate
+                        let title = candidate?.title
+                        model.createArchivedMeeting(start: archiveStart, end: archiveEnd, title: title, candidate: candidate) { result in
                             archiveBusy = false
                             switch result {
                             case .success(let record):
@@ -126,7 +140,10 @@ struct MeetingMinutesPetView: View {
                         }
                     }
                     .disabled(archiveBusy || archiveStart >= archiveEnd ||
-                              archiveStart < Date().addingTimeInterval(-MeetingAudioArchive.retentionSeconds))
+                              archiveStart < Date().addingTimeInterval(-MeetingAudioArchive.retentionSeconds) ||
+                              (!showManualRange && selectedCandidate.map {
+                                  $0.matchStatus == "noConversation" || $0.proposedStart == nil || $0.proposedEnd == nil
+                              } == true))
                     Spacer()
                 }
             }
@@ -141,6 +158,10 @@ struct MeetingMinutesPetView: View {
         .padding(9)
     }
 
+    private func formattedRange(_ start: Date, _ end: Date) -> String {
+        "\(DateFormatter.localizedString(from: start, dateStyle: .short, timeStyle: .short))–\(DateFormatter.localizedString(from: end, dateStyle: .short, timeStyle: .short))"
+    }
+
     private func loadCandidates() {
         guard !calendarBusy else { return }
         calendarBusy = true
@@ -152,7 +173,7 @@ struct MeetingMinutesPetView: View {
                 case .success(let found):
                     candidates = found
                     if let selectedCandidate,
-                       !found.contains(where: { $0.id == selectedCandidate.id && $0.microphoneSeconds > 0 }) {
+                       !found.contains(where: { $0.id == selectedCandidate.id && $0.proposedStart != nil }) {
                         self.selectedCandidate = nil
                     }
                     calendarError = nil
