@@ -210,7 +210,7 @@ The request **waits its turn**: it never preempts a Log question or scene
 naming. A `pending` record is a durable queue entry, so a busy summon slot,
 disconnect, or app restart does not consume a generation attempt. When the
 slot is released or the gateway reconnects, queued meetings drain oldest-first
-by meeting start time, one at a time, and each request is dispatched at most
+by meeting end time, one at a time, and each request is dispatched at most
 `PetModel.minutesMaxAttempts` times. A real send failure, parser rejection, or
 reply timeout remains a visible `failed` reason that the owner can act on by
 asking again; slot waits are never reported as generation failures.
