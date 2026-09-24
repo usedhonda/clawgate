@@ -46,6 +46,29 @@ enum AXActions {
               pid, downResult.rawValue, upResult.rawValue)
     }
 
+    /// Send Enter straight to one process with a supported API.
+    ///
+    /// `AXUIElementPostKeyboardEvent` has been deprecated since 10.9 and on
+    /// macOS 27 it no longer delivers: the text still lands in LINE's input
+    /// box, but the message is never sent and the call reports nothing wrong
+    /// (observed 2026-09-24 on an M6 running 27.0/26A425; the same build sent
+    /// fine on the Intel machine running 26). `CGEvent.postToPid` keeps the
+    /// property the old call was chosen for — delivery to one process, not
+    /// through the HID tap, which disturbs Qt's window focus — while being an
+    /// API that is still supported.
+    static func sendEnterToPid(_ pid: pid_t) {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+            NSLog("[AXActions] sendEnterToPid: no CGEventSource")
+            return
+        }
+        let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true)
+        let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false)
+        down?.postToPid(pid)
+        usleep(20_000)
+        up?.postToPid(pid)
+        NSLog("[AXActions] sendEnterToPid pid=%d posted", pid)
+    }
+
     /// Send Escape via CGEvent at HID level to dismiss search mode.
     static func sendEscape() {
         guard let source = CGEventSource(stateID: .combinedSessionState) else {

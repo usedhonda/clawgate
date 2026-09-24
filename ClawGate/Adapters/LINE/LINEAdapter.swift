@@ -371,6 +371,39 @@ final class LINEAdapter: AdapterProtocol {
                 AXActions.setFocused(input.node.element)
             }
             AXActions.sendEnter(pid: pid)
+
+            // Then check that it left. The input box emptying is the only
+            // evidence this Mac gives that the message was actually sent, and
+            // without it a send that silently did nothing was still reported as
+            // line_send_ok — which is what happened for a whole day on macOS 27
+            // (2026-09-24): the text landed, Enter never fired, and every layer
+            // above said the send had succeeded.
+            let inputElement = inputCandidate?.node.element
+            func inputStillHoldsText() -> Bool {
+                guard let inputElement else { return false }
+                guard let value = AXQuery.copyStringAttribute(inputElement,
+                                                              attribute: kAXValueAttribute as String),
+                      !value.isEmpty else { return false }
+                // Either the whole text is still sitting there, or part of it
+                // is — both mean the message did not leave.
+                return value.contains(payload.text) || payload.text.contains(value)
+            }
+            usleep(250_000)
+            if inputStillHoldsText() {
+                // AXUIElementPostKeyboardEvent is deprecated and stopped
+                // delivering on macOS 27; this is the supported equivalent.
+                NSLog("[LINEAdapter] Enter did not clear the input — retrying via postToPid")
+                AXActions.sendEnterToPid(pid)
+                usleep(400_000)
+                if inputStillHoldsText() {
+                    throw BridgeRuntimeError(
+                        code: "send_not_delivered",
+                        message: "Enter を送りましたが入力欄が空になりません（本文は残っています）",
+                        retriable: true,
+                        failedStep: "send_message",
+                        details: nil)
+                }
+            }
             return true
         }
 
