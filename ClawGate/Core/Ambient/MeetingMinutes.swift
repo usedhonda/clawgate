@@ -201,7 +201,12 @@ enum MeetingMinutesError: Error, Equatable {
     /// `outcome` was "answer" but no minutes came with it, or the reverse.
     case outcomeContradictsBody
     case unknownOutcome(String)
-    case invalidEvidence
+    /// Which claim failed the evidence check, and how. A bare
+    /// `invalidEvidence` could not be acted on after the fact: the failure is
+    /// stored with only the head of the reply, and the head never contains the
+    /// claim that was rejected (observed 2026-09-24 on a 70-minute meeting
+    /// whose minutes were otherwise complete and good).
+    case invalidEvidence(claim: String?, reason: String)
 }
 
 enum MeetingMinutesParser {
@@ -226,15 +231,34 @@ enum MeetingMinutesParser {
         switch reply.outcome {
         case "answer":
             guard let minutes = reply.minutes else { throw MeetingMinutesError.outcomeContradictsBody }
-            guard let evidence = minutes.evidence else { throw MeetingMinutesError.invalidEvidence }
+            guard let evidence = minutes.evidence else {
+                throw MeetingMinutesError.invalidEvidence(claim: nil, reason: "evidence 配列がありません")
+            }
             let claims = [minutes.summary]
                 + minutes.topics.flatMap(\.points) + minutes.decisions
                 + minutes.actionItems.map(\.what) + minutes.openQuestions
             for claim in claims where !claim.isEmpty {
-                guard evidence.contains(where: { item in
-                    item.claim == claim && !item.segmentIds.isEmpty &&
-                    (validSegmentIds == nil || item.segmentIds.allSatisfy { validSegmentIds!.contains($0) })
-                }) else { throw MeetingMinutesError.invalidEvidence }
+                // Reported separately so a failure says which rule broke: a
+                // claim nobody cited, a citation with no segments, or segment
+                // ids that are not in this meeting's transcript.
+                let cited = evidence.filter { $0.claim == claim }
+                guard !cited.isEmpty else {
+                    throw MeetingMinutesError.invalidEvidence(
+                        claim: claim, reason: "evidence にこの主張の引用がありません")
+                }
+                guard cited.contains(where: { !$0.segmentIds.isEmpty }) else {
+                    throw MeetingMinutesError.invalidEvidence(
+                        claim: claim, reason: "引用に segmentIds がありません")
+                }
+                guard let ids = validSegmentIds else { continue }
+                guard cited.contains(where: { item in
+                    !item.segmentIds.isEmpty && item.segmentIds.allSatisfy { ids.contains($0) }
+                }) else {
+                    let unknown = cited.flatMap(\.segmentIds).filter { !ids.contains($0) }
+                    throw MeetingMinutesError.invalidEvidence(
+                        claim: claim,
+                        reason: "この会議にない segmentIds: \(unknown.prefix(5).joined(separator: ","))")
+                }
             }
             return minutes
         case "insufficientEvidence":
@@ -312,6 +336,19 @@ extension MeetingMinutes {
 }
 
 extension MeetingStore {
+    /// The full model reply for a set of minutes that failed to parse, kept
+    /// beside the meeting so the refusal can be diagnosed later. The failure
+    /// itself only stores the first 200 characters, which is enough to see the
+    /// model chatting instead of answering and never enough to see why a
+    /// well-formed answer was rejected. Overwritten by the next failure and
+    /// removed once minutes are produced — it is a post-mortem, not an archive.
+    func saveRejectedReply(_ text: String, for record: MeetingRecord) {
+        let dir = directory(for: record.id)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? Data(text.utf8).write(to: dir.appendingPathComponent("minutes-rejected.txt"),
+                                   options: .atomic)
+    }
+
     func saveMinutes(_ minutes: MeetingMinutes, for record: MeetingRecord, now: Date = Date()) {
         let dir = directory(for: record.id)
         do {
@@ -321,6 +358,9 @@ extension MeetingStore {
             try encoder.encode(minutes).write(to: dir.appendingPathComponent("minutes.json"), options: .atomic)
             try Data(minutes.markdown(record: record, now: now).utf8)
                 .write(to: dir.appendingPathComponent("minutes.md"), options: .atomic)
+            // A rejected reply from an earlier attempt is a post-mortem for a
+            // failure that no longer exists.
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("minutes-rejected.txt"))
         } catch {
             // Losing the file is recoverable: the minutes can be made again.
         }

@@ -87,8 +87,14 @@ final class MeetingMinutesTests: XCTestCase {
     func testEvidenceMustResolveToInputSegment() {
         XCTAssertThrowsError(try MeetingMinutesParser.parse(
             reply(outcome: "answer", minutes: Self.sampleMinutes),
-            validSegmentIds: ["seg-2"])) {
-            XCTAssertEqual($0 as? MeetingMinutesError, .invalidEvidence)
+            validSegmentIds: ["seg-2"])) { error in
+            // The failure has to name the claim and the rule, not just say
+            // "invalid": the stored excerpt never contains the rejected claim.
+            guard case .invalidEvidence(let claim, let reason)? = error as? MeetingMinutesError else {
+                return XCTFail("expected invalidEvidence, got \(error)")
+            }
+            XCTAssertNotNil(claim, "the rejected claim must be named")
+            XCTAssertTrue(reason.contains("segmentIds"), "reason names the rule: \(reason)")
         }
     }
 

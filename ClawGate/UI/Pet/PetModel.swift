@@ -2823,6 +2823,12 @@ final class PetModel: NSObject, ObservableObject {
             // Keep the head of what came back: without it "notJSON" says
             // nothing about whether the model refused, chatted, or truncated.
             let excerpt = text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200)
+            // And keep the whole reply beside the meeting. The head is enough
+            // to see that the model chatted instead of answering, but never
+            // enough to see WHY a well-formed answer was rejected — on
+            // 2026-09-24 a complete, good set of minutes was refused and the
+            // stored 200 characters could not say which rule broke.
+            MeetingStore().saveRejectedReply(text, for: record)
             finishMinutes(id: id, state: "failed", error: "\(error) — 返答: \(excerpt)")
         }
     }
