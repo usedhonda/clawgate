@@ -551,6 +551,14 @@ final class LINEInboundWatcher {
             return
         }
 
+        // Keep LINE in its corner here too, not only when sending. Placing it
+        // on send alone left the window in the way for however long nobody
+        // happened to send — which is exactly the time the owner is trying to
+        // use the rest of the screen. This runs before the tree is read, so the
+        // nodes below are measured at the final geometry rather than a stale
+        // one, and it does not raise or focus LINE.
+        AXActions.placeWindowIfNeeded(window, to: AXActions.optimalWindowFrame())
+
         guard shouldContinue(pollID: pollID) else { return }
         let windowTitle = AXQuery.copyStringAttribute(window, attribute: kAXTitleAttribute as String) ?? ""
         let nodes = AXQuery.descendants(of: window, maxDepth: 4, maxNodes: 220)

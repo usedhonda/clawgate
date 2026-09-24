@@ -499,6 +499,27 @@ enum AXActions {
                       height: visibleFrame.height)
     }
 
+    /// Place the window only when it is not already where it belongs.
+    ///
+    /// The inbound poller runs this on every tick, so writing position and size
+    /// unconditionally would mean two AX writes a second against LINE for no
+    /// reason. `tolerance` absorbs the pixel or two that LINE gives back.
+    /// Returns true when it actually moved something.
+    @discardableResult
+    static func placeWindowIfNeeded(_ window: AXUIElement,
+                                    to frame: CGRect,
+                                    tolerance: CGFloat = 4) -> Bool {
+        if let current = AXQuery.copyFrameAttribute(window),
+           abs(current.minX - frame.minX) <= tolerance,
+           abs(current.minY - frame.minY) <= tolerance,
+           abs(current.width - frame.width) <= tolerance,
+           abs(current.height - frame.height) <= tolerance {
+            return false
+        }
+        _ = setWindowFrame(window, to: frame)
+        return true
+    }
+
     /// `lineWindowFrame` against the live screen.
     static func optimalWindowFrame() -> CGRect {
         let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1920, height: 1055)
