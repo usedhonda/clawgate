@@ -120,6 +120,8 @@ enum MeetingMinutesPrompt {
 
         すべての概要・議題の要点・決定・やること・未解決事項には `evidence` で原文と同じ
         `claim` を一つずつ挙げ、根拠の `segments[].id` を `segmentIds` に入れてください。
+        `summary` が複数文のときは、文ごとに分けて挙げてかまいません（そのほうが根拠が
+        はっきりします）。
         発話に根拠のない項目を作らず、IDを推測しないでください。
 
         根拠が足りないとき（発言がほとんど無い、文字化けばかり等）は、項目を創作せず
@@ -234,7 +236,14 @@ enum MeetingMinutesParser {
             guard let evidence = minutes.evidence else {
                 throw MeetingMinutesError.invalidEvidence(claim: nil, reason: "evidence 配列がありません")
             }
-            let claims = [minutes.summary]
+            // The summary is a roll-up of several sentences, so it is checked
+            // sentence by sentence rather than as one string. Demanding that a
+            // four-sentence paragraph reappear verbatim as a single `claim` was
+            // the one rule a complete, correct set of minutes failed on
+            // 2026-09-24: the model had cited each of its sentences separately,
+            // with real segment ids, which is the stricter thing to do. Every
+            // sentence still has to be grounded — nothing ungrounded passes.
+            let claims = summarySentences(minutes.summary)
                 + minutes.topics.flatMap(\.points) + minutes.decisions
                 + minutes.actionItems.map(\.what) + minutes.openQuestions
             for claim in claims where !claim.isEmpty {
@@ -267,6 +276,29 @@ enum MeetingMinutesParser {
         default:
             throw MeetingMinutesError.unknownOutcome(reply.outcome)
         }
+    }
+
+    /// The summary split into the units a citation can reasonably cover: its
+    /// lines, and within a line its sentences. A summary written as one
+    /// sentence comes back unchanged, so the single-claim citation the prompt
+    /// asks for still satisfies the check.
+    static func summarySentences(_ summary: String) -> [String] {
+        let lines = summary.split(whereSeparator: \.isNewline)
+        var out: [String] = []
+        for line in lines {
+            var current = ""
+            for character in line {
+                current.append(character)
+                if character == "。" {
+                    let piece = current.trimmingCharacters(in: .whitespaces)
+                    if !piece.isEmpty { out.append(piece) }
+                    current = ""
+                }
+            }
+            let tail = current.trimmingCharacters(in: .whitespaces)
+            if !tail.isEmpty { out.append(tail) }
+        }
+        return out.isEmpty ? [summary] : out
     }
 
     /// Models wrap JSON in a fence often enough that refusing it would be

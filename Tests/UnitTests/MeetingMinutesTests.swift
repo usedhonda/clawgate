@@ -98,6 +98,47 @@ final class MeetingMinutesTests: XCTestCase {
         }
     }
 
+    /// A multi-sentence summary may be cited sentence by sentence. 2026-09-24:
+    /// a complete, correct set of minutes was refused on this one rule while
+    /// every other claim (10 topic points, 5 decisions, 8 action items, 4 open
+    /// questions) was cited — the model had grounded each sentence of the
+    /// summary separately, which is stricter than one citation for the whole.
+    func testAMultiSentenceSummaryMayBeCitedSentenceBySentence() throws {
+        let body = """
+        {"outcome":"answer","contextDecision":{"policyVersion":"\(MeetingMinutesPrompt.policyVersion)"},
+         "minutes":{"title":"t","summary":"一文目です。\\n二文目です。","topics":[],"decisions":[],
+         "actionItems":[],"openQuestions":[],
+         "evidence":[{"claim":"一文目です。","segmentIds":["seg-1"]},
+                     {"claim":"二文目です。","segmentIds":["seg-2"]}]}}
+        """
+        let minutes = try MeetingMinutesParser.parse(body, validSegmentIds: ["seg-1", "seg-2"])
+        XCTAssertEqual(minutes?.title, "t")
+    }
+
+    /// The relaxation is about granularity, not grounding: a sentence nobody
+    /// cited still fails, and the failure names it.
+    func testAnUncitedSummarySentenceStillFails() {
+        let body = """
+        {"outcome":"answer","contextDecision":{"policyVersion":"\(MeetingMinutesPrompt.policyVersion)"},
+         "minutes":{"title":"t","summary":"引用ありの文です。\\n引用なしの文です。","topics":[],
+         "decisions":[],"actionItems":[],"openQuestions":[],
+         "evidence":[{"claim":"引用ありの文です。","segmentIds":["seg-1"]}]}}
+        """
+        XCTAssertThrowsError(try MeetingMinutesParser.parse(body, validSegmentIds: ["seg-1"])) { error in
+            guard case .invalidEvidence(let claim, _)? = error as? MeetingMinutesError else {
+                return XCTFail("expected invalidEvidence, got \(error)")
+            }
+            XCTAssertEqual(claim, "引用なしの文です。")
+        }
+    }
+
+    /// A one-sentence summary is unchanged by the split, so the single citation
+    /// the prompt asks for keeps working.
+    func testASingleSentenceSummaryIsStillOneClaim() throws {
+        XCTAssertEqual(MeetingMinutesParser.summarySentences("ひとつの文です。"), ["ひとつの文です。"])
+        XCTAssertEqual(MeetingMinutesParser.summarySentences("句点なしの要約"), ["句点なしの要約"])
+    }
+
     func testInsufficientEvidenceParsesAsNoMinutes() throws {
         XCTAssertNil(try MeetingMinutesParser.parse(reply(outcome: "insufficientEvidence", minutes: "null")))
     }
