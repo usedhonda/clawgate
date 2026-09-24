@@ -365,6 +365,9 @@ final class PetModel: NSObject, ObservableObject {
                     self.showWhisper("Connected")
                 }
                 self.hasEverConnected = true
+                // Pending minutes are durable meeting records, not a timer
+                // attempt. Reconnect is therefore a queue-drain trigger.
+                self.drainPendingMinutes()
                 Task { [weak self] in
                     guard let self, let key = self.sessionKey else { return }
                     try? await self.wsClient.subscribeToSession(sessionKey: key)
@@ -536,6 +539,13 @@ final class PetModel: NSObject, ObservableObject {
                 self.streamingMessageId = nil
                 self.streamingRunId = nil
                 self.streamingText = ""
+                if self.pendingSummonSource == Self.minutesSource {
+                    // The durable record remains pending; only the in-flight
+                    // transport ownership is discarded so reconnect can drain
+                    // it again without treating the disconnect as a failure.
+                    self.pendingMinutesMeetingID = nil
+                    self.pendingMinutesSegmentIDs = []
+                }
                 if self.pendingSummonSource != "log" {
                     self.releaseSharedSummonIfPresent()
                     self.summonWatchdogToken = nil
@@ -2149,6 +2159,10 @@ final class PetModel: NSObject, ObservableObject {
         if owner.source == "log_scene_naming" {
             pendingSceneNamingIDs = []
         }
+        // A slot release is the other queue-drain trigger besides reconnect.
+        // The current minutes reply still owns pendingMinutesMeetingID until
+        // its parser runs, so this is naturally a no-op for that reply.
+        drainPendingMinutes()
     }
 
     private func summonEventMatchesCurrentOwner(runId: String?) -> Bool {
@@ -2217,10 +2231,16 @@ final class PetModel: NSObject, ObservableObject {
                 Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) slotReclaimed=1")
             } else {
                 Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) slotReclaimed=1")
-                self.addSummonResult(
-                    text: "Error: no reply received within \(Int(Self.replyTimeout(for: source)))s",
-                    source: source,
-                    owner: owner)
+                let timeout = "返事が \(Int(Self.replyTimeout(for: source))) 秒以内に返りませんでした"
+                if source == Self.minutesSource, let id = self.pendingMinutesMeetingID {
+                    self.pendingMinutesMeetingID = nil
+                    self.pendingMinutesSegmentIDs = []
+                    self.finishMinutes(id: id, state: "failed", error: timeout)
+                    self.drainPendingMinutes()
+                } else {
+                    self.addSummonResult(text: "Error: no reply received within \(Int(Self.replyTimeout(for: source)))s",
+                                         source: source, owner: owner)
+                }
             }
         }
 
@@ -2260,7 +2280,14 @@ final class PetModel: NSObject, ObservableObject {
         guard let owner = sharedSummonOwner,
               owner.token == token, owner.source == source else { return }
         releaseSharedSummon(owner)
-        addSummonResult(text: "Error: \(error)", source: source, owner: owner)
+        if source == Self.minutesSource, let id = pendingMinutesMeetingID {
+            pendingMinutesMeetingID = nil
+            pendingMinutesSegmentIDs = []
+            finishMinutes(id: id, state: "failed", error: "送信に失敗しました: \(error)")
+            drainPendingMinutes()
+        } else {
+            addSummonResult(text: "Error: \(error)", source: source, owner: owner)
+        }
     }
 
     /// Log-specific summon send. Threads `requestId` through as the
@@ -2714,47 +2741,67 @@ final class PetModel: NSObject, ObservableObject {
     /// a Log question the owner just asked matters more than a background write.
     func requestMinutes(for record: MeetingRecord) {
         guard let provider = meetingTranscriptProvider else { return }
-        let store = MeetingStore()
+        // A second UI refresh/request for the same pending record is only a
+        // queue poke. It must never dispatch a duplicate summon.
+        if pendingMinutesMeetingID == record.id { return }
         let segments = provider(record)
         guard !segments.isEmpty else {
             finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
             return
         }
         shadowMinutesWithJev(record: record, segments: segments)
-        let attempts = minutesAttempts[record.id, default: 0]
-        guard attempts < Self.minutesMaxAttempts else {
-            finishMinutes(id: record.id, state: "failed", error: "生成を \(Self.minutesMaxAttempts) 回試しましたが順番が空きませんでした")
+        markMinutes(id: record.id, state: "pending", error: nil)
+        drainPendingMinutes()
+    }
+
+    /// Drain durable pending records oldest-first whenever the shared summon
+    /// slot and transport are available. Waiting for a busy slot or a
+    /// reconnect does not consume a generation attempt.
+    private func drainPendingMinutes() {
+        guard pendingMinutesMeetingID == nil,
+              connectionState == .connected,
+              sessionKey != nil,
+              !isSummonBusy else { return }
+        guard let record = Self.pendingMinutesOrder(MeetingStore().all()).first,
+              let provider = meetingTranscriptProvider else { return }
+        let segments = provider(record)
+        guard !segments.isEmpty else {
+            finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
+            drainPendingMinutes()
             return
         }
-        guard connectionState == .connected, sessionKey != nil, !isSummonBusy, pendingMinutesMeetingID == nil else {
-            minutesAttempts[record.id] = attempts + 1
-            markMinutes(id: record.id, state: "pending", error: nil, store: store)
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesRetrySeconds) { [weak self] in
-                guard let self, let fresh = MeetingStore().load(id: record.id) else { return }
-                guard fresh.minutesState == "pending" else { return }
-                self.requestMinutes(for: fresh)
-            }
+        let attempts = minutesAttempts[record.id, default: 0]
+        guard attempts < Self.minutesMaxAttempts else {
+            finishMinutes(id: record.id, state: "failed", error: "生成を \(Self.minutesMaxAttempts) 回試しましたが失敗しました")
+            drainPendingMinutes()
             return
         }
         let envelope = MeetingMinutesEnvelope.build(record: record, segments: segments)
         guard let message = try? MeetingMinutesPrompt.buildMessage(envelope: envelope) else {
             finishMinutes(id: record.id, state: "failed", error: "envelope を組み立てられませんでした")
+            drainPendingMinutes()
             return
         }
         minutesAttempts[record.id] = attempts + 1
         pendingMinutesMeetingID = record.id
         pendingMinutesSegmentIDs = Set(envelope.segments.map(\.id))
-        markMinutes(id: record.id, state: "pending", error: nil, store: store)
+        markMinutes(id: record.id, state: "pending", error: nil)
         sendSummon(message, source: Self.minutesSource)
-        // sendSummon returns quietly when it cannot claim the slot. Without
-        // this check the meeting would stay `pending` forever and block every
-        // later request, since only one can be in flight.
+        // A failed admission remains pending and is retried by the next slot
+        // release/reconnect; it is not a generation failure.
         if sharedSummonOwner?.source != Self.minutesSource {
             pendingMinutesMeetingID = nil
-            finishMinutes(id: record.id, state: "failed", error: "送信できませんでした")
+            drainPendingMinutes()
             return
         }
         armMinutesWatchdog(id: record.id)
+    }
+
+    /// Stable chronological ordering is kept separate so queue fairness can be
+    /// checked without a live socket or wall clock.
+    static func pendingMinutesOrder(_ records: [MeetingRecord]) -> [MeetingRecord] {
+        records.filter { $0.minutesState == "pending" }
+            .sorted { $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt < $1.startedAt }
     }
 
     /// The shared summon's own watchdog only fires while it still owns the
@@ -2806,6 +2853,7 @@ final class PetModel: NSObject, ObservableObject {
 
     private func handleMinutesReply(_ text: String) {
         guard let id = pendingMinutesMeetingID else { return }
+        defer { drainPendingMinutes() }
         pendingMinutesMeetingID = nil
         let validSegmentIDs = pendingMinutesSegmentIDs
         pendingMinutesSegmentIDs = []

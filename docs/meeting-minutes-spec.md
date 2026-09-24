@@ -207,9 +207,13 @@ Minutes are requested once, `MenuBarApp.minutesAfterCallSeconds` (90s) after the
 call ends — long enough for the final audio chunk to close and be transcribed.
 
 The request **waits its turn**: it never preempts a Log question or scene
-naming. While the summon slot is busy the state stays `pending` and it retries,
-at most `PetModel.minutesMaxAttempts` times, before failing with a reason the
-owner can act on by asking again.
+naming. A `pending` record is a durable queue entry, so a busy summon slot,
+disconnect, or app restart does not consume a generation attempt. When the
+slot is released or the gateway reconnects, queued meetings drain oldest-first
+by meeting start time, one at a time, and each request is dispatched at most
+`PetModel.minutesMaxAttempts` times. A real send failure, parser rejection, or
+reply timeout remains a visible `failed` reason that the owner can act on by
+asking again; slot waits are never reported as generation failures.
 
 Autonomous LINE delivery is out of scope: `docs/SPEC-messaging.md` keeps
 autonomous notifications to milestones, and finished minutes surface in the app.

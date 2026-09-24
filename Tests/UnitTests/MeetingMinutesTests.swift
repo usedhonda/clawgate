@@ -23,6 +23,21 @@ final class MeetingMinutesTests: XCTestCase {
 
     // MARK: - Request
 
+    func testPendingMinutesAreOrderedOldestFirstAndIgnoreCompletedRecords() {
+        func pending(_ id: String, _ startedAt: Double) -> MeetingRecord {
+            MeetingRecord(id: id, source: "meet", startedAt: startedAt, endedAt: startedAt + 60,
+                          timeZone: "UTC", title: nil, conferenceCode: nil, participants: [],
+                          minutesState: "pending", minutesError: nil)
+        }
+        let ready = MeetingRecord(id: "ready", source: "meet", startedAt: 1,
+                                  endedAt: 2, timeZone: "UTC", title: nil,
+                                  conferenceCode: nil, participants: [], minutesState: "ready", minutesError: nil)
+        let ordered = PetModel.pendingMinutesOrder([
+            pending("later", 30), ready, pending("same-b", 10), pending("same-a", 10), pending("earlier", 5)
+        ])
+        XCTAssertEqual(ordered.map(\.id), ["earlier", "same-a", "same-b", "later"])
+    }
+
     func testEnvelopeNumbersSegmentsAndKeepsTheirStreamAndName() {
         let env = MeetingMinutesEnvelope.build(
             record: record(),
