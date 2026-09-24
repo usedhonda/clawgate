@@ -23,9 +23,9 @@ final class MeetingMinutesTests: XCTestCase {
 
     // MARK: - Request
 
-    func testPendingMinutesAreOrderedOldestFirstAndIgnoreCompletedRecords() {
-        func pending(_ id: String, _ startedAt: Double) -> MeetingRecord {
-            MeetingRecord(id: id, source: "meet", startedAt: startedAt, endedAt: startedAt + 60,
+    func testPendingMinutesAreOrderedByEndTimeAndIgnoreCompletedRecords() {
+        func pending(_ id: String, _ startedAt: Double, _ endedAt: Double) -> MeetingRecord {
+            MeetingRecord(id: id, source: "meet", startedAt: startedAt, endedAt: endedAt,
                           timeZone: "UTC", title: nil, conferenceCode: nil, participants: [],
                           minutesState: "pending", minutesError: nil)
         }
@@ -33,9 +33,52 @@ final class MeetingMinutesTests: XCTestCase {
                                   endedAt: 2, timeZone: "UTC", title: nil,
                                   conferenceCode: nil, participants: [], minutesState: "ready", minutesError: nil)
         let ordered = PetModel.pendingMinutesOrder([
-            pending("later", 30), ready, pending("same-b", 10), pending("same-a", 10), pending("earlier", 5)
+            pending("later", 30, 40), ready, pending("same-b", 10, 20), pending("same-a", 10, 20), pending("earlier", 5, 15)
         ])
         XCTAssertEqual(ordered.map(\.id), ["earlier", "same-a", "same-b", "later"])
+    }
+
+    func testBusyWaitsDoNotConsumeAttemptsAndDrainInOrderAfterCompletion() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("minutes-queue-\(UUID().uuidString)")
+        let store = MeetingStore(root: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func meeting(_ id: String, _ start: Double, _ end: Double) -> MeetingRecord {
+            MeetingRecord(id: id, source: "meet", startedAt: start, endedAt: end,
+                          timeZone: "UTC", title: id, conferenceCode: nil, participants: [],
+                          minutesState: "none", minutesError: nil)
+        }
+        let first = meeting("mtg-first", 10, 40)
+        let second = meeting("mtg-second", 20, 30) // overlapping, but ready earlier
+        store.save(first)
+        store.save(second)
+
+        let model = PetModel()
+        model.setMeetingStoreForTesting(store)
+        model.setSessionKeyForTesting("test-session")
+        model.setConnectionStateForTesting(.connected)
+        model.meetingTranscriptProvider = { _ in [TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "議題")] }
+        model.suppressLogSendForTesting = true
+        let busyToken = try XCTUnwrap(model.startSharedSummonForTesting(source: "log"))
+
+        // Four queue pokes model the old retry intervals while the shared slot
+        // remains busy. None may count as a generation attempt.
+        for _ in 0..<4 {
+            model.requestMinutes(for: first)
+            model.requestMinutes(for: second)
+        }
+        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-first", default: 0], 0)
+        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-second", default: 0], 0)
+
+        model.releaseSharedSummonForTesting(token: busyToken)
+        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-second")
+        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-second"], 1)
+
+        // A terminal failure is still a real completion; the queue must then
+        // advance to the remaining meeting rather than stall or duplicate.
+        model.releaseCurrentSharedSummonForTesting()
+        model.completeMinutesReplyForTesting("not JSON")
+        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-first")
+        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-first"], 1)
     }
 
     func testEnvelopeNumbersSegmentsAndKeepsTheirStreamAndName() {

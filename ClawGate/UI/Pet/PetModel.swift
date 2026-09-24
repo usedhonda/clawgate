@@ -1993,6 +1993,16 @@ final class PetModel: NSObject, ObservableObject {
     /// Test seam: inject a session key so the connected-path Log summon logic
     /// runs without a live Gateway handshake (`sessionKey` is otherwise private).
     func setSessionKeyForTesting(_ key: String?) { sessionKey = key }
+    func setConnectionStateForTesting(_ state: ConnectionState) { connectionState = state }
+    func setMeetingStoreForTesting(_ store: MeetingStore) { meetingStoreOverrideForTesting = store }
+    var pendingMinutesMeetingIDForTesting: String? { pendingMinutesMeetingID }
+    var minutesAttemptsForTesting: [String: Int] { minutesAttempts }
+    func completeMinutesReplyForTesting(_ text: String) {
+        appendSummonEntry(text: text, source: Self.minutesSource)
+    }
+    func releaseCurrentSharedSummonForTesting() {
+        releaseSharedSummonIfPresent()
+    }
     /// Test seam: when true, `sendLogSummon` and the shared `sendSummon` both
     /// claim the summon slot but skip the real WS send, so their reply-timeout
     /// watchdogs ("send succeeded, reply never arrived") can be exercised
@@ -2725,6 +2735,9 @@ final class PetModel: NSObject, ObservableObject {
     /// Attempts per meeting, so a permanently busy slot gives up instead of
     /// retrying forever.
     private var minutesAttempts: [String: Int] = [:]
+#if DEBUG
+    private var meetingStoreOverrideForTesting: MeetingStore?
+#endif
 
     static let minutesSource = "minutes"
     static let minutesMaxAttempts = 3
@@ -2735,6 +2748,13 @@ final class PetModel: NSObject, ObservableObject {
 
     static func replyTimeout(for source: String) -> TimeInterval {
         source == minutesSource ? minutesReplyTimeoutSeconds : summonReplyTimeoutSeconds
+    }
+
+    private func minutesStore() -> MeetingStore {
+#if DEBUG
+        if let meetingStoreOverrideForTesting { return meetingStoreOverrideForTesting }
+#endif
+        return MeetingStore()
     }
 
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
@@ -2762,7 +2782,7 @@ final class PetModel: NSObject, ObservableObject {
               connectionState == .connected,
               sessionKey != nil,
               !isSummonBusy else { return }
-        guard let record = Self.pendingMinutesOrder(MeetingStore().all()).first,
+        guard let record = Self.pendingMinutesOrder(minutesStore().all()).first,
               let provider = meetingTranscriptProvider else { return }
         let segments = provider(record)
         guard !segments.isEmpty else {
@@ -2794,14 +2814,22 @@ final class PetModel: NSObject, ObservableObject {
             drainPendingMinutes()
             return
         }
-        armMinutesWatchdog(id: record.id)
+        if let token = sharedSummonOwner?.token {
+            armMinutesWatchdog(id: record.id, token: token)
+        }
     }
 
     /// Stable chronological ordering is kept separate so queue fairness can be
     /// checked without a live socket or wall clock.
     static func pendingMinutesOrder(_ records: [MeetingRecord]) -> [MeetingRecord] {
         records.filter { $0.minutesState == "pending" }
-            .sorted { $0.startedAt == $1.startedAt ? $0.id < $1.id : $0.startedAt < $1.startedAt }
+            .sorted {
+                let leftEnd = $0.endedAt ?? $0.startedAt
+                let rightEnd = $1.endedAt ?? $1.startedAt
+                if leftEnd != rightEnd { return leftEnd < rightEnd }
+                if $0.startedAt != $1.startedAt { return $0.startedAt < $1.startedAt }
+                return $0.id < $1.id
+            }
     }
 
     /// The shared summon's own watchdog only fires while it still owns the
@@ -2809,9 +2837,11 @@ final class PetModel: NSObject, ObservableObject {
     /// the disconnect) would leave the meeting pending forever and block every
     /// later request. This one is keyed on the meeting alone. Observed for real
     /// on 2026-09-22, when a request went out mid-restart.
-    private func armMinutesWatchdog(id: String) {
+    private func armMinutesWatchdog(id: String, token: UUID) {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesReplyTimeoutSeconds + 30) { [weak self] in
-            guard let self, self.pendingMinutesMeetingID == id else { return }
+            guard let self,
+                  self.pendingMinutesMeetingID == id,
+                  self.sharedSummonOwner?.token == token else { return }
             self.pendingMinutesMeetingID = nil
             self.finishMinutes(id: id, state: "failed", error: "返事が返ってきませんでした")
         }
@@ -2857,13 +2887,13 @@ final class PetModel: NSObject, ObservableObject {
         pendingMinutesMeetingID = nil
         let validSegmentIDs = pendingMinutesSegmentIDs
         pendingMinutesSegmentIDs = []
-        guard let record = MeetingStore().load(id: id) else { return }
+        guard let record = minutesStore().load(id: id) else { return }
         do {
             guard let minutes = try MeetingMinutesParser.parse(text, validSegmentIds: validSegmentIDs) else {
                 finishMinutes(id: id, state: "failed", error: "根拠となる発言が足りませんでした")
                 return
             }
-            MeetingStore().saveMinutes(minutes, for: record)
+            minutesStore().saveMinutes(minutes, for: record)
             finishMinutes(id: id, state: "ready", error: nil)
             addNotificationEntry(text: "議事録ができました: \(minutes.title ?? record.title ?? "会議")",
                                  source: Self.minutesSource)
@@ -2876,16 +2906,17 @@ final class PetModel: NSObject, ObservableObject {
             // enough to see WHY a well-formed answer was rejected — on
             // 2026-09-24 a complete, good set of minutes was refused and the
             // stored 200 characters could not say which rule broke.
-            MeetingStore().saveRejectedReply(text, for: record)
+            minutesStore().saveRejectedReply(text, for: record)
             finishMinutes(id: id, state: "failed", error: "\(error) — 返答: \(excerpt)")
         }
     }
 
-    private func markMinutes(id: String, state: String, error: String?, store: MeetingStore = MeetingStore()) {
-        guard var record = store.load(id: id) else { return }
+    private func markMinutes(id: String, state: String, error: String?, store: MeetingStore? = nil) {
+        let targetStore = store ?? minutesStore()
+        guard var record = targetStore.load(id: id) else { return }
         record.minutesState = state
         record.minutesError = error
-        store.save(record)
+        targetStore.save(record)
         meetingsRevision += 1
     }
 
