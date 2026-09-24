@@ -462,18 +462,53 @@ enum AXActions {
         return actual
     }
 
-    /// Calculate an optimal window frame for OCR visibility.
-    /// Uses ~65% of screen width and ~85% of screen height, positioned at left edge.
+    /// LINE's sidebar is a fixed-width Qt pane, so narrowing the window raises
+    /// its share of the width rather than shrinking it. Measured at 302px
+    /// against a 1200x859 window (the fixture in `LineSidebarDiscoveryTests`).
+    static let lineSidebarWidth: CGFloat = 302
+
+    /// `LineSidebarDiscovery` refuses a sidebar wider than 0.35 of the window,
+    /// and that refusal is not a degraded selector — `resolveLineMainWindow`
+    /// finds no window at all, which takes the whole read path down with it.
+    /// Staying at 0.32 leaves room for LINE to differ from the measurement.
+    static let lineSidebarMaxWidthShare: CGFloat = 0.32
+
+    /// The narrowest the window may be placed before sidebar discovery is at
+    /// risk. About 944px.
+    static var minimumLineWindowWidth: CGFloat { lineSidebarWidth / lineSidebarMaxWidthShare }
+
+    /// Where the LINE window should sit: top-left corner, half the width, the
+    /// full usable height. Left half so the rest of the screen stays usable —
+    /// it used to take 1200x900 out of the middle-left of a 1920x1080 desktop.
+    ///
+    /// Pure, so the arithmetic can be tested without a display attached.
+    /// - Parameters:
+    ///   - visibleFrame: AppKit's usable area (menu bar and Dock already out),
+    ///     bottom-left origin.
+    ///   - desktopMaxY: the top edge of the whole desktop in AppKit
+    ///     coordinates, for the flip to AX's top-left origin.
+    static func lineWindowFrame(visibleFrame: CGRect,
+                                desktopMaxY: CGFloat,
+                                widthRatio: CGFloat = 0.5) -> CGRect {
+        // The floor never exceeds what the display actually has.
+        let floor = min(minimumLineWindowWidth, visibleFrame.width)
+        let width = max(visibleFrame.width * widthRatio, floor)
+        return CGRect(x: visibleFrame.minX,
+                      y: desktopMaxY - visibleFrame.maxY,
+                      width: width,
+                      height: visibleFrame.height)
+    }
+
+    /// `lineWindowFrame` against the live screen.
     static func optimalWindowFrame() -> CGRect {
-        let screen = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1920, height: 1055)
-        // visibleFrame excludes menu bar and Dock, but uses bottom-left origin.
-        // AX uses top-left origin. Convert.
-        let screenTop = (NSScreen.screens.first?.frame.height ?? 1080) - screen.maxY  // menu bar height
-        let width = min(1200, screen.width * 0.65)
-        let height = min(900, screen.height * 0.85)
-        let x = screen.origin.x + 60  // slight offset from left edge
-        let y = screenTop + 20        // below menu bar
-        return CGRect(x: x, y: y, width: width, height: height)
+        let visible = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1920, height: 1055)
+        // Flipped against the whole desktop, not `screens.first`: the main
+        // screen and the primary screen are not always the same one, and using
+        // the wrong height puts the window off-screen. Same rule the Pet window
+        // uses (`PetModel.desktopMaxY`).
+        let desktopMaxY = NSScreen.screens.map(\.frame.maxY).max()
+            ?? (NSScreen.main?.frame.maxY ?? visible.maxY)
+        return lineWindowFrame(visibleFrame: visible, desktopMaxY: desktopMaxY)
     }
 
     // MARK: - 4-Stage Pipeline helpers
