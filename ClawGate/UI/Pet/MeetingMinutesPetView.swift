@@ -341,6 +341,24 @@ struct MeetingMinutesPetView: View {
     private var detail: some View {
         if let meeting = selected {
             VStack(alignment: .leading, spacing: 0) {
+                if let evidence = meeting.boundaryEvidence, !evidence.isEmpty {
+                    Text("録音区間: \(evidence)")
+                        .font(.system(size: 11))
+                        .foregroundColor(.yellow)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+                if !showTranscript && minutes != nil && meeting.minutesState != "ready" {
+                    Text(meeting.minutesState == "failed"
+                         ? "議事録の更新に失敗しました。以下は統合前の旧議事録で、追加分は未反映です。"
+                         : "議事録を更新中です。以下は統合前の旧議事録で、追加分は未反映です。")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.yellow)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
                 ScrollViewReader { proxy in
                     ScrollView(.vertical, showsIndicators: true) {
                         if showTranscript {
@@ -383,7 +401,11 @@ struct MeetingMinutesPetView: View {
     }
 
     private func bodyText(_ meeting: MeetingRecord) -> String {
-        if let minutes { return minutes.markdown(record: meeting) }
+        if let minutes {
+            let body = minutes.markdown(record: meeting)
+            guard meeting.minutesState != "ready" else { return body }
+            return "【旧議事録・部分的】追加された録音・文字起こしは未反映です。\n\n" + body
+        }
         switch meeting.minutesState {
         case "pending": return "議事録を作っています…"
         case "failed": return "作れませんでした: " + (meeting.minutesError ?? "理由不明")
@@ -505,7 +527,7 @@ struct MeetingMinutesPetView: View {
     // MARK: - Actions
 
     private func reload() {
-        meetings = model.meetingList()
+        meetings = model.meetingList().filter { $0.mergedIntoMeetingID == nil }
         if selectedID == nil || !meetings.contains(where: { $0.id == selectedID }) {
             selectedID = meetings.first?.id
         }
