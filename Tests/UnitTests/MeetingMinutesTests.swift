@@ -121,6 +121,22 @@ final class MeetingMinutesTests: XCTestCase {
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(json.utf8)))
     }
 
+    func testPromptKeepsShortOverviewSeparateFromDetailedDiscussion() {
+        let prompt = MeetingMinutesPrompt.universalPrefix()
+        XCTAssertTrue(prompt.contains("`summary` は短い概要"))
+        XCTAssertTrue(prompt.contains("`topics` は概要の言い換えではなく"))
+        XCTAssertTrue(prompt.contains("終盤までの主要な論点"))
+        XCTAssertTrue(prompt.contains("聞き取れない数字や食い違う表現"))
+    }
+
+    func testRenderedMinutesDiscloseKnownRecordingGap() throws {
+        var interrupted = record()
+        interrupted.boundaryEvidence = "録音に欠落あり"
+        let minutes = try XCTUnwrap(MeetingMinutesParser.parse(
+            reply(outcome: "answer", minutes: Self.sampleMinutes)))
+        XCTAssertTrue(minutes.markdown(record: interrupted).contains("欠落区間の発言を網羅していません"))
+    }
+
     // MARK: - Response
 
     private func reply(outcome: String, minutes: String, policy: String = MeetingMinutesPrompt.policyVersion) -> String {

@@ -137,7 +137,7 @@ Read back over HTTP with `GET /v1/ambient/meetings` (records, newest first) and
 
 ## Request envelope
 
-`policyVersion` = `meeting-minutes-v3`. The outbound message is the universal
+`policyVersion` = `meeting-minutes-v4`. The outbound message is the universal
 prefix, a blank line, then the envelope as JSON — never string-concatenated with
 a delimiter, so transcript text cannot break out of the data section.
 
@@ -177,13 +177,22 @@ uses observed participants and named speakers. No invitee list is sent, so
 `attendance.absent` is empty and `calendarEventId` copies `calendarEventID`.
 The client enforces those last two fields when saving the reply.
 
+`summary` is a short overview; `topics` is the detailed discussion body, not a
+second compressed summary. For each substantive topic, preserve supported
+background, proposals, concrete figures and names, alternatives, rationale,
+and unresolved points through separate, specific `points`, including material
+discussion late in a long meeting. Do not enforce a fixed point count or invent
+missing detail. Materially conflicting or unclear figures remain unconfirmed
+until checked against the recorded audio. Every point retains its own segment
+evidence under the existing fail-closed validation.
+
 ## Reply schema
 
 ```json
 { "outcome": "answer",
   "minutes": {
     "title": "…", "summary": "…",
-    "topics": [{"heading": "…", "points": ["…"]}],
+    "topics": [{"heading": "…", "points": ["specific discussion claim"]}],
     "decisions": ["…"],
     "actionItems": [{"what": "…", "owner": null, "due": null, "mine": false}],
     "openQuestions": ["…"],
@@ -191,7 +200,7 @@ The client enforces those last two fields when saving the reply.
     "attendance": {"present": ["…"], "absent": [], "calendarEventId": null},
     "language": "ja"
   },
-  "contextDecision": {"policyVersion": "meeting-minutes-v3"} }
+  "contextDecision": {"policyVersion": "meeting-minutes-v4"} }
 ```
 
 The parser is fail-closed. A reply is rejected — never shown as minutes — when:
@@ -210,6 +219,10 @@ identity is not implemented.
 
 `insufficientEvidence` with `"minutes": null` is the required answer when the
 meeting has too little speech to write from. Inventing items is a defect.
+
+When the selected record's boundary evidence reports a recording gap, rendered
+Markdown explicitly warns that the missing interval is not covered. This is
+recording provenance, not a model-generated claim or evidence of silence.
 
 ## Storage of the result
 

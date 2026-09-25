@@ -83,7 +83,7 @@ struct MeetingMinutesEnvelope: Codable, Equatable {
 }
 
 enum MeetingMinutesPrompt {
-    static let policyVersion = "meeting-minutes-v3"
+    static let policyVersion = "meeting-minutes-v4"
 
     /// The instruction text sent ahead of the JSON envelope. Pure, static and
     /// versioned, exactly like the Log prefix, and with the same trust boundary:
@@ -117,8 +117,14 @@ enum MeetingMinutesPrompt {
         招待者一覧は渡していないため `absent` は常に空配列にしてください。
         `attendance.calendarEventId` は envelope の `calendarEventID` をそのまま写してください。
 
-        書き方: 言語は会議で主に話されていた言語に合わせてください。要点は短く、実際に言われたことだけを
-        書き、決まっていないことを決まったように書かないでください。`actionItems` の `owner` は発言から
+        書き方: 言語は会議で主に話されていた言語に合わせてください。`summary` は短い概要です。
+        `topics` は概要の言い換えではなく、会議の詳細な議論を時系列に沿って残す本文です。
+        各議題に背景・提案・具体的な数字や固有名詞・異論や比較・判断理由・未決点が発言されていれば、
+        それぞれ独立した具体的な point として記録してください。長い会議でも冒頭だけで打ち切らず、
+        終盤までの主要な論点を確認してください。論点数を固定せず、内容が多ければ十分な数の point を
+        書いてください。発言にない要素を埋めるために創作せず、聞き取れない数字や食い違う表現は
+        断定しないで未確認として扱ってください。決まっていないことを決まったように書かないでください。
+        `actionItems` の `owner` は発言から
         分かるときだけ埋め、分からなければ `null`。ご主人様自身の担当なら `mine` を `true` にしてください。
         `due` は発言に出てきたときだけ入れ、無ければ `null`。
 
@@ -136,8 +142,8 @@ enum MeetingMinutesPrompt {
           "outcome": "answer",
           "minutes": {
             "title": "会議の題名",
-            "summary": "3〜5 行の概要",
-            "topics": [{"heading": "議題", "points": ["要点"]}],
+            "summary": "短い概要",
+            "topics": [{"heading": "議題", "points": ["具体的な議論と経緯を表す一つの主張"]}],
             "decisions": ["決まったこと"],
             "actionItems": [{"what": "やること", "owner": "担当者かnull", "due": "期限かnull", "mine": false}],
             "openQuestions": ["未解決のこと"],
@@ -348,6 +354,9 @@ extension MeetingMinutes {
         let end = fmt.string(from: Date(timeIntervalSince1970: record.endedAt ?? now.timeIntervalSince1970))
 
         var out = ["# \(title ?? record.title ?? "会議")", "", "\(start)–\(end) (\(record.timeZone))"]
+        if record.boundaryEvidence?.contains("録音に欠落あり") == true {
+            out.append("\n> 録音に欠落があります。この議事録は欠落区間の発言を網羅していません。")
+        }
         if let attendance {
             if !attendance.present.isEmpty { out.append("出席: " + attendance.present.joined(separator: ", ")) }
             if !attendance.absent.isEmpty { out.append("欠席: " + attendance.absent.joined(separator: ", ")) }
