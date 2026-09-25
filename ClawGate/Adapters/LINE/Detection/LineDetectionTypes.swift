@@ -141,7 +141,7 @@ enum LineCaretakerDecisionEngine {
                 repairReason: nil
             )
         }
-        if input.forcedReanchorDue {
+        if input.forcedReanchorDue && (input.surfaceAbnormal || input.watcherStale) {
             return LineCaretakerDecisionResult(
                 shouldRepair: true,
                 mode: .forceRecover,

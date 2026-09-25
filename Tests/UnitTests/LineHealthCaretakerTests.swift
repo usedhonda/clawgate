@@ -40,7 +40,7 @@ final class LineHealthCaretakerTests: XCTestCase {
         XCTAssertEqual(result.repairReason, "watcher_stale")
     }
 
-    func testDecisionUsesForceRecoverForForcedReanchor() {
+    func testDecisionDoesNotForegroundHealthySurfaceWhenReanchorDue() {
         let result = LineCaretakerDecisionEngine.decide(
             LineCaretakerDecisionInput(
                 isSending: false,
@@ -48,6 +48,25 @@ final class LineHealthCaretakerTests: XCTestCase {
                 inCooldown: false,
                 lineRunning: true,
                 watcherStale: false,
+                surfaceAbnormal: false,
+                forcedReanchorDue: true,
+                dedupPipelineDegraded: false
+            )
+        )
+
+        XCTAssertFalse(result.shouldRepair)
+        XCTAssertNil(result.mode)
+        XCTAssertEqual(result.assessmentReason, "surface_ok")
+    }
+
+    func testDecisionUsesForceRecoverWhenReanchorDueAndWatcherStale() {
+        let result = LineCaretakerDecisionEngine.decide(
+            LineCaretakerDecisionInput(
+                isSending: false,
+                sentRecently: false,
+                inCooldown: false,
+                lineRunning: true,
+                watcherStale: true,
                 surfaceAbnormal: false,
                 forcedReanchorDue: true,
                 dedupPipelineDegraded: false
@@ -141,7 +160,7 @@ final class LineHealthCaretakerTests: XCTestCase {
                 inCooldown: false,
                 lineRunning: true,
                 watcherStale: false,
-                surfaceAbnormal: false,
+                surfaceAbnormal: true,
                 forcedReanchorDue: true,
                 dedupPipelineDegraded: true
             )

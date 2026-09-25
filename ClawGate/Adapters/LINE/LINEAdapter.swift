@@ -804,7 +804,9 @@ final class LINEAdapter: AdapterProtocol {
     private func currentRootWindow(app: NSRunningApplication, allowActivation: Bool) -> AXUIElement? {
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
         if lineUseMainWindowPreferenceEnabled(), let mainWindow = resolveLineMainWindow(appElement: appElement) {
-            _ = AXActions.surface(app: appElement, window: mainWindow)
+            if allowActivation {
+                _ = AXActions.surface(app: appElement, window: mainWindow)
+            }
             return mainWindow
         }
         if allowActivation {
