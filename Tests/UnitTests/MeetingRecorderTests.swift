@@ -61,6 +61,21 @@ final class MeetingRecorderTests: XCTestCase {
         XCTAssertNil(recorder.current)
     }
 
+    func testRestartClosesAtPersistedHeartbeatNotMetadataFileTime() throws {
+        let recorder = MeetingRecorder(store: store)
+        guard case .started(let started) = recorder.heartbeat(inCall: true, now: at(1_000)) else {
+            return XCTFail("expected a start edge")
+        }
+        recorder.heartbeat(inCall: true, now: at(1_100))
+        XCTAssertEqual(store.load(id: started.id)?.lastHeartbeatAt, 1_100)
+
+        let file = store.directory(for: started.id).appendingPathComponent("meeting.json")
+        try FileManager.default.setAttributes([.modificationDate: at(1_010)], ofItemAtPath: file.path)
+        _ = MeetingRecorder(store: store) // Simulate a fresh app process.
+
+        XCTAssertEqual(store.load(id: started.id)?.endedAt, 1_100 + MeetingRecorder.tailSeconds)
+    }
+
     func testAHandStartedMeetingEndsWhenItIsStopped() {
         let recorder = MeetingRecorder(store: store)
         recorder.heartbeat(inCall: true, source: "manual", now: at(1_000))

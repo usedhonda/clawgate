@@ -30,6 +30,9 @@ struct MeetingRecord: Codable, Equatable {
     var calendarEventStart: Double? = nil
     var calendarEventEnd: Double? = nil
     var boundaryEvidence: String? = nil
+    var mergedIntoMeetingID: String? = nil
+    /// Actual last Meet heartbeat, independent of metadata writes to meeting.json.
+    var lastHeartbeatAt: Double? = nil
 
     var isOpen: Bool { endedAt == nil }
 
@@ -102,6 +105,7 @@ final class MeetingRecorder {
                     timeZone: TimeZone.current.identifier, title: nil, conferenceCode: nil,
                     participants: [], minutesState: "none", minutesError: nil)
                 apply(meta, to: &record)
+                if source == "meet" { record.lastHeartbeatAt = t }
                 current = record
                 lastSeen = t
                 store.save(record)
@@ -112,6 +116,7 @@ final class MeetingRecorder {
             guard var record = current else { return .none }
             let before = record
             apply(meta, to: &record)
+            if record.source == "meet" { record.lastHeartbeatAt = t }
             current = record
             if record != before { store.save(record) }
             return .none
@@ -264,8 +269,8 @@ struct MeetingStore {
         }
     }
 
-    /// Ends any meeting still marked open, using the record's own last write as
-    /// the last sign of life. Returns what it closed.
+    /// Ends any meeting still marked open. Legacy records without a persisted
+    /// heartbeat use their last write as the last sign of life.
     @discardableResult
     func closeOpenMeetings() -> [MeetingRecord] {
         var closed: [MeetingRecord] = []
@@ -273,7 +278,8 @@ struct MeetingStore {
             let file = directory(for: record.id).appendingPathComponent("meeting.json")
             let lastWrite = (try? FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
                 .flatMap { $0 }?.timeIntervalSince1970
-            record.endedAt = max(record.startedAt, lastWrite ?? record.startedAt) + MeetingRecorder.tailSeconds
+            record.endedAt = max(record.startedAt, record.lastHeartbeatAt ?? lastWrite ?? record.startedAt)
+                + MeetingRecorder.tailSeconds
             save(record)
             closed.append(record)
         }
