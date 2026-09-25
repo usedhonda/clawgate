@@ -44,7 +44,21 @@ final class MeetingBackfill {
             try pinAudio(for: record)
             let segments = try process(record)
             guard !segments.isEmpty else { throw Failure.noAudio }
+            // The retained minutes.json still describes the old transcript.
+            // Keep it as a clearly partial fallback until a new, validated
+            // reply replaces it; never label it ready for this wider interval.
+            if existing != nil {
+                record.minutesState = "pending"
+                record.minutesError = nil
+            }
             store.save(record)
+            if let candidate {
+                for id in candidate.matchingMeetingIDs where id != record.id {
+                    guard var fragment = store.load(id: id), fragment.source == "meet" else { continue }
+                    fragment.mergedIntoMeetingID = record.id
+                    store.save(fragment)
+                }
+            }
             return record
         } catch {
             if existing == nil { try? FileManager.default.removeItem(at: store.directory(for: record.id)) }

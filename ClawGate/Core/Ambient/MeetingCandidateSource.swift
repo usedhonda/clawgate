@@ -15,6 +15,7 @@ struct MeetingCandidate: Identifiable, Equatable {
     /// suggested | ambiguous | noConversation
     let matchStatus: String
     let matchedMeetingID: String?
+    let matchingMeetingIDs: [String]
 }
 
 /// Read-only Google Calendar adapter. Calendar content stays on this Mac and
@@ -147,7 +148,8 @@ struct MeetingCandidateSource {
                                     proposedStart: proposal.start.map(Date.init(timeIntervalSince1970:)),
                                     proposedEnd: proposal.end.map(Date.init(timeIntervalSince1970:)),
                                     boundaryEvidence: evidence, matchStatus: status,
-                                    matchedMeetingID: proposal.record?.id)
+                                    matchedMeetingID: proposal.record?.id,
+                                    matchingMeetingIDs: proposal.matchingRecordIDs)
         }.sorted { $0.start > $1.start }
     }
 

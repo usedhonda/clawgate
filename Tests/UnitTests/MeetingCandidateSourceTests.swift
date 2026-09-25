@@ -46,6 +46,33 @@ final class MeetingCandidateSourceTests: XCTestCase {
         XCTAssertTrue(found.first { $0.calendarEventID == "generic" }?.boundaryEvidence.contains("1 件一致") == true)
     }
 
+    func testSplitMeetRecordsChooseLongReadyTargetAndReportShortInternalAudioGap() {
+        let chunks = [
+            MeetingAudioArchive.Chunk(id: "mic-before", source: "mic", startedAt: 600,
+                                      endedAt: 1_680, fileName: "before.m4a"),
+            MeetingAudioArchive.Chunk(id: "mic-after", source: "mic", startedAt: 1_920,
+                                      endedAt: 4_200, fileName: "after.m4a"),
+        ]
+        let short = MeetingRecord(id: "mtg-short", source: "meet", startedAt: 600,
+                                  endedAt: 660, timeZone: "UTC", title: nil,
+                                  conferenceCode: nil, participants: [], minutesState: "none", minutesError: nil)
+        let ready = MeetingRecord(id: "mtg-ready", source: "meet", startedAt: 1_980,
+                                  endedAt: 4_170, timeZone: "UTC", title: nil,
+                                  conferenceCode: nil, participants: [], minutesState: "ready", minutesError: nil)
+        let proposal = MeetingBoundaryProposal.infer(eventStart: 600, eventEnd: 3_600,
+            rough: [speech("まず共有します", at: 610), speech("次の内容です", at: 1_000),
+                    speech("さらに共有します", at: 1_400), speech("続きを説明します", at: 1_670),
+                    speech("引き続き共有します", at: 1_930), speech("論点を確認します", at: 2_350),
+                    speech("次の議題です", at: 2_750), speech("意見をまとめます", at: 3_150),
+                    speech("結論を確認します", at: 3_550), speech("まとめを確認します", at: 3_900),
+                    speech("ありがとうございました", at: 4_120)],
+            chunks: chunks, records: [short, ready])
+        XCTAssertEqual(proposal.record?.id, ready.id)
+        XCTAssertEqual(Set(proposal.matchingRecordIDs), Set([short.id, ready.id]))
+        XCTAssertTrue(proposal.evidence.contains("録音に欠落あり"))
+        XCTAssertTrue(proposal.ambiguous)
+    }
+
     func testContinuousRecordingWithoutConversationDoesNotInventMeetingBounds() {
         let audio = [MeetingAudioArchive.Chunk(id: "mic", source: "mic", startedAt: 600,
                                                 endedAt: 1_200, fileName: "mic.m4a")]

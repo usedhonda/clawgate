@@ -105,6 +105,8 @@ A meeting is created from the Google Meet call heartbeat
 | `minutesError` | why the last attempt failed, when it did |
 | `calendarID` / `calendarEventID` / `calendarEventStart` / `calendarEventEnd` | optional owner-selected event and original scheduled range |
 | `boundaryEvidence` | optional provenance of the proposed audio range |
+| `lastHeartbeatAt` | last observed Meet heartbeat, persisted independently of metadata changes |
+| `mergedIntoMeetingID` | optional destination for a split Meet fragment; the fragment remains on disk but is hidden from the ordinary list |
 
 Invariants:
 
@@ -117,9 +119,16 @@ Invariants:
   The range is never widened backwards, for the same reason.
 - **Participants accumulate.** A snapshot at the start misses late joiners and
   one at the end misses early leavers, so the union is the only honest answer.
-- **Open meetings are closed on startup**, using the record's own last write as
-  the last sign of life. An app restart mid-call must not leave a range that
-  grows forever.
+- **Open meetings are closed on startup**, using the persisted last heartbeat
+  as the last sign of life. Legacy records without it use the last write.
+  An app restart mid-call must not leave a range that grows forever.
+- **Split calls can be reconstructed from retained audio.** The calendar is an
+  anchor, not an exact cut point. Conversation continuity across multiple Meet
+  records selects the record with the greatest overlap as the destination;
+  other overlapping fragments are marked as merged only after a successful
+  backfill. An internal microphone gap of at least one minute is named even
+  when total coverage is high. The old ready minutes remain available but are
+  labelled partial while the wider transcript is awaiting validated minutes.
 
 Read back over HTTP with `GET /v1/ambient/meetings` (records, newest first) and
 `GET /v1/ambient/meeting/transcript?id=<id>` (record plus its segments).
