@@ -625,7 +625,6 @@ final class LINEAdapter: AdapterProtocol {
                 }
                 let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
                 if let mainWindow = resolveLineMainWindow(appElement: appElement) {
-                    _ = AXActions.surface(app: appElement, window: mainWindow)
                     guard let frame = AXQuery.copyFrameAttribute(mainWindow) else {
                         throw AXAppWindow.WindowError.frameNotFound
                     }
@@ -633,7 +632,7 @@ final class LINEAdapter: AdapterProtocol {
                     return try body(mainWindow, frame, nodes)
                 }
             }
-            return try AXAppWindow.withWindow(bundleIdentifier: bundleIdentifier) { ctx in
+            return try AXAppWindow.withWindow(bundleIdentifier: bundleIdentifier, activate: false) { ctx in
                 try body(ctx.window, ctx.frame, ctx.nodes)
             }
         } catch AXAppWindow.WindowError.axPermissionMissing {
