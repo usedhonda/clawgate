@@ -29,6 +29,19 @@ function unwrapRpcResponse(response) {
 let _runtime = null;
 export function setTprojMailboxRuntime(runtime) { _runtime = runtime; }
 
+function resolveMainAgentId(cfg) {
+  const configured = cfg?.agents?.defaults?.systemAgent;
+  if (typeof configured === "string" && configured.trim()) return configured.trim();
+  if (configured && typeof configured.agentId === "string" && configured.agentId.trim()) return configured.agentId.trim();
+  const entries = cfg?.agents?.entries;
+  if (Array.isArray(entries) && typeof entries[0] === "string" && entries[0].trim()) return entries[0].trim();
+  if (entries && typeof entries === "object") {
+    const first = Object.keys(entries)[0];
+    if (first) return first;
+  }
+  return "main";
+}
+
 export function loadMailboxConfig(configPath = DEFAULT_CONFIG_PATH) {
   if (!existsSync(configPath)) return null;
   let value;
@@ -153,7 +166,7 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
   };
   writeJournal(config.journalPath, journal);
   const cfg = typeof runtime.config?.current === "function" ? runtime.config.current() : runtime.config;
-  const agentId = Object.keys(cfg?.agents?.entries || {})[0] || "main";
+  const agentId = resolveMainAgentId(cfg);
   const ctx = buildMailboxContext(message, "tproj-mailbox", agentId);
   const sendReply = async (body) => {
     const text = String(body || "").trim();
@@ -283,7 +296,7 @@ export async function sendMailboxMessage({ target, body, submissionId, config = 
 
 export function createTprojMessageTool({ ctx, send = sendMailboxMessage } = {}) {
   const cfg = ctx?.getRuntimeConfig?.() ?? ctx?.runtimeConfig ?? ctx?.config ?? {};
-  const mainAgentId = cfg?.agents?.defaults?.systemAgent?.agentId || "main";
+  const mainAgentId = resolveMainAgentId(cfg);
   if (!ctx?.agentId || ctx.agentId !== mainAgentId) return null;
   return {
     name: "tproj_message",
