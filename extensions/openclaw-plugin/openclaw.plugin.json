@@ -1,6 +1,7 @@
 {
   "id": "clawgate",
   "channels": ["clawgate"],
+  "contracts": { "tools": ["tproj_message"] },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
