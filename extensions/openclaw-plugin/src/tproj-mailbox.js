@@ -85,6 +85,16 @@ function writeJournal(path, journal) {
   try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
 }
 
+// Always merge against the on-disk journal. Dispatch and send-tool callbacks
+// can update it independently; writing a stale in-memory object would erase
+// the other operation's outbound evidence.
+function updateJournal(path, mutate) {
+  const journal = readJournal(path);
+  const result = mutate(journal);
+  writeJournal(path, journal);
+  return result;
+}
+
 function rpcRequest(socketPath, request, timeoutMs = RPC_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
@@ -119,11 +129,12 @@ function buildMailboxContext(message, accountId = "tproj-mailbox", agentId = "ma
   const thread = String(message.thread_id || message.message_id);
   const contextKey = encodeURIComponent(`${sender}|${thread}`);
   const body = String(message.body || "");
+  const routing = `[tproj mailbox adapter: inbound message_id=${String(message.message_id)} sender=${sender}] Reply to this turn by writing the final answer as plain text; it will be correlated to message_id=${String(message.message_id)}. Do not use generic message or session tools for this reply. If an explicit tool reply is needed, use tproj_message with reply_to=${String(message.message_id)}. For new outbound messages, use tproj_message with a project.cc or project.cdx target.`;
   return {
     Body: body,
     RawBody: body,
     CommandBody: body,
-    BodyForAgent: body,
+    BodyForAgent: `${routing}\n\n${body}`,
     From: `tproj:${sender}`,
     To: `tproj:${accountId}`,
     SessionKey: `agent:${agentId}:tproj:${contextKey}`,
@@ -139,6 +150,7 @@ function buildMailboxContext(message, accountId = "tproj-mailbox", agentId = "ma
     OriginatingChannel: "tproj",
     OriginatingTo: sender,
     _ingressAdapter: "tproj-mailbox",
+    GroupSystemPrompt: routing,
     _tprojMailbox: {
       messageId: String(message.message_id),
       threadId: thread,
@@ -158,26 +170,35 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
     thread_id: String(message.thread_id || messageId),
     sender_endpoint: String(message.sender_endpoint || "unknown"),
   };
-  journal.messages[messageId] = {
-    ...origin,
-    key: endpointKey(message),
-    status: "dispatching",
-    claimed_at: new Date().toISOString(),
-  };
-  writeJournal(config.journalPath, journal);
+  updateJournal(config.journalPath, (current) => {
+    current.messages[messageId] = {
+      ...current.messages[messageId],
+      ...origin,
+      key: endpointKey(message),
+      status: "dispatching",
+      claimed_at: new Date().toISOString(),
+    };
+  });
   const cfg = typeof runtime.config?.current === "function" ? runtime.config.current() : runtime.config;
   const agentId = resolveMainAgentId(cfg);
   const ctx = buildMailboxContext(message, "tproj-mailbox", agentId);
   const sendReply = async (body) => {
     const text = String(body || "").trim();
     if (!text) return;
-    const submissionIds = journal.messages[messageId].reply_submission_ids || {};
-    const submissionId = submissionIds[text] || randomUUID();
-    submissionIds[text] = submissionId;
-    journal.messages[messageId].reply_submission_ids = submissionIds;
-    journal.outbound = journal.outbound || {};
-    journal.outbound[submissionId] = { op: "service_reply", message_id: messageId, body: text, status: "pending", created_at: new Date().toISOString() };
-    writeJournal(config.journalPath, journal);
+    const submissionId = updateJournal(config.journalPath, (current) => {
+      current.messages[messageId] = current.messages[messageId] || { ...origin };
+      const submissionIds = current.messages[messageId].reply_submission_ids || {};
+      const existingId = submissionIds[text];
+      if (existingId) return existingId;
+      const nextId = randomUUID();
+      submissionIds[text] = nextId;
+      current.messages[messageId].reply_submission_ids = submissionIds;
+      current.outbound = current.outbound || {};
+      current.outbound[nextId] = { op: "service_reply", message_id: messageId, body: text, status: "pending", created_at: new Date().toISOString() };
+      return nextId;
+    });
+    const latest = readJournal(config.journalPath);
+    if (latest.outbound?.[submissionId]?.status === "accepted") return;
     const replyResult = unwrapRpcResponse(await rpc(config.socket, {
       op: "service_reply",
       message_id: messageId,
@@ -185,37 +206,61 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
       body: text,
       service_token: config.serviceToken,
     }));
-    journal.outbound[submissionId].status = "accepted";
-    journal.outbound[submissionId].result_message_id = replyResult?.message_id ? String(replyResult.message_id) : "";
-    const replies = journal.messages[messageId].reply_ids || [];
-    if (replyResult?.message_id) replies.push(String(replyResult.message_id));
-    journal.messages[messageId].reply_ids = replies;
-    writeJournal(config.journalPath, journal);
+    updateJournal(config.journalPath, (current) => {
+      current.outbound = current.outbound || {};
+      if (current.outbound[submissionId]) {
+        current.outbound[submissionId].status = "accepted";
+        current.outbound[submissionId].result_message_id = replyResult?.message_id ? String(replyResult.message_id) : "";
+      }
+      current.messages[messageId] = current.messages[messageId] || { ...origin };
+      const replies = current.messages[messageId].reply_ids || [];
+      if (replyResult?.message_id && !replies.includes(String(replyResult.message_id))) replies.push(String(replyResult.message_id));
+      current.messages[messageId].reply_ids = replies;
+    });
+  };
+  let finalReplyDelivered = false;
+  const explicitReplyAccepted = () => {
+    const current = readJournal(config.journalPath);
+    return Object.values(current.outbound || {}).some((entry) => entry?.op === "service_reply" && entry.message_id === messageId && entry.status === "accepted");
   };
   try {
-    await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+    const dispatchResult = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx,
       cfg,
       dispatcherOptions: {
-        deliver: async (payload) => sendReply(payload?.text ?? payload?.content ?? payload?.body ?? ""),
+        deliver: async (payload, info) => {
+          if (info?.kind !== "final" || explicitReplyAccepted()) return;
+          if (payload?.isError || payload?.isReasoning || payload?.isCommentary || payload?.isCompactionNotice || payload?.isFallbackNotice || payload?.isStatusNotice) return;
+          const text = payload?.text ?? payload?.content ?? payload?.body ?? "";
+          if (!String(text).trim()) return;
+          finalReplyDelivered = true;
+          await sendReply(text);
+        },
         humanDelay: { mode: "off" },
         onError: (error) => logger?.error?.(`tproj mailbox dispatch error: ${error}`),
       },
     });
-    journal.messages[messageId].status = "presented";
-    journal.messages[messageId].presented_at = new Date().toISOString();
-    writeJournal(config.journalPath, journal);
+    const explicitReply = explicitReplyAccepted();
+    const presented = explicitReply || (finalReplyDelivered && dispatchResult?.observedReplyDelivery !== false);
+    updateJournal(config.journalPath, (current) => {
+      current.messages[messageId] = current.messages[messageId] || { ...origin };
+      current.messages[messageId].status = presented ? "presented" : "uncertain";
+      if (presented) current.messages[messageId].presented_at = new Date().toISOString();
+      else current.messages[messageId].error = "dispatcher completed without a final reply delivery";
+    });
     await rpc(config.socket, {
       op: "service_receipt",
       message_id: messageId,
-      state: "presented",
-      evidence: { adapter: "openclaw", session_key: ctx.SessionKey },
+      state: presented ? "presented" : "uncertain",
+      evidence: { adapter: "openclaw", session_key: ctx.SessionKey, final_reply_delivered: presented },
       service_token: config.serviceToken,
     });
   } catch (error) {
-    journal.messages[messageId].status = "uncertain";
-    journal.messages[messageId].error = String(error?.message || error);
-    writeJournal(config.journalPath, journal);
+    updateJournal(config.journalPath, (current) => {
+      current.messages[messageId] = current.messages[messageId] || { ...origin };
+      current.messages[messageId].status = "uncertain";
+      current.messages[messageId].error = String(error?.message || error);
+    });
     try {
       await rpc(config.socket, {
         op: "service_receipt",
@@ -261,27 +306,34 @@ export async function runMailboxBatch({ config, runtime = _runtime, logger = con
 }
 
 /** Send a new agent message through the same authenticated service endpoint. */
-export async function sendMailboxMessage({ target, body, submissionId, config = loadMailboxConfig(), rpc = rpcRequest } = {}) {
+export async function sendMailboxMessage({ target, body, replyTo, submissionId, config = loadMailboxConfig(), rpc = rpcRequest } = {}) {
   if (!config) throw new Error("tproj mailbox is not configured");
-  if (!String(target || "").trim() || !String(body || "").trim()) throw new Error("target and body are required");
+  if ((!String(target || "").trim() && !String(replyTo || "").trim()) || !String(body || "").trim()) throw new Error("target or reply_to, and body are required");
+  const operation = String(replyTo || "").trim() ? "service_reply" : "service_send";
+  const targetValue = String(target || "").trim();
+  const replyToValue = String(replyTo || "").trim();
   const journal = readJournal(config.journalPath);
   journal.outbound = journal.outbound || {};
   if (!submissionId) {
     submissionId = Object.entries(journal.outbound).find(([, entry]) =>
-      entry?.op === "service_send" && entry.status === "pending" && entry.target === String(target) && entry.body === String(body)
+      entry?.op === operation && entry.status === "pending" && String(entry.target || "") === targetValue && entry.body === String(body) && (!replyToValue || entry.message_id === replyToValue)
     )?.[0] || randomUUID();
   }
   if (!journal.outbound[submissionId]) {
-    journal.outbound[submissionId] = { op: "service_send", target: String(target), body: String(body), status: "pending", created_at: new Date().toISOString() };
-    writeJournal(config.journalPath, journal);
+    updateJournal(config.journalPath, (current) => {
+      current.outbound = current.outbound || {};
+      if (!current.outbound[submissionId]) current.outbound[submissionId] = { op: operation, ...(targetValue ? { target: targetValue } : {}), ...(replyToValue ? { message_id: replyToValue } : {}), body: String(body), status: "pending", created_at: new Date().toISOString() };
+    });
   }
-  return rpc(config.socket, {
-    op: "service_send",
-    target: String(target),
+  const request = {
+    op: operation,
+    ...(targetValue ? { target: targetValue } : {}),
+    ...(replyToValue ? { message_id: replyToValue } : {}),
     body: String(body),
     submission_id: submissionId,
     service_token: config.serviceToken,
-  }).then((response) => {
+  };
+  return rpc(config.socket, request).then((response) => {
     const result = unwrapRpcResponse(response);
     const updated = readJournal(config.journalPath);
     updated.outbound = updated.outbound || {};
@@ -308,14 +360,16 @@ export function createTprojMessageTool({ ctx, send = sendMailboxMessage } = {}) 
       properties: {
         target: { type: "string", minLength: 1 },
         body: { type: "string", minLength: 1 },
+        reply_to: { type: "string", minLength: 1 },
       },
-      required: ["target", "body"],
+      required: ["body"],
     },
     async execute(_toolCallId, params) {
       const target = String(params?.target || "").trim();
       const body = String(params?.body || "");
-      if (!target || !body) throw new Error("target and body are required");
-      const result = await send({ target, body });
+      const replyTo = String(params?.reply_to || "").trim();
+      if ((!target && !replyTo) || !body) throw new Error("target or reply_to, and body are required");
+      const result = await send(replyTo ? { target, body, replyTo } : { target, body });
       return {
         content: [{ type: "text", text: JSON.stringify({ state: result?.state || "accepted", message_id: result?.message_id || null }) }],
         details: { state: result?.state || "accepted", message_id: result?.message_id || null },

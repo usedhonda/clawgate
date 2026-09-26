@@ -56,6 +56,21 @@ Host A (Server / macmini)                   Host B (Client / local)
 | shared-state.js | JS | `extensions/openclaw-plugin/src/shared-state.js` | Active project bridge (60s TTL) |
 | client.js | JS | `extensions/openclaw-plugin/src/client.js` | HTTP client (clawgateSend, clawgatePoll, etc.) |
 
+### Unified tproj mailbox (OpenClaw)
+
+The opt-in `tproj-mailbox` participant claims bounded service envelopes and
+dispatches the main agent through OpenClaw's supported buffered reply runtime.
+The adapter supplies trusted routing guidance in the turn context: a normal
+final answer is emitted as plain reply text and is correlated to the immutable
+inbound `message_id`; `tproj_message` is reserved for new `project.cc` or
+`project.cdx` sends, with `reply_to` available for an explicit service reply.
+
+Mailbox journal writes always merge with the current on-disk journal so a
+concurrent `service_send` entry cannot be lost when a dispatch records its
+reply. A turn is reported `presented` only after a non-error, non-status final
+payload is delivered; a dispatcher completion without such a payload remains
+`uncertain`.
+
 ### Data Flow Overview
 
 ```

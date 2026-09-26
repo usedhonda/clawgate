@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   loadMailboxConfig,
   runMailboxBatch,
+  sendMailboxMessage,
   createTprojMailboxService,
   createTprojMessageTool,
 } from "../tproj-mailbox.js";
@@ -34,8 +35,9 @@ describe("tproj mailbox adapter", () => {
       config: { current: () => ({ agents: { entries: { main: {} } } }) },
       channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ ctx, dispatcherOptions }) => {
         assert.equal(ctx._tprojMailbox.messageId, "m-1");
+        assert.match(ctx.GroupSystemPrompt, /plain text/);
         assert.match(ctx.SessionKey, /proj\.cc%7Cthread-1/);
-        await dispatcherOptions.deliver({ text: "reply" });
+        await dispatcherOptions.deliver({ text: "reply" }, { kind: "final" });
       } } },
     };
     const rpc = async (_socket, request) => {
@@ -54,6 +56,32 @@ describe("tproj mailbox adapter", () => {
     assert.equal(journal.messages["m-1"].status, "presented");
     const skipped = await runMailboxBatch({ config, runtime, rpc, logger: { warn() {}, error() {} } });
     assert.deepEqual(skipped, { claimed: 1, dispatched: 0, skipped: 1 });
+  });
+
+  it("merges concurrent send-tool journal entries and only presents a final payload", async () => {
+    const { configPath, journalPath } = fixture();
+    const config = loadMailboxConfig(configPath);
+    let dispatchCalls = 0;
+    const runtime = {
+      config: { current: () => ({ agents: { entries: { main: {} } } }) },
+      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ dispatcherOptions }) => {
+        dispatchCalls++;
+        await dispatcherOptions.deliver({ text: "⚠️ Message failed", isError: true }, { kind: "final" });
+      } } },
+    };
+    const rpc = async (_socket, request) => {
+      if (request.op === "service_claim") return { messages: [{ message_id: "m-race", thread_id: "t", body: "hello", sender_endpoint: "proj.cc" }] };
+      if (request.op === "service_send") return { message_id: "outbound-1", state: "queued" };
+      return { message_id: "unexpected" };
+    };
+    const batch = runMailboxBatch({ config, runtime, rpc, logger: { warn() {}, error() {} } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await sendMailboxMessage({ config, target: "tproj.cdx", body: "concurrent", rpc });
+    await batch;
+    assert.equal(dispatchCalls, 1);
+    const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+    assert.equal(journal.messages["m-race"].status, "uncertain");
+    assert.equal(journal.outbound[Object.keys(journal.outbound).find((id) => journal.outbound[id].op === "service_send")].status, "accepted");
   });
 
   it("does not blindly rerun a dispatch left uncertain after a crash", async () => {
@@ -93,5 +121,57 @@ describe("tproj mailbox adapter", () => {
     assert.deepEqual(calls, [{ target: "proj.cc", body: "hello" }]);
     assert.equal(result.details.message_id, "m-7");
     assert.equal(createTprojMessageTool({ ctx: { agentId: "worker", config: {} } }), null);
+  });
+
+  it("supports explicit reply-to sends without changing new-message routing", async () => {
+    const calls = [];
+    const tool = createTprojMessageTool({
+      ctx: { agentId: "main", config: { agents: { defaults: { systemAgent: { agentId: "main" } } } } },
+      send: async (value) => { calls.push(value); return { state: "queued", message_id: "reply-1" }; },
+    });
+    await tool.execute("call-2", { reply_to: "m-1", body: "reply" });
+    assert.deepEqual(calls, [{ target: "", body: "reply", replyTo: "m-1" }]);
+  });
+
+  it("uses an accepted explicit reply as presentation proof and suppresses an automatic duplicate", async () => {
+    const { configPath, journalPath } = fixture();
+    const config = loadMailboxConfig(configPath);
+    const calls = [];
+    const rpc = async (_socket, request) => {
+      calls.push(request);
+      if (request.op === "service_claim") return { messages: [{ message_id: "m-explicit", body: "hello", sender_endpoint: "proj.cc" }] };
+      if (request.op === "service_reply") return { message_id: "reply-explicit" };
+      return {};
+    };
+    await sendMailboxMessage({ config, replyTo: "m-explicit", body: "explicit", rpc });
+    const runtime = {
+      config: { current: () => ({ agents: { entries: { main: {} } } }) },
+      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ dispatcherOptions }) => {
+        await dispatcherOptions.deliver({ text: "automatic duplicate" }, { kind: "final" });
+      } } },
+    };
+    await runMailboxBatch({ config, runtime, rpc, logger: { warn() {}, error() {} } });
+    const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+    assert.equal(journal.messages["m-explicit"].status, "presented");
+    assert.equal(calls.filter((call) => call.op === "service_reply").length, 1);
+  });
+
+  it("reuses a pending reply submission after an unknown RPC outcome", async () => {
+    const { configPath, journalPath } = fixture();
+    const config = loadMailboxConfig(configPath);
+    const requests = [];
+    let attempt = 0;
+    const rpc = async (_socket, request) => {
+      requests.push(request);
+      if (request.op !== "service_reply") return {};
+      attempt++;
+      if (attempt === 1) throw new Error("connection lost after submit");
+      return { message_id: "reply-retried" };
+    };
+    await assert.rejects(() => sendMailboxMessage({ config, replyTo: "m-retry", body: "reply", rpc }), /connection lost/);
+    await sendMailboxMessage({ config, replyTo: "m-retry", body: "reply", rpc });
+    assert.equal(requests[0].submission_id, requests[1].submission_id);
+    const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+    assert.equal(Object.keys(journal.outbound).length, 1);
   });
 });
