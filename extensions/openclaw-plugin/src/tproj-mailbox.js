@@ -124,6 +124,10 @@ function endpointKey(message) {
   return `${message.sender_endpoint || "unknown"}|${message.thread_id || message.message_id}`;
 }
 
+function normalizedSessionKey(value) {
+  return String(value || "").replace(/%[0-9a-f]{2}/gi, (escape) => escape.toLowerCase());
+}
+
 function buildMailboxContext(message, accountId = "tproj-mailbox", agentId = "main") {
   const sender = String(message.sender_endpoint || "unknown");
   const thread = String(message.thread_id || message.message_id);
@@ -399,7 +403,7 @@ export function createTprojMessageTool({ ctx, send = sendMailboxMessage, journal
       if ((!target && !replyTo) || !body) throw new Error("target or reply_to, and body are required");
       const matching = journalPath && ctx?.sessionKey
         ? Object.values(readJournal(journalPath).messages).filter((entry) =>
-          entry?.status === "dispatching" && entry.session_key === ctx.sessionKey)
+          entry?.status === "dispatching" && normalizedSessionKey(entry.session_key) === normalizedSessionKey(ctx.sessionKey))
         : [];
       const inboundMessageId = matching.length === 1 ? matching[0].message_id : "";
       const sendArgs = replyTo ? { target, body, replyTo } : { target, body };

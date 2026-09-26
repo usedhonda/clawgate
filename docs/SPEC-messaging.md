@@ -69,10 +69,11 @@ Mailbox journal writes always merge with the current on-disk journal so a
 concurrent `service_send` entry cannot be lost when a dispatch records its
 reply. A `service_send` issued by the main-agent tool is bound to the active
 dispatch's inbound `message_id` by matching OpenClaw's trusted tool
-`sessionKey` to the single dispatching journal entry; an accepted bound send is
-durable evidence that the turn
-was consumed, even when OpenClaw suppresses the final callback after a tool
-send. A turn is reported `presented` after a non-error, non-status final
+`sessionKey` to the single dispatching journal entry. Percent-escape hex case is
+normalized because OpenClaw canonicalizes `%7C` to `%7c`. An accepted bound
+send is durable evidence that the turn was consumed, even when OpenClaw
+suppresses the final callback after a tool send. A turn is reported `presented`
+after a non-error, non-status final
 payload, an explicit accepted `service_reply`, or an accepted bound
 `service_send`. OpenClaw may also report a deliberate silent terminal; it is
 presentation evidence only when the run was not blocked, deferred, or denied

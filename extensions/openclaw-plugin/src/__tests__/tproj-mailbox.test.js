@@ -98,7 +98,7 @@ describe("tproj mailbox adapter", () => {
       config: { current: () => ({ agents: { entries: { main: {} } } }) },
       channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ ctx }) => {
         const tool = createTprojMessageTool({
-          ctx: { agentId: "main", sessionKey: ctx.SessionKey, config: { agents: { entries: { main: {} } } } },
+          ctx: { agentId: "main", sessionKey: ctx.SessionKey.replace("%7C", "%7c"), config: { agents: { entries: { main: {} } } } },
           journalPath,
           send: (value) => sendMailboxMessage({ ...value, config, rpc }),
         });
