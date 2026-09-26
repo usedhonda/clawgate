@@ -249,7 +249,11 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
     });
     const explicitReply = explicitReplyAccepted();
     const toolSendAccepted = boundToolSendAccepted();
-    const presented = explicitReply || toolSendAccepted || (finalReplyDelivered && dispatchResult?.observedReplyDelivery !== false);
+    const deliberateSilentTerminal = dispatchResult?.deliberateSilentTerminalReply === true
+      && dispatchResult?.beforeAgentRunBlocked !== true
+      && !dispatchResult?.deferredToActiveRun
+      && dispatchResult?.sendPolicyDenied !== true;
+    const presented = explicitReply || toolSendAccepted || deliberateSilentTerminal || (finalReplyDelivered && dispatchResult?.observedReplyDelivery !== false);
     updateJournal(config.journalPath, (current) => {
       current.messages[messageId] = current.messages[messageId] || { ...origin };
       current.messages[messageId].status = presented ? "presented" : "uncertain";
@@ -266,6 +270,7 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
         final_reply_delivered: finalReplyDelivered,
         explicit_reply_accepted: explicitReply,
         bound_tool_send_accepted: toolSendAccepted,
+        deliberate_silent_terminal: deliberateSilentTerminal,
       },
       service_token: config.serviceToken,
     });

@@ -72,7 +72,9 @@ context `message_id`; an accepted bound send is durable evidence that the turn
 was consumed, even when OpenClaw suppresses the final callback after a tool
 send. A turn is reported `presented` after a non-error, non-status final
 payload, an explicit accepted `service_reply`, or an accepted bound
-`service_send`. No-output/no-tool completion remains `uncertain`.
+`service_send`. OpenClaw may also report a deliberate silent terminal; it is
+presentation evidence only when the run was not blocked, deferred, or denied
+by send policy. Other no-output/no-tool completion remains `uncertain`.
 
 ### Data Flow Overview
 

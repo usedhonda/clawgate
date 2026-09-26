@@ -117,6 +117,32 @@ describe("tproj mailbox adapter", () => {
     assert.equal(journal.messages["m-tool"].status, "presented");
   });
 
+  it("accepts only an unblocked deliberate silent terminal as no-reply completion evidence", async () => {
+    const { configPath, journalPath } = fixture();
+    const config = loadMailboxConfig(configPath);
+    let mode = "silent";
+    const receipts = [];
+    const rpc = async (_socket, request) => {
+      if (request.op === "service_claim") return { messages: [{ message_id: `m-${mode}`, body: "hello", sender_endpoint: "artist.cc" }] };
+      if (request.op === "service_receipt") receipts.push(request);
+      return {};
+    };
+    const runtime = {
+      config: { current: () => ({ agents: { entries: { main: {} } } }) },
+      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async () => mode === "silent"
+        ? { deliberateSilentTerminalReply: true }
+        : { deliberateSilentTerminalReply: true, deferredToActiveRun: "followup" } } },
+    };
+    await runMailboxBatch({ config, runtime, rpc, logger: { warn() {}, error() {} } });
+    assert.equal(receipts[0].state, "presented");
+    mode = "deferred";
+    await runMailboxBatch({ config, runtime, rpc, logger: { warn() {}, error() {} } });
+    assert.equal(receipts[1].state, "uncertain");
+    const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+    assert.equal(journal.messages["m-silent"].status, "presented");
+    assert.equal(journal.messages["m-deferred"].status, "uncertain");
+  });
+
   it("does not blindly rerun a dispatch left uncertain after a crash", async () => {
     const { configPath } = fixture();
     const config = loadMailboxConfig(configPath);
