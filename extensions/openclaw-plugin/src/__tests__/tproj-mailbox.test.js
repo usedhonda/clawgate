@@ -7,6 +7,7 @@ import {
   loadMailboxConfig,
   runMailboxBatch,
   createTprojMailboxService,
+  createTprojMessageTool,
 } from "../tproj-mailbox.js";
 
 function fixture() {
@@ -79,5 +80,18 @@ describe("tproj mailbox adapter", () => {
     writeFileSync(journalPath, "not-json");
     const config = loadMailboxConfig(configPath);
     await assert.rejects(() => runMailboxBatch({ config, runtime: {}, rpc: async () => ({ messages: [] }) }), /journal unreadable/);
+  });
+
+  it("registers the send tool only for configured main agent and sends through service_send", async () => {
+    const calls = [];
+    const tool = createTprojMessageTool({
+      ctx: { agentId: "main", config: { agents: { defaults: { systemAgent: { agentId: "main" } } } } },
+      send: async (value) => { calls.push(value); return { state: "queued", message_id: "m-7" }; },
+    });
+    assert.ok(tool);
+    const result = await tool.execute("call-1", { target: "proj.cc", body: "hello" });
+    assert.deepEqual(calls, [{ target: "proj.cc", body: "hello" }]);
+    assert.equal(result.details.message_id, "m-7");
+    assert.equal(createTprojMessageTool({ ctx: { agentId: "worker", config: {} } }), null);
   });
 });

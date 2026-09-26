@@ -281,6 +281,36 @@ export async function sendMailboxMessage({ target, body, submissionId, config = 
   });
 }
 
+export function createTprojMessageTool({ ctx, send = sendMailboxMessage } = {}) {
+  const cfg = ctx?.getRuntimeConfig?.() ?? ctx?.runtimeConfig ?? ctx?.config ?? {};
+  const mainAgentId = cfg?.agents?.defaults?.systemAgent?.agentId || "main";
+  if (!ctx?.agentId || ctx.agentId !== mainAgentId) return null;
+  return {
+    name: "tproj_message",
+    label: "tproj message",
+    description: "Send a unified tproj mailbox message to a participant.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        target: { type: "string", minLength: 1 },
+        body: { type: "string", minLength: 1 },
+      },
+      required: ["target", "body"],
+    },
+    async execute(_toolCallId, params) {
+      const target = String(params?.target || "").trim();
+      const body = String(params?.body || "");
+      if (!target || !body) throw new Error("target and body are required");
+      const result = await send({ target, body });
+      return {
+        content: [{ type: "text", text: JSON.stringify({ state: result?.state || "accepted", message_id: result?.message_id || null }) }],
+        details: { state: result?.state || "accepted", message_id: result?.message_id || null },
+      };
+    },
+  };
+}
+
 export function createTprojMailboxService({ runtime = _runtime, configPath = DEFAULT_CONFIG_PATH, rpc = rpcRequest } = {}) {
   let stopped = false;
   let timer = null;

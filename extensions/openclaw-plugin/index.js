@@ -7,7 +7,7 @@
 
 import { clawgatePlugin } from "./src/channel.js";
 import { setGatewayRuntime } from "./src/gateway.js";
-import { createTprojMailboxService, setTprojMailboxRuntime } from "./src/tproj-mailbox.js";
+import { createTprojMailboxService, setTprojMailboxRuntime, createTprojMessageTool } from "./src/tproj-mailbox.js";
 
 const plugin = {
   id: "clawgate",
@@ -26,6 +26,9 @@ const plugin = {
     api.registerChannel({ plugin: clawgatePlugin });
     if (typeof api.registerService === "function") {
       api.registerService(createTprojMailboxService({ runtime: api.runtime }));
+    }
+    if (typeof api.registerTool === "function") {
+      api.registerTool((ctx) => createTprojMessageTool({ ctx }), { name: "tproj_message" });
     }
   },
 };
