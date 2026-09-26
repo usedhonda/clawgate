@@ -67,9 +67,12 @@ inbound `message_id`; `tproj_message` is reserved for new `project.cc` or
 
 Mailbox journal writes always merge with the current on-disk journal so a
 concurrent `service_send` entry cannot be lost when a dispatch records its
-reply. A turn is reported `presented` only after a non-error, non-status final
-payload is delivered; a dispatcher completion without such a payload remains
-`uncertain`.
+reply. A `service_send` issued by the main-agent tool is bound to the inbound
+context `message_id`; an accepted bound send is durable evidence that the turn
+was consumed, even when OpenClaw suppresses the final callback after a tool
+send. A turn is reported `presented` after a non-error, non-status final
+payload, an explicit accepted `service_reply`, or an accepted bound
+`service_send`. No-output/no-tool completion remains `uncertain`.
 
 ### Data Flow Overview
 

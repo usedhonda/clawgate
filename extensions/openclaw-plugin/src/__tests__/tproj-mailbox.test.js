@@ -84,6 +84,39 @@ describe("tproj mailbox adapter", () => {
     assert.equal(journal.outbound[Object.keys(journal.outbound).find((id) => journal.outbound[id].op === "service_send")].status, "accepted");
   });
 
+  it("presents an inbound turn when an accepted service_send consumed it without a final callback", async () => {
+    const { configPath, journalPath } = fixture();
+    const config = loadMailboxConfig(configPath);
+    const calls = [];
+    const rpc = async (_socket, request) => {
+      calls.push(request);
+      if (request.op === "service_claim") return { messages: [{ message_id: "m-tool", thread_id: "t-tool", body: "hello", sender_endpoint: "artist.cc" }] };
+      if (request.op === "service_send") return { message_id: "outbound-tool", state: "accepted" };
+      return {};
+    };
+    const runtime = {
+      config: { current: () => ({ agents: { entries: { main: {} } } }) },
+      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ ctx }) => {
+        const tool = createTprojMessageTool({
+          ctx,
+          send: (value) => sendMailboxMessage({ ...value, config, rpc }),
+        });
+        await tool.execute("call-tool", { target: "artist.cdx", body: "accepted outbound" });
+      } } },
+    };
+    const result = await runMailboxBatch({ config, runtime, rpc, logger: { warn() {}, error() {} } });
+    assert.deepEqual(result, { claimed: 1, dispatched: 1, skipped: 0 });
+    assert.equal(calls.filter((call) => call.op === "service_reply").length, 0);
+    const receipt = calls.find((call) => call.op === "service_receipt");
+    assert.equal(receipt.state, "presented");
+    assert.equal(receipt.evidence.bound_tool_send_accepted, true);
+    const journal = JSON.parse(readFileSync(journalPath, "utf8"));
+    const outbound = journal.outbound[Object.keys(journal.outbound).find((id) => journal.outbound[id].op === "service_send")];
+    assert.equal(outbound.status, "accepted");
+    assert.equal(outbound.inbound_message_id, "m-tool");
+    assert.equal(journal.messages["m-tool"].status, "presented");
+  });
+
   it("does not blindly rerun a dispatch left uncertain after a crash", async () => {
     const { configPath } = fixture();
     const config = loadMailboxConfig(configPath);

@@ -138,6 +138,7 @@ function buildMailboxContext(message, accountId = "tproj-mailbox", agentId = "ma
     From: `tproj:${sender}`,
     To: `tproj:${accountId}`,
     SessionKey: `agent:${agentId}:tproj:${contextKey}`,
+    agentId,
     AccountId: accountId,
     ChatType: "direct",
     Provider: "tproj",
@@ -223,13 +224,19 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
     const current = readJournal(config.journalPath);
     return Object.values(current.outbound || {}).some((entry) => entry?.op === "service_reply" && entry.message_id === messageId && entry.status === "accepted");
   };
+  const boundToolSendAccepted = () => {
+    const current = readJournal(config.journalPath);
+    return Object.values(current.outbound || {}).some((entry) =>
+      entry?.op === "service_send" && entry.inbound_message_id === messageId && entry.status === "accepted"
+    );
+  };
   try {
     const dispatchResult = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx,
       cfg,
       dispatcherOptions: {
         deliver: async (payload, info) => {
-          if (info?.kind !== "final" || explicitReplyAccepted()) return;
+          if (info?.kind !== "final" || explicitReplyAccepted() || boundToolSendAccepted()) return;
           if (payload?.isError || payload?.isReasoning || payload?.isCommentary || payload?.isCompactionNotice || payload?.isFallbackNotice || payload?.isStatusNotice) return;
           const text = payload?.text ?? payload?.content ?? payload?.body ?? "";
           if (!String(text).trim()) return;
@@ -241,7 +248,8 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
       },
     });
     const explicitReply = explicitReplyAccepted();
-    const presented = explicitReply || (finalReplyDelivered && dispatchResult?.observedReplyDelivery !== false);
+    const toolSendAccepted = boundToolSendAccepted();
+    const presented = explicitReply || toolSendAccepted || (finalReplyDelivered && dispatchResult?.observedReplyDelivery !== false);
     updateJournal(config.journalPath, (current) => {
       current.messages[messageId] = current.messages[messageId] || { ...origin };
       current.messages[messageId].status = presented ? "presented" : "uncertain";
@@ -252,7 +260,13 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
       op: "service_receipt",
       message_id: messageId,
       state: presented ? "presented" : "uncertain",
-      evidence: { adapter: "openclaw", session_key: ctx.SessionKey, final_reply_delivered: presented },
+      evidence: {
+        adapter: "openclaw",
+        session_key: ctx.SessionKey,
+        final_reply_delivered: finalReplyDelivered,
+        explicit_reply_accepted: explicitReply,
+        bound_tool_send_accepted: toolSendAccepted,
+      },
       service_token: config.serviceToken,
     });
   } catch (error) {
@@ -306,7 +320,7 @@ export async function runMailboxBatch({ config, runtime = _runtime, logger = con
 }
 
 /** Send a new agent message through the same authenticated service endpoint. */
-export async function sendMailboxMessage({ target, body, replyTo, submissionId, config = loadMailboxConfig(), rpc = rpcRequest } = {}) {
+export async function sendMailboxMessage({ target, body, replyTo, submissionId, inboundMessageId, config = loadMailboxConfig(), rpc = rpcRequest } = {}) {
   if (!config) throw new Error("tproj mailbox is not configured");
   if ((!String(target || "").trim() && !String(replyTo || "").trim()) || !String(body || "").trim()) throw new Error("target or reply_to, and body are required");
   const operation = String(replyTo || "").trim() ? "service_reply" : "service_send";
@@ -316,13 +330,21 @@ export async function sendMailboxMessage({ target, body, replyTo, submissionId, 
   journal.outbound = journal.outbound || {};
   if (!submissionId) {
     submissionId = Object.entries(journal.outbound).find(([, entry]) =>
-      entry?.op === operation && entry.status === "pending" && String(entry.target || "") === targetValue && entry.body === String(body) && (!replyToValue || entry.message_id === replyToValue)
+      entry?.op === operation && entry.status === "pending" && String(entry.target || "") === targetValue && entry.body === String(body) && (!replyToValue || entry.message_id === replyToValue) && (!inboundMessageId || entry.inbound_message_id === String(inboundMessageId))
     )?.[0] || randomUUID();
   }
   if (!journal.outbound[submissionId]) {
     updateJournal(config.journalPath, (current) => {
       current.outbound = current.outbound || {};
-      if (!current.outbound[submissionId]) current.outbound[submissionId] = { op: operation, ...(targetValue ? { target: targetValue } : {}), ...(replyToValue ? { message_id: replyToValue } : {}), body: String(body), status: "pending", created_at: new Date().toISOString() };
+      if (!current.outbound[submissionId]) current.outbound[submissionId] = {
+        op: operation,
+        ...(targetValue ? { target: targetValue } : {}),
+        ...(replyToValue ? { message_id: replyToValue } : {}),
+        ...(inboundMessageId ? { inbound_message_id: String(inboundMessageId) } : {}),
+        body: String(body),
+        status: "pending",
+        created_at: new Date().toISOString(),
+      };
     });
   }
   const request = {
@@ -369,7 +391,10 @@ export function createTprojMessageTool({ ctx, send = sendMailboxMessage } = {}) 
       const body = String(params?.body || "");
       const replyTo = String(params?.reply_to || "").trim();
       if ((!target && !replyTo) || !body) throw new Error("target or reply_to, and body are required");
-      const result = await send(replyTo ? { target, body, replyTo } : { target, body });
+      const inboundMessageId = String(ctx?._tprojMailbox?.messageId || "").trim();
+      const sendArgs = replyTo ? { target, body, replyTo } : { target, body };
+      if (inboundMessageId && !replyTo) sendArgs.inboundMessageId = inboundMessageId;
+      const result = await send(sendArgs);
       return {
         content: [{ type: "text", text: JSON.stringify({ state: result?.state || "accepted", message_id: result?.message_id || null }) }],
         details: { state: result?.state || "accepted", message_id: result?.message_id || null },
