@@ -10,7 +10,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSyn
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 
 const DEFAULT_CONFIG_PATH = join(homedir(), ".config", "tproj", "msg-service.json");
 const DEFAULT_JOURNAL_PATH = join(homedir(), ".openclaw", "state", "tproj-mailbox-journal.json");
@@ -28,7 +27,6 @@ function unwrapRpcResponse(response) {
 }
 
 let _runtime = null;
-const inboundDispatch = new AsyncLocalStorage();
 export function setTprojMailboxRuntime(runtime) { _runtime = runtime; }
 
 function resolveMainAgentId(cfg) {
@@ -173,18 +171,19 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
     thread_id: String(message.thread_id || messageId),
     sender_endpoint: String(message.sender_endpoint || "unknown"),
   };
+  const cfg = typeof runtime.config?.current === "function" ? runtime.config.current() : runtime.config;
+  const agentId = resolveMainAgentId(cfg);
+  const ctx = buildMailboxContext(message, "tproj-mailbox", agentId);
   updateJournal(config.journalPath, (current) => {
     current.messages[messageId] = {
       ...current.messages[messageId],
       ...origin,
       key: endpointKey(message),
+      session_key: ctx.SessionKey,
       status: "dispatching",
       claimed_at: new Date().toISOString(),
     };
   });
-  const cfg = typeof runtime.config?.current === "function" ? runtime.config.current() : runtime.config;
-  const agentId = resolveMainAgentId(cfg);
-  const ctx = buildMailboxContext(message, "tproj-mailbox", agentId);
   const sendReply = async (body) => {
     const text = String(body || "").trim();
     if (!text) return;
@@ -233,7 +232,7 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
     );
   };
   try {
-    const dispatchResult = await inboundDispatch.run({ messageId }, () => runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
+    const dispatchResult = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx,
       cfg,
       dispatcherOptions: {
@@ -248,7 +247,7 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
         humanDelay: { mode: "off" },
         onError: (error) => logger?.error?.(`tproj mailbox dispatch error: ${error}`),
       },
-    }));
+    });
     const explicitReply = explicitReplyAccepted();
     const toolSendAccepted = boundToolSendAccepted();
     const deliberateSilentTerminal = dispatchResult?.deliberateSilentTerminalReply === true
@@ -375,7 +374,7 @@ export async function sendMailboxMessage({ target, body, replyTo, submissionId, 
   });
 }
 
-export function createTprojMessageTool({ ctx, send = sendMailboxMessage } = {}) {
+export function createTprojMessageTool({ ctx, send = sendMailboxMessage, journalPath = loadMailboxConfig()?.journalPath } = {}) {
   const cfg = ctx?.getRuntimeConfig?.() ?? ctx?.runtimeConfig ?? ctx?.config ?? {};
   const mainAgentId = resolveMainAgentId(cfg);
   if (!ctx?.agentId || ctx.agentId !== mainAgentId) return null;
@@ -398,7 +397,11 @@ export function createTprojMessageTool({ ctx, send = sendMailboxMessage } = {}) 
       const body = String(params?.body || "");
       const replyTo = String(params?.reply_to || "").trim();
       if ((!target && !replyTo) || !body) throw new Error("target or reply_to, and body are required");
-      const inboundMessageId = String(inboundDispatch.getStore()?.messageId || "").trim();
+      const matching = journalPath && ctx?.sessionKey
+        ? Object.values(readJournal(journalPath).messages).filter((entry) =>
+          entry?.status === "dispatching" && entry.session_key === ctx.sessionKey)
+        : [];
+      const inboundMessageId = matching.length === 1 ? matching[0].message_id : "";
       const sendArgs = replyTo ? { target, body, replyTo } : { target, body };
       if (inboundMessageId && !replyTo) sendArgs.inboundMessageId = inboundMessageId;
       const result = await send(sendArgs);

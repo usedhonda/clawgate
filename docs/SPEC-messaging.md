@@ -68,8 +68,9 @@ inbound `message_id`; `tproj_message` is reserved for new `project.cc` or
 Mailbox journal writes always merge with the current on-disk journal so a
 concurrent `service_send` entry cannot be lost when a dispatch records its
 reply. A `service_send` issued by the main-agent tool is bound to the active
-dispatch's inbound `message_id` through async context, not the tool's static
-registration context; an accepted bound send is durable evidence that the turn
+dispatch's inbound `message_id` by matching OpenClaw's trusted tool
+`sessionKey` to the single dispatching journal entry; an accepted bound send is
+durable evidence that the turn
 was consumed, even when OpenClaw suppresses the final callback after a tool
 send. A turn is reported `presented` after a non-error, non-status final
 payload, an explicit accepted `service_reply`, or an accepted bound
