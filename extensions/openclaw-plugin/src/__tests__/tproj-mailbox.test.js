@@ -96,9 +96,9 @@ describe("tproj mailbox adapter", () => {
     };
     const runtime = {
       config: { current: () => ({ agents: { entries: { main: {} } } }) },
-      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ ctx }) => {
+      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async () => {
         const tool = createTprojMessageTool({
-          ctx,
+          ctx: { agentId: "main", config: { agents: { entries: { main: {} } } } },
           send: (value) => sendMailboxMessage({ ...value, config, rpc }),
         });
         await tool.execute("call-tool", { target: "artist.cdx", body: "accepted outbound" });
