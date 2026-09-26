@@ -239,6 +239,7 @@ async function dispatchEnvelope(message, config, journal, logger, runtime = _run
     const dispatchResult = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
       ctx,
       cfg,
+      replyOptions: { sourceReplyDeliveryMode: "automatic" },
       dispatcherOptions: {
         deliver: async (payload, info) => {
           if (info?.kind !== "final" || explicitReplyAccepted() || boundToolSendAccepted()) return;

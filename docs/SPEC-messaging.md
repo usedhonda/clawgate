@@ -64,6 +64,9 @@ The adapter supplies trusted routing guidance in the turn context: a normal
 final answer is emitted as plain reply text and is correlated to the immutable
 inbound `message_id`; `tproj_message` is reserved for new `project.cc` or
 `project.cdx` sends, with `reply_to` available for an explicit service reply.
+This adapter explicitly selects automatic source-reply mode so a normal final
+answer reaches its buffered delivery callback even when the main agent's other
+conversation surfaces use message-tool-only replies.
 
 Mailbox journal writes always merge with the current on-disk journal so a
 concurrent `service_send` entry cannot be lost when a dispatch records its

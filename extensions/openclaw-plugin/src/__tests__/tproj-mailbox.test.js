@@ -33,8 +33,9 @@ describe("tproj mailbox adapter", () => {
     const calls = [];
     const runtime = {
       config: { current: () => ({ agents: { entries: { main: {} } } }) },
-      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ ctx, dispatcherOptions }) => {
+      channel: { reply: { dispatchReplyWithBufferedBlockDispatcher: async ({ ctx, replyOptions, dispatcherOptions }) => {
         assert.equal(ctx._tprojMailbox.messageId, "m-1");
+        assert.equal(replyOptions.sourceReplyDeliveryMode, "automatic");
         assert.match(ctx.GroupSystemPrompt, /plain text/);
         assert.match(ctx.SessionKey, /proj\.cc%7Cthread-1/);
         await dispatcherOptions.deliver({ text: "reply" }, { kind: "final" });
