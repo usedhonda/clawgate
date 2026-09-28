@@ -323,11 +323,19 @@ async function refreshBadge() {
 // button press in the popup. The popup's Connect button reads this same
 // bootstrap payload from the local bridge, so doing it automatically asks the
 // same question of the same 127.0.0.1 endpoint and just spares the click.
+// Once filled, the settings keep following the bridge: after a gateway moves
+// to another host, stale values would otherwise send every capture to a dead
+// address, silently.
+const GATEWAY_REFRESH_INTERVAL_MS = 60 * 1000;
+let lastGatewayRefreshAt = 0;
+
 async function ensureGatewayConfigured() {
   const { bridgePort, gatewayURL, gatewayToken } = await getSettings();
-  if (gatewayURL && gatewayToken) {
+  const configured = Boolean(gatewayURL && gatewayToken);
+  if (configured && Date.now() - lastGatewayRefreshAt < GATEWAY_REFRESH_INTERVAL_MS) {
     return;
   }
+  lastGatewayRefreshAt = Date.now();
   try {
     const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/openclaw-info`);
     if (!response.ok) {
@@ -342,7 +350,11 @@ async function ensureGatewayConfigured() {
     if (!host || !Number.isFinite(port) || !token) {
       return;
     }
-    await chrome.storage.local.set({ gatewayURL: `http://${host}:${port}`, gatewayToken: token });
+    const nextURL = `http://${host}:${port}`;
+    if (nextURL === gatewayURL && token === gatewayToken) {
+      return;
+    }
+    await chrome.storage.local.set({ gatewayURL: nextURL, gatewayToken: token });
     await refreshBadge();
   } catch {
     // The app is not up yet. The next poll tick tries again.
@@ -736,8 +748,9 @@ async function flushPassiveQueue() {
     return;
   }
 
+  // Entries leave the queue only once the gateway has accepted them; a failed
+  // send keeps them for the next flush (the queue limit still bounds it).
   const entries = passiveQueue.slice();
-  passiveQueue.splice(0, entries.length);
 
   const messengerEntries = entries.filter((entry) => entry.platform === 'messenger');
   const webEntries = entries.filter((entry) => entry.platform !== 'messenger');
@@ -745,23 +758,42 @@ async function flushPassiveQueue() {
   const sentAt = new Date().toISOString();
 
   if (webEntries.length) {
-    await postWebHistoryEntries(webEntries, settings);
-    await appendPassiveSendLog(webEntries.map((entry) => ({
-      domain: entry.domain || '',
-      title: entry.title || '',
-      url: entry.url || '',
-      sentAt,
-    })));
+    try {
+      await postWebHistoryEntries(webEntries, settings);
+      removeFromPassiveQueue(webEntries);
+      await appendPassiveSendLog(webEntries.map((entry) => ({
+        domain: entry.domain || '',
+        title: entry.title || '',
+        url: entry.url || '',
+        sentAt,
+      })));
+    } catch (error) {
+      console.warn(`[ClawGate] web-history send to ${settings.gatewayURL} failed; ${webEntries.length} entries kept for retry:`, error?.message || error);
+    }
   }
 
   if (messengerEntries.length) {
-    await postMessengerEntries(messengerEntries, settings);
-    await appendPassiveSendLog(messengerEntries.map((entry) => ({
-      domain: safeHostname(entry.threadUrl) || '',
-      title: entry.contactName || '',
-      url: entry.threadUrl || '',
-      sentAt,
-    })));
+    try {
+      await postMessengerEntries(messengerEntries, settings);
+      removeFromPassiveQueue(messengerEntries);
+      await appendPassiveSendLog(messengerEntries.map((entry) => ({
+        domain: safeHostname(entry.threadUrl) || '',
+        title: entry.contactName || '',
+        url: entry.threadUrl || '',
+        sentAt,
+      })));
+    } catch (error) {
+      console.warn(`[ClawGate] messenger-capture send to ${settings.gatewayURL} failed; ${messengerEntries.length} entries kept for retry:`, error?.message || error);
+    }
+  }
+}
+
+function removeFromPassiveQueue(sent) {
+  const sentSet = new Set(sent);
+  for (let i = passiveQueue.length - 1; i >= 0; i -= 1) {
+    if (sentSet.has(passiveQueue[i])) {
+      passiveQueue.splice(i, 1);
+    }
   }
 }
 
