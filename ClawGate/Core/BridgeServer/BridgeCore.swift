@@ -194,9 +194,22 @@ final class BridgeCore {
             return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
         let token = info.token
-        let port = info.port
         let host = OwnHostnameResolver.resolve()
-        let gatewayHost = info.host.flatMap { $0.isEmpty ? nil : $0 } ?? host
+        // The Settings gateway host is what the app itself connects to, so the
+        // extension is handed the same one. Falling back to openclaw.json only
+        // when Settings is empty keeps a stale copy there from silently
+        // diverting the extension after the gateway moves hosts.
+        let cfg = configStore.load()
+        let settingsHost = cfg.openclawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let gatewayHost: String
+        let port: Int
+        if !settingsHost.isEmpty, (1...65535).contains(cfg.openclawPort) {
+            gatewayHost = settingsHost
+            port = cfg.openclawPort
+        } else {
+            gatewayHost = info.host.flatMap { $0.isEmpty ? nil : $0 } ?? host
+            port = info.port
+        }
 
         let result: [String: Any] = [
             "ok": true,
