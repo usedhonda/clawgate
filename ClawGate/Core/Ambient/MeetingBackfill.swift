@@ -104,6 +104,32 @@ final class MeetingBackfill {
         return results
     }
 
+    func rerecognize(record: MeetingRecord, windows: [MeetingConflictReview.Window]) throws -> MeetingConflictReview.Result {
+        guard windows.count <= 3, windows.allSatisfy({ $0.duration <= 30 && $0.duration > 0 }) else { throw Failure.incompleteAudio }
+        let fingerprint = MeetingConflictReview.fingerprint(record: record, windows: windows)
+        if let cached = MeetingConflictReview.load(record: record, fingerprint: fingerprint, store: store) { return cached }
+        let chunks = pinnedAudio(for: record)?.chunks ?? archive.chunks(start: record.startedAt, end: record.endedAt ?? record.startedAt)
+        guard !chunks.isEmpty else { throw Failure.noAudio }
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString); try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true); defer { try? FileManager.default.removeItem(at: scratch) }
+        var output: [TranscriptSegment] = []
+        for window in windows {
+            for chunk in chunks where chunk.startedAt < window.end && chunk.endedAt > window.start {
+                let begin = max(window.start, chunk.startedAt), finish = min(window.end, chunk.endedAt)
+                guard begin < finish else { continue }
+                let wav = scratch.appendingPathComponent(UUID().uuidString + ".wav")
+                let source = pinnedAudio(for: record)?.directory.appendingPathComponent(chunk.fileName) ?? archive.audioURL(for: chunk)
+                try exportWAV(from: source, to: wav, offset: begin - chunk.startedAt, duration: finish - begin)
+                for var segment in try transcriber.transcribe(chunk: wav, engineOverride: "whisper").kept {
+                    segment.capturedAt = begin + segment.startSeconds; segment.stream = chunk.source
+                    output.append(segment)
+                }
+            }
+        }
+        let result = MeetingConflictReview.Result(fingerprint: fingerprint, segments: output, error: nil)
+        try MeetingConflictReview.save(result, record: record, store: store)
+        return result
+    }
+
     static func carryLiveSpeakerLabels(_ backfill: [TranscriptSegment], from live: [TranscriptSegment],
                                        meetingSource: String) -> [TranscriptSegment] {
         backfill.map { segment in

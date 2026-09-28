@@ -64,16 +64,23 @@ omitting meetings. Only events with timed RFC3339 `dateTime` endpoints are
 meeting candidates; all-day `date` entries are skipped rather than treated as
 a meeting covering an entire day. Out-of-office/non-default and transparent
 events are likewise excluded from automatic suggestions.
-Timed eligible events from the past seven days are listed newest first, even if
-no audio was saved. Rows without retained `mic` audio are marked "録音なし" and
-cannot start automatic transcription; system-output audio alone never counts
-as microphone coverage. A calendar entry does not assert attendance. While the
-Minutes tab is visible it refreshes every two minutes, so newly finished
-meetings become selectable when mic audio is archived. Rows include their
-scheduled start time.
+Timed eligible events from the past seven days are combined with stored records
+in one workspace. Cards are grouped by local day (newest day first, ascending
+start time within each day), independently collapsible, and show day counts.
+Search covers titles and names; an optional filter shows only readable minutes.
+Confirmed solo appointments with no minutes and no multi-person observation are
+hidden, while unknown attendance is never treated as solo. Older stored
+meetings remain recoverable through the older-meetings control and are never
+deleted. Cards show start/end time, confirmed participants separately from
+invitees, state, and truthful `Meet`/`ClawGate` provenance.
+Rows without retained `mic` audio are marked "録音なし" and cannot start
+automatic transcription; system-output audio alone never counts as microphone
+coverage. A calendar entry does not assert attendance. While the Minutes tab is
+visible it refreshes every two minutes, so newly finished meetings become
+selectable when mic audio is archived.
 The manual date range is a collapsed fallback, not the primary path.
 The tab uses the CLI's configured account
-to start `gog auth add` with Calendar-only, read-only scopes; after a successful
+to start `gog auth add` with Calendar, Drive, and Docs read-only scopes; after a successful
 auth command it refreshes candidates in the same view. It does not maintain a
 separate Google login or token store. Without a configured GOG
 account or authorized calendar access, the explicit date range
@@ -87,6 +94,27 @@ carried over only on the same audio stream with unambiguous time overlap.
 For manually recorded meetings, the live self/other label follows the same
 rule. This does not infer a guest's identity from their voice; there is no
 cross-utterance voice matching yet.
+
+Calendar candidates and stored records join only by an exact event instance
+(calendar ID, event ID, and scheduled start) or a unique conference-code
+overlap. Rough audio overlap or a shared event ID alone is not an association.
+Selecting an unassociated candidate opens its allowlisted calendar URL; creating
+a local meeting is a separate explicit action.
+
+### Meeting workspace material
+
+Google Meet notes are read-only material discovered from authorized Drive/Docs
+sources across all document tabs. Nonempty generated notes render as
+`Google Meetの生成メモ（発言原文とは別資料）` with HTTPS source links. Meet source segments are
+transcript material only when accepted by the material manifest; segments alone
+do not count as readable minutes. `available`, `none`, `checking`,
+`permissionDenied`, `serviceUnavailable`, `failed`, and `ambiguous` remain distinct states. Cached
+notes remain readable if a later refresh fails. Local parsed minutes always take
+precedence and retain their stale/partial warning while a retry is pending.
+
+The status item uses left click for the status menu and right click for the main
+panel. The menu always includes an explicit Open Main Panel action; recording
+controls remain available there.
 
 A meeting is created from the Google Meet call heartbeat
 (`POST /v1/ambient/meeting`) and stored at
@@ -137,7 +165,7 @@ Read back over HTTP with `GET /v1/ambient/meetings` (records, newest first) and
 
 ## Request envelope
 
-`policyVersion` = `meeting-minutes-v4`. The outbound message is the universal
+`policyVersion` = `meeting-minutes-v5`. The outbound message is the universal
 prefix, a blank line, then the envelope as JSON — never string-concatenated with
 a delimiter, so transcript text cannot break out of the data section.
 
@@ -200,7 +228,7 @@ evidence under the existing fail-closed validation.
     "attendance": {"present": ["…"], "absent": [], "calendarEventId": null},
     "language": "ja"
   },
-  "contextDecision": {"policyVersion": "meeting-minutes-v4"} }
+  "contextDecision": {"policyVersion": "meeting-minutes-v5"} }
 ```
 
 The parser is fail-closed. A reply is rejected — never shown as minutes — when:
@@ -244,6 +272,30 @@ by meeting end time, one at a time, and each request is dispatched at most
 `PetModel.minutesMaxAttempts` times. A real send failure, parser rejection, or
 reply timeout remains a visible `failed` reason that the owner can act on by
 asking again; slot waits are never reported as generation failures.
+A retry never removes the last accepted parsed minutes: until a replacement
+passes the same validation, the accepted output remains readable and is marked
+stale or partial with the retry reason. A failed Meet-material refresh likewise
+does not erase cached notes.
 
 Autonomous LINE delivery is out of scope: `docs/SPEC-messaging.md` keeps
 autonomous notifications to milestones, and finished minutes surface in the app.
+
+### Durable generation and source revisions
+
+Policy v5 chunks long input without dropping utterances. Each validated part,
+including an insufficient-evidence part, is checkpointed. All parts must finish
+and at least one part must contain grounded minutes before the atomic accepted
+bundle is replaced. A retry never removes the previous readable document.
+The accepted bundle pins input segments, input fingerprint and unresolved
+conflicts, so citations keep referring to the generation-time source revision.
+Deterministic assembly preserves the detailed topic points rather than applying
+a second lossy summary pass. Generated Meet notes are coverage hints only, never
+speech evidence. Numeric/negation differences between aligned similar utterances
+remain explicit. At most three retained-audio windows, each at most thirty
+seconds, are rerecognized off the UI thread; these are separate evidence, never
+silent corrections of the original transcript. Missing audio leaves the
+conflict unresolved.
+
+The app bundles the pinned MIT-licensed gogcli helper and its license. Local
+bundles use the native architecture; release bundles include both architectures.
+Source: https://github.com/steipete/gogcli/tree/v0.42.0

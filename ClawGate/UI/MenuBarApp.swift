@@ -167,6 +167,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func showStatusItemMenu() {
         let menu = NSMenu()
+        let openPanel = NSMenuItem(title: "Open Main Panel", action: #selector(openMainPanelFromMenu), keyEquivalent: "")
+        openPanel.target = self
+        menu.addItem(openPanel)
+        menu.addItem(NSMenuItem.separator())
 
         // Ambient Context Stream controls (client-only). The menu bar must let
         // the user stop/resume capture at any moment — a hard privacy requirement.
@@ -233,6 +237,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func wireMeetingMinutes() {
         guard let ambient = runtime.ambient() else { return }
+        petModel.startMeetingSources()
         petModel.meetingTranscriptProvider = { [weak ambient] record in
             ambient?.meetingTranscript(record) ?? []
         }
@@ -268,6 +273,10 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc private func meetingOpenMinutes() {
         petModel.requestTab("minutes")
         petWindowController?.show()
+    }
+
+    @objc private func openMainPanelFromMenu() {
+        toggleMainPanel(nil)
     }
 
     @objc private func ambientStartStream() {
@@ -424,8 +433,8 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc private func toggleMainPanel(_ sender: Any?) {
-        // Right-click → show context menu with Quit
-        if let event = NSApp.currentEvent, event.type == .rightMouseUp {
+        // Left-click opens the status menu; right-click reveals the main panel.
+        if sender != nil, let event = NSApp.currentEvent, event.type == .leftMouseUp {
             showStatusItemMenu()
             return
         }

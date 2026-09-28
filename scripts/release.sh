@@ -186,6 +186,7 @@ echo
 
 echo -e "${GREEN}[3/9] Updating app bundle...${NC}"
 cp ".build/apple/Products/Release/${APP_NAME}" "$APP_BINARY"
+bash "$PROJECT_DIR/scripts/prepare-meeting-tools.sh" --universal
 if [[ -f "$PROJECT_DIR/resources/AppIcon.icns" ]]; then
   cp "$PROJECT_DIR/resources/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 fi

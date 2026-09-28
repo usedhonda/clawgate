@@ -33,6 +33,9 @@ struct MeetingRecord: Codable, Equatable {
     var mergedIntoMeetingID: String? = nil
     /// Actual last Meet heartbeat, independent of metadata writes to meeting.json.
     var lastHeartbeatAt: Double? = nil
+    /// Exact locally cached Calendar/Meet material association. Never inferred
+    /// solely from overlapping audio or a matching title.
+    var materialCandidateID: String? = nil
 
     var isOpen: Bool { endedAt == nil }
 

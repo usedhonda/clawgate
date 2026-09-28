@@ -178,9 +178,21 @@ final class MeetingCandidateSourceTests: XCTestCase {
     func testCalendarConnectionUsesConfiguredGOGAccountWithReadOnlyScope() throws {
         let status = Data(#"{"account":{"email":"user@example.test"}}"#.utf8)
         XCTAssertEqual(try MeetingCandidateSource.calendarAuthorizationArguments(status: status),
-                       ["auth", "add", "user@example.test", "--services=calendar", "--readonly"])
+                       ["auth", "add", "user@example.test", "--services=calendar,drive,docs", "--readonly"])
         XCTAssertThrowsError(try MeetingCandidateSource.calendarAuthorizationArguments(
             status: Data(#"{"account":{"email":""}}"#.utf8)))
+    }
+
+    func testCandidateCarriesAccountAttachmentsAndHumanInvitees() {
+        let data = Data(#"{"id":"meeting","summary":"Meet","start":{"dateTime":"1970-01-01T00:10:00Z"},"end":{"dateTime":"1970-01-01T00:20:00Z"},"attendees":[{"displayName":"Alice","email":"alice@example.test"},{"displayName":"Room","resource":true},{"displayName":"Declined","responseStatus":"declined"}],"attachments":[{"fileUrl":"https://docs.google.com/document/d/doc-1","title":"Notes"}]}"#.utf8)
+        var meeting = try! JSONDecoder().decode(MeetingCandidateSource.Event.self, from: data)
+        meeting.calendarID = "primary"
+        meeting.calendarAccount = "owner@example.test"
+        let found = MeetingCandidateSource.makeCandidates(events: [meeting], chunks: [], rough: [], from: from, to: to)
+        XCTAssertEqual(found.first?.calendarAccount, "owner@example.test")
+        XCTAssertEqual(found.first?.attendeeNames, ["Alice"])
+        XCTAssertEqual(found.first?.humanAttendeeCount, 1)
+        XCTAssertEqual(found.first?.attachmentURLs, ["https://docs.google.com/document/d/doc-1"])
     }
 
     func testPartialPageFailureIsNotSilentlyAccepted() {

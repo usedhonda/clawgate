@@ -66,6 +66,7 @@ fi
 
 if [[ "$SKIP_SYNC" != "true" ]]; then
   echo "[2/5] Sync app binary"
+  bash "$PROJECT_PATH/scripts/prepare-meeting-tools.sh"
   if [[ ! -f "$BUILD_BIN" ]]; then
     echo "Missing build output: $BUILD_BIN" >&2
     exit 1
