@@ -477,6 +477,9 @@ final class PetModel: NSObject, ObservableObject {
                     }
                     // Reset idle timer on each delta — stop speak 5s after last delta
                     self.deltaIdleTask?.cancel()
+                    // Long structured minutes may pause between chunks. Only
+                    // an explicit terminal event may finalize their JSON.
+                    guard self.pendingSummonSource != Self.minutesSource else { break }
                     self.deltaIdleTask = Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: Self.deltaIdleTimeoutNanos)
                         guard !Task.isCancelled, let self else { return }

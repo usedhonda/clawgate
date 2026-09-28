@@ -46,6 +46,23 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         super.tearDown()
     }
 
+    func testMinutesWaitForExplicitTerminalAcrossDeltaIdleGap() async throws {
+        let model = PetModel()
+        model.pendingSummonSource = PetModel.minutesSource
+        model.pendingSummonRunId = "run-minutes"
+        let owner = OpenClawEventOwnerIdentity(messageId: "minutes-part", runId: "run-minutes")
+        model.handleEvent(.delta(messageId: owner, text: "{\"outcome\":"))
+        model.handleEvent(.delta(messageId: owner, text: "\"answer\""))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(model.pendingSummonSource, PetModel.minutesSource)
+        XCTAssertEqual(model.streamingText, "{\"outcome\":\"answer\"")
+        model.handleEvent(.delta(messageId: owner, text: "}"))
+        model.handleEvent(.messageComplete(messageId: owner))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertNil(model.pendingSummonSource)
+        model.cleanup()
+    }
+
     func testDisconnectMidStreamDoesNotTruncateOrDropPendingLogReply() async throws {
         let model = PetModel()
         model.pendingSummonSource = "log"

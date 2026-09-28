@@ -299,3 +299,7 @@ conflict unresolved.
 The app bundles the pinned MIT-licensed gogcli helper and its license. Local
 bundles use the native architecture; release bundles include both architectures.
 Source: https://github.com/steipete/gogcli/tree/v0.42.0
+
+Minutes responses finalize only on an explicit terminal event. A gap between
+streaming deltas is not completion and must not parse or discard partial JSON.
+The bounded reply watchdog still handles a genuinely missing terminal reply.
