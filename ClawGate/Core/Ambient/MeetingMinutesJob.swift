@@ -12,15 +12,31 @@ struct MeetingMinutesJob: Codable {
         completed.count < envelopes.count ? envelopes[completed.count] : nil
     }
 
+    /// The input revision: what was said, not what the meeting is called.
+    /// Calendar association, title or schedule arriving after the first
+    /// request used to change this and throw away parts already written
+    /// (2026-09-29); only the spoken segments and the unresolved conflicts
+    /// that travel with them decide whether a generation is still current.
     static func fingerprint(_ envelope: MeetingMinutesEnvelope) -> String {
+        struct Revision: Encodable {
+            let policyVersion: String
+            let segments: [MeetingMinutesSegment]
+            let unresolvedNotes: [String]
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        // Request IDs are per-attempt, not input revisions.
-        let data = (try? encoder.encode(envelope)) ?? Data()
-        var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-        object.removeValue(forKey: "requestId")
-        let stable = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? data
-        return SHA256.hash(data: stable).map { String(format: "%02x", $0) }.joined()
+        let data = (try? encoder.encode(Revision(policyVersion: envelope.policyVersion,
+                                                  segments: envelope.segments,
+                                                  unresolvedNotes: envelope.unresolvedNotes ?? []))) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Same spoken input, newer meeting metadata: keep every written part and
+    /// let the parts still to be sent carry the current metadata.
+    func refreshingMetadata(from envelope: MeetingMinutesEnvelope) -> MeetingMinutesJob {
+        let fresh = MeetingMinutes.chunked(envelope)
+        guard fresh.count == envelopes.count else { return self }
+        return MeetingMinutesJob(fingerprint: fingerprint, envelopes: fresh, completed: completed)
     }
 
     static func load(store: MeetingStore, id: String) -> MeetingMinutesJob? {

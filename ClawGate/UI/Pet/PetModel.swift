@@ -2913,7 +2913,10 @@ final class PetModel: NSObject, ObservableObject {
         }
         let fingerprint = MeetingMinutesJob.fingerprint(envelope)
         do {
-            if MeetingMinutesJob.load(store: minutesStore(), id: record.id)?.fingerprint != fingerprint {
+            if let existing = MeetingMinutesJob.load(store: minutesStore(), id: record.id),
+               existing.fingerprint == fingerprint {
+                try existing.refreshingMetadata(from: envelope).save(store: minutesStore(), id: record.id)
+            } else {
                 try MeetingMinutesJob(fingerprint: fingerprint,
                     envelopes: MeetingMinutes.chunked(envelope), completed: []).save(store: minutesStore(), id: record.id)
             }

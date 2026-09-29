@@ -313,6 +313,12 @@ becomes `failed` only when the part's attempts run out. After a part's reply,
 the next part waits `PetModel.minutesPartGapSeconds` (20s): on 2026-09-29 the
 Gateway failed every second part sent about six seconds after the first reply.
 
+A job's fingerprint covers only the spoken input: the policy version, the
+segments and the unresolved conflict notes. Calendar association, title or
+schedule arriving after the first request keep every written part; the parts
+still to be sent are re-chunked from the same segments and carry the current
+metadata.
+
 Asking again has two forms. Resume (`POST /v1/ambient/meeting/minutes?id=…&mode=resume`)
 continues from the checkpointed parts with fresh attempts. Regenerate (no
 `mode`) starts a new generation from the first part; the previous accepted

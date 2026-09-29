@@ -103,4 +103,25 @@ final class MeetingMinutesRetryTests: XCTestCase {
         drainMain()
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
     }
+
+    /// 2026-09-29: the calendar association arrived after the first request
+    /// and the first meeting's written part was thrown away.
+    func testCalendarMetadataArrivingLaterKeepsWrittenParts() throws {
+        var record = meeting()
+        let segments = model.meetingTranscriptProvider?(record) ?? []
+        let before = MeetingMinutesEnvelope.build(record: record, segments: segments)
+        var job = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(before),
+                                    envelopes: MeetingMinutes.chunked(before), completed: [nil])
+        XCTAssertGreaterThan(job.envelopes.count, 1)
+
+        record.calendarEventID = "event-1"
+        record.calendarEventStart = record.startedAt
+        record.calendarEventEnd = record.startedAt + 3600
+        let after = MeetingMinutesEnvelope.build(record: record, segments: segments)
+        XCTAssertEqual(MeetingMinutesJob.fingerprint(after), job.fingerprint)
+
+        job = job.refreshingMetadata(from: after)
+        XCTAssertEqual(job.completed.count, 1)
+        XCTAssertEqual(job.next?.calendarEventID, "event-1")
+    }
 }
