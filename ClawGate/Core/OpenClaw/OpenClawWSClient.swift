@@ -694,6 +694,10 @@ actor OpenClawWSClient {
             guard let state = payload?.state,
                   let runId = payload?.runId,
                   let owner = OpenClawEventOwnerIdentity.fromPayload(messageId: runId, runId: runId, sessionKey: payload?.sessionKey) else { return [] }
+            if state == "error" || state == "aborted" {
+                let reason = payload?.errorMessage.flatMap { $0.isEmpty ? nil : $0 } ?? state
+                return [.runFailed(owner: owner, reason: reason)]
+            }
             guard state == "final" else { return [] }
             let text = payload?.message?.content?
                 .compactMap { $0.type == "text" ? $0.text : nil }

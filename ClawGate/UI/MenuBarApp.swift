@@ -248,8 +248,11 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 DispatchQueue.main.async { completion(result) }
             }
         }
-        ambient.onMinutesRequested = { [weak self] record in
-            DispatchQueue.main.async { self?.petModel.regenerateMinutes(for: record) }
+        ambient.onMinutesRequested = { [weak self] record, resume in
+            DispatchQueue.main.async {
+                if resume { self?.petModel.resumeMinutes(for: record) }
+                else { self?.petModel.regenerateMinutes(for: record) }
+            }
         }
         ambient.onMeetingEnded = { [weak self] record in
             // Called on the ambient state queue; the model is main-only.

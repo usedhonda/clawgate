@@ -136,7 +136,8 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         },
         RouteKey(.POST, "/v1/ambient/meeting/minutes"): { core, components, _, _ in
             let id = components?.queryItems?.first(where: { $0.name == "id" })?.value ?? ""
-            return core.ambientMeetingMinutes(id: id)
+            let resume = components?.queryItems?.first(where: { $0.name == "mode" })?.value == "resume"
+            return core.ambientMeetingMinutes(id: id, resume: resume)
         },
     ]
 

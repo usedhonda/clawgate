@@ -303,3 +303,17 @@ Source: https://github.com/steipete/gogcli/tree/v0.42.0
 Minutes responses finalize only on an explicit terminal event. A gap between
 streaming deltas is not completion and must not parse or discard partial JSON.
 The bounded reply watchdog still handles a genuinely missing terminal reply.
+
+A part fails, rather than times out, when the Gateway ends its run without a
+reply: a `chat` event in state `error` or `aborted` whose `runId` is the part's
+ACK `runId`. A failed or timed-out part is sent again after a backoff (30s, 2m,
+5m) while the part still has attempts left; parts already checkpointed are kept
+and never resent. The meeting stays `pending` with the reason while it waits and
+becomes `failed` only when the part's attempts run out. After a part's reply,
+the next part waits `PetModel.minutesPartGapSeconds` (20s): on 2026-09-29 the
+Gateway failed every second part sent about six seconds after the first reply.
+
+Asking again has two forms. Resume (`POST /v1/ambient/meeting/minutes?id=…&mode=resume`)
+continues from the checkpointed parts with fresh attempts. Regenerate (no
+`mode`) starts a new generation from the first part; the previous accepted
+minutes stay readable until it completes.

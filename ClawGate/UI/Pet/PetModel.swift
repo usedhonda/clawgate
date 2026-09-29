@@ -505,6 +505,15 @@ final class PetModel: NSObject, ObservableObject {
                 self.finishStreamingMessage(messageId: messageId, runId: eventId.runId)
                 self.stateMachine.handle(.assistantFinished)
 
+            case .runFailed(let eventOwner, let reason):
+                // Only minutes act on this so far; every other summon keeps
+                // its existing timeout behavior.
+                guard let owner = self.sharedSummonOwner,
+                      owner.source == Self.minutesSource, owner.phase == .running,
+                      self.summonEventMatchesCurrentOwner(runId: eventOwner.runId) else { break }
+                NSLog("[Pet] minutes run failed: %@", reason)
+                self.failMinutesPart(reason: "Chi が返事を書く前に処理を終えました（\(reason)）")
+
             case .history(let msgs):
                 NSLog("[Pet] Loaded %d history messages", msgs.count)
                 self.messages = msgs
@@ -2043,6 +2052,15 @@ final class PetModel: NSObject, ObservableObject {
 
     var sharedSummonDispatchCountForTesting: Int { sharedSummonDispatchCount }
 
+    /// Test seam: the Gateway ACK for the in-flight summon arrived with `runId`.
+    func acknowledgeSharedSummonForTesting(runId: String) {
+        guard var owner = sharedSummonOwner else { return }
+        owner.runId = runId
+        owner.phase = .running
+        sharedSummonOwner = owner
+        pendingSummonRunId = runId
+    }
+
     func releaseSharedSummonForTesting(token: UUID) {
         releaseSharedSummonIfCurrent(token)
     }
@@ -2247,11 +2265,8 @@ final class PetModel: NSObject, ObservableObject {
             } else {
                 Self.petLogTelemetry.notice("summonReplyTimeout source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) slotReclaimed=1")
                 let timeout = "返事が \(Int(Self.replyTimeout(for: source))) 秒以内に返りませんでした"
-                if source == Self.minutesSource, let id = self.pendingMinutesMeetingID {
-                    self.pendingMinutesMeetingID = nil
-                    self.pendingMinutesSegmentIDs = []
-                    self.finishMinutes(id: id, state: "failed", error: timeout)
-                    self.drainPendingMinutes()
+                if source == Self.minutesSource, self.pendingMinutesMeetingID != nil {
+                    self.failMinutesPart(reason: timeout)
                 } else {
                     self.addSummonResult(text: "Error: no reply received within \(Int(Self.replyTimeout(for: source)))s",
                                          source: source, owner: owner)
@@ -2294,13 +2309,10 @@ final class PetModel: NSObject, ObservableObject {
     private func handleSummonSendFailure(token: UUID, source: String, error: Error) {
         guard let owner = sharedSummonOwner,
               owner.token == token, owner.source == source else { return }
-        releaseSharedSummon(owner)
-        if source == Self.minutesSource, let id = pendingMinutesMeetingID {
-            pendingMinutesMeetingID = nil
-            pendingMinutesSegmentIDs = []
-            finishMinutes(id: id, state: "failed", error: "送信に失敗しました: \(error)")
-            drainPendingMinutes()
+        if source == Self.minutesSource, pendingMinutesMeetingID != nil {
+            failMinutesPart(reason: "送信に失敗しました: \(error)")
         } else {
+            releaseSharedSummon(owner)
             addSummonResult(text: "Error: \(error)", source: source, owner: owner)
         }
     }
@@ -2856,6 +2868,9 @@ final class PetModel: NSObject, ObservableObject {
     /// Attempts per meeting, so a permanently busy slot gives up instead of
     /// retrying forever.
     private var minutesAttempts: [String: Int] = [:]
+    /// A meeting waiting out a retry backoff or the pause between parts is
+    /// skipped by the drain until this time.
+    private var minutesNotBefore: [String: Date] = [:]
 #if DEBUG
     private var meetingStoreOverrideForTesting: MeetingStore?
 #endif
@@ -2863,6 +2878,13 @@ final class PetModel: NSObject, ObservableObject {
     static let minutesSource = "minutes"
     static let minutesMaxAttempts = 3
     static let minutesRetrySeconds: TimeInterval = 120
+    /// Backoff before re-sending a part that failed, by attempts already made.
+    static let minutesRetryBackoff: [TimeInterval] = [30, 120, 300]
+    /// Pause between one part's reply and sending the next. On 2026-09-29 the
+    /// Gateway failed every second part that arrived ~6s after the first
+    /// reply ("Current-turn transcript admission is no longer a visible
+    /// message"), while the main session was still settling the first turn.
+    static var minutesPartGapSeconds: TimeInterval = 20
     /// Minutes are a long read of a whole meeting; the shared 180s watchdog is
     /// sized for a one-line summon and would reclaim the slot mid-thought.
     static let minutesReplyTimeoutSeconds: TimeInterval = 600
@@ -2911,7 +2933,10 @@ final class PetModel: NSObject, ObservableObject {
               connectionState == .connected,
               sessionKey != nil,
               !isSummonBusy else { return }
-        guard let record = Self.pendingMinutesOrder(minutesStore().all()).first else { return }
+        let now = Date()
+        guard let record = Self.pendingMinutesOrder(minutesStore().all())
+            .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now }) else { return }
+        minutesNotBefore[record.id] = nil
         let fullEnvelope = minutesEnvelope(for: record)
         // Review only tightly aligned conflicting speech, off the UI thread.
         let raw = fullEnvelope.segments.filter { $0.source != "audio-recheck" }.map {
@@ -3023,9 +3048,41 @@ final class PetModel: NSObject, ObservableObject {
             guard let self,
                   self.pendingMinutesMeetingID == id,
                   self.sharedSummonOwner?.token == token else { return }
-            self.pendingMinutesMeetingID = nil
-            self.finishMinutes(id: id, state: "failed", error: "返事が返ってきませんでした")
+            self.failMinutesPart(reason: "返事が返ってきませんでした")
         }
+    }
+
+    /// One part did not come back. Parts already written stay in the job, so
+    /// the retry sends only this part again, after a backoff. The meeting
+    /// fails only when the attempts for this part run out.
+    private func failMinutesPart(reason: String) {
+        guard let id = pendingMinutesMeetingID else { return }
+        if let owner = sharedSummonOwner, owner.source == Self.minutesSource {
+            releaseSharedSummon(owner)
+        }
+        pendingMinutesMeetingID = nil
+        pendingMinutesSegmentIDs = []
+        let attempts = minutesAttempts[id, default: 0]
+        guard attempts < Self.minutesMaxAttempts else {
+            finishMinutes(id: id, state: "failed",
+                          error: "\(reason)。\(Self.minutesMaxAttempts) 回試しました。書けた部分は保持しています。")
+            drainPendingMinutes()
+            return
+        }
+        let delay = Self.minutesRetryBackoff[min(max(attempts - 1, 0), Self.minutesRetryBackoff.count - 1)]
+        minutesNotBefore[id] = Date().addingTimeInterval(delay)
+        markMinutes(id: id, state: "pending", error: "\(reason)。\(Int(delay)) 秒後に続きから再試行します")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.drainPendingMinutes() }
+        drainPendingMinutes()
+    }
+
+    /// Continue a meeting's minutes from the parts already written, with a
+    /// fresh set of attempts. Unlike `regenerateMinutes`, nothing written is
+    /// thrown away.
+    func resumeMinutes(for record: MeetingRecord) {
+        minutesAttempts[record.id] = 0
+        minutesNotBefore[record.id] = nil
+        requestMinutes(for: record)
     }
 
     /// Every meeting on disk, newest first.
@@ -3092,7 +3149,11 @@ final class PetModel: NSObject, ObservableObject {
             try job.save(store: minutesStore(), id: id)
             if job.next != nil {
                 minutesAttempts[id] = 0
+                minutesNotBefore[id] = Date().addingTimeInterval(Self.minutesPartGapSeconds)
                 markMinutes(id: id, state: "pending", error: nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesPartGapSeconds) { [weak self] in
+                    self?.drainPendingMinutes()
+                }
                 return
             }
             guard let accepted = MeetingMinutes.combining(job.completed.compactMap { $0 }) else {

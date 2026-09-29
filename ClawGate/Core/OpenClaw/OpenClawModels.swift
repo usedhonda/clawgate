@@ -15,6 +15,10 @@ enum OpenClawEvent {
     case message(OpenClawChatMessage)
     case delta(messageId: OpenClawEventOwnerIdentity, text: String)
     case messageComplete(messageId: OpenClawEventOwnerIdentity)
+    /// The Gateway ended a run without a reply (`chat` state `error` or
+    /// `aborted`). Without this a caller only learns of it from its own
+    /// timeout, minutes later.
+    case runFailed(owner: OpenClawEventOwnerIdentity, reason: String)
     case history([OpenClawChatMessage])
     /// A calendar reminder the Gateway asked this Mac to read aloud.
     case reminder(ReminderPayload)
@@ -353,6 +357,7 @@ struct IncomingPayload: Decodable {
     let stream: String?
     let data: AgentDataPayload?
     let state: String?
+    let errorMessage: String?
     let message: ChatMessagePayload?
     let messageId: String?
     let content: String?
@@ -392,6 +397,7 @@ struct IncomingPayload: Decodable {
         case stream
         case data
         case state
+        case errorMessage
         case message
         case messageId
         case content
@@ -426,6 +432,7 @@ struct IncomingPayload: Decodable {
         stream = try container.decodeIfPresent(String.self, forKey: .stream)
         data = try container.decodeIfPresent(AgentDataPayload.self, forKey: .data)
         state = try container.decodeIfPresent(String.self, forKey: .state)
+        errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         message = try container.decodeIfPresent(ChatMessagePayload.self, forKey: .message)
         messageId = try container.decodeIfPresent(String.self, forKey: .messageId)
         content = try container.decodeIfPresent(String.self, forKey: .content)

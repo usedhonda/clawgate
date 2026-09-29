@@ -952,9 +952,11 @@ final class BridgeCore {
     }
 
     /// Write (or rewrite) one meeting's minutes now.
-    func ambientMeetingMinutes(id: String) -> HTTPResult {
+    /// `resume` continues from the parts already written; without it the
+    /// minutes are generated again from the first part.
+    func ambientMeetingMinutes(id: String, resume: Bool = false) -> HTTPResult {
         guard let c = ambientController, c.isAvailable else { return ambientUnavailable() }
-        guard c.requestMinutes(id: id) else {
+        guard c.requestMinutes(id: id, resume: resume) else {
             let payload = ErrorPayload(code: "not_found", message: "meeting not found", retriable: false, failedStep: "ambient", details: nil)
             return jsonResponse(status: .notFound, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }

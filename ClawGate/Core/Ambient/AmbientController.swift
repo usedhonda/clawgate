@@ -140,7 +140,9 @@ final class AmbientController {
     /// Set by the app to react when a call finishes (minutes generation).
     var onMeetingEnded: ((MeetingRecord) -> Void)?
     /// Set by the app to write minutes for a meeting on demand.
-    var onMinutesRequested: ((MeetingRecord) -> Void)?
+    /// The Bool is `resume`: continue from the written parts instead of
+    /// starting over.
+    var onMinutesRequested: ((MeetingRecord, Bool) -> Void)?
     static let meetingHeartbeatTTL: TimeInterval = 30
     /// Chrome chunks wait this long so speaking edges for their span arrive first.
     static let speakerEdgeWaitSeconds = 3
@@ -425,9 +427,9 @@ final class AmbientController {
     /// Ask for a meeting's minutes to be written now. Returns false when there
     /// is no such meeting or nothing is listening.
     @discardableResult
-    func requestMinutes(id: String) -> Bool {
+    func requestMinutes(id: String, resume: Bool = false) -> Bool {
         guard let record = meetingRecord(id: id), let handler = onMinutesRequested else { return false }
-        handler(record)
+        handler(record, resume)
         return true
     }
 
