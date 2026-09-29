@@ -27,6 +27,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var statusItem: NSStatusItem?
     private var mainPanel: NSPanel?
     private var mainPanelHost: NSHostingController<MainPanelView>?
+    private var meetingWindow: NSWindow?
     private var refreshTimer: Timer?
     private var ghosttyFollowTimer: DispatchSourceTimer?
     private var lastGhosttyFrame: CGRect?
@@ -274,8 +275,26 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc private func meetingEnd() { runtime.ambient()?.endManualMeeting() }
 
     @objc private func meetingOpenMinutes() {
-        petModel.requestTab("minutes")
-        petWindowController?.show()
+        if meetingWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: true
+            )
+            window.title = "議事録"
+            window.contentViewController = NSHostingController(rootView: MeetingWorkspaceView(model: petModel))
+            window.minSize = NSSize(width: 900, height: 560)
+            // The hosting controller shrinks the window to the view's ideal
+            // size; restore the intended one before any saved frame applies.
+            window.setContentSize(NSSize(width: 1180, height: 780))
+            window.isReleasedWhenClosed = false
+            window.setFrameAutosaveName("ClawGateMeetingWorkspace")
+            if !window.setFrameUsingName("ClawGateMeetingWorkspace") { window.center() }
+            meetingWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        meetingWindow?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func openMainPanelFromMenu() {
