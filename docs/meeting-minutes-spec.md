@@ -320,6 +320,13 @@ headings, decisions and action items; it returns one overview and normalized
 due dates. Every overview sentence must cite segments the part overviews
 already cited, and topics, decisions and open questions are never rewritten.
 A rejected, failed or timed-out rewrite leaves the joined minutes unchanged.
+Like minutes, the rewrite finalizes only on an explicit terminal event.
+
+The pause after a reply applies to the shared main session: no minutes or
+rewrite request of any meeting goes out within `minutesPartGapSeconds` of the
+last reply. A `chat` error on the same session before the in-flight minutes
+run has streamed anything is attributed to that run even when its `runId`
+differs, because the Gateway reports a failed turn under its own run id.
 
 A job's fingerprint covers only the spoken input: the policy version, the
 segments and the unresolved conflict notes. Calendar association, title or

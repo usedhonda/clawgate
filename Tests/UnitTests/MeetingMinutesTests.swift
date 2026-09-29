@@ -52,6 +52,9 @@ final class MeetingMinutesTests: XCTestCase {
         store.save(first)
         store.save(second)
 
+        let originalGap = PetModel.minutesPartGapSeconds
+        PetModel.minutesPartGapSeconds = 0
+        defer { PetModel.minutesPartGapSeconds = originalGap }
         let model = PetModel()
         model.setMeetingStoreForTesting(store)
         model.setSessionKeyForTesting("test-session")

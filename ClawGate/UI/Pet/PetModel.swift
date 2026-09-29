@@ -456,6 +456,10 @@ final class PetModel: NSObject, ObservableObject {
                     break
                 }
                 let isSummon = self.pendingSummonSource != nil
+                if self.pendingSummonSource == Self.minutesSource
+                    || self.pendingSummonSource == Self.minutesSummarySource {
+                    self.minutesRunSawDelta = true
+                }
                 if self.streamingMessageId != messageId {
                     self.streamingMessageId = messageId
                     self.streamingRunId = eventId.runId
@@ -479,7 +483,8 @@ final class PetModel: NSObject, ObservableObject {
                     self.deltaIdleTask?.cancel()
                     // Long structured minutes may pause between chunks. Only
                     // an explicit terminal event may finalize their JSON.
-                    guard self.pendingSummonSource != Self.minutesSource else { break }
+                    if self.pendingSummonSource == Self.minutesSource
+                        || self.pendingSummonSource == Self.minutesSummarySource { break }
                     self.deltaIdleTask = Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: Self.deltaIdleTimeoutNanos)
                         guard !Task.isCancelled, let self else { return }
@@ -510,8 +515,16 @@ final class PetModel: NSObject, ObservableObject {
                 // its existing timeout behavior.
                 guard let owner = self.sharedSummonOwner,
                       owner.source == Self.minutesSource || owner.source == Self.minutesSummarySource,
-                      owner.phase == .running,
-                      self.summonEventMatchesCurrentOwner(runId: eventOwner.runId) else { break }
+                      owner.phase == .running else { break }
+                // The Gateway's own run id for a failed turn need not be the
+                // ACK run id, so a failure on this session before our run has
+                // streamed anything is taken as ours. At worst a live run is
+                // asked again after the backoff.
+                let sameSession = eventOwner.sessionKey == nil || eventOwner.sessionKey == self.sessionKey
+                    || (self.sessionKey.map { eventOwner.sessionKey?.hasSuffix($0) == true } ?? false)
+                Self.petLogTelemetry.notice("minutesRunFailedEvent run=\(eventOwner.runId ?? "nil", privacy: .public) session=\(eventOwner.sessionKey ?? "nil", privacy: .public) mine=\(self.summonEventMatchesCurrentOwner(runId: eventOwner.runId), privacy: .public) streamed=\(self.minutesRunSawDelta, privacy: .public)")
+                guard self.summonEventMatchesCurrentOwner(runId: eventOwner.runId)
+                        || (sameSession && !self.minutesRunSawDelta) else { break }
                 if owner.source == Self.minutesSummarySource {
                     self.releaseSharedSummon(owner)
                     self.handleSummaryPassReply("")
@@ -557,6 +570,12 @@ final class PetModel: NSObject, ObservableObject {
                 self.streamingMessageId = nil
                 self.streamingRunId = nil
                 self.streamingText = ""
+                if let summary = self.pendingSummaryPass {
+                    // Retried after reconnect; a lost rewrite must not hold
+                    // the queue closed.
+                    self.pendingSummaryPass = nil
+                    self.summaryPassQueue.insert(summary.id, at: 0)
+                }
                 if self.pendingSummonSource == Self.minutesSource {
                     // The durable record remains pending; only the in-flight
                     // transport ownership is discarded so reconnect can drain
@@ -2881,6 +2900,13 @@ final class PetModel: NSObject, ObservableObject {
     /// rewrite, and the one in flight. In memory only: after a restart the
     /// joined minutes simply stay as they are.
     private var summaryPassQueue: [String] = []
+    /// Whether the in-flight minutes run has streamed anything yet. A Gateway
+    /// run failure is attributed to it only while it has not.
+    private var minutesRunSawDelta = false
+    /// No minutes request of any meeting goes out before this: the pause
+    /// after a reply applies to the shared main session, not per meeting
+    /// (2026-09-29: another meeting's part went out 5s after a reply).
+    private var minutesSessionNotBefore = Date.distantPast
     private var pendingSummaryPass: (id: String, input: MeetingMinutesSummaryPass.Input)?
 #if DEBUG
     private var meetingStoreOverrideForTesting: MeetingStore?
@@ -2950,6 +2976,11 @@ final class PetModel: NSObject, ObservableObject {
               sessionKey != nil,
               !isSummonBusy else { return }
         guard pendingSummaryPass == nil else { return }
+        let wait = minutesSessionNotBefore.timeIntervalSinceNow
+        if wait > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.1) { [weak self] in self?.drainPendingMinutes() }
+            return
+        }
         if sendNextSummaryPass() { return }
         let now = Date()
         guard let record = Self.pendingMinutesOrder(minutesStore().all())
@@ -2996,6 +3027,10 @@ final class PetModel: NSObject, ObservableObject {
                 if let combined = MeetingMinutes.combining(finished.completed.compactMap { $0 }) {
                     try minutesStore().saveValidatedMinutes(combined.boundToCalendarEvent(record.calendarEventID), for: record, job: finished)
                     finishMinutes(id: record.id, state: "ready", error: nil)
+                    if MeetingMinutesSummaryPass.needed(partCount: finished.envelopes.count),
+                       !summaryPassQueue.contains(record.id) {
+                        summaryPassQueue.append(record.id)
+                    }
                 } else {
                     finishMinutes(id: record.id, state: "failed", error: "根拠となる発言が足りませんでした")
                 }
@@ -3029,6 +3064,7 @@ final class PetModel: NSObject, ObservableObject {
         pendingMinutesMeetingID = record.id
         pendingMinutesSegmentIDs = Set(envelope.segments.map(\.id))
         markMinutes(id: record.id, state: "pending", error: nil)
+        minutesRunSawDelta = false
         sendSummon(message, source: Self.minutesSource)
         // A failed admission remains pending and is retried by the next slot
         // release/reconnect; it is not a generation failure.
@@ -3162,6 +3198,7 @@ final class PetModel: NSObject, ObservableObject {
             let input = MeetingMinutesSummaryPass.input(for: accepted.minutes, parts: parts, record: record)
             guard let message = try? MeetingMinutesSummaryPass.buildMessage(input: input) else { continue }
             pendingSummaryPass = (id, input)
+            minutesRunSawDelta = false
             sendSummon(message, source: Self.minutesSummarySource)
             if sharedSummonOwner?.source != Self.minutesSummarySource {
                 // Not admitted; try again on the next drain.
@@ -3177,6 +3214,7 @@ final class PetModel: NSObject, ObservableObject {
     /// A rejected or failed rewrite leaves the joined minutes as they are.
     private func handleSummaryPassReply(_ text: String) {
         guard let pending = pendingSummaryPass else { return }
+        minutesSessionNotBefore = Date().addingTimeInterval(Self.minutesPartGapSeconds)
         pendingSummaryPass = nil
         defer { drainPendingMinutes() }
         let store = minutesStore()
@@ -3195,6 +3233,7 @@ final class PetModel: NSObject, ObservableObject {
 
     private func handleMinutesReply(_ text: String) {
         guard let id = pendingMinutesMeetingID else { return }
+        minutesSessionNotBefore = Date().addingTimeInterval(Self.minutesPartGapSeconds)
         defer { drainPendingMinutes() }
         pendingMinutesMeetingID = nil
         let validSegmentIDs = pendingMinutesSegmentIDs

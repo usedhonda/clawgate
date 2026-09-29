@@ -98,10 +98,33 @@ final class MeetingMinutesRetryTests: XCTestCase {
         let record = meeting()
         model.requestMinutes(for: record)
         model.acknowledgeSharedSummonForTesting(runId: "run-mine")
-        model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-other"),
+        model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-other",
+                                                                       sessionKey: "agent:main:proactive"),
+                                     reason: "fence"))
+        drainMain()
+        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id, "another session's failure is not ours")
+
+        // Once our run has streamed, a same-session failure of another run
+        // is not ours either.
+        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "run-mine", runId: "run-mine"), text: "{"))
+        model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-other",
+                                                                       sessionKey: "agent:main:main"),
                                      reason: "fence"))
         drainMain()
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
+    }
+
+    /// The Gateway reports the failed turn under its own run id, not the ACK's.
+    func testASameSessionFailureBeforeAnyOutputIsOurs() throws {
+        let record = meeting()
+        model.requestMinutes(for: record)
+        model.acknowledgeSharedSummonForTesting(runId: "run-mine")
+        model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-gateway",
+                                                                       sessionKey: "agent:main:main"),
+                                     reason: "fence"))
+        drainMain()
+        XCTAssertNil(model.pendingMinutesMeetingIDForTesting)
+        XCTAssertTrue(store.load(id: record.id)?.minutesError?.contains("再試行") == true)
     }
 
     /// 2026-09-29: the calendar association arrived after the first request
