@@ -146,6 +146,7 @@ private struct MeetingWorkspaceDetail: View {
     @Binding var tab: MeetingWorkspaceView.Tab
     @Binding var scrollTarget: String?
     @Binding var copied: Bool
+    @State private var highlighted: Set<String> = []
 
     private var accepted: MeetingAcceptedMinutes? { MeetingStore().loadAcceptedMinutes(id: meeting.id) }
     private var job: MeetingMinutesJob? { MeetingMinutesJob.load(store: MeetingStore(), id: meeting.id) }
@@ -164,29 +165,34 @@ private struct MeetingWorkspaceDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            MeetingSourcesRow(model: model, meeting: meeting, accepted: accepted)
             MeetingStatusBanner(model: model, meeting: meeting, job: job,
                                 hasReadableMinutes: shown != nil)
             tabBar
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Group {
-                        switch tab {
-                        case .minutes: minutesTab
-                        case .transcript: transcriptTab
-                        case .materials: materialsTab
+            GeometryReader { geometry in
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        Group {
+                            switch tab {
+                            case .minutes: minutesTab(width: geometry.size.width - 56)
+                            case .transcript: transcriptTab
+                            case .materials: materialsTab
+                            }
                         }
+                        .padding(.horizontal, 28).padding(.vertical, 20)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
-                    .padding(.horizontal, 28).padding(.vertical, 22)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .onChange(of: tab) { newTab in
-                    guard newTab == .transcript, let target = scrollTarget else { return }
-                    DispatchQueue.main.async { proxy.scrollTo(target, anchor: .top) }
+                    .onChange(of: tab) { newTab in
+                        guard newTab == .transcript, let target = scrollTarget else { return }
+                        DispatchQueue.main.async { proxy.scrollTo(target, anchor: .top) }
+                    }
                 }
             }
             .environment(\.openURL, OpenURLAction { url in
                 if url.scheme == "clawgate-segment", let host = url.host {
-                    scrollTarget = "seg-\(host)"
+                    let ids = host.split(separator: ",").map { "seg-\($0)" }
+                    highlighted = Set(ids)
+                    scrollTarget = ids.first
                     tab = .transcript
                     return .handled
                 }
@@ -206,9 +212,10 @@ private struct MeetingWorkspaceDetail: View {
                     Text(shown?.minutes.title ?? meeting.title ?? "無題の会議")
                         .font(.system(size: 24, weight: .bold))
                         .textSelection(.enabled)
-                    HStack(spacing: 18) {
+                    HStack(spacing: 16) {
                         if let planned = WorkspaceFormat.plannedRange(meeting) { Text("予定 \(planned)") }
                         Text("録音 \(WorkspaceFormat.timeRange(meeting))")
+                        attendees
                     }
                     .font(.system(size: 13))
                     .foregroundColor(WorkspaceTheme.secondary)
@@ -224,39 +231,45 @@ private struct MeetingWorkspaceDetail: View {
                     .controlSize(.large)
                 }
             }
-            attendees
         }
-        .padding(.horizontal, 28).padding(.top, 22).padding(.bottom, 14)
+        .padding(.horizontal, 28).padding(.top, 18).padding(.bottom, 12)
         .background(WorkspaceTheme.header)
         .overlay(Divider(), alignment: .bottom)
     }
 
+    /// Attendees sit on the time line and keep their full names; a long list
+    /// scrolls sideways rather than truncating or spreading into a grid.
     @ViewBuilder
     private var attendees: some View {
-        let present = shown?.minutes.attendance?.present ?? meeting.participants
+        let present = WorkspaceFormat.ownerFirst(shown?.minutes.attendance?.present ?? meeting.participants)
         let invitedOnly = shown?.minutes.attendance?.absent ?? []
-        VStack(alignment: .leading, spacing: 6) {
-            if !present.isEmpty { chipRow("参加", present, dashed: false) }
-            if !invitedOnly.isEmpty { chipRow("招待のみ", invitedOnly, dashed: true) }
-        }
-    }
-
-    private func chipRow(_ label: String, _ names: [String], dashed: Bool) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(label).font(.system(size: 12)).foregroundColor(WorkspaceTheme.muted)
-                .frame(width: 56, alignment: .leading).padding(.top, 4)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6, alignment: .leading)],
-                      alignment: .leading, spacing: 6) {
-                ForEach(names, id: \.self) { name in
-                    Text(name).font(.system(size: 13)).lineLimit(1)
-                        .padding(.horizontal, 10).padding(.vertical, 3)
-                        .background(Capsule().fill(dashed ? Color.clear : WorkspaceTheme.chip))
-                        .overlay(Capsule().strokeBorder(dashed ? WorkspaceTheme.line : Color.clear,
-                                                        style: StrokeStyle(lineWidth: 1, dash: [3])))
-                        .foregroundColor(dashed ? WorkspaceTheme.secondary : WorkspaceTheme.chipText)
+        if !present.isEmpty || !invitedOnly.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    if !present.isEmpty {
+                        Text("参加").foregroundColor(WorkspaceTheme.muted)
+                        ForEach(present, id: \.self) { name in chip(name, dashed: false) }
+                    }
+                    if !invitedOnly.isEmpty {
+                        Text("招待のみ").foregroundColor(WorkspaceTheme.muted).padding(.leading, 6)
+                        ForEach(invitedOnly, id: \.self) { name in chip(name, dashed: true) }
+                    }
                 }
             }
         }
+    }
+
+    private func chip(_ name: String, dashed: Bool) -> some View {
+        let mine = WorkspaceFormat.isOwner(name)
+        return Text(mine ? "あなた" : name)
+            .font(.system(size: 13, weight: mine ? .semibold : .regular))
+            .fixedSize()
+            .padding(.horizontal, 10).padding(.vertical, 3)
+            .background(Capsule().fill(dashed ? Color.clear : WorkspaceTheme.chip))
+            .overlay(Capsule().strokeBorder(dashed ? WorkspaceTheme.line : Color.clear,
+                                            style: StrokeStyle(lineWidth: 1, dash: [3])))
+            .foregroundColor(dashed ? WorkspaceTheme.secondary : WorkspaceTheme.chipText)
+            .help(name)
     }
 
     private var tabBar: some View {
@@ -281,17 +294,19 @@ private struct MeetingWorkspaceDetail: View {
     // MARK: Minutes tab
 
     @ViewBuilder
-    private var minutesTab: some View {
+    private func minutesTab(width: CGFloat) -> some View {
         if let shown {
             let minutes = shown.minutes
-            let citations = Set((minutes.evidence ?? []).flatMap(\.segmentIds))
+            let evidence = minutes.evidence ?? []
+            let citations = Set(evidence.flatMap(\.segmentIds))
             // Side by side when there is room; the side column drops below the
             // main one on a narrow window instead of crushing it.
-            AdaptiveColumns(sideWidth: 300, minimumMainWidth: 460) {
+            AdaptiveColumns(width: width, sideWidth: 300, minimumMainWidth: 460) {
                 VStack(alignment: .leading, spacing: 18) {
                     WorkspaceCard(title: shown.partial ? "概要（完成したパートの範囲）" : "概要") {
-                        Text(WorkspaceFormat.cited(minutes.summary, allowed: citations))
+                        Text(WorkspaceFormat.cited(minutes.summary, allowed: citations, evidence: evidence))
                             .font(.system(size: 15)).lineSpacing(5).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if !minutes.topics.isEmpty {
                         Text("議題ごとの詳細").font(.system(size: 13, weight: .bold)).foregroundColor(WorkspaceTheme.muted)
@@ -301,8 +316,9 @@ private struct MeetingWorkspaceDetail: View {
                                 ForEach(Array(topic.points.enumerated()), id: \.offset) { _, point in
                                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                                         Text("•").foregroundColor(WorkspaceTheme.muted)
-                                        Text(WorkspaceFormat.cited(point, allowed: citations))
+                                        Text(WorkspaceFormat.cited(point, allowed: citations, evidence: evidence))
                                             .font(.system(size: 14)).lineSpacing(4).textSelection(.enabled)
+                                            .fixedSize(horizontal: false, vertical: true)
                                     }
                                 }
                             }
@@ -312,7 +328,7 @@ private struct MeetingWorkspaceDetail: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             } side: {
                 VStack(alignment: .leading, spacing: 18) {
-                    listCard("決まったこと", minutes.decisions, citations, empty: "記録なし")
+                    listCard("決まったこと", minutes.decisions, citations, empty: "記録なし", evidence: evidence)
                     WorkspaceCard(title: "宿題") {
                         if minutes.actionItems.isEmpty {
                             Text("記録なし").font(.system(size: 14)).foregroundColor(WorkspaceTheme.muted)
@@ -322,8 +338,9 @@ private struct MeetingWorkspaceDetail: View {
                                 Text(item.mine == true ? "あなた" : (item.owner ?? "担当未定"))
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundColor(item.mine == true ? WorkspaceTheme.chipText : WorkspaceTheme.secondary)
-                                Text(WorkspaceFormat.cited(item.what, allowed: citations))
+                                Text(WorkspaceFormat.cited(item.what, allowed: citations, evidence: evidence))
                                     .font(.system(size: 14)).lineSpacing(3).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                                 Text(item.due.map { "期限 \($0)" } ?? "期限なし")
                                     .font(.system(size: 12)).foregroundColor(WorkspaceTheme.muted)
                             }
@@ -331,7 +348,7 @@ private struct MeetingWorkspaceDetail: View {
                         }
                     }
                     listCard("未解決・要確認", minutes.openQuestions + (accepted?.unresolvedNotes ?? []),
-                             citations, empty: "なし")
+                             citations, empty: "なし", evidence: evidence)
                 }
             }
         } else {
@@ -345,14 +362,16 @@ private struct MeetingWorkspaceDetail: View {
         }
     }
 
-    private func listCard(_ title: String, _ items: [String], _ citations: Set<String>, empty: String) -> some View {
+    private func listCard(_ title: String, _ items: [String], _ citations: Set<String>, empty: String,
+                          evidence: [MeetingEvidence] = []) -> some View {
         WorkspaceCard(title: title) {
             if items.isEmpty {
                 Text(empty).font(.system(size: 14)).foregroundColor(WorkspaceTheme.muted)
             }
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                Text(WorkspaceFormat.cited(item, allowed: citations))
+                Text(WorkspaceFormat.cited(item, allowed: citations, evidence: evidence))
                     .font(.system(size: 14)).lineSpacing(3).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -396,11 +415,12 @@ private struct MeetingWorkspaceDetail: View {
                         Text(row.speaker).font(.system(size: 13, weight: .bold))
                             .frame(width: 130, alignment: .leading)
                         Text(row.text).font(.system(size: 14)).lineSpacing(3).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .padding(.vertical, 7).padding(.horizontal, 10)
                     .background(RoundedRectangle(cornerRadius: 6)
-                        .fill(row.id == scrollTarget ? WorkspaceTheme.chip : Color.clear))
+                        .fill(highlighted.contains(row.id) ? WorkspaceTheme.chip : Color.clear))
                     .id(row.id)
                 }
             }
@@ -437,6 +457,7 @@ private struct MeetingWorkspaceDetail: View {
                 ForEach(snapshot.notes) { note in
                     WorkspaceCard(title: nil) {
                         Text(note.text).font(.system(size: 14)).lineSpacing(3).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                         if let url = WorkspaceFormat.safeExternalURL(note.sourceURL) {
                             Button("出典を開く") { NSWorkspace.shared.open(url) }
                         }
@@ -457,6 +478,76 @@ private struct MeetingWorkspaceDetail: View {
         case .failed?: return "資料を読み取れませんでした。"
         case .ambiguous?: return "この会議の資料の候補が複数あり、決められませんでした。"
         default: return "この会議に紐づく資料はありません。"
+        }
+    }
+}
+
+// MARK: - Sources
+
+/// Which sources the minutes were written from, with counts, and — on
+/// request — how they are combined. Without this the owner cannot tell a
+/// ClawGate-only generation from one cross-checked against Meet.
+private struct MeetingSourcesRow: View {
+    @ObservedObject var model: PetModel
+    let meeting: MeetingRecord
+    let accepted: MeetingAcceptedMinutes?
+    @State private var explain = false
+
+    var body: some View {
+        let sources = accepted?.segments.map(\.source)
+        let local = sources?.filter { $0 == "local" }.count ?? model.meetingTranscript(for: meeting).count
+        let recheck = sources?.filter { $0 == "audio-recheck" }.count ?? 0
+        let external = sources?.filter { $0 != "local" && $0 != "audio-recheck" }.count ?? 0
+        let material = model.googleMaterial(for: meeting)
+        let notes = material?.notes.count ?? 0
+        let unresolved = accepted?.unresolvedNotes.count ?? 0
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 14) {
+                Text("情報源").font(.system(size: 12, weight: .bold)).foregroundColor(WorkspaceTheme.muted)
+                item("ClawGate 文字起こし", "\(local) 発言", ok: local > 0)
+                item("Meet 文字起こし", external > 0 ? "\(external) 発言" : meetStatus(material), ok: external > 0)
+                item("聞き直し", "\(recheck) 件", ok: true)
+                item("要確認", "\(unresolved) 件", ok: unresolved == 0)
+                if notes > 0 { item("Meet メモ", "\(notes) 件（参考のみ）", ok: true) }
+                Spacer()
+                Button(explain ? "閉じる" : "どう使っているか") { explain.toggle() }
+                    .buttonStyle(.link).font(.system(size: 12))
+            }
+            if explain {
+                Text("""
+                ClawGate の文字起こしと Meet の文字起こしは、時刻順に並べてどちらも残します。同じ発言は重複としてまとめ、どちらを根拠にしても辿れます。
+                似た発言なのに数字や否定（〜しない）が食い違う箇所は「要確認」にし、その区間の録音を最大3回・各30秒まで聞き直して別の根拠として添えます。元の文字起こしは書き換えません。
+                Meet の自動メモは取りこぼしの確認にだけ使い、議事録の発言の根拠にはしません。
+                """)
+                .font(.system(size: 12)).lineSpacing(3)
+                .foregroundColor(WorkspaceTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 28).padding(.vertical, 10)
+        .background(WorkspaceTheme.header)
+        .overlay(Divider(), alignment: .bottom)
+    }
+
+    private func item(_ label: String, _ value: String, ok: Bool) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(ok ? WorkspaceTheme.ready : WorkspaceTheme.warning).frame(width: 6, height: 6)
+            Text(label).foregroundColor(WorkspaceTheme.secondary)
+            Text(value).fontWeight(.semibold)
+        }
+        .font(.system(size: 12))
+        .fixedSize()
+    }
+
+    private func meetStatus(_ material: MeetingGoogleMaterials.Snapshot?) -> String {
+        switch material?.status {
+        case .serviceUnavailable?: return "取得できず（Docs API 未有効）"
+        case .permissionDenied?: return "取得できず（権限なし）"
+        case .failed?: return "取得できず"
+        case .ambiguous?: return "候補が複数"
+        case .checking?: return "確認中"
+        case .available?: return "文字起こしなし"
+        default: return meeting.calendarEventID == nil ? "予定と未紐付け" : "なし"
         }
     }
 }
@@ -609,33 +700,27 @@ private struct WorkspaceCard<Content: View>: View {
 }
 
 /// Two columns when the width allows both, otherwise one above the other.
+/// The width comes from outside the scroll view so the first layout is
+/// already the final one.
 private struct AdaptiveColumns<Main: View, Side: View>: View {
+    let width: CGFloat
     let sideWidth: CGFloat
     let minimumMainWidth: CGFloat
     @ViewBuilder let main: Main
     @ViewBuilder let side: Side
-    @State private var width: CGFloat = 0
 
     var body: some View {
-        Group {
-            if width >= sideWidth + minimumMainWidth + 20 {
-                HStack(alignment: .top, spacing: 20) {
-                    main
-                    side.frame(width: sideWidth)
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 18) {
-                    main
-                    side
-                }
+        if width >= sideWidth + minimumMainWidth + 20 {
+            HStack(alignment: .top, spacing: 20) {
+                main.frame(maxWidth: .infinity, alignment: .topLeading)
+                side.frame(width: sideWidth)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 18) {
+                main
+                side
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(GeometryReader { proxy in
-            Color.clear
-                .onAppear { width = proxy.size.width }
-                .onChange(of: proxy.size.width) { width = $0 }
-        })
     }
 }
 
@@ -697,7 +782,35 @@ enum WorkspaceFormat {
 
     /// `[seg-N]` citations become small links to the transcript line; a
     /// token the parser did not accept as evidence stays plain text.
-    static func cited(_ text: String, allowed: Set<String>) -> AttributedString {
+    static func cited(_ text: String, allowed: Set<String>, evidence: [MeetingEvidence] = []) -> AttributedString {
+        var output = inlineCited(text, allowed: allowed)
+        // The parser keeps grounding beside the text, claim by claim. A line
+        // links to every segment whose claim it states (or is part of).
+        let ids = evidenceIDs(for: text, evidence: evidence)
+        guard !ids.isEmpty, !text.contains("[seg-") else { return output }
+        var link = AttributedString("  発言\(ids.count)件")
+        link.link = URL(string: "clawgate-segment://" + ids.map { String($0.dropFirst(4)) }.joined(separator: ","))
+        link.foregroundColor = WorkspaceTheme.accent
+        link.font = .system(size: 12, weight: .semibold)
+        output.append(link)
+        return output
+    }
+
+    static func evidenceIDs(for text: String, evidence: [MeetingEvidence]) -> [String] {
+        let squash = { (value: String) in value.filter { !$0.isWhitespace && !"。、，．.,".contains($0) } }
+        let line = squash(text)
+        guard line.count >= 8 else { return [] }
+        var seen = Set<String>()
+        var ids: [String] = []
+        for item in evidence {
+            let claim = squash(item.claim)
+            guard claim.count >= 8, line.contains(claim) || claim.contains(line) else { continue }
+            for id in item.segmentIds where id.hasPrefix("seg-") && seen.insert(id).inserted { ids.append(id) }
+        }
+        return ids.sorted { (Int($0.dropFirst(4)) ?? 0) < (Int($1.dropFirst(4)) ?? 0) }
+    }
+
+    private static func inlineCited(_ text: String, allowed: Set<String>) -> AttributedString {
         let expression = try! NSRegularExpression(pattern: #"\s*\[(seg-[1-9][0-9]*)\]"#)
         let ns = text as NSString
         var output = AttributedString()
@@ -716,6 +829,23 @@ enum WorkspaceFormat {
         }
         output.append(AttributedString(ns.substring(from: offset)))
         return output
+    }
+
+    /// The Mac's own user is the meeting owner; their name reads as "あなた".
+    static func isOwner(_ name: String) -> Bool {
+        // Word order differs between sources ("Yuzuru Honda" / "Honda Yuzuru"),
+        // so compare the set of name parts rather than the string.
+        let parts = { (value: String) in
+            Set(value.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count >= 2 })
+        }
+        let full = parts(NSFullUserName())
+        let candidate = parts(name)
+        guard full.count >= 2, !candidate.isEmpty else { return false }
+        return candidate == full
+    }
+
+    static func ownerFirst(_ names: [String]) -> [String] {
+        names.filter(isOwner) + names.filter { !isOwner($0) }
     }
 
     static func safeExternalURL(_ raw: String) -> URL? {
