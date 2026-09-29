@@ -313,6 +313,14 @@ becomes `failed` only when the part's attempts run out. After a part's reply,
 the next part waits `PetModel.minutesPartGapSeconds` (20s): on 2026-09-29 the
 Gateway failed every second part sent about six seconds after the first reply.
 
+After a generation of more than one part is accepted, one overview rewrite
+(`meeting-minutes-summary-v1`, `MeetingMinutesSummaryPass`) is requested. Its
+input is only the parts' overviews with the segments they cited, the topic
+headings, decisions and action items; it returns one overview and normalized
+due dates. Every overview sentence must cite segments the part overviews
+already cited, and topics, decisions and open questions are never rewritten.
+A rejected, failed or timed-out rewrite leaves the joined minutes unchanged.
+
 A job's fingerprint covers only the spoken input: the policy version, the
 segments and the unresolved conflict notes. Calendar association, title or
 schedule arriving after the first request keep every written part; the parts

@@ -509,8 +509,14 @@ final class PetModel: NSObject, ObservableObject {
                 // Only minutes act on this so far; every other summon keeps
                 // its existing timeout behavior.
                 guard let owner = self.sharedSummonOwner,
-                      owner.source == Self.minutesSource, owner.phase == .running,
+                      owner.source == Self.minutesSource || owner.source == Self.minutesSummarySource,
+                      owner.phase == .running,
                       self.summonEventMatchesCurrentOwner(runId: eventOwner.runId) else { break }
+                if owner.source == Self.minutesSummarySource {
+                    self.releaseSharedSummon(owner)
+                    self.handleSummaryPassReply("")
+                    break
+                }
                 NSLog("[Pet] minutes run failed: %@", reason)
                 self.failMinutesPart(reason: "Chi が返事を書く前に処理を終えました（\(reason)）")
 
@@ -2871,11 +2877,18 @@ final class PetModel: NSObject, ObservableObject {
     /// A meeting waiting out a retry backoff or the pause between parts is
     /// skipped by the drain until this time.
     private var minutesNotBefore: [String: Date] = [:]
+    /// Meetings whose joined multi-part minutes still await the overview
+    /// rewrite, and the one in flight. In memory only: after a restart the
+    /// joined minutes simply stay as they are.
+    private var summaryPassQueue: [String] = []
+    private var pendingSummaryPass: (id: String, input: MeetingMinutesSummaryPass.Input)?
 #if DEBUG
     private var meetingStoreOverrideForTesting: MeetingStore?
 #endif
 
     static let minutesSource = "minutes"
+    /// The one overview rewrite after a multi-part generation.
+    static let minutesSummarySource = "minutes-summary"
     static let minutesMaxAttempts = 3
     static let minutesRetrySeconds: TimeInterval = 120
     /// Backoff before re-sending a part that failed, by attempts already made.
@@ -2890,7 +2903,7 @@ final class PetModel: NSObject, ObservableObject {
     static let minutesReplyTimeoutSeconds: TimeInterval = 600
 
     static func replyTimeout(for source: String) -> TimeInterval {
-        source == minutesSource ? minutesReplyTimeoutSeconds : summonReplyTimeoutSeconds
+        source == minutesSource || source == minutesSummarySource ? minutesReplyTimeoutSeconds : summonReplyTimeoutSeconds
     }
 
     private func minutesStore() -> MeetingStore {
@@ -2936,6 +2949,8 @@ final class PetModel: NSObject, ObservableObject {
               connectionState == .connected,
               sessionKey != nil,
               !isSummonBusy else { return }
+        guard pendingSummaryPass == nil else { return }
+        if sendNextSummaryPass() { return }
         let now = Date()
         guard let record = Self.pendingMinutesOrder(minutesStore().all())
             .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now }) else { return }
@@ -3135,6 +3150,49 @@ final class PetModel: NSObject, ObservableObject {
         requestMinutes(for: record)
     }
 
+    /// Sends the next queued overview rewrite. Returns whether one went out.
+    private func sendNextSummaryPass() -> Bool {
+        while let id = summaryPassQueue.first {
+            summaryPassQueue.removeFirst()
+            let store = minutesStore()
+            guard let record = store.load(id: id), record.minutesState == "ready",
+                  let accepted = store.loadAcceptedMinutes(id: id),
+                  let job = MeetingMinutesJob.load(store: store, id: id) else { continue }
+            let parts = job.completed.compactMap { $0 }
+            let input = MeetingMinutesSummaryPass.input(for: accepted.minutes, parts: parts, record: record)
+            guard let message = try? MeetingMinutesSummaryPass.buildMessage(input: input) else { continue }
+            pendingSummaryPass = (id, input)
+            sendSummon(message, source: Self.minutesSummarySource)
+            if sharedSummonOwner?.source != Self.minutesSummarySource {
+                // Not admitted; try again on the next drain.
+                pendingSummaryPass = nil
+                summaryPassQueue.insert(id, at: 0)
+                return false
+            }
+            return true
+        }
+        return false
+    }
+
+    /// A rejected or failed rewrite leaves the joined minutes as they are.
+    private func handleSummaryPassReply(_ text: String) {
+        guard let pending = pendingSummaryPass else { return }
+        pendingSummaryPass = nil
+        defer { drainPendingMinutes() }
+        let store = minutesStore()
+        guard let record = store.load(id: pending.id),
+              let accepted = store.loadAcceptedMinutes(id: pending.id),
+              let job = MeetingMinutesJob.load(store: store, id: pending.id) else { return }
+        do {
+            let reply = try MeetingMinutesSummaryPass.parse(text, input: pending.input)
+            let rewritten = MeetingMinutesSummaryPass.apply(reply, to: accepted.minutes, parts: job.completed.compactMap { $0 })
+            try store.saveValidatedMinutes(rewritten, for: record, job: job)
+            meetingsRevision += 1
+        } catch {
+            NSLog("[Pet] minutes overview rewrite kept the joined overview: %@", "\(error)")
+        }
+    }
+
     private func handleMinutesReply(_ text: String) {
         guard let id = pendingMinutesMeetingID else { return }
         defer { drainPendingMinutes() }
@@ -3167,6 +3225,9 @@ final class PetModel: NSObject, ObservableObject {
             finishMinutes(id: id, state: "ready", error: nil)
             addNotificationEntry(text: "議事録ができました: \(accepted.title ?? record.title ?? "会議")",
                                  source: Self.minutesSource)
+            if MeetingMinutesSummaryPass.needed(partCount: job.envelopes.count), !summaryPassQueue.contains(id) {
+                summaryPassQueue.append(id)
+            }
         } catch {
             // Keep the head of what came back: without it "notJSON" says
             // nothing about whether the model refused, chatted, or truncated.
@@ -3197,6 +3258,10 @@ final class PetModel: NSObject, ObservableObject {
     private func appendSummonEntry(text: String, source: String, parseAsStructured: Bool = false) {
         if source == Self.minutesSource {
             handleMinutesReply(text)
+            return
+        }
+        if source == Self.minutesSummarySource {
+            handleSummaryPassReply(text)
             return
         }
         if source == "log_scene_naming" {
