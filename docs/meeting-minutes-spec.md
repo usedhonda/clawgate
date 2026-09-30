@@ -267,9 +267,11 @@ call ends — long enough for the final audio chunk to close and be transcribed.
 The request **waits its turn**: it never preempts a Log question or scene
 naming. A `pending` record is a durable queue entry, so a busy summon slot,
 disconnect, or app restart does not consume a generation attempt. When the
-slot is released or the gateway reconnects, queued meetings drain oldest-first
-by meeting end time, one at a time, and each request is dispatched at most
-`PetModel.minutesMaxAttempts` times. A real send failure, parser rejection, or
+slot is released or the gateway reconnects, queued meetings drain one at a time
+with explicit owner requests first. Explicit requests are FIFO by their durable
+request timestamp; automatic refreshes and legacy jobs without that timestamp
+remain FIFO by meeting end time. An active part is never preempted, and each
+request is dispatched at most `PetModel.minutesMaxAttempts` times. A real send failure, parser rejection, or
 reply timeout remains a visible `failed` reason that the owner can act on by
 asking again; slot waits are never reported as generation failures.
 A retry never removes the last accepted parsed minutes: until a replacement
@@ -374,3 +376,13 @@ refetched explicitly. API-unavailable failures are reconsidered after 30 minutes
 permission failures require explicit refresh/reconnect. Failed reads preserve
 prior content. Fetching materials must not silently regenerate user-edited
 supplemental inputs.
+
+### Prompt-only metadata compaction
+
+The model request omits per-segment source URLs and duplicate speaker fields,
+and omits zero local-offset placeholders on external transcript lines. Source
+IDs, speech text, source type, captured timestamps, locators and meaningful
+audio offsets are unchanged. Durable job and accepted bundles retain the
+complete source metadata for provenance and navigation. The JSON writer does
+not escape slashes. This reduces input overhead without reducing coverage;
+it does not itself guarantee a particular model response duration.

@@ -259,7 +259,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             // Called on the ambient state queue; the model is main-only.
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesAfterCallSeconds) {
                 guard let self, let fresh = MeetingStore().load(id: record.id) else { return }
-                self.petModel.requestMinutes(for: fresh)
+                self.petModel.requestMinutes(for: fresh, markUserRequested: false)
             }
         }
     }

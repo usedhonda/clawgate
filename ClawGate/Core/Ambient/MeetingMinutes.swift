@@ -258,12 +258,80 @@ enum MeetingMinutesPrompt {
     /// a delimiter, so transcript text cannot break out of the data section.
     static func buildMessage(envelope: MeetingMinutesEnvelope) throws -> String {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(envelope)
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(MeetingMinutesPromptEnvelope(envelope: envelope))
         guard let json = String(data: data, encoding: .utf8) else {
             throw MeetingMinutesError.encodingFailed
         }
         return universalPrefix() + "\n\n" + json
+    }
+}
+
+/// Prompt-only representation of the envelope. The durable envelope remains
+/// lossless; this projection removes repeated Meet URLs and redundant metadata
+/// only at the model boundary.
+private struct MeetingMinutesPromptEnvelope: Encodable {
+    let policyVersion: String
+    let requestId: String
+    let meetingId: String
+    let startedAt: String
+    let endedAt: String
+    let timeZone: String
+    let title: String?
+    let conferenceCode: String?
+    let participantsSeen: [String]
+    let calendarEventID: String?
+    let scheduledStartAt: String?
+    let scheduledEndAt: String?
+    let segments: [MeetingMinutesPromptSegment]
+    let unresolvedNotes: [String]?
+    let coverageHints: [String]?
+    let supplementalMaterials: [MeetingSupplementalMaterial]?
+
+    init(envelope: MeetingMinutesEnvelope) {
+        policyVersion = envelope.policyVersion
+        requestId = envelope.requestId
+        meetingId = envelope.meetingId
+        startedAt = envelope.startedAt
+        endedAt = envelope.endedAt
+        timeZone = envelope.timeZone
+        title = envelope.title
+        conferenceCode = envelope.conferenceCode
+        participantsSeen = envelope.participantsSeen
+        calendarEventID = envelope.calendarEventID
+        scheduledStartAt = envelope.scheduledStartAt
+        scheduledEndAt = envelope.scheduledEndAt
+        segments = envelope.segments.map(MeetingMinutesPromptSegment.init)
+        unresolvedNotes = envelope.unresolvedNotes
+        coverageHints = envelope.coverageHints
+        supplementalMaterials = envelope.supplementalMaterials
+    }
+}
+
+private struct MeetingMinutesPromptSegment: Encodable {
+    let id: String
+    let capturedAt: Double?
+    let startSeconds: Double?
+    let endSeconds: Double?
+    let speaker: String?
+    let stream: String?
+    let speakerName: String?
+    let text: String
+    let source: String
+    let sourceLocator: String?
+
+    init(segment: MeetingMinutesSegment) {
+        id = segment.id
+        capturedAt = segment.capturedAt
+        let isLocal = segment.source == "local"
+        startSeconds = isLocal || segment.startSeconds != 0 ? segment.startSeconds : nil
+        endSeconds = isLocal || segment.endSeconds != 0 ? segment.endSeconds : nil
+        speaker = segment.speaker == segment.speakerName ? nil : segment.speaker
+        stream = segment.stream
+        speakerName = segment.speakerName
+        text = segment.text
+        source = segment.source
+        sourceLocator = segment.sourceLocator
     }
 }
 

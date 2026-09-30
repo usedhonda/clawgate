@@ -2893,7 +2893,7 @@ final class PetModel: NSObject, ObservableObject {
                         let fingerprint = MeetingMinutesJob.fingerprint(envelope)
                         if store.loadAcceptedMinutes(id: record.id)?.fingerprint != fingerprint &&
                            record.minutesState != "failed" {
-                            self.regenerateMinutes(for: record)
+                            self.requestMinutes(for: record, markUserRequested: false)
                         }
                     }
                     self.meetingsRevision += 1
@@ -2984,7 +2984,8 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
     /// a Log question the owner just asked matters more than a background write.
-    func requestMinutes(for record: MeetingRecord, preservingMaterials: Bool = false) {
+    func requestMinutes(for record: MeetingRecord, preservingMaterials: Bool = false,
+                        markUserRequested: Bool = true) {
         // A second UI refresh/request for the same pending record is only a
         // queue poke. It must never dispatch a duplicate summon.
         if pendingMinutesMeetingID == record.id { return }
@@ -3004,10 +3005,13 @@ final class PetModel: NSObject, ObservableObject {
         do {
             if let existing = MeetingMinutesJob.load(store: minutesStore(), id: record.id),
                existing.fingerprint == fingerprint {
-                try existing.refreshingMetadata(from: envelope).save(store: minutesStore(), id: record.id)
+                var refreshed = existing.refreshingMetadata(from: envelope)
+                if markUserRequested { refreshed.userRequestedAt = Date() }
+                try refreshed.save(store: minutesStore(), id: record.id)
             } else {
                 try MeetingMinutesJob(fingerprint: fingerprint,
-                    envelopes: MeetingMinutes.chunked(envelope), completed: [], supplementalSnapshot: envelope.supplementalMaterials).save(store: minutesStore(), id: record.id)
+                    envelopes: MeetingMinutes.chunked(envelope), completed: [], supplementalSnapshot: envelope.supplementalMaterials,
+                    userRequestedAt: markUserRequested ? Date() : nil).save(store: minutesStore(), id: record.id)
             }
         } catch {
             finishMinutes(id: record.id, state: "failed", error: "生成の準備を保存できませんでした。旧議事録は保持しています。")
@@ -3031,10 +3035,18 @@ final class PetModel: NSObject, ObservableObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait + 0.1) { [weak self] in self?.drainPendingMinutes() }
             return
         }
-        if sendNextSummaryPass() { return }
         let now = Date()
-        guard let record = Self.pendingMinutesOrder(minutesStore().all())
-            .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now }) else { return }
+        let queuedRecord = Self.pendingMinutesOrder(minutesStore().all(), store: minutesStore())
+            .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now })
+        // An explicit owner request is allowed ahead of a background overview
+        // rewrite. This only chooses the next idle slot; active RPCs remain
+        // untouched. Automatic/legacy parts keep summary priority.
+        let queuedIsExplicit = queuedRecord.flatMap {
+            MeetingMinutesJob.load(store: minutesStore(), id: $0.id)?.userRequestedAt
+        } != nil
+        if !queuedIsExplicit,
+           sendNextSummaryPass() { return }
+        guard let record = queuedRecord else { return }
         minutesNotBefore[record.id] = nil
         let fullEnvelope = minutesEnvelope(for: record)
         // Review only tightly aligned conflicting speech, off the UI thread.
@@ -3059,7 +3071,7 @@ final class PetModel: NSObject, ObservableObject {
                     if MeetingConflictReview.load(record: record, fingerprint: reviewKey, store: store) == nil {
                         self.finishMinutes(id: record.id, state: "failed", error: "再認識結果を保存できませんでした")
                         self.drainPendingMinutes()
-                    } else { self.requestMinutes(for: record) }
+                    } else { self.requestMinutes(for: record, markUserRequested: false) }
                 }
             }
             return
@@ -3128,11 +3140,26 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
-    /// Stable chronological ordering is kept separate so queue fairness can be
-    /// checked without a live socket or wall clock.
-    static func pendingMinutesOrder(_ records: [MeetingRecord]) -> [MeetingRecord] {
-        records.filter { $0.minutesState == "pending" }
-            .sorted {
+    /// Explicit owner requests run FIFO ahead of automatic/legacy jobs;
+    /// automatic and legacy entries retain chronological FIFO ordering.
+    static func pendingMinutesOrder(_ records: [MeetingRecord], store: MeetingStore = MeetingStore()) -> [MeetingRecord] {
+        let pending = records.filter { $0.minutesState == "pending" }
+        let requestDates: [String: Date?] = Dictionary(uniqueKeysWithValues: pending.map { record in
+            (record.id, MeetingMinutesJob.load(store: store, id: record.id)?.userRequestedAt)
+        })
+        return pending.sorted {
+                let leftRequest = requestDates[$0.id] ?? nil
+                let rightRequest = requestDates[$1.id] ?? nil
+                switch (leftRequest, rightRequest) {
+                case let (left?, right?) where left != right:
+                    return left < right
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                default:
+                    break
+                }
                 let leftEnd = $0.endedAt ?? $0.startedAt
                 let rightEnd = $1.endedAt ?? $1.startedAt
                 if leftEnd != rightEnd { return leftEnd < rightEnd }
@@ -3186,7 +3213,7 @@ final class PetModel: NSObject, ObservableObject {
     func resumeMinutes(for record: MeetingRecord) {
         minutesAttempts[record.id] = 0
         minutesNotBefore[record.id] = nil
-        requestMinutes(for: record, preservingMaterials: true)
+        requestMinutes(for: record, preservingMaterials: true, markUserRequested: true)
     }
 
     /// Every meeting on disk, newest first.
@@ -3230,13 +3257,14 @@ final class PetModel: NSObject, ObservableObject {
             let envelope = minutesEnvelope(for: record)
             do {
                 try MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope),
-                    envelopes: MeetingMinutes.chunked(envelope), completed: [], supplementalSnapshot: envelope.supplementalMaterials).save(store: minutesStore(), id: record.id)
+                    envelopes: MeetingMinutes.chunked(envelope), completed: [], supplementalSnapshot: envelope.supplementalMaterials,
+                    userRequestedAt: Date()).save(store: minutesStore(), id: record.id)
             } catch {
                 finishMinutes(id: record.id, state: "failed", error: "生成ジョブを保存できませんでした")
                 return
             }
         }
-        requestMinutes(for: record)
+        requestMinutes(for: record, markUserRequested: true)
     }
 
     /// Sends the next queued overview rewrite. Returns whether one went out.

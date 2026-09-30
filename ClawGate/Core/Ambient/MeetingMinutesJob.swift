@@ -8,6 +8,8 @@ struct MeetingMinutesJob: Codable {
     let envelopes: [MeetingMinutesEnvelope]
     var completed: [MeetingMinutes?]
     var supplementalSnapshot: [MeetingSupplementalMaterial]? = nil
+    /// Explicit owner request marker. Missing on legacy and automatic jobs.
+    var userRequestedAt: Date? = nil
 
     var allSupplementalMaterials: [MeetingSupplementalMaterial]? { supplementalSnapshot ?? envelopes.first?.supplementalMaterials }
 
@@ -54,7 +56,8 @@ struct MeetingMinutesJob: Codable {
     func refreshingMetadata(from envelope: MeetingMinutesEnvelope) -> MeetingMinutesJob {
         let fresh = MeetingMinutes.chunked(envelope)
         guard fresh.count == envelopes.count else { return self }
-        return MeetingMinutesJob(fingerprint: fingerprint, envelopes: fresh, completed: completed, supplementalSnapshot: supplementalSnapshot)
+        return MeetingMinutesJob(fingerprint: fingerprint, envelopes: fresh, completed: completed,
+                                 supplementalSnapshot: supplementalSnapshot, userRequestedAt: userRequestedAt)
     }
 
     static func load(store: MeetingStore, id: String) -> MeetingMinutesJob? {

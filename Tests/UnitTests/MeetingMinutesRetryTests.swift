@@ -147,4 +147,43 @@ final class MeetingMinutesRetryTests: XCTestCase {
         XCTAssertEqual(job.completed.count, 1)
         XCTAssertEqual(job.next?.calendarEventID, "event-1")
     }
+
+    func testExplicitRequestsArePrioritizedAndPersistAcrossMetadataRefresh() throws {
+        let legacy = MeetingRecord(id: "legacy", source: "meet", startedAt: 1_790_000_000,
+                                   endedAt: 1_790_000_100, timeZone: "UTC", title: "legacy",
+                                   conferenceCode: nil, participants: [], minutesState: "pending", minutesError: nil)
+        let automatic = MeetingRecord(id: "automatic", source: "meet", startedAt: 1_790_000_200,
+                                      endedAt: 1_790_000_300, timeZone: "UTC", title: "automatic",
+                                      conferenceCode: nil, participants: [], minutesState: "pending", minutesError: nil)
+        let explicit = MeetingRecord(id: "explicit", source: "meet", startedAt: 1_790_000_400,
+                                     endedAt: 1_790_000_500, timeZone: "UTC", title: "explicit",
+                                     conferenceCode: nil, participants: [], minutesState: "pending", minutesError: nil)
+        let explicitLater = MeetingRecord(id: "explicit-later", source: "meet", startedAt: 1_789_999_400,
+                                          endedAt: 1_789_999_500, timeZone: "UTC", title: "explicit-later",
+                                          conferenceCode: nil, participants: [], minutesState: "pending", minutesError: nil)
+        [legacy, automatic, explicit, explicitLater].forEach(store.save)
+        let envelope = MeetingMinutesEnvelope.build(record: explicit, segments: model.meetingTranscriptProvider?(explicit) ?? [])
+        try MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope), envelopes: MeetingMinutes.chunked(envelope),
+                              completed: [nil], userRequestedAt: Date(timeIntervalSince1970: 1_790_000_600))
+            .save(store: store, id: explicit.id)
+        let autoEnvelope = MeetingMinutesEnvelope.build(record: automatic, segments: model.meetingTranscriptProvider?(automatic) ?? [])
+        try MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(autoEnvelope), envelopes: MeetingMinutes.chunked(autoEnvelope), completed: [nil])
+            .save(store: store, id: automatic.id)
+        let legacyEnvelope = MeetingMinutesEnvelope.build(record: legacy, segments: model.meetingTranscriptProvider?(legacy) ?? [])
+        try MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(legacyEnvelope), envelopes: MeetingMinutes.chunked(legacyEnvelope), completed: [nil])
+            .save(store: store, id: legacy.id)
+        let laterEnvelope = MeetingMinutesEnvelope.build(record: explicitLater, segments: model.meetingTranscriptProvider?(explicitLater) ?? [])
+        try MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(laterEnvelope), envelopes: MeetingMinutes.chunked(laterEnvelope), completed: [nil],
+                              userRequestedAt: Date(timeIntervalSince1970: 1_790_000_700))
+            .save(store: store, id: explicitLater.id)
+
+        XCTAssertEqual(PetModel.pendingMinutesOrder([legacy, automatic, explicit, explicitLater], store: store).map(\.id),
+                       [explicit.id, explicitLater.id, legacy.id, automatic.id])
+        XCTAssertNil(MeetingMinutesJob.load(store: store, id: legacy.id)?.userRequestedAt,
+                     "legacy jobs without the key remain automatic FIFO entries")
+        var refreshed = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: explicit.id))
+        refreshed = refreshed.refreshingMetadata(from: envelope)
+        XCTAssertEqual(refreshed.userRequestedAt, Date(timeIntervalSince1970: 1_790_000_600))
+        XCTAssertEqual(refreshed.completed.count, 1, "metadata refresh must preserve the checkpoint")
+    }
 }
