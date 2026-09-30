@@ -2931,6 +2931,7 @@ final class PetModel: NSObject, ObservableObject {
     }
     /// The meeting whose minutes are in flight, if any.
     private var conflictReviewInFlight = Set<String>()
+    @Published private var minutesActivityStartedAt: Date?
     private var pendingMinutesMeetingID: String?
     private var pendingMinutesSegmentIDs: Set<String> = []
     /// Attempts per meeting, so a permanently busy slot gives up instead of
@@ -2980,6 +2981,32 @@ final class PetModel: NSObject, ObservableObject {
         if let meetingStoreOverrideForTesting { return meetingStoreOverrideForTesting }
 #endif
         return MeetingStore()
+    }
+
+    /// The actual scheduler phase, not an estimate based on a pending record.
+    func minutesActivity(for record: MeetingRecord, now: Date = Date()) -> (label: String, elapsedSeconds: Int?)? {
+        let elapsed = minutesActivityStartedAt.map { max(0, Int(now.timeIntervalSince($0))) }
+        guard record.minutesState == "pending" || pendingSummaryPass?.id == record.id else { return nil }
+        if connectionState != .connected { return ("接続の回復待ち", nil) }
+        if pendingSummaryPass?.id == record.id {
+            return ("会議全体の概要を統合中", elapsed)
+        }
+        guard record.minutesState == "pending" else { return nil }
+        if pendingMinutesMeetingID == record.id {
+            let label = sharedSummonOwner?.phase == .awaitingRunId ? "生成依頼を送信中" : "AIがこのパートの議事録を生成中"
+            return (label, elapsed)
+        }
+        if conflictReviewInFlight.contains(record.id) { return ("食い違う区間の音声を再認識中", nil) }
+        if let until = minutesNotBefore[record.id], until > now {
+            let seconds = max(1, Int(ceil(until.timeIntervalSince(now))))
+            return (record.minutesError?.contains("再試行") == true ? "再試行まであと\(seconds)秒" : "次のパート開始まであと\(seconds)秒", nil)
+        }
+        if pendingMinutesMeetingID != nil || pendingSummaryPass != nil { return ("別の議事録処理の完了待ち", nil) }
+        if isSummonBusy { return ("他の依頼の完了待ち", nil) }
+        if minutesSessionNotBefore > now {
+            return ("次のパート開始まであと\(max(1, Int(ceil(minutesSessionNotBefore.timeIntervalSince(now)))))秒", nil)
+        }
+        return ("生成の開始準備中（順番待ち）", nil)
     }
 
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
@@ -3127,6 +3154,7 @@ final class PetModel: NSObject, ObservableObject {
         pendingMinutesSegmentIDs = Set(envelope.segments.map(\.id))
         markMinutes(id: record.id, state: "pending", error: nil)
         minutesRunSawDelta = false
+        minutesActivityStartedAt = Date()
         sendSummon(message, source: Self.minutesSource)
         // A failed admission remains pending and is retried by the next slot
         // release/reconnect; it is not a generation failure.
@@ -3280,6 +3308,7 @@ final class PetModel: NSObject, ObservableObject {
             guard let message = try? MeetingMinutesSummaryPass.buildMessage(input: input) else { continue }
             pendingSummaryPass = (id, input)
             minutesRunSawDelta = false
+            minutesActivityStartedAt = Date()
             sendSummon(message, source: Self.minutesSummarySource)
             if sharedSummonOwner?.source != Self.minutesSummarySource {
                 // Not admitted; try again on the next drain.

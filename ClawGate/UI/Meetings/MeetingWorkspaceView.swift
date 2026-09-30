@@ -775,9 +775,26 @@ private struct MeetingStatusBanner: View {
             HStack(alignment: .center, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(title).font(.system(size: 15, weight: .bold))
-                    if let detail = bannerDetail {
-                        Text(detail).font(.system(size: 13)).lineSpacing(3)
+                    if model.minutesActivity(for: meeting) != nil {
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            if let activity = model.minutesActivity(for: meeting, now: context.date) {
+                                let elapsed = activity.elapsedSeconds.map { "（\($0 / 60)分\($0 % 60)秒経過）" } ?? ""
+                                Text(activity.label + elapsed).font(.system(size: 13, weight: .semibold))
+                            }
+                        }
+                    }
+                    if let detail = bannerDetail(done: done, total: total) {
+                        Text(detail.summary).font(.system(size: 13)).lineSpacing(3)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let technicalDetails = detail.technicalDetails {
+                            DisclosureGroup("技術的な詳細") {
+                                Text(technicalDetails)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .font(.system(size: 12))
+                        }
                     }
                     if total > 1 {
                         HStack(spacing: 4) {
@@ -815,19 +832,17 @@ private struct MeetingStatusBanner: View {
         case "failed":
             return total > 1 && done > 0 ? "途中で止まりました（\(total) パート中 \(done) パート完成）" : "議事録を作れませんでした"
         case "ready":
-            return nil
+            return model.minutesActivity(for: meeting) == nil ? nil : "議事録の概要を仕上げています"
         default:
             return model.meetingTranscript(for: meeting).isEmpty ? nil : "議事録はまだありません"
         }
     }
 
-    private var bannerDetail: String? {
-        if let error = meeting.minutesError, !error.isEmpty { return error }
-        switch meeting.minutesState {
-        case "pending": return "完成したパートは残したまま、順に作っています。"
-        case "failed": return "完成した部分は残っています。続きから作り直せます。"
-        default: return nil
-        }
+    private func bannerDetail(done: Int, total: Int) -> MeetingMinutesFailurePresentation? {
+        MeetingMinutesFailurePresentation.make(error: meeting.minutesError,
+                                                state: meeting.minutesState,
+                                                completedParts: done,
+                                                totalParts: total)
     }
 
     @ViewBuilder
@@ -850,6 +865,57 @@ private struct MeetingStatusBanner: View {
                     .buttonStyle(.borderedProminent).controlSize(.large)
             }
         }
+    }
+}
+
+/// User-facing wording for a failed generation. The stored error remains
+/// available on demand, but the primary banner never exposes model JSON or a
+/// Swift error's associated-value dump.
+struct MeetingMinutesFailurePresentation: Equatable {
+    let summary: String
+    let technicalDetails: String?
+
+    static func make(error: String?, state: String, completedParts: Int, totalParts: Int) -> Self? {
+        let raw = error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard state == "failed" || state == "pending" else { return nil }
+
+        let progress: String
+        if totalParts > 1 && completedParts > 0 {
+            progress = "完成済みの \(completedParts) パートは残っています。"
+        } else {
+            progress = ""
+        }
+
+        if state == "pending" {
+            return Self(summary: progress.isEmpty ? "完成したパートは保存し、残りを順番に進めます。" : progress,
+                        technicalDetails: raw.isEmpty ? nil : raw)
+        }
+
+        let reason: String
+        let lower = raw.lowercased()
+        if raw.contains("invalidEvidence") {
+            reason = "引用の確認に失敗しました。議事録の根拠を確認できませんでした。"
+        } else if raw.contains("notJSON") {
+            reason = "モデルの返答を議事録として読み取れませんでした。"
+        } else if raw.contains("policyVersionMismatch") {
+            reason = "議事録の形式が現在の仕様と一致しませんでした。"
+        } else if lower.contains("timeout") || lower.contains("timed out") || raw.contains("時間切れ") || raw.contains("秒以内に返") || raw.contains("返事が返ってきません") {
+            reason = "生成が時間内に完了しませんでした。"
+        } else if lower.contains("sendfailed") || lower.contains("send failed") || raw.contains("送信に失敗") {
+            reason = "議事録の生成依頼を送信できませんでした。"
+        } else {
+            reason = "議事録の生成に失敗しました。"
+        }
+
+        let next: String
+        if progress.isEmpty {
+            next = "自動再試行は行いません。必要なら「もう一度作る」を選んでください。"
+        } else if completedParts < totalParts {
+            next = "\(progress) 失敗した残りのパートだけ続きから作れます。"
+        } else {
+            next = "自動再試行は行いません。必要なら「最初から作り直す」を選んでください。"
+        }
+        return Self(summary: "\(reason) \(next)", technicalDetails: raw.isEmpty ? nil : raw)
     }
 }
 

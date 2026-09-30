@@ -194,6 +194,9 @@ enum MeetingMinutesPrompt {
         `unresolvedNotes` は認識の食い違い候補です。根拠を比較し、解決できない数字を断定しないでください。
         sourceLocator の calendar-relative 時刻は予定からの概算で、録音時刻の証明ではありません。
         入力が会議の一部なら、この部分の内容を詳細に残し、会議全体を見たと主張しないでください。
+        入力範囲の注意書き（例: 「前半の発言原文が今回の入力に含まれない」や「この区間しか見えていない」）は
+        UI が表示するスコープ情報であり、議事録の summary・topics・decisions・actionItems・openQuestions の事実として
+        記録してはいけません。これらの項目は発言に根拠がある内容だけにしてください。
 
         事実根拠の境界: 会議での発言・決定・宿題の根拠は `segments` です。資料は上記の補足・用語訂正に限り、資料引用を添えて使ってください。
         カレンダーの照合は依頼前に行われています。外部の予定を検索・推測して結び付けないでください。
@@ -226,10 +229,12 @@ enum MeetingMinutesPrompt {
         `openQuestions` に残してください。Google Meet のノートは補助的な網羅ヒントであり、発言本文より
         強い根拠ではありません。
 
-        すべての概要・議題の要点・決定・やること・未解決事項には `evidence` で原文と同じ
-        `claim` を一つずつ挙げ、根拠の `segments[].id` を `segmentIds` に入れてください。
-        `summary` が複数文のときは、文ごとに分けて挙げてかまいません（そのほうが根拠が
-        はっきりします）。
+        すべての概要・議題の要点・決定・やること・未解決事項には `evidence` で本文の各項目を一つずつ参照し、
+        根拠の `segments[].id` を `segmentIds` に入れてください。
+        返答では本文を繰り返さず、`claim` の代わりに対応する本文の位置を示す `claimRef`（例: `summary/0`,
+        `topics/0/points/0`, `decisions/0`, `actionItems/0/what`, `openQuestions/0`）を使ってください。
+        `claimRef` は必ず実在する本文を指し、推測した参照・範囲外の添字・本文と異なる `claim` の併記は禁止です。
+        `summary` が複数文のときは、文ごとに `summary/0`, `summary/1` のように分けて必ず引用してください。
         発話に根拠のない項目を作らず、IDを推測しないでください。
 
         根拠が足りないとき（発言がほとんど無い、文字化けばかり等）は、項目を創作せず
@@ -245,7 +250,7 @@ enum MeetingMinutesPrompt {
             "decisions": ["決まったこと"],
             "actionItems": [{"what": "やること", "owner": "担当者かnull", "due": "期限かnull", "mine": false}],
             "openQuestions": ["未解決のこと"],
-            "evidence": [{"claim": "決まったこと", "segmentIds": ["seg-1"], "materialIds": []}],
+            "evidence": [{"claimRef": "decisions/0", "segmentIds": ["seg-1"], "materialIds": []}],
             "attendance": {"present": ["いた人"], "absent": [], "calendarEventId": null},
             "language": "ja"
           },
@@ -359,6 +364,23 @@ struct MeetingEvidence: Codable, Equatable {
     let claim: String
     let segmentIds: [String]
     var materialIds: [String]? = nil
+    /// Optional model-side path used to avoid repeating the claim text. The
+    /// parser expands it to the durable `claim` before validation/storage;
+    /// legacy claim-only replies remain valid for already queued jobs.
+    let claimRef: String?
+
+    init(claim: String, segmentIds: [String], materialIds: [String]? = nil, claimRef: String? = nil) {
+        self.claim = claim; self.segmentIds = segmentIds; self.materialIds = materialIds; self.claimRef = claimRef
+    }
+
+    private enum CodingKeys: String, CodingKey { case claim, segmentIds, materialIds, claimRef }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        claim = try c.decodeIfPresent(String.self, forKey: .claim) ?? ""
+        segmentIds = try c.decode([String].self, forKey: .segmentIds)
+        materialIds = try c.decodeIfPresent([String].self, forKey: .materialIds)
+        claimRef = try c.decodeIfPresent(String.self, forKey: .claimRef)
+    }
 }
 
 struct MeetingMinutes: Codable, Equatable {
@@ -508,9 +530,14 @@ enum MeetingMinutesParser {
         switch reply.outcome {
         case "answer":
             guard let minutes = reply.minutes else { throw MeetingMinutesError.outcomeContradictsBody }
-            guard let evidence = minutes.evidence else {
+            guard let rawEvidence = minutes.evidence else {
                 throw MeetingMinutesError.invalidEvidence(claim: nil, reason: "evidence 配列がありません")
             }
+            let evidence = try resolveEvidence(rawEvidence, in: minutes)
+            let normalizedMinutes = MeetingMinutes(title: minutes.title, summary: minutes.summary, topics: minutes.topics,
+                                         decisions: minutes.decisions, actionItems: minutes.actionItems,
+                                         openQuestions: minutes.openQuestions, evidence: evidence,
+                                         attendance: minutes.attendance, language: minutes.language)
             // The summary is a roll-up of several sentences, so it is checked
             // sentence by sentence rather than as one string. Demanding that a
             // four-sentence paragraph reappear verbatim as a single `claim` was
@@ -518,9 +545,9 @@ enum MeetingMinutesParser {
             // 2026-09-24: the model had cited each of its sentences separately,
             // with real segment ids, which is the stricter thing to do. Every
             // sentence still has to be grounded — nothing ungrounded passes.
-            let claims = summarySentences(minutes.summary)
-                + minutes.topics.flatMap(\.points) + minutes.decisions
-                + minutes.actionItems.map(\.what) + minutes.openQuestions
+            let claims: [String] = summarySentences(normalizedMinutes.summary)
+                + normalizedMinutes.topics.flatMap { $0.points } + normalizedMinutes.decisions
+                + normalizedMinutes.actionItems.map { $0.what } + normalizedMinutes.openQuestions
             for claim in claims where !claim.isEmpty {
                 // Reported separately so a failure says which rule broke: a
                 // claim nobody cited, a citation with no segments, or segment
@@ -530,8 +557,8 @@ enum MeetingMinutesParser {
                     throw MeetingMinutesError.invalidEvidence(
                         claim: claim, reason: "evidence にこの主張の引用がありません")
                 }
-                let speechRequired = summarySentences(minutes.summary) + minutes.decisions + minutes.actionItems.map(\.what) + minutes.openQuestions
-                let materialOnly = claim.hasPrefix("【資料補足】") && minutes.topics.flatMap(\.points).contains(claim) && !speechRequired.contains(claim)
+                let speechRequired = summarySentences(normalizedMinutes.summary) + normalizedMinutes.decisions + normalizedMinutes.actionItems.map { $0.what } + normalizedMinutes.openQuestions
+                let materialOnly = claim.hasPrefix("【資料補足】") && normalizedMinutes.topics.flatMap { $0.points }.contains(claim) && !speechRequired.contains(claim)
                 guard cited.contains(where: { item in
                     let materials = item.materialIds ?? []
                     let validMaterials = materials.allSatisfy { validMaterialIds.contains($0) }
@@ -543,13 +570,54 @@ enum MeetingMinutesParser {
                         reason: "segmentIds / materialIds がないか、この会議にない出典を参照しています")
                 }
             }
-            return minutes
+            return normalizedMinutes
         case "insufficientEvidence":
             guard reply.minutes == nil else { throw MeetingMinutesError.outcomeContradictsBody }
             return nil
         default:
             throw MeetingMinutesError.unknownOutcome(reply.outcome)
         }
+    }
+
+    private static func resolveEvidence(_ raw: [MeetingEvidence], in minutes: MeetingMinutes) throws -> [MeetingEvidence] {
+        try raw.map { item in
+            guard let ref = item.claimRef else {
+                guard !item.claim.isEmpty else { throw MeetingMinutesError.invalidEvidence(claim: nil, reason: "claim または claimRef がありません") }
+                return item
+            }
+            guard let resolved = claim(at: ref, in: minutes) else {
+                throw MeetingMinutesError.invalidEvidence(claim: item.claim.isEmpty ? nil : item.claim, reason: "claimRef が不正または範囲外です")
+            }
+            if !item.claim.isEmpty && item.claim != resolved {
+                throw MeetingMinutesError.invalidEvidence(claim: item.claim, reason: "claim と claimRef の主張が一致しません")
+            }
+            return MeetingEvidence(claim: resolved, segmentIds: item.segmentIds, materialIds: item.materialIds)
+        }
+    }
+
+    private static func claim(at ref: String, in minutes: MeetingMinutes) -> String? {
+        let parts = ref.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard !parts.isEmpty else { return nil }
+        func indexed(_ indexPart: String, _ values: [String]) -> String? {
+            guard let index = Int(indexPart), index >= 0, index < values.count else { return nil }
+            return values[index]
+        }
+        if parts.count == 2 && parts[0] == "summary" {
+            return indexed(parts[1], summarySentences(minutes.summary))
+        }
+        if parts.count == 4 && parts[0] == "topics" && parts[2] == "points" {
+            let topicIndex = parts[1], pointIndex = parts[3]
+            guard let i = Int(topicIndex), i >= 0, i < minutes.topics.count,
+                  let j = Int(pointIndex), j >= 0, j < minutes.topics[i].points.count else { return nil }
+            return minutes.topics[i].points[j]
+        }
+        if parts.count == 2 && parts[0] == "decisions" { return indexed(parts[1], minutes.decisions) }
+        if parts.count == 3 && parts[0] == "actionItems" && parts[2] == "what" {
+            guard let i = Int(parts[1]), i >= 0, i < minutes.actionItems.count else { return nil }
+            return minutes.actionItems[i].what
+        }
+        if parts.count == 2 && parts[0] == "openQuestions" { return indexed(parts[1], minutes.openQuestions) }
+        return nil
     }
 
     /// The summary split into the units a citation can reasonably cover: its

@@ -148,6 +148,20 @@ final class MeetingMinutesRetryTests: XCTestCase {
         XCTAssertEqual(job.next?.calendarEventID, "event-1")
     }
 
+    func testActivityDistinguishesSendingFromQueuedMeeting() {
+        let first = meeting()
+        model.requestMinutes(for: first)
+        let active = store.load(id: first.id)!
+        XCTAssertEqual(model.minutesActivity(for: active)?.label, "生成依頼を送信中")
+        XCTAssertNotNil(model.minutesActivity(for: active)?.elapsedSeconds)
+        var waiting = first
+        waiting.id = "mtg-waiting"
+        store.save(waiting)
+        model.requestMinutes(for: waiting)
+        XCTAssertEqual(model.minutesActivity(for: store.load(id: waiting.id)!)?.label, "別の議事録処理の完了待ち")
+        XCTAssertNil(model.minutesActivity(for: store.load(id: waiting.id)!)?.elapsedSeconds)
+    }
+
     func testExplicitRequestsArePrioritizedAndPersistAcrossMetadataRefresh() throws {
         let legacy = MeetingRecord(id: "legacy", source: "meet", startedAt: 1_790_000_000,
                                    endedAt: 1_790_000_100, timeZone: "UTC", title: "legacy",

@@ -386,3 +386,25 @@ audio offsets are unchanged. Durable job and accepted bundles retain the
 complete source metadata for provenance and navigation. The JSON writer does
 not escape slashes. This reduces input overhead without reducing coverage;
 it does not itself guarantee a particular model response duration.
+
+### Runtime phase and failure presentation
+
+Pending status distinguishes connection wait, other work/meeting wait,
+retry backoff, inter-part gap, conflict audio review, RPC admission,
+part generation and overview integration. Active request elapsed time is
+shown separately from completed-part progress. It is not a completion ETA.
+Failures show a concise category and checkpoint-preserving recovery; raw
+stored diagnostics are selectable only in an expandable technical section.
+Input-range disclaimers belong to app scope UI, not speech-grounded minutes.
+
+### Compact response grounding
+
+The model can cite a factual field by `evidence[].claimRef` instead of repeating
+its full text. Supported paths are `summary/N` (split summary sentences),
+`topics/N/points/N`, `decisions/N`, `actionItems/N/what`, and `openQuestions/N`.
+The parser resolves these references into ordinary full claims before the
+unchanged speech/material grounding checks. Invalid paths and conflicting
+claim/reference pairs reject the reply. Existing claim-only v6 replies remain
+valid for durable and in-flight jobs. Accepted files retain full claim strings,
+not the response-only references. This reduces duplicate output text without
+omitting meeting detail; measured end-to-end latency improvement is not assumed.
