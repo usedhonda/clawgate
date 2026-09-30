@@ -2829,6 +2829,11 @@ final class PetModel: NSObject, ObservableObject {
         return current != previous
     }
 
+    func minutesInputsChanged(for record: MeetingRecord) -> Bool {
+        guard let accepted = minutesStore().loadAcceptedMinutes(id: record.id) else { return false }
+        return MeetingMinutesJob.fingerprint(minutesEnvelope(for: record)) != accepted.fingerprint
+    }
+
     private static func selectedSupplementalMaterials(store: MeetingStore, id: String) -> [MeetingSupplementalMaterial] {
         MeetingSupplementalMaterials(store: store).load(meetingID: id)
             .filter { $0.included && $0.status != .failed && !$0.sections.isEmpty }
@@ -3012,10 +3017,22 @@ final class PetModel: NSObject, ObservableObject {
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
     /// a Log question the owner just asked matters more than a background write.
     func requestMinutes(for record: MeetingRecord, preservingMaterials: Bool = false,
-                        markUserRequested: Bool = true) {
+                        markUserRequested: Bool = true, refreshPreparedInput: Bool = false) {
         // A second UI refresh/request for the same pending record is only a
         // queue poke. It must never dispatch a duplicate summon.
         if pendingMinutesMeetingID == record.id { return }
+        // Source refresh during a generation belongs to the next revision.
+        // Only the bounded pre-dispatch audio conflict review may complete
+        // preparation of the frozen input before any part has been written.
+        if record.minutesState == "pending",
+           var frozen = MeetingMinutesJob.load(store: minutesStore(), id: record.id),
+           !refreshPreparedInput || !frozen.completed.isEmpty {
+            if markUserRequested { frozen.userRequestedAt = Date() }
+            do { try frozen.save(store: minutesStore(), id: record.id) }
+            catch { finishMinutes(id: record.id, state: "failed", error: "生成の準備を保存できませんでした") ; return }
+            drainPendingMinutes()
+            return
+        }
         var envelope = minutesEnvelope(for: record)
         if record.minutesState == "pending" || preservingMaterials, let old = MeetingMinutesJob.load(store: minutesStore(), id: record.id) {
             envelope.supplementalMaterials = old.allSupplementalMaterials
@@ -3075,7 +3092,8 @@ final class PetModel: NSObject, ObservableObject {
            sendNextSummaryPass() { return }
         guard let record = queuedRecord else { return }
         minutesNotBefore[record.id] = nil
-        let fullEnvelope = minutesEnvelope(for: record)
+        let preparedJob = MeetingMinutesJob.load(store: minutesStore(), id: record.id)
+        let fullEnvelope = preparedJob?.frozenEnvelope ?? minutesEnvelope(for: record)
         // Review only tightly aligned conflicting speech, off the UI thread.
         let raw = fullEnvelope.segments.filter { $0.source != "audio-recheck" }.map {
             MeetingTranscriptSourceSegment(id: $0.id, source: $0.source, text: $0.text, capturedAt: $0.capturedAt)
@@ -3083,7 +3101,8 @@ final class PetModel: NSObject, ObservableObject {
         let conflicts = MeetingTranscriptFusion.fuse(sourceSegments: raw)
         let windows = MeetingConflictReview.windows(times: conflicts.conflictTimes, record: record)
         let reviewKey = MeetingConflictReview.fingerprint(record: record, windows: windows)
-        if !windows.isEmpty, MeetingConflictReview.load(record: record, fingerprint: reviewKey, store: minutesStore()) == nil {
+        if preparedJob?.completed.isEmpty != false, !windows.isEmpty,
+           MeetingConflictReview.load(record: record, fingerprint: reviewKey, store: minutesStore()) == nil {
             guard conflictReviewInFlight.insert(record.id).inserted else { return }
             let store = minutesStore()
             DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -3098,7 +3117,7 @@ final class PetModel: NSObject, ObservableObject {
                     if MeetingConflictReview.load(record: record, fingerprint: reviewKey, store: store) == nil {
                         self.finishMinutes(id: record.id, state: "failed", error: "再認識結果を保存できませんでした")
                         self.drainPendingMinutes()
-                    } else { self.requestMinutes(for: record, markUserRequested: false) }
+                    } else { self.requestMinutes(for: record, markUserRequested: false, refreshPreparedInput: true) }
                 }
             }
             return
@@ -3275,18 +3294,20 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
-    /// Ask again for a meeting whose minutes failed, or replace ones already
-    /// written. Attempts are reset: this is a fresh request by hand.
-    func regenerateMinutes(for record: MeetingRecord) {
+    /// Update from the selected sources. Unchanged validated input prefixes
+    /// are reusable; new/changed material is generated before atomic acceptance.
+    func regenerateMinutes(for record: MeetingRecord, forceFull: Bool = false) {
+        guard record.minutesState != "pending", pendingMinutesMeetingID != record.id,
+              pendingSummaryPass?.id != record.id else { return }
         minutesAttempts[record.id] = 0
-        // An explicit retry starts a new generation; prior validated output
-        // remains separate and readable until every part succeeds.
+        minutesNotBefore[record.id] = nil
+        summaryPassQueue.removeAll { $0 == record.id }
         if pendingMinutesMeetingID != record.id {
             let envelope = minutesEnvelope(for: record)
             do {
-                try MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope),
-                    envelopes: MeetingMinutes.chunked(envelope), completed: [], supplementalSnapshot: envelope.supplementalMaterials,
-                    userRequestedAt: Date()).save(store: minutesStore(), id: record.id)
+                try MeetingMinutesJob.updating(envelope,
+                    previous: forceFull ? nil : MeetingMinutesJob.load(store: minutesStore(), id: record.id))
+                    .save(store: minutesStore(), id: record.id)
             } catch {
                 finishMinutes(id: record.id, state: "failed", error: "生成ジョブを保存できませんでした")
                 return

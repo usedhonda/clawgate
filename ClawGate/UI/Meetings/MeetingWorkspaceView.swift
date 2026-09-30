@@ -160,6 +160,7 @@ private struct MeetingWorkspaceDetail: View {
     @State private var confirmDeleteMaterial: MeetingSupplementalMaterial?
     @State private var editingNoteID: String?
     @State private var editingNote = ""
+    @State private var confirmFullRegeneration = false
 
     private var accepted: MeetingAcceptedMinutes? { MeetingStore().loadAcceptedMinutes(id: meeting.id) }
     private var job: MeetingMinutesJob? { MeetingMinutesJob.load(store: MeetingStore(), id: meeting.id) }
@@ -178,6 +179,7 @@ private struct MeetingWorkspaceDetail: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            workflowBar
             MeetingSourcesRow(model: model, meeting: meeting, accepted: accepted)
             MeetingStatusBanner(model: model, meeting: meeting, job: job,
                                 hasReadableMinutes: shown != nil)
@@ -226,6 +228,12 @@ private struct MeetingWorkspaceDetail: View {
         }
         .foregroundColor(WorkspaceTheme.ink)
         .onAppear { reloadSupplemental() }
+        .alert("全パートを作り直しますか？", isPresented: $confirmFullRegeneration) {
+            Button("全パートを作り直す") { model.regenerateMinutes(for: meeting, forceFull: true) }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("同じ入力の完成済みパートも再生成します。現在の議事録は、新版が完成するまで読めます。")
+        }
         .onChange(of: meeting.id) { _ in
             materialText = ""; materialName = ""; materialNote = ""
             materialDropError = nil; editingNoteID = nil; editingNote = ""
@@ -242,6 +250,96 @@ private struct MeetingWorkspaceDetail: View {
             }
             Button("キャンセル", role: .cancel) { confirmDeleteMaterial = nil }
         }
+    }
+
+    /// A single, stable path from source material to the minutes output. The
+    /// selected inputs are read only when the request starts; adding material
+    /// never silently regenerates the accepted minutes.
+    private var workflowBar: some View {
+        let included = supplemental.filter { $0.included && $0.status != .failed && !$0.sections.isEmpty }
+        let failed = supplemental.filter { $0.status == .failed }.count
+        let changed = accepted != nil && model.minutesInputsChanged(for: meeting)
+        let pending = meeting.minutesState == "pending"
+        let disabled = pending || materialBusy || model.googleMaterialBusy(for: meeting)
+            || model.minutesActivity(for: meeting) != nil
+        let checkpoint = meeting.minutesState == "failed"
+            && (job?.completed.count ?? 0) > 0
+            && (job?.completed.count ?? 0) < (job?.envelopes.count ?? 0)
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                workflowStep("1", "資料をそろえる", active: tab == .materials) {
+                    tab = .materials
+                }
+                Image(systemName: "chevron.right").foregroundColor(WorkspaceTheme.muted)
+                Text("2  議事録を生成・更新").font(.system(size: 13, weight: pending ? .bold : .regular))
+                Image(systemName: "chevron.right").foregroundColor(WorkspaceTheme.muted)
+                workflowStep("3", "結果を確認", active: tab == .minutes) {
+                    tab = .minutes
+                }
+            }
+            HStack(spacing: 12) {
+                    Button(accepted == nil ? "議事録を生成" : "議事録を再生成") {
+                        model.regenerateMinutesWithSupplementalMaterials(for: meeting)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(disabled)
+                    if checkpoint {
+                        Button("失敗した続きから再開") { model.resumeMinutes(for: meeting) }
+                            .controlSize(.small)
+                            .disabled(disabled)
+                    }
+                    if accepted != nil || job != nil {
+                        Button("全パートを作り直す…") { confirmFullRegeneration = true }
+                            .disabled(disabled)
+                    }
+                    Spacer()
+                    if pending {
+                        Text(accepted == nil ? "議事録を生成中" : "新版を生成中・現在の議事録は引き続き読めます")
+                            .font(.system(size: 12))
+                    }
+            }
+            HStack(spacing: 12) {
+                Text("使用する追加資料 \(included.count) 件")
+                if failed > 0 {
+                    Text("読み取り失敗 \(failed) 件（今回の入力には含まれません）").foregroundColor(WorkspaceTheme.warningText)
+                }
+                if changed {
+                    Text("入力が変更されています。再生成すると最新の文字起こし・選択資料を使用します")
+                        .foregroundColor(WorkspaceTheme.warningText)
+                }
+            }
+            .font(.system(size: 12))
+            Text("資料を追加・選択してから「議事録を再生成」。入力は開始時に固定し、変わらない完成済みパートは再利用します。")
+                .font(.system(size: 12)).foregroundColor(WorkspaceTheme.muted)
+            if pending, let reused = job?.reusedPartCount, reused > 0 {
+                Text("完成済み \(reused) パートを再利用。変更部分と全体の仕上げを処理します。")
+                    .font(.system(size: 12)).foregroundColor(WorkspaceTheme.secondary)
+            }
+            if let accepted {
+                Text("表示中の議事録: \(accepted.createdAt.formatted(date: .abbreviated, time: .shortened)) に生成")
+                    .font(.system(size: 11)).foregroundColor(WorkspaceTheme.muted)
+            }
+        }
+        .padding(.horizontal, 28).padding(.vertical, 12)
+        .background(WorkspaceTheme.header)
+        .overlay(Divider(), alignment: .bottom)
+    }
+
+    private func workflowStep(_ number: String, _ label: String, active: Bool, disabled: Bool = false,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(number).font(.system(size: 11, weight: .bold))
+                    .foregroundColor(active ? .white : WorkspaceTheme.secondary)
+                    .frame(width: 20, height: 20)
+                    .background(Circle().fill(active ? WorkspaceTheme.accent : WorkspaceTheme.line))
+                Text(label).font(.system(size: 13, weight: active ? .bold : .regular))
+            }
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(WorkspaceTheme.ink)
+        .disabled(disabled)
     }
 
     private var header: some View {
@@ -563,8 +661,6 @@ private struct MeetingWorkspaceDetail: View {
             if supplemental.isEmpty { Text("追加資料はありません。ファイルをここへドロップできます。").foregroundColor(WorkspaceTheme.muted) }
             if let materialDropError { Text(materialDropError).font(.system(size: 12)).foregroundColor(WorkspaceTheme.warningText) }
             ForEach(displayedSupplemental) { material in supplementalRow(material, readOnly: !supplemental.contains(material)) }
-            Button("選択した資料で議事録を再生成") { model.regenerateMinutesWithSupplementalMaterials(for: meeting) }
-                .buttonStyle(.borderedProminent).disabled(materialBusy || meeting.minutesState == "pending")
         }
     }
 
@@ -765,7 +861,6 @@ private struct MeetingStatusBanner: View {
     let meeting: MeetingRecord
     let job: MeetingMinutesJob?
     let hasReadableMinutes: Bool
-    @State private var confirmRegenerate = false
 
     var body: some View {
         let status = MeetingWorkspaceStatus(meeting: meeting)
@@ -808,20 +903,12 @@ private struct MeetingStatusBanner: View {
                         }
                     }
                 }
-                Spacer()
-                actions(status: status, done: done, total: total)
             }
             .padding(.horizontal, 18).padding(.vertical, 14)
             .foregroundColor(status.isProblem ? WorkspaceTheme.warningText : WorkspaceTheme.chipText)
             .background(RoundedRectangle(cornerRadius: 12)
                 .fill(status.isProblem ? WorkspaceTheme.warningFill : WorkspaceTheme.infoFill))
             .padding(.horizontal, 28).padding(.top, 14)
-            .alert("最初から作り直しますか？", isPresented: $confirmRegenerate) {
-                Button("作り直す") { model.regenerateMinutes(for: meeting) }
-                Button("やめる", role: .cancel) {}
-            } message: {
-                Text("完成済みのパートも作り直します。今読める議事録は、新しいものが完成するまで残ります。")
-            }
         }
     }
 
@@ -845,27 +932,6 @@ private struct MeetingStatusBanner: View {
                                                 totalParts: total)
     }
 
-    @ViewBuilder
-    private func actions(status: MeetingWorkspaceStatus, done: Int, total: Int) -> some View {
-        HStack(spacing: 8) {
-            switch meeting.minutesState {
-            case "failed":
-                if done > 0 && done < total {
-                    Button("続きから作る") { model.resumeMinutes(for: meeting) }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                    Button("最初から作り直す") { confirmRegenerate = true }.controlSize(.large)
-                } else {
-                    Button("もう一度作る") { model.regenerateMinutes(for: meeting) }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                }
-            case "pending":
-                EmptyView()
-            default:
-                Button("議事録を作る") { model.requestMinutes(for: meeting) }
-                    .buttonStyle(.borderedProminent).controlSize(.large)
-            }
-        }
-    }
 }
 
 /// User-facing wording for a failed generation. The stored error remains
@@ -909,11 +975,11 @@ struct MeetingMinutesFailurePresentation: Equatable {
 
         let next: String
         if progress.isEmpty {
-            next = "自動再試行は行いません。必要なら「もう一度作る」を選んでください。"
+            next = "自動再試行は行いません。必要なら「議事録を再生成」を選んでください。"
         } else if completedParts < totalParts {
             next = "\(progress) 失敗した残りのパートだけ続きから作れます。"
         } else {
-            next = "自動再試行は行いません。必要なら「最初から作り直す」を選んでください。"
+            next = "自動再試行は行いません。必要なら「全パートを作り直す…」を選んでください。"
         }
         return Self(summary: "\(reason) \(next)", technicalDetails: raw.isEmpty ? nil : raw)
     }

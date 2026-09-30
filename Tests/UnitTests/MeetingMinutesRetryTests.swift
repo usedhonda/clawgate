@@ -94,6 +94,22 @@ final class MeetingMinutesRetryTests: XCTestCase {
         XCTAssertEqual(MeetingMinutesJob.load(store: store, id: record.id)?.completed.count, 1)
     }
 
+    func testSourceRefreshDoesNotReplaceFrozenPendingInput() throws {
+        let record = meeting()
+        model.requestMinutes(for: record)
+        var frozen = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
+        frozen.completed = [nil]
+        try frozen.save(store: store, id: record.id)
+        model.releaseCurrentSharedSummonForTesting()
+        model.meetingTranscriptProvider = { _ in [TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "Newly fetched source")] }
+        let pending = try XCTUnwrap(store.load(id: record.id))
+        model.requestMinutes(for: pending, markUserRequested: false)
+        let after = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
+        XCTAssertEqual(after.fingerprint, frozen.fingerprint)
+        XCTAssertEqual(after.completed.count, 1)
+        XCTAssertEqual(after.envelopes.flatMap(\.segments), frozen.envelopes.flatMap(\.segments))
+    }
+
     func testAFailureFromAnotherRunIsIgnored() throws {
         let record = meeting()
         model.requestMinutes(for: record)

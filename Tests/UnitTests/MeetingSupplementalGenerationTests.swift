@@ -36,6 +36,32 @@ final class MeetingSupplementalGenerationTests: XCTestCase {
         XCTAssertNotEqual(MeetingMinutesJob.fingerprint(edited), job.fingerprint)
         XCTAssertEqual(job.allSupplementalMaterials?.first?.note, "会議中に配布")
     }
+
+    func testUpdatingMaterialsReusesOnlyIdenticalCompletedPrefix() throws {
+        var speech = MeetingMinutesEnvelope.build(record: record, segments: [TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "Proposal discussed")])
+        let previous = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(speech),
+            envelopes: MeetingMinutes.chunked(speech), completed: [nil])
+        // nil is a validated silent part, not an unfinished checkpoint.
+        speech.supplementalMaterials = [material("Reference")]
+        let updated = MeetingMinutesJob.updating(speech, previous: previous)
+        XCTAssertEqual(updated.completed.count, 1)
+        XCTAssertEqual(updated.envelopes.count, 2)
+        XCTAssertNotNil(updated.next?.supplementalMaterials)
+        XCTAssertEqual(updated.allSupplementalMaterials, speech.supplementalMaterials)
+        XCTAssertEqual(updated.frozenEnvelope?.segments, speech.segments,
+                       "material context must not duplicate speech in the frozen input")
+        XCTAssertEqual(updated.frozenEnvelope?.supplementalMaterials, speech.supplementalMaterials)
+
+        var changedRecord = record
+        changedRecord.title = "Different meeting title"
+        var changedMetadata = MeetingMinutesEnvelope.build(record: changedRecord, segments: [TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "Proposal discussed")])
+        changedMetadata.supplementalMaterials = speech.supplementalMaterials
+        XCTAssertEqual(MeetingMinutesJob.updating(changedMetadata, previous: previous).completed.count, 0)
+        let sameInput = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(speech),
+            envelopes: updated.envelopes, completed: [nil, nil])
+        XCTAssertEqual(MeetingMinutesJob.updating(speech, previous: sameInput).completed.count, 0,
+                       "explicit regenerate of identical input must not be a no-op")
+    }
     func testMaterialOnlyDecisionIsRejectedButLabelledSupplementIsAccepted() throws {
         func reply(_ decisions: [String], _ points: [String], _ ids: [String]) throws -> String {
             let claims = decisions + points

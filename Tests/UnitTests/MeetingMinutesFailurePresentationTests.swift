@@ -19,12 +19,12 @@ final class MeetingMinutesFailurePresentationTests: XCTestCase {
         let timeout = MeetingMinutesFailurePresentation.make(error: "request timed out after 30s", state: "failed",
                                                               completedParts: 0, totalParts: 1)
         XCTAssertEqual(timeout?.summary,
-                       "生成が時間内に完了しませんでした。 自動再試行は行いません。必要なら「もう一度作る」を選んでください。")
+                       "生成が時間内に完了しませんでした。 自動再試行は行いません。必要なら「議事録を再生成」を選んでください。")
 
         let generic = MeetingMinutesFailurePresentation.make(error: "unexpected backend response {\"raw\":true}", state: "failed",
                                                               completedParts: 0, totalParts: 1)
         XCTAssertEqual(generic?.summary,
-                       "議事録の生成に失敗しました。 自動再試行は行いません。必要なら「もう一度作る」を選んでください。")
+                       "議事録の生成に失敗しました。 自動再試行は行いません。必要なら「議事録を再生成」を選んでください。")
         XCTAssertFalse(generic?.summary.contains("backend") == true)
     }
 }

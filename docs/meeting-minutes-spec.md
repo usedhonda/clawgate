@@ -6,6 +6,67 @@ real hostnames, IP addresses, network ids, personal names/accounts, or secrets.
 
 ## Operating rule
 
+### Repeatable source-to-minutes workflow
+
+The ordinary workflow is **collect sources -> select inputs -> generate or
+update -> inspect minutes and citations**. Updating after a meeting is not an
+exceptional recovery action. The workspace has one persistent workflow bar,
+with a primary `議事録を生成` / `議事録を再生成` action visible on every tab,
+including when an accepted document already exists. Source collection opens
+the materials tab, where Meet retrieval and local file/text import remain
+available. Extraction failures are shown explicitly and not counted as usable
+inputs. Generation waits while a source import or explicit Google retrieval
+is active. It does not silently wait for, or retry, unavailable sources.
+
+Adding/selecting material does not automatically replace the readable minutes.
+The bar reports input changes, the accepted generation time, and reusable part
+count. During generation, the previous accepted document remains readable;
+the progress banner describes real execution/wait states, not a promised ETA.
+`失敗した続きから再開` continues the frozen job. `全パートを作り直す…`
+is a separate explicit operation, with confirmation, that discards job
+checkpoints but never the accepted document.
+
+At dispatch preparation, freeze speech, unresolved conflicts, calendar metadata
+and selected supplemental input in a durable job. Subsequent source refreshes
+belong to the next revision; they cannot reset a queued/in-flight generation.
+The bounded audio-conflict review may finalize preparation before dispatch.
+When input genuinely changes, reuse only the contiguous validated prefix
+whose complete envelopes match, ignoring only the request correlation id.
+Metadata, policy, citation locators, speech, material content or use-note
+changes break reuse at that part. A validated silent result (`nil`) is reusable.
+An explicit regenerate with identical input creates fresh parts, not a no-op.
+This conservative prefix rule fits the existing sequential durable checkpoint
+format; it never treats an unfinished part as complete or reuses a changed
+reference result. After new parts are validated, combine in original order and
+run the existing grounded overview pass.
+
+### Execution isolation and latency boundary
+
+The target dedicated execution path requires typed `chat.send` flags
+`requestLocalContext`, `nonprojection`, and `retainTerminalResult`, all true.
+No model/thinking override is planned. The ACK must explicitly confirm
+`isolationApplied` and `nonprojectionApplied`; absent/false confirmation is
+an activation failure, not an ordinary-chat fallback. Input must consist of the frozen minutes
+request, not preceding conversational turns; output must not project into
+ordinary chat/history or messaging channels. Run-id ownership and the existing
+grounding validator remain mandatory. The live Gateway rejected the typed
+`nonprojection` flag during the activation probe, so this path is **not active**;
+the existing working dispatch remains unchanged. Shared summon scheduling is
+still sequential, and the existing settling gap remains in force. Input
+checkpoint reuse is active independently of this deployment prerequisite.
+This change does **not** claim execution isolation, parallelism or a measured
+latency multiplier.
+
+The next executor design is a dedicated minutes scheduler, independent of the
+interactive summon slot, with at most two independent part runs in flight.
+Before activating it, prove deployed Gateway concurrent work admission,
+request-local delivery, same-device/run correlation, reconnect and retained
+result recovery. It requires per-index durable checkpoints (not append-order
+completion), per-part retry/idempotency ownership and deterministic ordered
+merge. Validate a same-input/same-model comparison including total time,
+quality and failure recovery before claiming acceleration. Do not implement
+parallel calls by guessing session/subscription behavior or changing models.
+
 Any change to the behavior this spec covers MUST update the corresponding
 section in the SAME commit. The `policyVersion` quoted here must equal
 `MeetingMinutesPrompt.policyVersion` in code.
@@ -332,13 +393,15 @@ differs, because the Gateway reports a failed turn under its own run id.
 
 A job's fingerprint covers its generation input: the policy version, the
 segments, unresolved conflict notes, and selected supplemental material text and usage notes. Calendar association, title or
-schedule arriving after the first request keep every written part; the parts
-still to be sent are re-chunked from the same segments and carry the current
-metadata.
+schedule arriving after the first request keep every written part. Once queued,
+all remaining parts retain the frozen metadata; updated metadata is incorporated
+in the next explicit generation.
 
 Asking again has two forms. Resume (`POST /v1/ambient/meeting/minutes?id=…&mode=resume`)
 continues from the checkpointed parts with fresh attempts. Regenerate (no
-`mode`) starts a new generation from the first part; the previous accepted
+`mode`) starts a new input revision, reusing only an identical completed prefix
+when the source input changed (identical-input reruns start from the first part);
+the previous accepted
 minutes stay readable until it completes.
 
 
