@@ -202,9 +202,12 @@ final class AmbientCaptureBackend: NSObject, AVCaptureAudioDataOutputSampleBuffe
         liveGeneration != 0 && bufferGeneration == liveGeneration
     }
 
-    /// Wrap the sample buffer's audio without copying. The format is whatever
-    /// the device produces; the manager's converter takes it from there.
-    private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> (AVAudioPCMBuffer, AVAudioFormat)? {
+    /// Copy the sample buffer's audio into an owned PCM buffer. The format is
+    /// whatever the device produces; the manager's converter takes it from there.
+    /// CoreMedia owns the AudioBufferList shape, so query its exact byte size
+    /// before allocating storage for it (the channel count is not sufficient
+    /// for planar buffers).
+    static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> (AVAudioPCMBuffer, AVAudioFormat)? {
         guard let description = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbdPointer = CMAudioFormatDescriptionGetStreamBasicDescription(description) else { return nil }
         var asbd = asbdPointer.pointee
@@ -213,14 +216,30 @@ final class AmbientCaptureBackend: NSObject, AVCaptureAudioDataOutputSampleBuffe
         guard frameCount > 0 else { return nil }
 
         var blockBuffer: CMBlockBuffer?
-        let bufferListSize = MemoryLayout<AudioBufferList>.size + (Int(asbd.mChannelsPerFrame) - 1) * MemoryLayout<AudioBuffer>.size
-        let listPointer = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-        defer { listPointer.deallocate() }
+        var bufferListSize = 0
+        let sizeStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &bufferListSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
+            blockBufferOut: nil
+        )
+        guard sizeStatus == noErr, bufferListSize >= MemoryLayout<AudioBufferList>.size else { return nil }
+
+        let listStorage = UnsafeMutableRawPointer.allocate(
+            byteCount: bufferListSize,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { listStorage.deallocate() }
+        let listPointer = listStorage.bindMemory(to: AudioBufferList.self, capacity: 1)
         let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
             bufferListSizeNeededOut: nil,
             bufferListOut: listPointer,
-            bufferListSize: max(bufferListSize, MemoryLayout<AudioBufferList>.size),
+            bufferListSize: bufferListSize,
             blockBufferAllocator: kCFAllocatorDefault,
             blockBufferMemoryAllocator: kCFAllocatorDefault,
             flags: kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment,
@@ -231,12 +250,14 @@ final class AmbientCaptureBackend: NSObject, AVCaptureAudioDataOutputSampleBuffe
         // returns, and the manager converts on another thread later.
         guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frameCount)) else { return nil }
         pcm.frameLength = AVAudioFrameCount(frameCount)
-        let source = UnsafeMutableAudioBufferListPointer(listPointer)
-        let destination = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
-        for (index, sourceBuffer) in source.enumerated() where index < destination.count {
-            let bytes = Int(min(sourceBuffer.mDataByteSize, destination[index].mDataByteSize))
-            if let from = sourceBuffer.mData, let to = destination[index].mData {
-                memcpy(to, from, bytes)
+        withExtendedLifetime(blockBuffer) {
+            let source = UnsafeMutableAudioBufferListPointer(listPointer)
+            let destination = UnsafeMutableAudioBufferListPointer(pcm.mutableAudioBufferList)
+            for (index, sourceBuffer) in source.enumerated() where index < destination.count {
+                let bytes = Int(min(sourceBuffer.mDataByteSize, destination[index].mDataByteSize))
+                if let from = sourceBuffer.mData, let to = destination[index].mData {
+                    memcpy(to, from, bytes)
+                }
             }
         }
         return (pcm, format)
