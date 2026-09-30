@@ -64,6 +64,25 @@ if [[ "$SKIP_BUILD" != "true" ]]; then
   swift build
 fi
 
+# Stop before replacing or signing mapped executable pages. Modifying a live
+# bundle can terminate the old process with CODESIGNING Invalid Page.
+APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
+pkill -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
+
+# Wait for old process to fully exit (up to 5s, then SIGKILL)
+for ((w=1; w<=5; w++)); do
+  if ! pgrep -f "$APP_PROCESS_PAT" >/dev/null 2>&1; then
+    break
+  fi
+  if [[ $w -eq 5 ]]; then
+    echo "Old process still alive after 5s, sending SIGKILL"
+    pkill -9 -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  sleep 1
+done
+
+
 if [[ "$SKIP_SYNC" != "true" ]]; then
   echo "[2/5] Sync app binary"
   bash "$PROJECT_PATH/scripts/prepare-meeting-tools.sh"
@@ -165,21 +184,6 @@ else
 fi
 
 echo "[5/5] Restart app + local gateway"
-APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
-pkill -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
-
-# Wait for old process to fully exit (up to 5s, then SIGKILL)
-for ((w=1; w<=5; w++)); do
-  if ! pgrep -f "$APP_PROCESS_PAT" >/dev/null 2>&1; then
-    break
-  fi
-  if [[ $w -eq 5 ]]; then
-    echo "Old process still alive after 5s, sending SIGKILL"
-    pkill -9 -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
-    sleep 1
-  fi
-  sleep 1
-done
 
 open -na "$APP_PATH"
 sleep 2

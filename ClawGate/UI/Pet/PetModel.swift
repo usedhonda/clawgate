@@ -2776,6 +2776,7 @@ final class PetModel: NSObject, ObservableObject {
     @Published private(set) var meetingSourcesError: String?
     private var meetingSourcesTimer: Timer?
     private var meetingMaterials: [String: MeetingGoogleMaterials.Snapshot] = [:]
+    @Published private var refreshingMaterialIDs: Set<String> = []
 
     func startMeetingSources() {
         guard meetingSourcesTimer == nil else { return }
@@ -2798,6 +2799,46 @@ final class PetModel: NSObject, ObservableObject {
         return meetingMaterials[id] ?? MeetingGoogleMaterials.load(candidateID: id)
     }
 
+    func googleMaterialBusy(for record: MeetingRecord) -> Bool {
+        record.materialCandidateID.map { refreshingMaterialIDs.contains($0) } ?? false
+    }
+
+    func refreshGoogleMaterial(for record: MeetingRecord) {
+        guard let id = record.materialCandidateID,
+              let candidate = (meetingCandidates + MeetingWorkspace.cachedCandidates()).first(where: { $0.id == id }),
+              refreshingMaterialIDs.insert(id).inserted else { return }
+        meetingsRevision += 1
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Result { try MeetingGoogleMaterials.sync(candidate: candidate) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.refreshingMaterialIDs.remove(id)
+                switch result {
+                case .success(let material): self.meetingMaterials[id] = material
+                case .failure: self.meetingSourcesError = "資料を再取得できませんでした。保存済みの資料は保持しています。"
+                }
+                self.meetingsRevision += 1
+            }
+        }
+    }
+
+    func supplementalMaterialsChanged(for record: MeetingRecord) -> Bool {
+        let current = Self.selectedSupplementalMaterials(store: minutesStore(), id: record.id)
+        let accepted = minutesStore().loadAcceptedMinutes(id: record.id)
+        let previous = accepted?.supplementalInput ?? accepted?.supplementalMaterials ?? []
+        return current != previous
+    }
+
+    private static func selectedSupplementalMaterials(store: MeetingStore, id: String) -> [MeetingSupplementalMaterial] {
+        MeetingSupplementalMaterials(store: store).load(meetingID: id)
+            .filter { $0.included && $0.status != .failed && !$0.sections.isEmpty }
+    }
+
+    func regenerateMinutesWithSupplementalMaterials(for record: MeetingRecord) {
+        guard record.minutesState != "pending", pendingSummaryPass?.id != record.id else { return }
+        regenerateMinutes(for: record)
+    }
+
     func refreshMeetingSources(force: Bool = false) {
         guard !meetingSourcesBusy else { return }
         meetingSourcesBusy = true
@@ -2810,7 +2851,7 @@ final class PetModel: NSObject, ObservableObject {
                     let cached = MeetingGoogleMaterials.load(candidateID: candidate.id)
                     // Permission failures require an explicit reconnect/refresh,
                     // not another network request for every timer tick.
-                    if !force, let cached, cached.status == .permissionDenied || cached.status == .serviceUnavailable {
+                    if let cached, MeetingGoogleMaterials.shouldReuseFailure(cached, force: force) {
                         material[candidate.id] = cached
                         continue
                     }
@@ -2846,7 +2887,7 @@ final class PetModel: NSObject, ObservableObject {
                         guard existing != nil || !(source?.notes.isEmpty ?? true) || !(source?.segments.isEmpty ?? true) else { continue }
                         let record = MeetingWorkspace.record(candidate: candidate, existing: existing)
                         store.save(record)
-                        guard candidate.end < Date(), source?.status == .available,
+                        guard candidate.end < Date(), !self.supplementalMaterialsChanged(for: record), source?.status == .available,
                               !(source?.segments.isEmpty ?? true), record.minutesState != "pending" else { continue }
                         let envelope = self.minutesEnvelope(for: record)
                         let fingerprint = MeetingMinutesJob.fingerprint(envelope)
@@ -2884,6 +2925,8 @@ final class PetModel: NSObject, ObservableObject {
             if let error = review.error { envelope.unresolvedNotes = (envelope.unresolvedNotes ?? []) + [error] }
         }
         envelope.coverageHints = googleMaterial(for: record)?.notes.map(\.text)
+        let materials = Self.selectedSupplementalMaterials(store: minutesStore(), id: record.id)
+        envelope.supplementalMaterials = materials.isEmpty ? nil : materials
         return envelope
     }
     /// The meeting whose minutes are in flight, if any.
@@ -2941,13 +2984,20 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
     /// a Log question the owner just asked matters more than a background write.
-    func requestMinutes(for record: MeetingRecord) {
+    func requestMinutes(for record: MeetingRecord, preservingMaterials: Bool = false) {
         // A second UI refresh/request for the same pending record is only a
         // queue poke. It must never dispatch a duplicate summon.
         if pendingMinutesMeetingID == record.id { return }
-        let envelope = minutesEnvelope(for: record)
+        var envelope = minutesEnvelope(for: record)
+        if record.minutesState == "pending" || preservingMaterials, let old = MeetingMinutesJob.load(store: minutesStore(), id: record.id) {
+            envelope.supplementalMaterials = old.allSupplementalMaterials
+        }
         guard !envelope.segments.isEmpty else {
             finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
+            return
+        }
+        guard (envelope.supplementalMaterials ?? []).flatMap(\.sections).reduce(0, { $0 + $1.text.count }) <= 200_000 else {
+            finishMinutes(id: record.id, state: "failed", error: "選択資料が20万文字を超えています。使用する資料を絞ってください。旧議事録は保持しています。")
             return
         }
         let fingerprint = MeetingMinutesJob.fingerprint(envelope)
@@ -2957,7 +3007,7 @@ final class PetModel: NSObject, ObservableObject {
                 try existing.refreshingMetadata(from: envelope).save(store: minutesStore(), id: record.id)
             } else {
                 try MeetingMinutesJob(fingerprint: fingerprint,
-                    envelopes: MeetingMinutes.chunked(envelope), completed: []).save(store: minutesStore(), id: record.id)
+                    envelopes: MeetingMinutes.chunked(envelope), completed: [], supplementalSnapshot: envelope.supplementalMaterials).save(store: minutesStore(), id: record.id)
             }
         } catch {
             finishMinutes(id: record.id, state: "failed", error: "生成の準備を保存できませんでした。旧議事録は保持しています。")
@@ -3047,7 +3097,7 @@ final class PetModel: NSObject, ObservableObject {
         var job = MeetingMinutesJob.load(store: minutesStore(), id: record.id)
         if job == nil {
             job = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(fullEnvelope),
-                                    envelopes: MeetingMinutes.chunked(fullEnvelope), completed: [])
+                                    envelopes: MeetingMinutes.chunked(fullEnvelope), completed: [], supplementalSnapshot: fullEnvelope.supplementalMaterials)
             do { try job?.save(store: minutesStore(), id: record.id) }
             catch {
                 finishMinutes(id: record.id, state: "failed", error: "生成ジョブを保存できませんでした")
@@ -3136,7 +3186,7 @@ final class PetModel: NSObject, ObservableObject {
     func resumeMinutes(for record: MeetingRecord) {
         minutesAttempts[record.id] = 0
         minutesNotBefore[record.id] = nil
-        requestMinutes(for: record)
+        requestMinutes(for: record, preservingMaterials: true)
     }
 
     /// Every meeting on disk, newest first.
@@ -3145,7 +3195,10 @@ final class PetModel: NSObject, ObservableObject {
     func minutes(for id: String) -> MeetingMinutes? { MeetingStore().loadMinutes(id: id) }
 
     func meetingTranscript(for record: MeetingRecord) -> [TranscriptSegment] {
-        meetingTranscriptProvider?(record) ?? []
+        if record.source == "calendar" {
+            return minutesStore().loadBackfill(id: record.id) ?? []
+        }
+        return meetingTranscriptProvider?(record) ?? []
     }
 
     func createArchivedMeeting(start: Date, end: Date, title: String? = nil,
@@ -3177,7 +3230,7 @@ final class PetModel: NSObject, ObservableObject {
             let envelope = minutesEnvelope(for: record)
             do {
                 try MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope),
-                    envelopes: MeetingMinutes.chunked(envelope), completed: []).save(store: minutesStore(), id: record.id)
+                    envelopes: MeetingMinutes.chunked(envelope), completed: [], supplementalSnapshot: envelope.supplementalMaterials).save(store: minutesStore(), id: record.id)
             } catch {
                 finishMinutes(id: record.id, state: "failed", error: "生成ジョブを保存できませんでした")
                 return
@@ -3240,7 +3293,9 @@ final class PetModel: NSObject, ObservableObject {
         pendingMinutesSegmentIDs = []
         guard let record = minutesStore().load(id: id) else { return }
         do {
-            let minutes = try MeetingMinutesParser.parse(text, validSegmentIds: validSegmentIDs)
+            let materialIDs = Set((MeetingMinutesJob.load(store: minutesStore(), id: id)?.next?.supplementalMaterials ?? [])
+                .flatMap(\.sections).map(\.id))
+            let minutes = try MeetingMinutesParser.parse(text, validSegmentIds: validSegmentIDs, validMaterialIds: materialIDs)
             guard var job = MeetingMinutesJob.load(store: minutesStore(), id: id), job.next != nil else {
                 throw MeetingMinutesError.encodingFailed
             }

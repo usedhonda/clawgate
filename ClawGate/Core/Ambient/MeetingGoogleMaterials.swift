@@ -47,6 +47,12 @@ struct MeetingGoogleMaterials {
 
     typealias Runner = ([String]) throws -> Data
 
+    static func shouldReuseFailure(_ snapshot: Snapshot, now: Date = Date(), force: Bool = false) -> Bool {
+        guard !force else { return false }
+        return snapshot.status == .permissionDenied ||
+            (snapshot.status == .serviceUnavailable && now.timeIntervalSince(snapshot.updatedAt) < 1800)
+    }
+
     static func authorizationArguments(email: String) -> [String] {
         ["auth", "add", email, "--services=calendar,drive,docs", "--readonly"]
     }
@@ -183,7 +189,7 @@ struct MeetingGoogleMaterials {
         var snapshot = Snapshot(candidateID: candidate.id, status: status, sources: sources,
                                 segments: segments, notes: notes, transcriptHash: transcriptHash, updatedAt: now)
         if (status == .failed || status == .permissionDenied || status == .serviceUnavailable), let old = previous {
-            snapshot = Snapshot(candidateID: candidate.id, status: status, sources: old.sources,
+            snapshot = Snapshot(candidateID: candidate.id, status: status, sources: sources.isEmpty ? old.sources : sources,
                 segments: old.segments, notes: old.notes, transcriptHash: old.transcriptHash, updatedAt: now)
         }
         try save(snapshot, cacheDirectory: cacheDirectory)

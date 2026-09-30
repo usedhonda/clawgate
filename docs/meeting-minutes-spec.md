@@ -165,7 +165,7 @@ Read back over HTTP with `GET /v1/ambient/meetings` (records, newest first) and
 
 ## Request envelope
 
-`policyVersion` = `meeting-minutes-v5`. The outbound message is the universal
+`policyVersion` = `meeting-minutes-v6`. The outbound message is the universal
 prefix, a blank line, then the envelope as JSON — never string-concatenated with
 a delimiter, so transcript text cannot break out of the data section.
 
@@ -228,7 +228,7 @@ evidence under the existing fail-closed validation.
     "attendance": {"present": ["…"], "absent": [], "calendarEventId": null},
     "language": "ja"
   },
-  "contextDecision": {"policyVersion": "meeting-minutes-v5"} }
+  "contextDecision": {"policyVersion": "meeting-minutes-v6"} }
 ```
 
 The parser is fail-closed. A reply is rejected — never shown as minutes — when:
@@ -328,8 +328,8 @@ last reply. A `chat` error on the same session before the in-flight minutes
 run has streamed anything is attributed to that run even when its `runId`
 differs, because the Gateway reports a failed turn under its own run id.
 
-A job's fingerprint covers only the spoken input: the policy version, the
-segments and the unresolved conflict notes. Calendar association, title or
+A job's fingerprint covers its generation input: the policy version, the
+segments, unresolved conflict notes, and selected supplemental material text and usage notes. Calendar association, title or
 schedule arriving after the first request keep every written part; the parts
 still to be sent are re-chunked from the same segments and carry the current
 metadata.
@@ -338,3 +338,39 @@ Asking again has two forms. Resume (`POST /v1/ambient/meeting/minutes?id=…&mod
 continues from the checkpointed parts with fresh attempts. Regenerate (no
 `mode`) starts a new generation from the first part; the previous accepted
 minutes stay readable until it completes.
+
+
+### Supplemental materials and workspace exports
+
+The workspace copy action follows the selected tab: minutes (including a
+partial label), displayed transcript with time/speaker, or materials including
+usage notes and sources. Empty content disables copy; changing tabs or meetings
+clears the confirmation.
+
+User-provided PDF, DOCX, TXT/Markdown, PNG/JPEG/HEIC and PPTX materials are copied
+into the local meeting directory. OCR/extraction is local. Missing text, limits
+and unreadable diagrams are shown as partial/failed, not silently successful.
+Each material retains an optional usage note and an inclusion checkbox. Adding,
+editing or removing it does not generate minutes automatically.
+
+An explicit regeneration freezes the selected material revision. Long text is
+split into uniquely identified fragments with page/slide locators, with bounded
+related speech context; transcript coverage remains in independent speech parts.
+The complete local input is retained in the job and accepted bundle, and
+fragment snapshots preserve citation navigation after an edit or deletion.
+Resume retains the frozen material revision. More than 200,000 selected text
+characters refuses generation explicitly rather than truncating; originals remain.
+
+`evidence[].materialIds` cites supplemental section IDs separately from
+`segmentIds`. Material-only claims are permitted only as topic points prefixed
+`【資料補足】`. Summaries, decisions, actions and open questions still require
+speech evidence. Terminology corrections cite both speech and material; original
+transcripts are unchanged. Unknown citations and material-only decisions are
+rejected. The overview rewrite must retain material citations from its input.
+
+Meet retrieval state is separate from the accepted generation's sources:
+newly fetched speech may be available but unused. A selected meeting can be
+refetched explicitly. API-unavailable failures are reconsidered after 30 minutes;
+permission failures require explicit refresh/reconnect. Failed reads preserve
+prior content. Fetching materials must not silently regenerate user-edited
+supplemental inputs.

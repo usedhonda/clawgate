@@ -7,6 +7,22 @@ struct MeetingMinutesJob: Codable {
     let fingerprint: String
     let envelopes: [MeetingMinutesEnvelope]
     var completed: [MeetingMinutes?]
+    var supplementalSnapshot: [MeetingSupplementalMaterial]? = nil
+
+    var allSupplementalMaterials: [MeetingSupplementalMaterial]? { supplementalSnapshot ?? envelopes.first?.supplementalMaterials }
+
+    var materialCitationSnapshot: [MeetingSupplementalMaterial]? {
+        guard let originals = allSupplementalMaterials else { return nil }
+        return originals.map { material in
+            var seen = Set<String>()
+            let sections = envelopes.flatMap { $0.supplementalMaterials ?? [] }.filter { $0.id == material.id }
+                .flatMap(\.sections).filter { seen.insert($0.id).inserted }
+            return MeetingSupplementalMaterial(id: material.id, name: material.name, note: material.note,
+                included: material.included, status: material.status, error: material.error,
+                sections: sections.isEmpty ? material.sections : sections, addedAt: material.addedAt,
+                originalRelativePath: material.originalRelativePath)
+        }
+    }
 
     var next: MeetingMinutesEnvelope? {
         completed.count < envelopes.count ? envelopes[completed.count] : nil
@@ -22,12 +38,14 @@ struct MeetingMinutesJob: Codable {
             let policyVersion: String
             let segments: [MeetingMinutesSegment]
             let unresolvedNotes: [String]
+            let supplementalMaterials: [MeetingSupplementalMaterial]?
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = (try? encoder.encode(Revision(policyVersion: envelope.policyVersion,
                                                   segments: envelope.segments,
-                                                  unresolvedNotes: envelope.unresolvedNotes ?? []))) ?? Data()
+                                                  unresolvedNotes: envelope.unresolvedNotes ?? [],
+                                                  supplementalMaterials: envelope.supplementalMaterials))) ?? Data()
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -36,7 +54,7 @@ struct MeetingMinutesJob: Codable {
     func refreshingMetadata(from envelope: MeetingMinutesEnvelope) -> MeetingMinutesJob {
         let fresh = MeetingMinutes.chunked(envelope)
         guard fresh.count == envelopes.count else { return self }
-        return MeetingMinutesJob(fingerprint: fingerprint, envelopes: fresh, completed: completed)
+        return MeetingMinutesJob(fingerprint: fingerprint, envelopes: fresh, completed: completed, supplementalSnapshot: supplementalSnapshot)
     }
 
     static func load(store: MeetingStore, id: String) -> MeetingMinutesJob? {

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The minutes window: meetings by day on the left, the selected meeting on
 /// the right. It reads the same records and minutes as the pet's Minutes tab;
@@ -43,6 +44,8 @@ struct MeetingWorkspaceView: View {
         .onAppear { reload() }
         .onChange(of: model.meetingsRevision) { _ in reload() }
         .onChange(of: searchText) { _ in reload() }
+        .onChange(of: selectedID) { _ in copied = false }
+        .onChange(of: tab) { _ in copied = false }
         .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in reload() }
     }
 
@@ -147,6 +150,16 @@ private struct MeetingWorkspaceDetail: View {
     @Binding var scrollTarget: String?
     @Binding var copied: Bool
     @State private var highlighted: Set<String> = []
+    @State private var highlightedMaterials: Set<String> = []
+    @State private var supplemental: [MeetingSupplementalMaterial] = []
+    @State private var materialText = ""
+    @State private var materialName = ""
+    @State private var materialNote = ""
+    @State private var materialDropError: String?
+    @State private var materialBusy = false
+    @State private var confirmDeleteMaterial: MeetingSupplementalMaterial?
+    @State private var editingNoteID: String?
+    @State private var editingNote = ""
 
     private var accepted: MeetingAcceptedMinutes? { MeetingStore().loadAcceptedMinutes(id: meeting.id) }
     private var job: MeetingMinutesJob? { MeetingMinutesJob.load(store: MeetingStore(), id: meeting.id) }
@@ -183,6 +196,10 @@ private struct MeetingWorkspaceDetail: View {
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                     }
                     .onChange(of: tab) { newTab in
+                        if newTab == .materials, let target = highlightedMaterials.first {
+                            DispatchQueue.main.async { proxy.scrollTo(target, anchor: .top) }
+                            return
+                        }
                         guard newTab == .transcript, let target = scrollTarget else { return }
                         DispatchQueue.main.async { proxy.scrollTo(target, anchor: .top) }
                     }
@@ -196,6 +213,11 @@ private struct MeetingWorkspaceDetail: View {
                     tab = .transcript
                     return .handled
                 }
+                if url.scheme == "clawgate-material", let host = url.host, !host.isEmpty {
+                    highlightedMaterials = [host]
+                    tab = .materials
+                    return .handled
+                }
                 if let safe = WorkspaceFormat.safeExternalURL(url.absoluteString) {
                     NSWorkspace.shared.open(safe); return .handled
                 }
@@ -203,6 +225,23 @@ private struct MeetingWorkspaceDetail: View {
             })
         }
         .foregroundColor(WorkspaceTheme.ink)
+        .onAppear { reloadSupplemental() }
+        .onChange(of: meeting.id) { _ in
+            materialText = ""; materialName = ""; materialNote = ""
+            materialDropError = nil; editingNoteID = nil; editingNote = ""
+            confirmDeleteMaterial = nil; highlightedMaterials = []; highlighted = []
+            reloadSupplemental()
+        }
+        .alert("資料を削除しますか？", isPresented: Binding(get: { confirmDeleteMaterial != nil }, set: { if !$0 { confirmDeleteMaterial = nil } })) {
+            Button("削除", role: .destructive) {
+                if let item = confirmDeleteMaterial {
+                    do { try MeetingSupplementalMaterials().remove(id: item.id, meetingID: meeting.id); materialDropError = nil }
+                    catch { materialDropError = error.localizedDescription }
+                }
+                confirmDeleteMaterial = nil; reloadSupplemental()
+            }
+            Button("キャンセル", role: .cancel) { confirmDeleteMaterial = nil }
+        }
     }
 
     private var header: some View {
@@ -221,13 +260,14 @@ private struct MeetingWorkspaceDetail: View {
                     .foregroundColor(WorkspaceTheme.secondary)
                 }
                 Spacer()
-                if let shown {
-                    Button(copied ? "コピーしました" : "コピー") {
+                if let copyText {
+                    Button(copied ? "コピーしました" : copyLabel) {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(shown.minutes.markdown(record: meeting), forType: .string)
+                        NSPasteboard.general.setString(copyText, forType: .string)
                         copied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                     }
+                    .disabled(copyText.isEmpty)
                     .controlSize(.large)
                 }
             }
@@ -235,6 +275,30 @@ private struct MeetingWorkspaceDetail: View {
         .padding(.horizontal, 28).padding(.top, 18).padding(.bottom, 12)
         .background(WorkspaceTheme.header)
         .overlay(Divider(), alignment: .bottom)
+    }
+
+    private var copyLabel: String {
+        switch tab {
+        case .minutes: return "議事録をコピー"
+        case .transcript: return "文字起こしをコピー"
+        case .materials: return "資料をコピー"
+        }
+    }
+
+    private var copyText: String? {
+        switch tab {
+        case .minutes:
+            guard let shown else { return "" }
+            return (shown.partial ? "> 作成途中の議事録です。\n\n" : "") + shown.minutes.markdown(record: meeting)
+        case .transcript:
+            return transcriptRows.map { "[\($0.time)] \($0.speaker): \($0.text)" }.joined(separator: "\n")
+        case .materials:
+            let google = model.googleMaterial(for: meeting)?.notes.map { $0.text + "\n出典: " + $0.sourceURL } ?? []
+            let supplemental = displayedSupplemental.flatMap { material in
+                ["## \(material.name)\nメモ: \(material.note)\n状態: \(material.status.rawValue)"] + material.sections.map { "[\($0.locator)] \($0.text)" }
+            }
+            return (google + supplemental).joined(separator: "\n\n")
+        }
     }
 
     /// Attendees sit on the time line and keep their full names; a long list
@@ -450,24 +514,162 @@ private struct MeetingWorkspaceDetail: View {
 
     @ViewBuilder
     private var materialsTab: some View {
-        if let snapshot = model.googleMaterial(for: meeting), !snapshot.notes.isEmpty {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Google Meet のメモと予定の資料です。取りこぼしの確認に使うもので、議事録の発言の根拠には使いません。")
-                    .font(.system(size: 13)).foregroundColor(WorkspaceTheme.secondary)
+        VStack(alignment: .leading, spacing: 16) {
+            googleMaterialsSection
+            supplementalMaterialsSection
+        }
+        .onDrop(of: ["public.file-url"], isTargeted: nil) { providers in
+            importDropped(providers); return true
+        }
+    }
+
+    @ViewBuilder private var googleMaterialsSection: some View {
+        let snapshot = model.googleMaterial(for: meeting)
+        WorkspaceCard(title: "Google Meet") {
+            HStack {
+                Text("Meet の資料・メモは参考情報です。議事録の発言根拠には使いません。").font(.system(size: 13)).foregroundColor(WorkspaceTheme.secondary)
+                Spacer()
+                Button(model.googleMaterialBusy(for: meeting) ? "取得中…" : "再取得") { model.refreshGoogleMaterial(for: meeting) }
+                    .disabled(model.googleMaterialBusy(for: meeting))
+            }
+            if let snapshot, !snapshot.notes.isEmpty {
                 ForEach(snapshot.notes) { note in
-                    WorkspaceCard(title: nil) {
+                    VStack(alignment: .leading, spacing: 5) {
                         Text(note.text).font(.system(size: 14)).lineSpacing(3).textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                        if let url = WorkspaceFormat.safeExternalURL(note.sourceURL) {
-                            Button("出典を開く") { NSWorkspace.shared.open(url) }
-                        }
+                        if let url = WorkspaceFormat.safeExternalURL(note.sourceURL) { Button("出典を開く") { NSWorkspace.shared.open(url) } }
                     }
                 }
-            }
-        } else {
-            Text(materialStatus)
-                .font(.system(size: 14)).foregroundColor(WorkspaceTheme.secondary)
+            } else { Text(materialStatus).font(.system(size: 14)).foregroundColor(WorkspaceTheme.secondary) }
+            if let snapshot { Text("最終取得: \(snapshot.updatedAt.formatted(date: .abbreviated, time: .shortened))").font(.system(size: 11)).foregroundColor(WorkspaceTheme.muted) }
         }
+    }
+
+    @ViewBuilder private var supplementalMaterialsSection: some View {
+        WorkspaceCard(title: "追加資料（手動）") {
+            HStack {
+                Button("ファイルを追加…") { chooseFiles() }
+                Button("テキストを追加…") { materialName = "メモ"; materialText = "" }
+                Spacer()
+                if model.supplementalMaterialsChanged(for: meeting) { Text("議事録が古い資料を参照しています").foregroundColor(WorkspaceTheme.warningText).font(.system(size: 12, weight: .semibold)) }
+            }
+            if !materialText.isEmpty || materialName == "メモ" {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("資料名", text: $materialName)
+                    TextField("メモ（任意）", text: $materialNote)
+                    TextEditor(text: $materialText).frame(minHeight: 100).overlay(RoundedRectangle(cornerRadius: 6).stroke(WorkspaceTheme.line))
+                    HStack { Button("保存") { addTextMaterial() }; Button("キャンセル") { materialText = ""; materialName = "" } }
+                }
+            }
+            if supplemental.isEmpty { Text("追加資料はありません。ファイルをここへドロップできます。").foregroundColor(WorkspaceTheme.muted) }
+            if let materialDropError { Text(materialDropError).font(.system(size: 12)).foregroundColor(WorkspaceTheme.warningText) }
+            ForEach(displayedSupplemental) { material in supplementalRow(material, readOnly: !supplemental.contains(material)) }
+            Button("選択した資料で議事録を再生成") { model.regenerateMinutesWithSupplementalMaterials(for: meeting) }
+                .buttonStyle(.borderedProminent).disabled(materialBusy || meeting.minutesState == "pending")
+        }
+    }
+
+    private var displayedSupplemental: [MeetingSupplementalMaterial] {
+        let acceptedMaterials = accepted?.supplementalMaterials ?? []
+        var result = supplemental
+        for item in acceptedMaterials where highlightedMaterials.contains(where: { id in item.sections.contains { $0.id == id } }) {
+            result.removeAll { $0.id == item.id }; result.append(item)
+        }
+        for item in acceptedMaterials where !result.contains(where: { $0.id == item.id }) { result.append(item) }
+        return result
+    }
+
+    private func supplementalRow(_ material: MeetingSupplementalMaterial, readOnly: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(material.name).font(.system(size: 14, weight: .semibold))
+                Text(material.status == .ready ? "読取済み" : material.status == .partial ? "一部読取" : "読取失敗").font(.system(size: 11)).foregroundColor(material.status == .failed ? WorkspaceTheme.warningText : WorkspaceTheme.muted)
+                Spacer()
+                Toggle("議事録に含める", isOn: Binding(get: { material.included }, set: { value in var updated = material; updated.included = value; saveMaterial(updated) })).toggleStyle(.checkbox).disabled(readOnly)
+                if !readOnly { Button("削除") { confirmDeleteMaterial = material }.buttonStyle(.borderless) }
+            }
+            if let error = material.error, !error.isEmpty { Text(error).font(.system(size: 12)).foregroundColor(WorkspaceTheme.warningText) }
+            if !readOnly && editingNoteID == material.id {
+                TextField("メモ（任意）", text: $editingNote)
+                HStack { Button("保存") { var updated = material; updated.note = editingNote; if saveMaterial(updated) { editingNoteID = nil } }; Button("キャンセル") { editingNoteID = nil } }
+            } else if !material.note.isEmpty {
+                Text(material.note).font(.system(size: 12)).foregroundColor(WorkspaceTheme.secondary)
+                if !readOnly { Button("メモを編集") { editingNoteID = material.id; editingNote = material.note }.buttonStyle(.borderless) }
+            } else if !readOnly {
+                Button("メモを追加") { editingNoteID = material.id; editingNote = "" }.buttonStyle(.borderless)
+            }
+            ForEach(material.sections) { section in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(section.locator.isEmpty ? "資料" : section.locator).font(.system(size: 11, weight: .semibold)).foregroundColor(WorkspaceTheme.muted)
+                    DisclosureGroup("本文を表示") {
+                        Text(section.text).font(.system(size: 13)).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }.padding(.leading, 10)
+                .id(section.id)
+                .background(highlightedMaterials.contains(section.id) ? WorkspaceTheme.chip : Color.clear)
+            }
+            if let url = MeetingSupplementalMaterials().originalURL(for: material, meetingID: meeting.id) { Button("元ファイルを開く") { NSWorkspace.shared.open(url) } }
+        }
+        .padding(.vertical, 6)
+    }
+
+    @discardableResult
+    private func saveMaterial(_ material: MeetingSupplementalMaterial) -> Bool {
+        do {
+            try MeetingSupplementalMaterials().update(material, meetingID: meeting.id)
+            materialDropError = nil
+            reloadSupplemental()
+            return true
+        } catch {
+            materialDropError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func reloadSupplemental() {
+        supplemental = MeetingSupplementalMaterials().load(meetingID: meeting.id)
+    }
+
+    private func chooseFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.item]
+        guard panel.runModal() == .OK else { return }
+        importFiles(panel.urls)
+    }
+
+    private func importDropped(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, _ in
+                let url: URL?
+                if let value = item as? URL { url = value }
+                else if let data = item as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }
+                else { url = nil }
+                guard let url else { return }
+                DispatchQueue.main.async { importFiles([url]) }
+            }
+        }
+    }
+
+    private func importFiles(_ urls: [URL]) {
+        materialBusy = true
+        let store = MeetingSupplementalMaterials()
+        Task.detached {
+            var failures: [String] = []
+            for url in urls { do { try store.importFile(url, meetingID: meeting.id) } catch { failures.append("\(url.lastPathComponent): \(error.localizedDescription)") } }
+            await MainActor.run { materialBusy = false; materialDropError = failures.isEmpty ? nil : failures.joined(separator: "\n"); reloadSupplemental() }
+        }
+    }
+
+    private func addTextMaterial() {
+        let text = materialText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        do {
+            try MeetingSupplementalMaterials().addText(text, name: materialName.isEmpty ? "メモ" : materialName,
+                                                      note: materialNote, meetingID: meeting.id)
+            materialText = ""; materialName = ""; materialNote = ""; reloadSupplemental()
+        } catch { materialDropError = error.localizedDescription }
     }
 
     private var materialStatus: String {
@@ -546,7 +748,9 @@ private struct MeetingSourcesRow: View {
         case .failed?: return "取得できず"
         case .ambiguous?: return "候補が複数"
         case .checking?: return "確認中"
-        case .available?: return "文字起こしなし"
+        case .available?:
+            if material?.segments.contains(where: { $0.isTranscript }) == true { return "取得済み（未使用）" }
+            return "文字起こしなし"
         default: return meeting.calendarEventID == nil ? "予定と未紐付け" : "なし"
         }
     }
@@ -787,13 +991,33 @@ enum WorkspaceFormat {
         // The parser keeps grounding beside the text, claim by claim. A line
         // links to every segment whose claim it states (or is part of).
         let ids = evidenceIDs(for: text, evidence: evidence)
-        guard !ids.isEmpty, !text.contains("[seg-") else { return output }
-        var link = AttributedString("  発言\(ids.count)件")
-        link.link = URL(string: "clawgate-segment://" + ids.map { String($0.dropFirst(4)) }.joined(separator: ","))
-        link.foregroundColor = WorkspaceTheme.accent
-        link.font = .system(size: 12, weight: .semibold)
-        output.append(link)
+        if !ids.isEmpty && !text.contains("[seg-") {
+            var link = AttributedString("  発言\(ids.count)件")
+            link.link = URL(string: "clawgate-segment://" + ids.map { String($0.dropFirst(4)) }.joined(separator: ","))
+            link.foregroundColor = WorkspaceTheme.accent
+            link.font = .system(size: 12, weight: .semibold)
+            output.append(link)
+        }
+        let materials = materialEvidenceIDs(for: text, evidence: evidence)
+        for (index, id) in materials.enumerated() {
+            var link = AttributedString("  資料\(index + 1)")
+            link.link = URL(string: "clawgate-material://" + id)
+            link.foregroundColor = WorkspaceTheme.accent
+            link.font = .system(size: 12, weight: .semibold)
+            output.append(link)
+        }
         return output
+    }
+
+    static func materialEvidenceIDs(for text: String, evidence: [MeetingEvidence]) -> [String] {
+        let squash = { (value: String) in value.filter { !$0.isWhitespace && !"。、，．.,".contains($0) } }
+        let line = squash(text)
+        guard !line.isEmpty else { return [] }
+        var seen = Set<String>()
+        return evidence.filter { item in
+            let claim = squash(item.claim)
+            return !claim.isEmpty && (line.contains(claim) || claim.contains(line))
+        }.flatMap { $0.materialIds ?? [] }.filter { seen.insert($0).inserted }
     }
 
     static func evidenceIDs(for text: String, evidence: [MeetingEvidence]) -> [String] {
@@ -833,7 +1057,7 @@ enum WorkspaceFormat {
 
     /// The Mac's own user is the meeting owner; their name reads as "あなた".
     static func isOwner(_ name: String) -> Bool {
-        // Word order differs between sources ("Yuzuru Honda" / "Honda Yuzuru"),
+        // Word order differs between sources ("Given Family" / "Family Given"),
         // so compare the set of name parts rather than the string.
         let parts = { (value: String) in
             Set(value.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).filter { $0.count >= 2 })

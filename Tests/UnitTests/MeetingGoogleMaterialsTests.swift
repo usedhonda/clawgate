@@ -71,4 +71,22 @@ final class MeetingGoogleMaterialsTests: XCTestCase {
         XCTAssertEqual(result.status, .serviceUnavailable)
     }
 
+    func testDisabledAPIRecoversOnRetryAndIsNotCachedForever() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let now = Date()
+        let failed = try MeetingGoogleMaterials.sync(candidate: candidate(), run: { _ in
+            throw NSError(domain: "docs API disabled", code: 403)
+        }, cacheDirectory: dir, now: now)
+        XCTAssertTrue(MeetingGoogleMaterials.shouldReuseFailure(failed, now: now.addingTimeInterval(100)))
+        XCTAssertFalse(MeetingGoogleMaterials.shouldReuseFailure(failed, now: now.addingTimeInterval(1800)))
+        XCTAssertFalse(MeetingGoogleMaterials.shouldReuseFailure(failed, force: true))
+        let recovered = try MeetingGoogleMaterials.sync(candidate: candidate(), run: { args in
+            if args.prefix(2) == ["docs", "raw"] { return self.tabs }
+            return Data(#"{"file":{"name":"Planning"}}"#.utf8)
+        }, cacheDirectory: dir)
+        XCTAssertEqual(recovered.status, .available)
+        XCTAssertEqual(recovered.segments.count, 2)
+    }
+
 }

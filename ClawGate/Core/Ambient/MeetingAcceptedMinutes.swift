@@ -8,9 +8,15 @@ struct MeetingAcceptedMinutes: Codable {
     let segments: [MeetingMinutesSegment]
     let unresolvedNotes: [String]
     let createdAt: Date
+    var supplementalMaterials: [MeetingSupplementalMaterial]? = nil
+    var supplementalInput: [MeetingSupplementalMaterial]? = nil
 }
 
 extension MeetingStore {
+    private static func uniqueSegments(_ values: [MeetingMinutesSegment]) -> [MeetingMinutesSegment] {
+        var seen = Set<String>(); return values.filter { seen.insert($0.id).inserted }
+    }
+
     func loadAcceptedMinutes(id: String) -> MeetingAcceptedMinutes? {
         guard let data = try? Data(contentsOf: directory(for: id).appendingPathComponent("minutes-accepted.json")) else { return nil }
         return try? JSONDecoder().decode(MeetingAcceptedMinutes.self, from: data)
@@ -21,8 +27,9 @@ extension MeetingStore {
         guard !job.envelopes.isEmpty, job.completed.count == job.envelopes.count,
               job.completed.contains(where: { $0 != nil }) else { throw MeetingMinutesError.encodingFailed }
         let accepted = MeetingAcceptedMinutes(minutes: minutes, fingerprint: job.fingerprint,
-            segments: job.envelopes.flatMap(\.segments),
-            unresolvedNotes: job.envelopes.first?.unresolvedNotes ?? [], createdAt: Date())
+            segments: Self.uniqueSegments(job.envelopes.flatMap(\.segments)),
+            unresolvedNotes: job.envelopes.first?.unresolvedNotes ?? [], createdAt: Date(),
+            supplementalMaterials: job.materialCitationSnapshot, supplementalInput: job.allSupplementalMaterials)
         let dir = directory(for: record.id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try JSONEncoder().encode(accepted).write(to: dir.appendingPathComponent("minutes-accepted.json"), options: .atomic)
