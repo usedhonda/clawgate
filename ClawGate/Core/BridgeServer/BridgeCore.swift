@@ -168,6 +168,11 @@ final class BridgeCore {
         return jsonResponse(status: .ok, body: encode(["ok": true]))
     }
 
+    func lineObservationDebug() -> HTTPResult {
+        let data = (try? JSONSerialization.data(withJSONObject: LineObservationDiagnostics.shared.snapshot(), options: [.sortedKeys])) ?? Data("{}".utf8)
+        return jsonResponse(status: .ok, body: data)
+    }
+
     func health() -> HTTPResult {
         let body = encode(HealthResponse(ok: true, version: "0.1.0"))
         return jsonResponse(status: .ok, body: body)

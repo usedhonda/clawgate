@@ -59,6 +59,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
     /// dispatch (see `handleRequest`) and the 405/404 route table.
     private static let blockingRoutes: [RouteKey: BlockingRouteHandler] = [
         RouteKey(.GET, "/v1/debug/line-dedup"): { core, _, _, _ in core.handleLineDedupDebug() },
+        RouteKey(.GET, "/v1/debug/line-observation"): { core, _, _, _ in core.lineObservationDebug() },
         RouteKey(.GET, "/v1/debug/line-health"): { core, _, _, _ in core.handleLineHealthDebug() },
         RouteKey(.GET, "/v1/debug/tmux-direct"): { core, _, _, _ in core.handleTmuxDirectDebug() },
         RouteKey(.GET, "/v1/debug/reminders"): { core, _, _, _ in core.debugReminders() },

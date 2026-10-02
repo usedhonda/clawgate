@@ -49,6 +49,10 @@ struct InlineSettingsView: View {
     }
 
     @ObservedObject var model: SettingsModel
+    @AppStorage("clawgate.lineObservationEnabled") private var lineObservationEnabled = true
+    @State private var observationStatus = "starting"
+    @State private var observationDelivery = "idle"
+    @State private var observationQueue = 0
     @State private var lineState: ConnectivityState = .unknown
     @State private var gatewayState: ConnectivityState = .unknown
     @State private var probeTimer: Timer?
@@ -62,6 +66,7 @@ struct InlineSettingsView: View {
             if lineSectionShouldShow {
                 lineSection
             }
+            if model.config.isClientRole { lineObservationSection }
             gatewaySection
             jevSection
             systemSection
@@ -123,6 +128,56 @@ struct InlineSettingsView: View {
         .onChange(of: model.config.tmuxSessionModes) { _ in model.save() }
         .onChange(of: model.config.openclawHost) { _ in model.save(); refreshConnectivity() }
         .onChange(of: model.config.openclawPort) { _ in model.save(); refreshConnectivity() }
+    }
+
+    private var lineObservationCaptureLabel: String {
+        switch observationStatus {
+        case "observing": return "表示範囲を観測中"
+        case "screenRecordingDenied": return "画面収録の許可を確認してください"
+        case "unknownWindow": return "窓の読取範囲を特定できません"
+        case "lineNotRunning": return "LINEが起動していません"
+        case "noLineWindows": return "取得できるLINE窓がありません"
+        case "disabled": return "停止中"
+        case "outbox_full": return "未保存データが上限に達したため取得停止"
+        case "screen_locked": return "画面ロック中"
+        case "storage_unavailable", "outbox_write_failed": return "ローカル保存を確認してください"
+        case "unsupported_os": return "このmacOSでは取得できません"
+        case "starting": return "準備中"
+        default: return "現在取得できません"
+        }
+    }
+
+    private var lineObservationDeliveryLabel: String {
+        switch observationDelivery {
+        case "committed", "caught_up": return "保存済み"
+        case "http_404": return "サーバー未対応・データ保持中"
+        case "partial_ack": return "一部保存済み"
+        case "permanent_rejection": return "受理されないデータを保持中"
+        case "auth_unavailable": return "接続情報を確認してください"
+        case "idle": return "待機中"
+        case "backpressure": return "保存待ちの上限に到達"
+        default: return "保存を確認できず再試行中"
+        }
+    }
+
+    private var lineObservationSection: some View {
+        PanelCard {
+            Text("LINE 状態監視").font(PanelTheme.titleFont)
+            Toggle("ユーザーのLINEを受動観測", isOn: $lineObservationEnabled)
+            Text("送信・前面化・会話操作はしません。見える範囲だけ取得します。")
+                .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
+            Text("取得: \(lineObservationCaptureLabel)").font(PanelTheme.smallFont)
+            if observationStatus == "screenRecordingDenied" {
+                Button("画面収録の設定を開く") {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+            Text("配送: \(lineObservationDeliveryLabel) · 未保存 \(observationQueue)件").font(PanelTheme.smallFont)
+            Text("会話同定が不明な観測から未返信を断定しません。")
+                .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
+        }
     }
 
     private var lineSection: some View {
@@ -429,6 +484,10 @@ struct InlineSettingsView: View {
     }
 
     private func refreshConnectivity() {
+        let observation = LineObservationDiagnostics.shared.snapshot()
+        observationStatus = observation["captureStatus"] as? String ?? "starting"
+        observationDelivery = observation["deliveryStatus"] as? String ?? "idle"
+        observationQueue = observation["queueCount"] as? Int ?? 0
         lineState = model.config.lineEnabled
             ? (lineAppRunning() ? .online : .offline)
             : .unknown

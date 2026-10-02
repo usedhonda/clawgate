@@ -138,6 +138,7 @@ final class AppRuntime {
 
     func startServer() {
         requestPermissionPromptsIfNeeded()
+        Task { @MainActor in LineObservationService.shared.start() }
 
         do {
             try server.start()
@@ -222,6 +223,7 @@ final class AppRuntime {
     }
 
     func stopServer() {
+        Task { @MainActor in LineObservationService.shared.stop() }
         if configStore.load().lineEnabled {
             notificationBannerWatcher.stop()
             lineHealthCaretaker.stop()
