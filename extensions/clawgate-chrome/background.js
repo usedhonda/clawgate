@@ -1,3 +1,5 @@
+import { enqueueHubEntry, flushHubOutbox } from './hub-outbox.js';
+
 const DEFAULT_SETTINGS = {
   bridgePort: 8765,
   gatewayURL: '',
@@ -57,6 +59,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   ensurePassiveAlarm().catch(() => undefined);
   armDwellForActiveTab().catch(() => undefined);
   startPolling();
+  await flushHubOutbox(await getSettings()).catch(() => undefined);
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -67,6 +70,7 @@ chrome.runtime.onStartup.addListener(async () => {
   ensurePassiveAlarm().catch(() => undefined);
   armDwellForActiveTab().catch(() => undefined);
   startPolling();
+  await flushHubOutbox(await getSettings()).catch(() => undefined);
 });
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -144,7 +148,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   handleMessengerFlushAlarmTick()
     .catch(() => undefined)
     .finally(() => {
-      flushPassiveQueue().catch(() => undefined);
+      flushPassiveQueue().catch(() => undefined)
+        .finally(async () => flushHubOutbox(await getSettings()).catch(() => undefined));
     });
 });
 
@@ -489,7 +494,9 @@ async function captureAndSend(tab, options = {}) {
     userInitiated: true,
   }];
 
+  await enqueueHubEntry(entries[0]).catch(() => console.warn('[ClawGate] hub outbox write failed'));
   await postWebHistoryEntries(entries, { gatewayURL, gatewayToken });
+  flushHubOutbox({ gatewayURL, gatewayToken }).catch(() => undefined);
 
   await appendPassiveSendLog([{
     domain: domain || '',
@@ -579,6 +586,7 @@ async function handlePassiveDwell(visit) {
   }
 
   passiveSentAtByURL.set(entry.url, { time: Date.now() });
+  await enqueueHubEntry(entry).catch(() => console.warn('[ClawGate] hub outbox write failed'));
   enqueuePassiveEntry(entry);
 }
 
@@ -604,8 +612,10 @@ async function captureMessengerNow(tab) {
   }
 
   passiveSentAtByURL.set(entry.threadUrl, { time: Date.now(), signature: entry.contentSignature });
+  await enqueueHubEntry(entry).catch(() => console.warn('[ClawGate] hub outbox write failed'));
   enqueuePassiveEntry(entry);
   await flushPassiveQueue();
+  flushHubOutbox(settings).catch(() => undefined);
 }
 
 async function buildPassiveEntry(tab, activeSeconds) {

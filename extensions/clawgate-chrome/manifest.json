@@ -2,13 +2,14 @@
   "manifest_version": 3,
   "name": "ClawGate",
   "description": "Send pages to Chi, your AI companion",
-  "version": "0.12.1",
+  "version": "0.12.2",
   "permissions": [
     "tabs",
     "activeTab",
     "scripting",
     "contextMenus",
     "storage",
+    "unlimitedStorage",
     "alarms"
   ],
   "host_permissions": [

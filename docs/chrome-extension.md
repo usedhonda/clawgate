@@ -1,10 +1,22 @@
 # ClawGate Chrome extension
 
-Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.9.1`.
+Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.12.2`.
 
 The extension is the browser half of ClawGate. It sends pages you choose to Chi,
 records where you have been, and — on Messenger only — reads the conversation on
 screen so Chi can reason about business correspondence.
+
+During migration to the personal realtime data hub, each selected page, eligible
+passive visit, and Messenger visible-window capture is also queued in durable
+`chrome.storage.local` before the existing delivery attempt. The independent
+Gateway `/api/personal-hub/chrome` route commits the event in the hub and returns
+its external ID. Only an ID-matching committed ACK removes it from the outbox;
+offline/unknown results remain queued for retry at the 1.5-minute alarm or
+extension startup. Hub failure never suppresses the existing Chi,
+`/api/web-history`, or `/api/messenger-capture` delivery. The extension's
+`unlimitedStorage` permission prevents Chrome's small default local-storage
+quota from silently limiting this owner-controlled outbox. The hub's scope and
+retention contract is `oc-general/docs/contracts/personal-realtime-data.md`.
 
 Everything below is taken from the source. Where behaviour is governed by an
 OpenClaw contract, this page points at the contract rather than restating it;
