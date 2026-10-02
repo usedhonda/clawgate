@@ -63,7 +63,7 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
 
     public enum State: String, Codable, Sendable {
         case captured
-        case screenRecordingDenied
+        case screenCapturePermissionUnverified
         case lineNotRunning
         case noLineWindows
         case captureUnavailable
@@ -116,7 +116,7 @@ public final class LinePassiveCapture {
             return [Self.unavailable(.captureUnavailable)]
         }
         guard CGPreflightScreenCaptureAccess() else {
-            return [Self.unavailable(.screenRecordingDenied)]
+            return [Self.unavailable(.screenCapturePermissionUnverified)]
         }
 
         let content: SCShareableContent

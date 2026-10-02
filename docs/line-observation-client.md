@@ -16,8 +16,8 @@ runs on a utility task. Images remain in memory; audio is not captured.
 
 AX geometry is global top-left points. Image crops are window-relative top-left
 pixels; exported OCR boxes are normalized bottom-left window coordinates.
-Layout/geometry is checked again after capture. Unknown layouts, denied screen
-permission, minimized/unavailable windows and locked sessions do not trigger
+Layout/geometry is checked again after capture. Unknown layouts, a failed
+screen-capture preflight (which does not prove an OS denial), minimized/unavailable windows and locked sessions do not trigger
 UI recovery or repeated permission requests. The feature requires macOS 12.3;
 macOS 14+ uses the screenshot API, earlier supported systems use a bounded
 single-frame stream. Historical rows outside the identified content rectangle
@@ -57,8 +57,10 @@ Polling is every 2 seconds, reducing to 10 after 30 seconds without change.
 `GET /v1/debug/line-observation` exposes only machine status, counts and
 per-window capture metadata, never OCR text or credentials. Settings shows
 capture state, delivery state and pending count, and links to screen recording
-settings when permission is denied. A 404 server endpoint is not a successful
-handoff; records remain pending until the dedicated server subsystem exists.
+settings when the preflight is false. This is an unverified access check, not
+proof that macOS denied permission. A 404 server endpoint is independent of
+the preflight and is not a successful handoff; records remain pending until
+the dedicated server subsystem exists.
 
 Server retention defaults to 30 days under the approved plan, unlike Messenger.
 The server dedicated SQLite is the canonical store. Ingestion never triggers

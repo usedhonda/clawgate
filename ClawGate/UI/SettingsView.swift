@@ -133,7 +133,7 @@ struct InlineSettingsView: View {
     private var lineObservationCaptureLabel: String {
         switch observationStatus {
         case "observing": return "表示範囲を観測中"
-        case "screenRecordingDenied": return "画面収録の許可を確認してください"
+        case "screenCapturePermissionUnverified": return "画面収録の事前確認で停止"
         case "unknownWindow": return "窓の読取範囲を特定できません"
         case "lineNotRunning": return "LINEが起動していません"
         case "noLineWindows": return "取得できるLINE窓がありません"
@@ -167,12 +167,20 @@ struct InlineSettingsView: View {
             Text("送信・前面化・会話操作はしません。見える範囲だけ取得します。")
                 .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
             Text("取得: \(lineObservationCaptureLabel)").font(PanelTheme.smallFont)
-            if observationStatus == "screenRecordingDenied" {
+            if observationStatus == "screenCapturePermissionUnverified" {
+                Text("ClawGateの事前確認がfalseのため、画面取得・OCRはまだ実行していません。macOS設定がONでも原因は未確定です。")
+                    .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
                 Button("画面収録の設定を開く") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
                         NSWorkspace.shared.open(url)
                     }
                 }
+            }
+            Text("事前確認 → 窓取得 → OCR → ローカル保存 → サーバー保存")
+                .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
+            if observationDelivery == "http_404" {
+                Text("サーバー404は事前確認・OCRとは独立しています。観測データは保持中です。")
+                    .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
             }
             Text("配送: \(lineObservationDeliveryLabel) · 未保存 \(observationQueue)件").font(PanelTheme.smallFont)
             Text("会話同定が不明な観測から未返信を断定しません。")
