@@ -105,6 +105,10 @@ final class LineObservationService {
         } else if #available(macOS 12.3, *), let capture {
             let windows = await capture.capture()
             if Task.isCancelled { return }
+            if let metricsData = try? JSONEncoder().encode(capture.metrics),
+               let performance = try? JSONSerialization.jsonObject(with: metricsData) {
+                diagnostics.update(["capturePerformance": performance, "lastCaptureCompletedAt": Self.iso(Date())])
+            }
             status = windows.contains { $0.state == .captured } ? "observing" : (windows.first?.state.rawValue ?? "unavailable")
             snapshots = windows.map { Self.snapshot($0, schemaVersion: schemaVersion) }
             diagnostics.update(["windows": windows.map { ["windowId": $0.windowID.map(String.init) as Any? ?? NSNull(),
@@ -131,13 +135,7 @@ final class LineObservationService {
                                   "reason": status == "observing" ? "no_identified_window" : status, "ocrSpans": []])
             }
         }
-        if schemaVersion == 2 {
-            snapshots = snapshots.map { snapshot in
-                var snapshot = snapshot
-                if snapshot["bodyCandidates"] == nil { snapshot["bodyCandidates"] = [] as [[String: Any]] }
-                return snapshot
-            }
-        }
+        snapshots = LineObservationProtocol.snapshotsForWire(snapshots, schemaVersion: schemaVersion)
         diagnostics.update(["captureStatus": status, "lastObservedAt": Self.iso(now),
                             "queueCount": outbox.queuedCount, "queueBytes": outbox.queuedBytes])
         do {
@@ -175,6 +173,7 @@ final class LineObservationService {
 
     private func clearSurfaceDiagnostics() {
         diagnostics.update(["windows": [] as [[String: Any]], "windowCount": 0, "availableWindowCount": 0,
+                            "capturePerformance": NSNull(),
                             "ocrSpanCount": 0, "sidebarWindowCount": 0, "sidebarOCRSpanCount": 0,
                             "conversationWindowCount": 0, "conversationOCRSpanCount": 0, "bodyCandidateCount": 0,
                             "schemaVersion": schemaVersion])

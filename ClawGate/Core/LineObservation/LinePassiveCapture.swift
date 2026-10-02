@@ -96,6 +96,43 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
     }
 }
 
+/// Machine-only timing and cache counters for the most recent passive capture.
+/// Durations are monotonic wall-clock milliseconds; nil means that stage was not reached.
+public struct LinePassiveCaptureMetrics: Codable, Equatable, Sendable {
+    public let invocationCount: Int
+    public let latestInvocationDurationMilliseconds: Double
+    public let latestScreenshotDurationMilliseconds: Double?
+    public let latestOCRDurationMilliseconds: Double?
+    public let latestCacheHits: Int
+    public let latestCacheMisses: Int
+    public let cumulativeScreenshotDurationMilliseconds: Double
+    public let cumulativeOCRDurationMilliseconds: Double
+    public let cumulativeCacheHits: Int
+    public let cumulativeCacheMisses: Int
+
+    public init(invocationCount: Int = 0,
+                latestInvocationDurationMilliseconds: Double = 0,
+                latestScreenshotDurationMilliseconds: Double? = nil,
+                latestOCRDurationMilliseconds: Double? = nil,
+                latestCacheHits: Int = 0,
+                latestCacheMisses: Int = 0,
+                cumulativeScreenshotDurationMilliseconds: Double = 0,
+                cumulativeOCRDurationMilliseconds: Double = 0,
+                cumulativeCacheHits: Int = 0,
+                cumulativeCacheMisses: Int = 0) {
+        self.invocationCount = invocationCount
+        self.latestInvocationDurationMilliseconds = latestInvocationDurationMilliseconds
+        self.latestScreenshotDurationMilliseconds = latestScreenshotDurationMilliseconds
+        self.latestOCRDurationMilliseconds = latestOCRDurationMilliseconds
+        self.latestCacheHits = latestCacheHits
+        self.latestCacheMisses = latestCacheMisses
+        self.cumulativeScreenshotDurationMilliseconds = cumulativeScreenshotDurationMilliseconds
+        self.cumulativeOCRDurationMilliseconds = cumulativeOCRDurationMilliseconds
+        self.cumulativeCacheHits = cumulativeCacheHits
+        self.cumulativeCacheMisses = cumulativeCacheMisses
+    }
+}
+
 /// Read-only, window-scoped LINE capture. It never activates, resizes, scrolls,
 /// clicks, types into, or otherwise mutates a LINE window.
 @MainActor
@@ -113,10 +150,59 @@ public final class LinePassiveCapture {
     }
 
     private var cache: [UInt32: CachedRows] = [:]
+    public private(set) var metrics = LinePassiveCaptureMetrics()
+
+    private struct InvocationAccumulator {
+        var screenshotNanoseconds: UInt64 = 0
+        var ocrNanoseconds: UInt64 = 0
+        var screenshotReached = false
+        var ocrReached = false
+        var cacheHits = 0
+        var cacheMisses = 0
+    }
+
+    private struct WindowCaptureResult {
+        let observation: LineWindowObservation
+        let screenshotNanoseconds: UInt64
+        let ocrNanoseconds: UInt64
+        let screenshotReached: Bool
+        let ocrReached: Bool
+        let cacheHit: Bool
+        let cacheMiss: Bool
+
+        init(observation: LineWindowObservation, screenshotNanoseconds: UInt64, ocrNanoseconds: UInt64,
+             screenshotReached: Bool = false, ocrReached: Bool = false,
+             cacheHit: Bool, cacheMiss: Bool) {
+            self.observation = observation
+            self.screenshotNanoseconds = screenshotNanoseconds
+            self.ocrNanoseconds = ocrNanoseconds
+            self.screenshotReached = screenshotReached
+            self.ocrReached = ocrReached
+            self.cacheHit = cacheHit
+            self.cacheMiss = cacheMiss
+        }
+    }
 
     public init() {}
 
     public func capture() async -> [LineWindowObservation] {
+        let started = Self.monotonicNanoseconds()
+        var accumulator = InvocationAccumulator()
+        defer {
+            let latestScreenshot = accumulator.screenshotReached ? Self.milliseconds(accumulator.screenshotNanoseconds) : nil
+            let latestOCR = accumulator.ocrReached ? Self.milliseconds(accumulator.ocrNanoseconds) : nil
+            metrics = LinePassiveCaptureMetrics(
+                invocationCount: metrics.invocationCount + 1,
+                latestInvocationDurationMilliseconds: Self.milliseconds(Self.monotonicNanoseconds() - started),
+                latestScreenshotDurationMilliseconds: latestScreenshot,
+                latestOCRDurationMilliseconds: latestOCR,
+                latestCacheHits: accumulator.cacheHits,
+                latestCacheMisses: accumulator.cacheMisses,
+                cumulativeScreenshotDurationMilliseconds: metrics.cumulativeScreenshotDurationMilliseconds + (latestScreenshot ?? 0),
+                cumulativeOCRDurationMilliseconds: metrics.cumulativeOCRDurationMilliseconds + (latestOCR ?? 0),
+                cumulativeCacheHits: metrics.cumulativeCacheHits + accumulator.cacheHits,
+                cumulativeCacheMisses: metrics.cumulativeCacheMisses + accumulator.cacheMisses)
+        }
         guard #available(macOS 12.3, *) else {
             return [Self.unavailable(.captureUnavailable)]
         }
@@ -143,56 +229,67 @@ public final class LinePassiveCapture {
 
         var results: [LineWindowObservation] = []
         for window in windows {
-            results.append(await capture(window: window))
+            let result = await capture(window: window)
+            results.append(result.observation)
+            accumulator.screenshotNanoseconds += result.screenshotNanoseconds
+            accumulator.ocrNanoseconds += result.ocrNanoseconds
+            accumulator.screenshotReached = accumulator.screenshotReached || result.screenshotReached
+            accumulator.ocrReached = accumulator.ocrReached || result.ocrReached
+            if result.cacheHit { accumulator.cacheHits += 1 }
+            if result.cacheMiss { accumulator.cacheMisses += 1 }
         }
         return results
     }
 
     @available(macOS 12.3, *)
-    private func capture(window: SCWindow) async -> LineWindowObservation {
+    private func capture(window: SCWindow) async -> WindowCaptureResult {
         let width = max(0, Int(window.frame.width.rounded()))
         let height = max(0, Int(window.frame.height.rounded()))
         guard width > 0, height > 0 else {
-            return LineWindowObservation(state: .captureUnavailable, kind: .unknown, coverage: .unavailable,
-                                         windowID: window.windowID, width: width, height: height, rows: [])
+            return WindowCaptureResult(observation: LineWindowObservation(state: .captureUnavailable, kind: .unknown, coverage: .unavailable,
+                                         windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: 0, ocrNanoseconds: 0, cacheHit: false, cacheMiss: false)
         }
 
         guard let evidence = Self.readOnlyAXEvidence(for: window) else {
-            return LineWindowObservation(state: .unknownWindow, kind: .unknown, coverage: .unavailable,
-                                         windowID: window.windowID, width: width, height: height, rows: [])
+            return WindowCaptureResult(observation: LineWindowObservation(state: .unknownWindow, kind: .unknown, coverage: .unavailable,
+                                         windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: 0, ocrNanoseconds: 0, cacheHit: false, cacheMiss: false)
         }
 
+        let screenshotStarted = Self.monotonicNanoseconds()
         guard let image = await captureImage(for: window, width: width, height: height) else {
-            return LineWindowObservation(state: .captureUnavailable, kind: .unknown, coverage: .unavailable,
-                                         windowID: window.windowID, width: width, height: height, rows: [])
+            return WindowCaptureResult(observation: LineWindowObservation(state: .captureUnavailable, kind: .unknown, coverage: .unavailable,
+                                         windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: Self.monotonicNanoseconds() - screenshotStarted, ocrNanoseconds: 0, screenshotReached: true, cacheHit: false, cacheMiss: false)
         }
+        let screenshotNanoseconds = Self.monotonicNanoseconds() - screenshotStarted
         guard Self.readOnlyAXEvidence(for: window) == evidence else {
-            return LineWindowObservation(state: .unknownWindow, kind: .unknown, coverage: .unavailable,
-                                         windowID: window.windowID, width: width, height: height, rows: [])
+            return WindowCaptureResult(observation: LineWindowObservation(state: .unknownWindow, kind: .unknown, coverage: .unavailable,
+                                         windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: false, cacheMiss: false)
         }
         let cropRect = Self.pixelCrop(content: evidence.contentFrame, window: window.frame, imageWidth: image.width, imageHeight: image.height)
         guard let cropped = image.cropping(to: cropRect), cropRect.width > 0, cropRect.height > 0 else {
-            return LineWindowObservation(state: .unknownWindow, kind: .unknown, coverage: .unavailable,
-                                         windowID: window.windowID, width: width, height: height, rows: [])
+            return WindowCaptureResult(observation: LineWindowObservation(state: .unknownWindow, kind: .unknown, coverage: .unavailable,
+                                         windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: false, cacheMiss: false)
         }
         let fingerprint = Self.fingerprint(cropped)
         if let previous = cache[window.windowID], previous.fingerprint == fingerprint,
            previous.width == image.width, previous.height == image.height, previous.title == window.title,
            previous.bounds == evidence.contentFrame, previous.bodyRegions == evidence.bodyRegions {
             let known = previous.kind != .unknown
-            return LineWindowObservation(state: known ? .captured : .unknownWindow, kind: previous.kind,
+            return WindowCaptureResult(observation: LineWindowObservation(state: known ? .captured : .unknownWindow, kind: previous.kind,
                                          coverage: known ? .contentExcludingChrome : .unavailable,
                                          windowID: window.windowID, width: previous.width, height: previous.height,
-                                         rows: previous.rows, bodyCandidates: previous.bodyCandidates)
+                                         rows: previous.rows, bodyCandidates: previous.bodyCandidates), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: true, cacheMiss: false)
         }
 
+        let ocrStarted = Self.monotonicNanoseconds()
         let rawRows: [(text: String, boundingBox: CGRect, confidence: Double)]
         do {
             rawRows = try await Task.detached(priority: .utility) { try Self.recognize(cropped) }.value
         } catch {
-            return LineWindowObservation(state: .ocrUnavailable, kind: .unknown, coverage: .unavailable,
-                                         windowID: window.windowID, width: width, height: height, rows: [])
+            return WindowCaptureResult(observation: LineWindowObservation(state: .ocrUnavailable, kind: .unknown, coverage: .unavailable,
+                                         windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: Self.monotonicNanoseconds() - ocrStarted, screenshotReached: true, ocrReached: true, cacheHit: false, cacheMiss: true)
         }
+        let ocrNanoseconds = Self.monotonicNanoseconds() - ocrStarted
         let kind = evidence.kind
         let imageW = CGFloat(image.width)
         let imageH = CGFloat(image.height)
@@ -218,14 +315,22 @@ public final class LinePassiveCapture {
                                             title: window.title,
                                             kind: kind, bounds: evidence.contentFrame, rows: usable,
                                             bodyRegions: evidence.bodyRegions, bodyCandidates: candidates)
-        return LineWindowObservation(state: .captured, kind: kind, coverage: .contentExcludingChrome,
+        return WindowCaptureResult(observation: LineWindowObservation(state: .captured, kind: kind, coverage: .contentExcludingChrome,
                                      windowID: window.windowID, width: image.width, height: image.height,
-                                     rows: usable, bodyCandidates: candidates)
+                                     rows: usable, bodyCandidates: candidates), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: ocrNanoseconds, screenshotReached: true, ocrReached: true, cacheHit: false, cacheMiss: true)
     }
 
     private static func unavailable(_ state: LineWindowObservation.State) -> LineWindowObservation {
         LineWindowObservation(state: state, kind: .unknown, coverage: .unavailable,
                               windowID: nil, width: 0, height: 0, rows: [])
+    }
+
+    private static func monotonicNanoseconds() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+    }
+
+    private static func milliseconds(_ nanoseconds: UInt64) -> Double {
+        Double(nanoseconds) / 1_000_000
     }
 
     @available(macOS 12.3, *)

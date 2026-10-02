@@ -92,8 +92,18 @@ An observation older than 30 seconds is labelled stale. Disabled, locked or
 unavailable surfaces clear current counts rather than exposing previous text as
 current evidence. Missing/unidentified history stays unavailable.
 
+`capturePerformance` reports the last capture invocation's monotonic wall-clock
+milliseconds, screenshot/OCR stage durations and cache hit/miss counters, plus
+cumulative stage durations and counters for this process. An unreached stage's
+duration is omitted, not reported as zero; inactive capture reports null. These
+are observer-specific elapsed times, not CPU utilization. Cache hits reuse OCR
+without running recognition again. No timing fields enter the observation wire.
+V2 also explicitly supplies unknown identity and empty candidate arrays for
+unavailable surfaces; missing history never becomes a confirmed empty thread.
+
 Server retention defaults to 30 days under the approved plan, unlike Messenger.
-The server dedicated SQLite is the canonical store. Ingestion never triggers
+The existing Personal Data Hub LINE domain is the canonical SQLite store;
+this observer does not create a separate LINE database. Ingestion never triggers
 an agent; a separate PCE tick may use state/digest context. Individual unanswered
 candidates require confirmed identity, attributed latest inbound, fresh capture
 and verified tail coverage, which this initial OCR producer does not assert.
