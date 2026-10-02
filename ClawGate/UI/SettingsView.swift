@@ -53,6 +53,14 @@ struct InlineSettingsView: View {
     @State private var observationStatus = "starting"
     @State private var observationDelivery = "idle"
     @State private var observationQueue = 0
+    @State private var sidebarWindowCount: Int? = nil
+    @State private var sidebarOCRSpanCount: Int? = nil
+    @State private var conversationWindowCount: Int? = nil
+    @State private var conversationOCRSpanCount: Int? = nil
+    @State private var bodyCandidateCount: Int? = nil
+    @State private var observationLastObservedAt: Date? = nil
+    @State private var observationLastAcknowledgedAt: Date? = nil
+    @State private var observationSchemaVersion = 1
     @State private var lineState: ConnectivityState = .unknown
     @State private var gatewayState: ConnectivityState = .unknown
     @State private var probeTimer: Timer?
@@ -141,6 +149,7 @@ struct InlineSettingsView: View {
         case "outbox_full": return "未保存データが上限に達したため取得停止"
         case "screen_locked": return "画面ロック中"
         case "storage_unavailable", "outbox_write_failed": return "ローカル保存を確認してください"
+        case "captureUnavailable", "unavailable": return "取得できる画面がありません"
         case "unsupported_os": return "このmacOSでは取得できません"
         case "starting": return "準備中"
         default: return "現在取得できません"
@@ -178,6 +187,8 @@ struct InlineSettingsView: View {
             }
             Text("事前確認 → 窓取得 → OCR → ローカル保存 → サーバー保存")
                 .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
+            lineObservationSurfaceStatus
+            lineObservationFreshness
             if observationDelivery == "http_404" {
                 Text("サーバー404は事前確認・OCRとは独立しています。観測データは保持中です。")
                     .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
@@ -186,6 +197,81 @@ struct InlineSettingsView: View {
             Text("会話同定が不明な観測から未返信を断定しません。")
                 .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
         }
+    }
+
+    private var lineObservationSurfaceStatus: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("画面の観測")
+                .font(PanelTheme.smallFont)
+                .foregroundStyle(PanelTheme.textSecondary)
+            if observationCountsUnavailable {
+                Text("サイドバー: 利用不可（\(lineObservationCaptureLabel)）")
+                Text("本文: 利用不可（\(lineObservationCaptureLabel)）")
+                Text(observationSchemaVersion == 2 ? "本文整理: 候補情報を確認中" : "本文整理:サーバーv2確認待ち")
+            } else if observationIsStale {
+                Text("サイドバー: 前回観測 · 窓 \(sidebarWindowCount ?? 0) / OCRスパン \(sidebarOCRSpanCount ?? 0)")
+                Text("本文: 前回観測 · 窓 \(conversationWindowCount ?? 0) / OCRスパン \(conversationOCRSpanCount ?? 0)")
+                lineObservationCandidateLabel(prefix: "本文整理（前回観測）")
+            } else {
+                if (sidebarWindowCount ?? 0) > 0 {
+                    Text("サイドバー: 最新 · 窓 \(sidebarWindowCount ?? 0) / OCR文字領域 \(sidebarOCRSpanCount ?? 0)")
+                } else { Text("サイドバー: 観測不能（安全な一覧窓なし）") }
+                if (conversationWindowCount ?? 0) > 0 {
+                    Text("本文: 最新 · 窓 \(conversationWindowCount ?? 0) / OCR文字領域 \(conversationOCRSpanCount ?? 0)")
+                } else { Text("本文: 観測不能（安全な会話窓なし）") }
+                lineObservationCandidateLabel(prefix: "本文整理")
+            }
+        }
+        .font(PanelTheme.smallFont)
+    }
+
+    @ViewBuilder
+    private func lineObservationCandidateLabel(prefix: String) -> some View {
+        if observationSchemaVersion == 2 {
+            Text("\(prefix): 候補 \(bodyCandidateCount ?? 0)件")
+        } else {
+            Text("\(prefix): ローカル候補 \(bodyCandidateCount ?? 0)件 · サーバーv2確認待ち")
+        }
+    }
+
+    private var lineObservationFreshness: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if observationCountsUnavailable {
+                Text("観測: 停止／利用不可").foregroundStyle(PanelTheme.textSecondary)
+            } else if observationIsStale {
+                Text("観測: stale（30秒以上更新なし）")
+                    .foregroundStyle(PanelTheme.accentYellow)
+            } else if observationLastObservedAt != nil {
+                Text("観測: 最新")
+                    .foregroundStyle(PanelTheme.accentGreen)
+            } else {
+                Text("観測: 未確認")
+                    .foregroundStyle(PanelTheme.textSecondary)
+            }
+            Text("最終観測: \(formatObservationDate(observationLastObservedAt))")
+            Text("最終コミットACK: \(formatObservationDate(observationLastAcknowledgedAt))")
+        }
+        .font(PanelTheme.smallFont)
+        .foregroundStyle(PanelTheme.textSecondary)
+    }
+
+    private var observationCountsUnavailable: Bool {
+        guard observationStatus == "observing" else { return true }
+        return sidebarWindowCount == nil && sidebarOCRSpanCount == nil &&
+            conversationWindowCount == nil && conversationOCRSpanCount == nil
+    }
+
+    private var observationIsStale: Bool {
+        guard let observed = observationLastObservedAt else { return false }
+        return Date().timeIntervalSince(observed) > 30
+    }
+
+    private func formatObservationDate(_ date: Date?) -> String {
+        guard let date else { return "未確認" }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.dateFormat = "yyyy/MM/dd HH:mm:ss"
+        return formatter.string(from: date)
     }
 
     private var lineSection: some View {
@@ -496,10 +582,32 @@ struct InlineSettingsView: View {
         observationStatus = observation["captureStatus"] as? String ?? "starting"
         observationDelivery = observation["deliveryStatus"] as? String ?? "idle"
         observationQueue = observation["queueCount"] as? Int ?? 0
+        observationSchemaVersion = observation["schemaVersion"] as? Int ?? 1
+        observationLastObservedAt = parseObservationDate(observation["lastObservedAt"] as? String)
+        observationLastAcknowledgedAt = parseObservationDate(observation["lastAcknowledgedAt"] as? String)
+        if observationStatus == "observing" {
+            sidebarWindowCount = observation["sidebarWindowCount"] as? Int
+            sidebarOCRSpanCount = observation["sidebarOCRSpanCount"] as? Int
+            conversationWindowCount = observation["conversationWindowCount"] as? Int
+            conversationOCRSpanCount = observation["conversationOCRSpanCount"] as? Int
+            bodyCandidateCount = observation["bodyCandidateCount"] as? Int
+        } else {
+            // A blocked or unavailable capture must not present an old sample as current.
+            sidebarWindowCount = nil
+            sidebarOCRSpanCount = nil
+            conversationWindowCount = nil
+            conversationOCRSpanCount = nil
+            bodyCandidateCount = nil
+        }
         lineState = model.config.lineEnabled
             ? (lineAppRunning() ? .online : .offline)
             : .unknown
         gatewayState = .online
+    }
+
+    private func parseObservationDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        return ISO8601DateFormatter().date(from: value)
     }
 
     private func lineAppRunning() -> Bool {

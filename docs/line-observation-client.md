@@ -24,10 +24,19 @@ single-frame stream. Historical rows outside the identified content rectangle
 are not obtained. Notification previews are separate fragments only when a
 LINE header is identified in an already-visible notification window.
 
-OCR spans are **not messages**. No native conversation ID, author, sent time,
+OCR spans and body candidates are **not messages**. No native conversation ID, author, sent time,
 read receipt, unread count or send success is inferred. Display names do not
 merge conversations. Initial observations have unknown identity and cannot
 create individual unanswered-conversation candidates.
+
+Visible history AXRows provide explicit UI-item geometry. OCR spans uniquely
+inside a non-overlapping item are grouped into a body candidate; geometry alone
+does not make that item an attributable or complete message. Ambiguous rows stay
+as individual spans. Every candidate retains the source span ordinals, rectangle,
+extraction method and `coverage=visible_fragment`. Identical text is not deduplicated
+and candidate ordinals are local to the snapshot, not cross-capture message IDs.
+Input fields are excluded before OCR; the history and item geometry are rechecked
+after capture and are included in the OCR cache key.
 
 ## Delivery
 
@@ -47,6 +56,21 @@ exact pending IDs. Duplicate delivery must ACK the same ID after server commit.
 Unknown, missing or malformed ACKs cannot dequeue. Permanent rejections remain
 on disk but do not starve later observations. UnACKed records never expire.
 
+Schema v1 remains unchanged. Before emitting v2, the client performs authenticated
+`GET /api/line-observation/capabilities`. Only a 200 JSON response with `ok=true`,
+`supportedSchemaVersions` including 2 and
+`bodyCandidateFormat=line-body-candidate-v1` enables v2. Probe failures preserve
+v1 delivery. The probe is cached for five minutes per endpoint. Queued observations
+are immutable even across schema changes. The server must advertise v2 only after
+durable v2 persistence and readback have been verified.
+
+V2 snapshots retain all v1 fields and add `bodyCandidates`. Conversation candidates
+carry ordinal, text, source `spanOrdinals`, normalized x/y/width/height,
+`extractionMethod` (`ax_history_row`, `ax_text_block` or `ocr_span`) and
+`coverage=visible_fragment`; sender/fromSelf/sentAt/displayedTimeText remain null,
+sentAtPrecision is unknown. Non-conversation/unavailable snapshots use an empty
+candidate array. No stable identity or incoming-message assertion is introduced.
+
 A private disk outbox holds at most 256 MiB. Near capacity it stops text capture,
 reports the missing interval, and retries delivery. Changed observations are
 queued immediately; unchanged observation status is refreshed every 60 seconds.
@@ -61,6 +85,12 @@ settings when the preflight is false. This is an unverified access check, not
 proof that macOS denied permission. A 404 server endpoint is independent of
 the preflight and is not a successful handoff; records remain pending until
 the dedicated server subsystem exists.
+
+Sidebar and conversation counts, local body-candidate count, negotiated schema,
+last observation time and last durable ACK are independent machine diagnostics.
+An observation older than 30 seconds is labelled stale. Disabled, locked or
+unavailable surfaces clear current counts rather than exposing previous text as
+current evidence. Missing/unidentified history stays unavailable.
 
 Server retention defaults to 30 days under the approved plan, unlike Messenger.
 The server dedicated SQLite is the canonical store. Ingestion never triggers

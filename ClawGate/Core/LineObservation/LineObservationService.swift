@@ -34,6 +34,9 @@ final class LineObservationService {
     private var retryAt = Date.distantPast
     private var capacityPausedAt: String?
     private var retryDelay: TimeInterval = 2
+    private var schemaVersion = 1
+    private var capabilityEndpoint: String?
+    private var capabilityCheckedAt = Date.distantPast
     private let session = URLSession(configuration: .ephemeral, delegate: LineObservationSessionDelegate(), delegateQueue: nil)
     private let diagnostics = LineObservationDiagnostics.shared
 
@@ -74,14 +77,17 @@ final class LineObservationService {
         let enabled = UserDefaults.standard.object(forKey: Self.enabledKey) == nil || UserDefaults.standard.bool(forKey: Self.enabledKey)
         guard config.isClientRole, enabled else {
             diagnostics.update(["captureStatus": config.isClientRole ? "disabled" : "server_role", "deliveryStatus": "idle"])
+            clearSurfaceDiagnostics()
             return
         }
         guard let outbox else { return }
         let now = Date()
+        await refreshCapabilities(config: config)
         if outbox.queuedBytes >= 256 * 1024 * 1024 - 1024 * 1024 || capacityPausedAt != nil {
             if capacityPausedAt == nil { capacityPausedAt = Self.iso(now) }
             diagnostics.update(["captureStatus": "outbox_full", "deliveryStatus": "backpressure",
                                 "gapStartedAt": capacityPausedAt!, "queueCount": outbox.queuedCount, "queueBytes": outbox.queuedBytes])
+            clearSurfaceDiagnostics()
             await deliver(config: config)
             if outbox.queuedBytes < 256 * 1024 * 1024 - 1024 * 1024 {
                 capacityPausedAt = nil
@@ -92,6 +98,7 @@ final class LineObservationService {
         let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool == true
         var snapshots: [[String: Any]] = []
         var status = "unavailable"
+        clearSurfaceDiagnostics()
         if locked {
             status = "screen_locked"
             snapshots = [Self.unavailableSnapshot(reason: status)]
@@ -99,15 +106,21 @@ final class LineObservationService {
             let windows = await capture.capture()
             if Task.isCancelled { return }
             status = windows.contains { $0.state == .captured } ? "observing" : (windows.first?.state.rawValue ?? "unavailable")
-            snapshots = windows.map(Self.snapshot)
+            snapshots = windows.map { Self.snapshot($0, schemaVersion: schemaVersion) }
             diagnostics.update(["windows": windows.map { ["windowId": $0.windowID.map(String.init) as Any? ?? NSNull(),
                                                          "kind": $0.kind.rawValue, "state": $0.state.rawValue,
-                                                         "width": $0.width, "height": $0.height, "spanCount": $0.rows.count] as [String: Any] }])
+                                                         "width": $0.width, "height": $0.height, "spanCount": $0.rows.count,
+                                                         "bodyCandidateCount": $0.bodyCandidates.count] as [String: Any] }])
             let notifications = Self.notificationSnapshots()
             snapshots.append(contentsOf: notifications.isEmpty ? [["scope": "notification_visible_window", "coverage": "unavailable", "reason": "no_verified_line_banner", "ocrSpans": []]] : notifications)
             diagnostics.update(["windowCount": windows.filter { $0.windowID != nil }.count,
                                 "availableWindowCount": windows.filter { $0.state == .captured }.count,
-                                "ocrSpanCount": windows.reduce(0) { $0 + $1.rows.count }])
+                                "ocrSpanCount": windows.reduce(0) { $0 + $1.rows.count },
+                                "sidebarWindowCount": windows.filter { $0.kind == .sidebar && $0.state == .captured }.count,
+                                "sidebarOCRSpanCount": windows.filter { $0.kind == .sidebar }.reduce(0) { $0 + $1.rows.count },
+                                "conversationWindowCount": windows.filter { $0.kind == .conversation && $0.state == .captured }.count,
+                                "conversationOCRSpanCount": windows.filter { $0.kind == .conversation }.reduce(0) { $0 + $1.rows.count },
+                                "bodyCandidateCount": windows.reduce(0) { $0 + $1.bodyCandidates.count }])
         } else {
             status = "unsupported_os"
             snapshots = [Self.unavailableSnapshot(reason: status)]
@@ -116,6 +129,13 @@ final class LineObservationService {
             if !snapshots.contains(where: { $0["scope"] as? String == requiredScope }) {
                 snapshots.append(["scope": requiredScope, "coverage": "unavailable",
                                   "reason": status == "observing" ? "no_identified_window" : status, "ocrSpans": []])
+            }
+        }
+        if schemaVersion == 2 {
+            snapshots = snapshots.map { snapshot in
+                var snapshot = snapshot
+                if snapshot["bodyCandidates"] == nil { snapshot["bodyCandidates"] = [] as [[String: Any]] }
+                return snapshot
             }
         }
         diagnostics.update(["captureStatus": status, "lastObservedAt": Self.iso(now),
@@ -134,7 +154,7 @@ final class LineObservationService {
                 }
                 let allocation = try outbox.allocateID()
                 let observation: [String: Any] = [
-                    "schemaVersion": 1, "observationId": allocation.id,
+                    "schemaVersion": schemaVersion, "observationId": allocation.id,
                     "producerInstance": outbox.producerInstance, "deviceId": deviceID, "seq": allocation.seq,
                     "platform": "line", "source": "clawgate-line-passive-ocr", "capturedAt": Self.iso(now),
                     "snapshots": snapshots,
@@ -151,6 +171,36 @@ final class LineObservationService {
         }
         await deliver(config: config)
         diagnostics.update(["queueCount": outbox.queuedCount, "queueBytes": outbox.queuedBytes, "rejectedCount": outbox.rejectedCount])
+    }
+
+    private func clearSurfaceDiagnostics() {
+        diagnostics.update(["windows": [] as [[String: Any]], "windowCount": 0, "availableWindowCount": 0,
+                            "ocrSpanCount": 0, "sidebarWindowCount": 0, "sidebarOCRSpanCount": 0,
+                            "conversationWindowCount": 0, "conversationOCRSpanCount": 0, "bodyCandidateCount": 0,
+                            "schemaVersion": schemaVersion])
+    }
+
+    private func refreshCapabilities(config: AppConfig) async {
+        var url = URLComponents()
+        url.scheme = "http"
+        url.host = config.openclawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        url.port = config.openclawPort
+        url.path = "/api/line-observation/capabilities"
+        guard let endpoint = url.url else { schemaVersion = 1; return }
+        if capabilityEndpoint == endpoint.absoluteString, Date().timeIntervalSince(capabilityCheckedAt) < 300 { return }
+        capabilityEndpoint = endpoint.absoluteString
+        capabilityCheckedAt = Date()
+        schemaVersion = 1
+        guard let gateway = OpenClawGatewayInfo.load(), !gateway.token.isEmpty else { return }
+        var request = URLRequest(url: endpoint)
+        request.timeoutInterval = 3
+        request.setValue("Bearer \(gateway.token)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await session.data(for: request)
+            if (response as? HTTPURLResponse)?.statusCode == 200 {
+                schemaVersion = LineObservationProtocol.supportedVersion(capabilityData: data)
+            }
+        } catch { /* Keep legacy capture/delivery when capabilities cannot be verified. */ }
     }
 
     private func deliver(config: AppConfig) async {
@@ -208,9 +258,9 @@ final class LineObservationService {
     private static func unavailableSnapshot(reason: String) -> [String: Any] {
         ["scope": "state", "coverage": "unavailable", "reason": reason, "ocrSpans": []]
     }
-    private static func snapshot(_ window: LineWindowObservation) -> [String: Any] {
+    private static func snapshot(_ window: LineWindowObservation, schemaVersion: Int) -> [String: Any] {
         let scope = window.kind == .sidebar ? "sidebar_visible_window" : window.kind == .conversation ? "selected_thread_visible_window" : "state"
-        return ["scope": scope, "coverage": window.state == .captured ? "available" : "unavailable",
+        var result: [String: Any] = ["scope": scope, "coverage": window.state == .captured ? "available" : "unavailable",
                 "reason": window.state == .captured ? NSNull() : window.state.rawValue as Any,
                 "windowId": window.windowID.map { String($0) } as Any? ?? NSNull(),
                 "windowWidth": window.width, "windowHeight": window.height,
@@ -221,6 +271,16 @@ final class LineObservationService {
                      "width": row.box.width, "height": row.box.height, "confidence": row.confidence as Any? ?? NSNull(),
                      "fromSelf": NSNull(), "sender": NSNull(), "sentAt": NSNull(), "sentAtPrecision": "unknown"] as [String: Any]
                 }]
+        if schemaVersion == 2 {
+            result["bodyCandidates"] = window.bodyCandidates.map { candidate in
+                ["ordinal": candidate.ordinal, "text": candidate.text, "spanOrdinals": candidate.spanOrdinals,
+                 "x": candidate.box.x, "y": candidate.box.y, "width": candidate.box.width, "height": candidate.box.height,
+                 "extractionMethod": candidate.extractionMethod, "coverage": candidate.coverage,
+                 "sender": NSNull(), "fromSelf": NSNull(), "sentAt": NSNull(), "sentAtPrecision": "unknown",
+                 "displayedTimeText": NSNull()] as [String: Any]
+            }
+        }
+        return result
     }
 
     /// Only already-displayed Notification Center windows; no click or open.

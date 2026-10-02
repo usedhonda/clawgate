@@ -79,9 +79,11 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
     public let width: Int
     public let height: Int
     public let rows: [LineOCRRow]
+    public let bodyCandidates: [LineBodyCandidate]
 
     public init(scope: String = "line_window", state: State, kind: Kind, coverage: Coverage,
-                windowID: UInt32?, width: Int, height: Int, rows: [LineOCRRow]) {
+                windowID: UInt32?, width: Int, height: Int, rows: [LineOCRRow],
+                bodyCandidates: [LineBodyCandidate] = []) {
         self.scope = scope
         self.state = state
         self.kind = kind
@@ -90,6 +92,7 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
         self.width = width
         self.height = height
         self.rows = rows
+        self.bodyCandidates = bodyCandidates
     }
 }
 
@@ -105,6 +108,8 @@ public final class LinePassiveCapture {
         let kind: LineWindowObservation.Kind
         let bounds: CGRect
         let rows: [LineOCRRow]
+        let bodyRegions: [CGRect]
+        let bodyCandidates: [LineBodyCandidate]
     }
 
     private var cache: [UInt32: CachedRows] = [:]
@@ -161,7 +166,7 @@ public final class LinePassiveCapture {
             return LineWindowObservation(state: .captureUnavailable, kind: .unknown, coverage: .unavailable,
                                          windowID: window.windowID, width: width, height: height, rows: [])
         }
-        guard Self.readOnlyAXEvidence(for: window)?.contentFrame == evidence.contentFrame else {
+        guard Self.readOnlyAXEvidence(for: window) == evidence else {
             return LineWindowObservation(state: .unknownWindow, kind: .unknown, coverage: .unavailable,
                                          windowID: window.windowID, width: width, height: height, rows: [])
         }
@@ -172,11 +177,13 @@ public final class LinePassiveCapture {
         }
         let fingerprint = Self.fingerprint(cropped)
         if let previous = cache[window.windowID], previous.fingerprint == fingerprint,
-           previous.width == image.width, previous.height == image.height, previous.title == window.title, previous.bounds == evidence.contentFrame {
+           previous.width == image.width, previous.height == image.height, previous.title == window.title,
+           previous.bounds == evidence.contentFrame, previous.bodyRegions == evidence.bodyRegions {
             let known = previous.kind != .unknown
             return LineWindowObservation(state: known ? .captured : .unknownWindow, kind: previous.kind,
                                          coverage: known ? .contentExcludingChrome : .unavailable,
-                                         windowID: window.windowID, width: previous.width, height: previous.height, rows: previous.rows)
+                                         windowID: window.windowID, width: previous.width, height: previous.height,
+                                         rows: previous.rows, bodyCandidates: previous.bodyCandidates)
         }
 
         let rawRows: [(text: String, boundingBox: CGRect, confidence: Double)]
@@ -200,11 +207,20 @@ public final class LinePassiveCapture {
         }.sorted { lhs, rhs in
             abs(lhs.box.y - rhs.box.y) > 0.01 ? lhs.box.y > rhs.box.y : lhs.box.x < rhs.box.x
         }
+        let normalizedRegions = evidence.bodyRegions.map { frame in
+            LineObservationRect(CGRect(x: (frame.minX-window.frame.minX)/window.frame.width,
+                                       y: (window.frame.maxY-frame.maxY)/window.frame.height,
+                                       width: frame.width/window.frame.width, height: frame.height/window.frame.height))
+        }
+        let candidates = kind == .conversation
+            ? LineBodyCandidateExtractor.extract(rows: usable, textBlockRegions: normalizedRegions, regionMethod: "ax_history_row") : []
         cache[window.windowID] = CachedRows(fingerprint: fingerprint, width: image.width, height: image.height,
                                             title: window.title,
-                                            kind: kind, bounds: evidence.contentFrame, rows: usable)
+                                            kind: kind, bounds: evidence.contentFrame, rows: usable,
+                                            bodyRegions: evidence.bodyRegions, bodyCandidates: candidates)
         return LineWindowObservation(state: .captured, kind: kind, coverage: .contentExcludingChrome,
-                                     windowID: window.windowID, width: image.width, height: image.height, rows: usable)
+                                     windowID: window.windowID, width: image.width, height: image.height,
+                                     rows: usable, bodyCandidates: candidates)
     }
 
     private static func unavailable(_ state: LineWindowObservation.State) -> LineWindowObservation {
@@ -223,9 +239,10 @@ public final class LinePassiveCapture {
         return false
     }
 
-    private struct AXEvidence {
+    private struct AXEvidence: Equatable {
         let kind: LineWindowObservation.Kind
         let contentFrame: CGRect
+        let bodyRegions: [CGRect]
     }
 
     /// AX is used only as read-only semantic geometry. No actions, focus, or
@@ -252,7 +269,38 @@ public final class LinePassiveCapture {
         guard kind != .unknown else { return nil }
         let exclusions = composers + searches
         guard let contentFrame = Self.safeContentFrame(lists: lists, excluded: exclusions, window: window.frame) else { return nil }
-        return AXEvidence(kind: kind, contentFrame: contentFrame)
+        let bodyRegions = kind == .conversation ? visibleHistoryRows(root, content: contentFrame) : []
+        return AXEvidence(kind: kind, contentFrame: contentFrame, bodyRegions: bodyRegions)
+    }
+
+    /// LINE exposes individual timeline items as AXRows. Read only their geometry;
+    /// an item is a visible fragment, not proof of an author or a complete message.
+    private static func visibleHistoryRows(_ root: AXUIElement, content: CGRect) -> [CGRect] {
+        var result: [CGRect] = []
+        var visited = 0
+        func walk(_ element: AXUIElement, depth: Int, inHistory: Bool) {
+            guard depth < 9, visited < 500 else { return }
+            visited += 1
+            var roleValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue) == .success,
+                  let role = roleValue as? String else { return }
+            if ["AXTextArea", "AXTextField", "AXSearchField"].contains(role) { return }
+            let frame = axFrame(element)
+            let history = inHistory || (role == "AXList" && frame == content)
+            if history, role == "AXRow" {
+                if let frame {
+                    let visible = frame.intersection(content)
+                    if !visible.isNull, visible.width > 0, visible.height > 0 { result.append(visible) }
+                }
+                return
+            }
+            var childrenValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+                  let children = childrenValue as? [AXUIElement] else { return }
+            for child in children { walk(child, depth: depth + 1, inHistory: history) }
+        }
+        walk(root, depth: 0, inHistory: false)
+        return result
     }
 
     nonisolated static func structuralKind(hasList: Bool, hasSearch: Bool, hasComposer: Bool) -> LineWindowObservation.Kind {
