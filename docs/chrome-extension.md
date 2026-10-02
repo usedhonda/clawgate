@@ -1,6 +1,6 @@
 # ClawGate Chrome extension
 
-Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.12.2`.
+Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.12.3`.
 
 The extension is the browser half of ClawGate. It sends pages you choose to Chi,
 records where you have been, and — on Messenger only — reads the conversation on
@@ -17,6 +17,15 @@ extension startup. Hub failure never suppresses the existing Chi,
 `unlimitedStorage` permission prevents Chrome's small default local-storage
 quota from silently limiting this owner-controlled outbox. The hub's scope and
 retention contract is `oc-general/docs/contracts/personal-realtime-data.md`.
+
+Storage transactions are serialized separately from network delivery. A stalled
+Hub request cannot block saving another observation or its existing delivery
+path. Only one flush per storage area runs at a time; each request, including
+its response body, has a ten-second deadline. A timeout leaves the original
+event queued. ACK removal re-reads the current queue and removes only an
+unchanged, matching event, retaining observations added during the request.
+Same-ID/different-content enqueue fails without replacing the pending record.
+This does not change retention, collection scope or per-route cutover policy.
 
 Everything below is taken from the source. Where behaviour is governed by an
 OpenClaw contract, this page points at the contract rather than restating it;
