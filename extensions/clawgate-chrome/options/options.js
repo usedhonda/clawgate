@@ -1,3 +1,5 @@
+import { parseProvisionFile, probeCapabilities } from '../hub-provision.js';
+
 const RECENT_LIMIT = 50;
 
 const addForm = document.getElementById('add-form');
@@ -9,6 +11,10 @@ const domainList = document.getElementById('domain-list');
 const domainEmpty = document.getElementById('domain-empty');
 const recentList = document.getElementById('recent-list');
 const recentEmpty = document.getElementById('recent-empty');
+const hubProvisionForm = document.getElementById('hub-provision-form');
+const hubProvisionFile = document.getElementById('hub-provision-file');
+const hubProvisionButton = document.getElementById('hub-provision-button');
+const hubProvisionStatus = document.getElementById('hub-provision-status');
 
 const state = {
   excludedDomains: [],
@@ -25,6 +31,7 @@ async function init() {
 
   addForm.addEventListener('submit', onAddSubmit);
   addInput.addEventListener('input', () => hideError());
+  hubProvisionForm.addEventListener('submit', onHubProvisionSubmit);
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') {
@@ -41,6 +48,39 @@ async function init() {
       renderRecent();
     }
   });
+}
+
+async function onHubProvisionSubmit(event) {
+  event.preventDefault();
+  const file = hubProvisionFile.files?.[0];
+  if (!file) {
+    showHubStatus('JSONファイルを選択してください。', true);
+    return;
+  }
+  hubProvisionButton.disabled = true;
+  showHubStatus('設定を確認しています…');
+  try {
+    const parsed = await parseProvisionFile(file);
+    if (!parsed.ok) throw new Error(parsed.error);
+    const capabilities = await probeCapabilities(parsed.provision);
+    if (!capabilities.ok) throw new Error(capabilities.error);
+    await chrome.storage.local.set({
+      personalHubURL: parsed.provision.base_url,
+      personalHubToken: parsed.provision.bearer_token,
+      personalHubDirectSelected: true,
+    });
+    hubProvisionFile.value = '';
+    showHubStatus('Chrome用設定を読み込みました（保存データの検証ではありません）。');
+  } catch (error) {
+    showHubStatus('設定を読み込めませんでした。既存の設定は保持されています。', true);
+  } finally {
+    hubProvisionButton.disabled = false;
+  }
+}
+
+function showHubStatus(message, isError = false) {
+  hubProvisionStatus.textContent = message;
+  hubProvisionStatus.className = isError ? 'inline-status is-error' : 'inline-status';
 }
 
 function renderAll() {

@@ -45,6 +45,14 @@ Messenger actuator routes remain separate and unchanged until consumer read
 acceptance authorizes their shutdown. This transport support alone does not
 prove provisioning, a reloaded worker, or natural source-to-consumer admission.
 
+In the extension's settings page, **Personal Hub接続** imports a private
+source-specific JSON descriptor supplied by the Hub operator. Only `chrome`
+with exactly page/history/messenger domains is accepted. A bounded authenticated
+capabilities GET must confirm the source, limits and receipt contract before
+settings are changed. Failed import preserves existing settings. Tokens are not
+rendered or logged; the import does not create a test observation or prove data
+storage. Keep the source file private and never import a complete ingest policy.
+
 Everything below is taken from the source. Where behaviour is governed by an
 OpenClaw contract, this page points at the contract rather than restating it;
 `docs/contracts/messenger-capture.md` in the `oc-general` repository is

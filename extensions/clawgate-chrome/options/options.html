@@ -26,6 +26,16 @@
       </section>
 
       <section class="card">
+        <h2 class="card-title">Personal Hub接続</h2>
+        <p class="card-hint">Hub運用者から受け取ったChrome用JSONだけを読み込みます。保存前に読み取り専用の接続確認を行い、トークンは画面に表示しません。</p>
+        <form id="hub-provision-form" class="add-row">
+          <input id="hub-provision-file" type="file" accept="application/json,.json">
+          <button id="hub-provision-button" class="primary-button" type="submit">設定を読み込む</button>
+        </form>
+        <p id="hub-provision-status" class="inline-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="card">
         <h2 class="card-title">最近送信したドメイン</h2>
         <ul id="domain-list" class="domain-list"></ul>
         <p id="domain-empty" class="empty-state" hidden>まだ送信履歴がありません</p>
