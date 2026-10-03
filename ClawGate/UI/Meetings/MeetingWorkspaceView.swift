@@ -945,6 +945,9 @@ struct MeetingMinutesFailurePresentation: Equatable {
     static func make(error: String?, state: String, completedParts: Int, totalParts: Int) -> Self? {
         let raw = error?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard state == "failed" || state == "pending" else { return nil }
+        if raw == MeetingMinutesExecutionProgress.admissionRejectedMessage {
+            return Self(summary: raw, technicalDetails: nil)
+        }
 
         let progress: String
         if totalParts > 1 && completedParts > 0 {

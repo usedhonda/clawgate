@@ -2981,6 +2981,7 @@ final class PetModel: NSObject, ObservableObject {
     private var minutesGenerationStartedAt: Date?
     private var minutesPilotTask: Task<Void, Never>?
     private var minutesPilotLabels: [String: String] = [:]
+    private var minutesExplicitRetryTickets: [String: [MeetingMinutesExecutor.RetryTicket]] = [:]
     private var pendingMinutesMeetingID: String?
     private var pendingMinutesSegmentIDs: Set<String> = []
     /// Attempts per meeting, so a permanently busy slot gives up instead of
@@ -3084,6 +3085,7 @@ final class PetModel: NSObject, ObservableObject {
                 let executor = try MeetingMinutesExecutor(job: job, store: store, id: record.id,
                     sessionKey: key, send: { try await client.sendMinutesExecution($0) },
                     read: { try await client.minutesExecutionResult($0) })
+                var handledExplicitRetry = false
                 while !Task.isCancelled {
                     guard self.connectionState == .connected,
                           await client.supportsDedicatedMinutesExecution() else {
@@ -3096,12 +3098,26 @@ final class PetModel: NSObject, ObservableObject {
                           let current = MeetingMinutesJob.load(store: store, id: record.id),
                           try MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: current) ==
                               MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: job) else { return }
+                    // Consume observed failure tickets only after current
+                    // revision/readiness checks, never on a reconnect alone.
+                    if !handledExplicitRetry {
+                        handledExplicitRetry = true
+                        if pilot.mode == .boundedMeeting,
+                           let tickets = self.minutesExplicitRetryTickets.removeValue(forKey: record.id) {
+                            for ticket in tickets { _ = try await executor.retryConfirmedFailure(ticket: ticket) }
+                        }
+                    }
                     let progress = try await executor.step(
                         maxConcurrentParts: pilot.mode == .singlePart ? 1 : 2,
                         maximumStartedParts: pilot.mode == .singlePart ? 1 : nil)
                     self.meetingsRevision += 1
+                    if !progress.admissionRejectedIndices.isEmpty && progress.live == 0 {
+                        self.finishMinutes(id: record.id, state: "failed",
+                            error: MeetingMinutesExecutionProgress.admissionRejectedMessage)
+                        return
+                    }
                     if progress.failed > 0 && progress.live == 0 {
-                        self.minutesPilotLabels[record.id] = "専用実行の結果を確認してください。完成分は保存されています"
+                        self.finishMinutes(id: record.id, state: "failed", error: "専用実行が停止しました。再開では再試行可能と確認できたパートだけを扱い、完成分は保持します")
                         return
                     }
                     if !progress.retainedUnavailableIndices.isEmpty {
@@ -3460,6 +3476,16 @@ final class PetModel: NSObject, ObservableObject {
     /// fresh set of attempts. Unlike `regenerateMinutes`, nothing written is
     /// thrown away.
     func resumeMinutes(for record: MeetingRecord) {
+        let store = minutesStore()
+        if let pilot = MeetingMinutesPilot.load(), pilot.mode == .boundedMeeting,
+           let job = MeetingMinutesJob.load(store: store, id: record.id),
+           pilot.matches(store: store, id: record.id, job: job),
+           let ledger = try? MeetingMinutesExecutionState.load(store: store, id: record.id, job: job) {
+            minutesExplicitRetryTickets[record.id] = ledger.parts.compactMap { part in
+                guard part.status == .failed, part.retryable, let key = part.idempotencyKey else { return nil }
+                return .init(index: part.index, attempt: part.attempt, idempotencyKey: key)
+            }
+        }
         minutesAttempts[record.id] = 0
         minutesNotBefore[record.id] = nil
         requestMinutes(for: record, preservingMaterials: true, markUserRequested: true)

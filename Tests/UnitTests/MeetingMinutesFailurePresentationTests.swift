@@ -2,6 +2,14 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingMinutesFailurePresentationTests: XCTestCase {
+    func testAdmissionRejectionDoesNotOfferRegeneration() {
+        let presentation = MeetingMinutesFailurePresentation.make(
+            error: MeetingMinutesExecutionProgress.admissionRejectedMessage,
+            state: "failed", completedParts: 4, totalParts: 13)
+        XCTAssertEqual(presentation?.summary, MeetingMinutesExecutionProgress.admissionRejectedMessage)
+        XCTAssertNil(presentation?.technicalDetails)
+    }
+
     func testInvalidEvidenceUsesCitationReasonAndKeepsRawDetailsOutOfSummary() {
         let raw = "invalidEvidence(claim: Optional(\"顧客は承認した\"), reason: \"evidence に引用がありません\") — 返答: {\"outcome\":\"answer\"}"
 

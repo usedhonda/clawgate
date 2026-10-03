@@ -6,6 +6,12 @@ import Foundation
 /// processes every response independently. No implicit retries or chat fallback.
 actor MeetingMinutesExecutor {
     enum Failure: Error { case busy, invalidPart, invalidAdmissionLimit }
+    struct RetryTicket: Equatable {
+        let index: Int
+        let attempt: Int
+        let idempotencyKey: String
+    }
+    enum RetryOutcome: Equatable { case admitted, recovering, admissionRejected }
     struct Progress {
         let completed: Int
         let total: Int
@@ -13,6 +19,7 @@ actor MeetingMinutesExecutor {
         let failed: Int
         let unresolvedIndices: [Int]
         let retainedUnavailableIndices: [Int]
+        let admissionRejectedIndices: [Int]
         let admissionLimitReached: Bool
     }
     typealias Send = (MinutesExecutionSendParams) async throws -> MinutesExecutionAck
@@ -20,6 +27,7 @@ actor MeetingMinutesExecutor {
     private enum Event {
         case ack(MeetingMinutesExecutionState.Dispatch, MinutesExecutionAck)
         case read(MeetingMinutesExecutionState.Dispatch, MinutesExecutionRead)
+        case admissionRejected(MeetingMinutesExecutionState.Dispatch)
         case unavailable(Int)
     }
     private let store: MeetingStore
@@ -52,7 +60,7 @@ actor MeetingMinutesExecutor {
         var fresh: [MeetingMinutesExecutionState.Dispatch] = []
         // A confirmed failed part requires explicit owner action. It must not
         // silently retry or keep filling subsequent work while recovery fails.
-        if !ledger.parts.contains(where: { $0.status == .failed }) {
+        if !ledger.parts.contains(where: { $0.status == .failed || $0.status == .admissionRejected }) {
             let started = ledger.parts.filter { $0.attempt > 0 }.count
             let budget = maximumStartedParts.map { max(0, $0 - started) } ?? 2
             let slots = min(max(0, maxConcurrentParts - recovering.count), budget)
@@ -75,7 +83,13 @@ actor MeetingMinutesExecutor {
             for d in fresh {
                 group.addTask {
                     do { return .ack(d, try await sender(d.request)) }
-                    catch { return .unavailable(d.index) }
+                    catch {
+                        if let transport = error as? MinutesExecutionTransportError,
+                           transport == .admissionRejected {
+                            return .admissionRejected(d)
+                        }
+                        return .unavailable(d.index)
+                    }
                 }
             }
             for await event in group {
@@ -85,6 +99,8 @@ actor MeetingMinutesExecutor {
                 do {
                     switch event {
                     case .unavailable(let index): unresolved.append(index)
+                    case .admissionRejected(let d):
+                        try ledger.rejectAdmission(d, store: store, id: id)
                     case .ack(let d, let ack): try ledger.acknowledge(d, ack: ack, store: store, id: id)
                     case .read(let d, let result):
                         if result.result == .expired || result.result == .notFound {
@@ -128,6 +144,7 @@ actor MeetingMinutesExecutor {
                         failed: ledger.parts.filter { $0.status == .failed }.count,
                         unresolvedIndices: unresolved.sorted(),
                         retainedUnavailableIndices: retainedUnavailable.sorted(),
+                        admissionRejectedIndices: ledger.parts.filter { $0.status == .admissionRejected }.map(\.index).sorted(),
                         admissionLimitReached: maximumStartedParts.map { limit in
                             ledger.parts.filter { $0.attempt > 0 }.count >= limit
                         } ?? false)
@@ -137,6 +154,49 @@ actor MeetingMinutesExecutor {
         guard !busy else { throw Failure.busy }
         return try MeetingMinutesExecutionFinalizer.prepare(ledger: ledger, frozenJob: job,
                                                             record: record, id: id)
+    }
+
+    /// Snapshot only confirmed terminal failures that explicitly allow retry.
+    /// A ticket is bound to the failed attempt and cannot be reused after the
+    /// ledger advances to a new owner.
+    func retryTickets() -> [RetryTicket] {
+        ledger.parts.filter { $0.status == .failed && $0.retryable }
+            .compactMap { part in
+                guard let key = part.idempotencyKey else { return nil }
+                return RetryTicket(index: part.index, attempt: part.attempt, idempotencyKey: key)
+            }
+    }
+
+    /// Admit one user-confirmed retry. This never loops or regenerates a
+    /// request: the exact stored message/session are carried into the ledger's
+    /// retry transition, which creates a fresh owner key durably before send.
+    func retryConfirmedFailure(ticket: RetryTicket) async throws -> RetryOutcome {
+        guard !busy else { throw Failure.busy }
+        busy = true; defer { busy = false }
+        guard ledger.parts.indices.contains(ticket.index) else { throw Failure.invalidPart }
+        let old = ledger.parts[ticket.index]
+        guard old.status == .failed, old.retryable,
+              old.attempt == ticket.attempt, old.idempotencyKey == ticket.idempotencyKey,
+              let request = old.request, let ownerSession = old.sessionKey else {
+            throw Failure.invalidPart
+        }
+        let dispatch = try ledger.retry(index: ticket.index, sessionKey: ownerSession,
+                                        message: request.message, store: store, id: id)
+        let ack: MinutesExecutionAck
+        do { ack = try await send(dispatch.request) }
+        catch MinutesExecutionTransportError.admissionRejected {
+            try ledger.rejectAdmission(dispatch, store: store, id: id)
+            return .admissionRejected
+        }
+        catch {
+            // Transport loss after reservation is recoverable by read, never
+            // an authorization to send a second request.
+            return .recovering
+        }
+        // Strict ACK/persistence failures are surfaced; the durable owner
+        // remains for same-request read recovery.
+        try ledger.acknowledge(dispatch, ack: ack, store: store, id: id)
+        return .admitted
     }
 
     /// Commit only the current complete revision. The accepted bundle is the

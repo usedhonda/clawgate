@@ -9,7 +9,7 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
     static let currentVersion = 2
     static let legacyFileName = "minutes-execution-state.json"
 
-    enum Status: String, Codable { case pending, submitting, running, completed, failed }
+    enum Status: String, Codable { case pending, submitting, running, completed, failed, admissionRejected }
     enum Outcome: Codable, Equatable {
         case insufficientEvidence
         case answer(MeetingMinutes)
@@ -262,6 +262,26 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         try transitionTerminal(dispatch, runId: runId, status: .failed, outcome: nil, reason: code, retryable: retryable, store: store, id: id)
     }
 
+    /// Persist a definitive server rejection that happened before admission.
+    /// The reserved request/key remain immutable; no binding or run id is
+    /// invented, and this status is never retryable.
+    mutating func rejectAdmission(_ dispatch: Dispatch, store: MeetingStore, id: String) throws {
+        guard parts.indices.contains(dispatch.index) else { throw LedgerError.staleOwner }
+        let old = parts[dispatch.index]
+        try owner(old, index: dispatch.index, attempt: dispatch.attempt,
+                  key: dispatch.idempotencyKey, sessionKey: dispatch.sessionKey)
+        guard old.status == .submitting,
+              old.requestFingerprint == (try dispatch.request.requestFingerprint()),
+              old.runId == nil, old.executionBinding == nil else {
+            throw LedgerError.invalidTransition
+        }
+        var candidate = self
+        candidate.parts[dispatch.index].status = .admissionRejected
+        candidate.parts[dispatch.index].reason = "admission_rejected"
+        candidate.parts[dispatch.index].retryable = false
+        try commit(candidate, store: store, id: id)
+    }
+
     private mutating func transitionTerminal(_ dispatch: Dispatch, runId: String, status: Status, outcome: Outcome?, reason: String?, retryable: Bool, store: MeetingStore, id: String) throws {
         guard parts.indices.contains(dispatch.index), let currentRun = parts[dispatch.index].runId, currentRun == runId else { throw LedgerError.staleOwner }
         let old = parts[dispatch.index]; try owner(old, index: dispatch.index, attempt: dispatch.attempt, key: dispatch.idempotencyKey, sessionKey: dispatch.sessionKey)
@@ -298,6 +318,9 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
                 let inherited = p.attempt == 0 && p.idempotencyKey == nil && p.sessionKey == nil && p.runId == nil && p.request == nil && p.requestFingerprint == nil && p.executionBinding == nil
                 return (inherited || (ownerValid && p.runId == p.idempotencyKey && requestValid(p) && bindingValid(p))) && p.outcome != nil && noError
             case .failed: return ownerValid && p.runId == p.idempotencyKey && p.reason.map(Self.validCode) == true && p.outcome == nil && requestValid(p) && bindingValid(p)
+            case .admissionRejected:
+                return ownerValid && p.runId == nil && p.reason == "admission_rejected" && !p.retryable &&
+                    p.outcome == nil && requestValid(p) && p.executionBinding == nil
             }
         }
     }

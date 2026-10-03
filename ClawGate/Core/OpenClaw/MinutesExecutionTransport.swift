@@ -82,6 +82,9 @@ struct MinutesResultGetParams: Encodable {
 enum MinutesExecutionTransportError: Error, Equatable {
     case invalidAcknowledgement, identityMismatch, modelMismatch, isolationNotApplied
     case invalidResult, invalidRequest, bindingMismatch
+    /// The Gateway rejected the initial dedicated request before creating an
+    /// execution owner. This is distinct from an unknown ACK.
+    case admissionRejected
 }
 
 struct MinutesExecutionAck: Equatable {
@@ -204,7 +207,14 @@ extension OpenClawWSClient {
     func sendMinutesExecution(_ params: MinutesExecutionSendParams) async throws -> MinutesExecutionAck {
         _ = try params.requestFingerprint()
         registerMinutesExecutionRunID(params.idempotencyKey)
-        let payload = try await request(method: "chat.send", params: params)
+        let payload: IncomingPayload?
+        do {
+            payload = try await request(method: "chat.send", params: params)
+        } catch OpenClawError.serverError(let code, _) where code == "INVALID_REQUEST" {
+            // INVALID_REQUEST is the server's authoritative pre-admission
+            // response. No ACK, binding or run owner was created.
+            throw MinutesExecutionTransportError.admissionRejected
+        }
         return try MinutesExecutionAck.validate(payload, expected: params)
     }
 

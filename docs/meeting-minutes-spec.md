@@ -82,6 +82,12 @@ request and key before dispatch. A v1 sidecar cannot be upgraded into proof of
 request binding and is rejected without overwriting it. Out-of-order validated
 completions retain source order. Explicit retry is allowed only for a confirmed
 retryable terminal failure and retains exact prompt bytes/session with a new key.
+In bounded-meeting mode, an explicit Resume captures tickets for currently
+confirmed retryable failures only: each ticket binds part index, old attempt and
+old key. Consumption rechecks that exact failure after current revision/readiness
+checks, reserves the new key durably, and sends once. A stale/repeated ticket,
+unknown/running owner or non-retryable terminal does not authorize retry.
+Single-part acceptance never consumes retry tickets.
 Disconnect, notFound, expiration, malformed binding or an unknown ACK never
 authorize regeneration. Private fsync/locking/CAS writes reject stale writers;
 a persistence error requires reopening the sidecar. Sidecars use
@@ -89,6 +95,14 @@ a persistence error requires reopening the sidecar. Sidecars use
 envelope hashes (including request IDs), so explicit regeneration preserves old
 owners/results without overwriting them. An unversioned legacy sidecar blocks
 activation rather than silently dropping a possibly unresolved owner.
+
+The initial dedicated `chat.send` has one typed pre-admission rejection: the
+server's exact `invalid_request` error response. The executor records this as
+`admissionRejected` with the immutable reserved request, key and fingerprint,
+but without an execution binding or fabricated run/terminal result. Reopening
+the ledger reports the rejection and never resends or performs a result read.
+All other send failures, including timeouts and unknown ACKs, remain
+recoverable same-request owners and are read-only on reopen.
 
 The agreed additive `executionBinding` v1 appears on ACK and authorized
 pending/terminal/expired reads; notFound is exactly `{status:"notFound"}`.
