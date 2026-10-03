@@ -82,10 +82,12 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
     public let bodyCandidates: [LineBodyCandidate]
     /// Local audit geometry only; not part of the observation wire.
     public let historyRegions: [LineObservationRect]
+    /// Observed AX window title, not a stable conversation identity or sender.
+    public let observedLabel: String?
 
     public init(scope: String = "line_window", state: State, kind: Kind, coverage: Coverage,
                 windowID: UInt32?, width: Int, height: Int, rows: [LineOCRRow],
-                bodyCandidates: [LineBodyCandidate] = [], historyRegions: [LineObservationRect] = []) {
+                bodyCandidates: [LineBodyCandidate] = [], historyRegions: [LineObservationRect] = [], observedLabel: String? = nil) {
         self.scope = scope
         self.state = state
         self.kind = kind
@@ -96,6 +98,7 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
         self.rows = rows
         self.bodyCandidates = bodyCandidates
         self.historyRegions = historyRegions
+        self.observedLabel = observedLabel
     }
 }
 
@@ -112,6 +115,10 @@ public struct LinePassiveCaptureMetrics: Codable, Equatable, Sendable {
     public let cumulativeOCRDurationMilliseconds: Double
     public let cumulativeCacheHits: Int
     public let cumulativeCacheMisses: Int
+    /// CPU on the synchronous Vision caller thread only; excludes Vision's
+    /// other workers/GPU and is not whole-observer CPU or an energy estimate.
+    public let latestOCRInitiatingThreadCPUMilliseconds: Double?
+    public let cumulativeOCRInitiatingThreadCPUMilliseconds: Double
 
     public init(invocationCount: Int = 0,
                 latestInvocationDurationMilliseconds: Double = 0,
@@ -122,7 +129,9 @@ public struct LinePassiveCaptureMetrics: Codable, Equatable, Sendable {
                 cumulativeScreenshotDurationMilliseconds: Double = 0,
                 cumulativeOCRDurationMilliseconds: Double = 0,
                 cumulativeCacheHits: Int = 0,
-                cumulativeCacheMisses: Int = 0) {
+                cumulativeCacheMisses: Int = 0,
+                latestOCRInitiatingThreadCPUMilliseconds: Double? = nil,
+                cumulativeOCRInitiatingThreadCPUMilliseconds: Double = 0) {
         self.invocationCount = invocationCount
         self.latestInvocationDurationMilliseconds = latestInvocationDurationMilliseconds
         self.latestScreenshotDurationMilliseconds = latestScreenshotDurationMilliseconds
@@ -133,6 +142,8 @@ public struct LinePassiveCaptureMetrics: Codable, Equatable, Sendable {
         self.cumulativeOCRDurationMilliseconds = cumulativeOCRDurationMilliseconds
         self.cumulativeCacheHits = cumulativeCacheHits
         self.cumulativeCacheMisses = cumulativeCacheMisses
+        self.latestOCRInitiatingThreadCPUMilliseconds = latestOCRInitiatingThreadCPUMilliseconds
+        self.cumulativeOCRInitiatingThreadCPUMilliseconds = cumulativeOCRInitiatingThreadCPUMilliseconds
     }
 }
 
@@ -150,6 +161,7 @@ public final class LinePassiveCapture {
         let rows: [LineOCRRow]
         let bodyRegions: [CGRect]
         let bodyCandidates: [LineBodyCandidate]
+        let observedLabel: String?
     }
 
     private var cache: [UInt32: CachedRows] = [:]
@@ -162,6 +174,7 @@ public final class LinePassiveCapture {
         var ocrReached = false
         var cacheHits = 0
         var cacheMisses = 0
+        var ocrThreadCPU: Double?
     }
 
     private struct WindowCaptureResult {
@@ -172,10 +185,11 @@ public final class LinePassiveCapture {
         let ocrReached: Bool
         let cacheHit: Bool
         let cacheMiss: Bool
+        let ocrThreadCPU: Double?
 
         init(observation: LineWindowObservation, screenshotNanoseconds: UInt64, ocrNanoseconds: UInt64,
              screenshotReached: Bool = false, ocrReached: Bool = false,
-             cacheHit: Bool, cacheMiss: Bool) {
+             cacheHit: Bool, cacheMiss: Bool, ocrThreadCPU: Double? = nil) {
             self.observation = observation
             self.screenshotNanoseconds = screenshotNanoseconds
             self.ocrNanoseconds = ocrNanoseconds
@@ -183,6 +197,7 @@ public final class LinePassiveCapture {
             self.ocrReached = ocrReached
             self.cacheHit = cacheHit
             self.cacheMiss = cacheMiss
+            self.ocrThreadCPU = ocrThreadCPU
         }
     }
 
@@ -204,7 +219,9 @@ public final class LinePassiveCapture {
                 cumulativeScreenshotDurationMilliseconds: metrics.cumulativeScreenshotDurationMilliseconds + (latestScreenshot ?? 0),
                 cumulativeOCRDurationMilliseconds: metrics.cumulativeOCRDurationMilliseconds + (latestOCR ?? 0),
                 cumulativeCacheHits: metrics.cumulativeCacheHits + accumulator.cacheHits,
-                cumulativeCacheMisses: metrics.cumulativeCacheMisses + accumulator.cacheMisses)
+                cumulativeCacheMisses: metrics.cumulativeCacheMisses + accumulator.cacheMisses,
+                latestOCRInitiatingThreadCPUMilliseconds: accumulator.ocrThreadCPU,
+                cumulativeOCRInitiatingThreadCPUMilliseconds: metrics.cumulativeOCRInitiatingThreadCPUMilliseconds + (accumulator.ocrThreadCPU ?? 0))
         }
         guard #available(macOS 12.3, *) else {
             return [Self.unavailable(.captureUnavailable)]
@@ -240,6 +257,7 @@ public final class LinePassiveCapture {
             accumulator.ocrReached = accumulator.ocrReached || result.ocrReached
             if result.cacheHit { accumulator.cacheHits += 1 }
             if result.cacheMiss { accumulator.cacheMisses += 1 }
+            if let cpu = result.ocrThreadCPU { accumulator.ocrThreadCPU = (accumulator.ocrThreadCPU ?? 0) + cpu }
         }
         return results
     }
@@ -281,18 +299,27 @@ public final class LinePassiveCapture {
         }
         if let previous = cache[window.windowID], previous.fingerprint == fingerprint,
            previous.width == image.width, previous.height == image.height, previous.title == window.title,
-           previous.bounds == evidence.contentFrame, previous.bodyRegions == evidence.bodyRegions {
+           previous.bounds == evidence.contentFrame, previous.bodyRegions == evidence.bodyRegions,
+           previous.observedLabel == evidence.observedLabel {
             let known = previous.kind != .unknown
             return WindowCaptureResult(observation: LineWindowObservation(state: known ? .captured : .unknownWindow, kind: previous.kind,
                                          coverage: known ? .contentExcludingChrome : .unavailable,
                                          windowID: window.windowID, width: previous.width, height: previous.height,
-                                         rows: previous.rows, bodyCandidates: previous.bodyCandidates, historyRegions: normalizedRegions), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: true, cacheMiss: false)
+                                         rows: previous.rows, bodyCandidates: previous.bodyCandidates, historyRegions: normalizedRegions, observedLabel: evidence.observedLabel), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: true, cacheMiss: false)
         }
 
         let ocrStarted = Self.monotonicNanoseconds()
         let rawRows: [(text: String, boundingBox: CGRect, confidence: Double)]
+        let ocrThreadCPU: Double
         do {
-            rawRows = try await Task.detached(priority: .utility) { try Self.recognize(cropped) }.value
+            let measured = try await Task.detached(priority: .utility) {
+                let start = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                let rows = try Self.recognize(cropped)
+                let end = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
+                return (rows, Double(end - start) / 1_000_000)
+            }.value
+            rawRows = measured.0
+            ocrThreadCPU = measured.1
         } catch {
             return WindowCaptureResult(observation: LineWindowObservation(state: .ocrUnavailable, kind: .unknown, coverage: .unavailable,
                                          windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: Self.monotonicNanoseconds() - ocrStarted, screenshotReached: true, ocrReached: true, cacheHit: false, cacheMiss: true)
@@ -317,10 +344,10 @@ public final class LinePassiveCapture {
         cache[window.windowID] = CachedRows(fingerprint: fingerprint, width: image.width, height: image.height,
                                             title: window.title,
                                             kind: kind, bounds: evidence.contentFrame, rows: usable,
-                                            bodyRegions: evidence.bodyRegions, bodyCandidates: candidates)
+                                            bodyRegions: evidence.bodyRegions, bodyCandidates: candidates, observedLabel: evidence.observedLabel)
         return WindowCaptureResult(observation: LineWindowObservation(state: .captured, kind: kind, coverage: .contentExcludingChrome,
                                      windowID: window.windowID, width: image.width, height: image.height,
-                                     rows: usable, bodyCandidates: candidates, historyRegions: normalizedRegions), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: ocrNanoseconds, screenshotReached: true, ocrReached: true, cacheHit: false, cacheMiss: true)
+                                     rows: usable, bodyCandidates: candidates, historyRegions: normalizedRegions, observedLabel: evidence.observedLabel), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: ocrNanoseconds, screenshotReached: true, ocrReached: true, cacheHit: false, cacheMiss: true, ocrThreadCPU: ocrThreadCPU)
     }
 
     private static func unavailable(_ state: LineWindowObservation.State) -> LineWindowObservation {
@@ -351,6 +378,7 @@ public final class LinePassiveCapture {
         let kind: LineWindowObservation.Kind
         let contentFrame: CGRect
         let bodyRegions: [CGRect]
+        let observedLabel: String?
     }
 
     /// AX is used only as read-only semantic geometry. No actions, focus, or
@@ -378,7 +406,15 @@ public final class LinePassiveCapture {
         let exclusions = composers + searches
         guard let contentFrame = Self.safeContentFrame(lists: lists, excluded: exclusions, window: window.frame) else { return nil }
         let bodyRegions = kind == .conversation ? visibleHistoryRows(root, content: contentFrame) : []
-        return AXEvidence(kind: kind, contentFrame: contentFrame, bodyRegions: bodyRegions)
+        var titleValue: CFTypeRef?
+        let titleStatus = AXUIElementCopyAttributeValue(root, kAXTitleAttribute as CFString, &titleValue)
+        let title = titleStatus == .success ? titleValue as? String : nil
+        // Only a structurally identified conversation title, corroborated by
+        // the window-server snapshot. Generic or disagreeing titles stay unknown.
+        let label = kind == .conversation && title == window.title &&
+            title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false &&
+            title?.uppercased() != "LINE" && (title?.utf8.count ?? 0) <= 512 ? title : nil
+        return AXEvidence(kind: kind, contentFrame: contentFrame, bodyRegions: bodyRegions, observedLabel: label)
     }
 
     /// LINE exposes individual timeline items as AXRows. Read only their geometry;

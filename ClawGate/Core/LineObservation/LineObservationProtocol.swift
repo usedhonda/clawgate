@@ -22,7 +22,7 @@ enum LineObservationProtocol {
     /// Current producer has no confirmed identity, including unavailable surfaces.
     /// Keep legacy observations unchanged; queued payloads never pass through here.
     static func snapshotsForWire(_ snapshots: [[String: Any]], schemaVersion: Int) -> [[String: Any]] {
-        guard schemaVersion == 2 else { return snapshots }
+        guard schemaVersion == 2 || schemaVersion == 3 else { return snapshots }
         return snapshots.map { snapshot in
             var result = snapshot
             result["conversationKey"] = NSNull()
@@ -31,11 +31,25 @@ enum LineObservationProtocol {
             if snapshot["scope"] as? String != "selected_thread_visible_window" ||
                 snapshot["coverage"] as? String != "available" {
                 result["bodyCandidates"] = [] as [[String: Any]]
+                if schemaVersion == 3 {
+                    result["annotations"] = [] as [[String: Any]]
+                    result["conversationLabel"] = NSNull()
+                    result["conversationLabelEvidence"] = NSNull()
+                }
             } else if result["bodyCandidates"] == nil {
                 result["bodyCandidates"] = [] as [[String: Any]]
             }
             return result
         }
+    }
+
+    /// Version alone is not semantic compatibility. Never upgrade existing queued bytes.
+    static func supportedHubVersion(capabilityData: Data) -> Int? {
+        guard let object = try? JSONSerialization.jsonObject(with: capabilityData) as? [String: Any],
+              let versions = object["line_observation_schema_versions"] as? [Int] else { return nil }
+        if versions.contains(3), object["line_observation_semantic_format"] as? String == "line-visible-content-v1" { return 3 }
+        if versions.contains(2) { return 2 }
+        return versions.contains(1) ? 1 : nil
     }
 
     static func supportedVersion(capabilityData: Data) -> Int {

@@ -16,6 +16,44 @@ final class SettingsModel: ObservableObject {
     func save() { configStore.save(config) }
 }
 
+private struct LineObservationWindowSummary: Identifiable {
+    let id: String
+    let windowID: String
+    let kind: String
+    let state: String
+    let width: Int
+    let height: Int
+    let spanCount: Int
+    let bodyCandidateCount: Int
+    let labelObserved: Bool
+
+    init?(diagnostic: [String: Any]) {
+        guard let kind = diagnostic["kind"] as? String,
+              let state = diagnostic["state"] as? String else { return nil }
+        let rawWindowID: String
+        if let value = diagnostic["windowId"] as? String {
+            rawWindowID = value
+        } else if let value = diagnostic["windowId"] as? Int {
+            rawWindowID = String(value)
+        } else {
+            rawWindowID = "匿名"
+        }
+        func number(_ key: String) -> Int {
+            if let value = diagnostic[key] as? NSNumber { return value.intValue }
+            return diagnostic[key] as? Int ?? 0
+        }
+        self.id = "\(rawWindowID)-\(kind)-\(state)-\(number("width"))-\(number("height"))"
+        self.windowID = rawWindowID
+        self.kind = kind
+        self.state = state
+        self.width = number("width")
+        self.height = number("height")
+        self.spanCount = number("spanCount")
+        self.bodyCandidateCount = number("bodyCandidateCount")
+        self.labelObserved = diagnostic["labelObserved"] as? Bool ?? false
+    }
+}
+
 struct InlineSettingsView: View {
     let embedInScroll: Bool
     let onOpenQRCode: (() -> Void)?
@@ -58,6 +96,11 @@ struct InlineSettingsView: View {
     @State private var conversationWindowCount: Int? = nil
     @State private var conversationOCRSpanCount: Int? = nil
     @State private var bodyCandidateCount: Int? = nil
+    @State private var localBodyCandidateCount: Int? = nil
+    @State private var displayedTimeCount: Int? = nil
+    @State private var annotationCount: Int? = nil
+    @State private var observedLabelWindowCount: Int? = nil
+    @State private var observationWindows: [LineObservationWindowSummary] = []
     @State private var observationLastObservedAt: Date? = nil
     @State private var observationLastAcknowledgedAt: Date? = nil
     @State private var observationSchemaVersion = 1
@@ -194,6 +237,7 @@ struct InlineSettingsView: View {
                     .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
             }
             Text("配送: \(lineObservationDeliveryLabel) · 未保存 \(observationQueue)件").font(PanelTheme.smallFont)
+            lineObservationSemanticStatus
             Text("会話同定が不明な観測から未返信を断定しません。")
                 .font(PanelTheme.smallFont).foregroundStyle(PanelTheme.textSecondary)
         }
@@ -207,7 +251,7 @@ struct InlineSettingsView: View {
             if observationCountsUnavailable {
                 Text("サイドバー: 利用不可（\(lineObservationCaptureLabel)）")
                 Text("本文: 利用不可（\(lineObservationCaptureLabel)）")
-                Text(observationSchemaVersion == 2 ? "本文整理: 候補情報を確認中" : "本文整理:サーバーv2確認待ち")
+                Text("本文整理: 読み取れる会話窓を確認中")
             } else if observationIsStale {
                 Text("サイドバー: 前回観測 · 窓 \(sidebarWindowCount ?? 0) / OCRスパン \(sidebarOCRSpanCount ?? 0)")
                 Text("本文: 前回観測 · 窓 \(conversationWindowCount ?? 0) / OCRスパン \(conversationOCRSpanCount ?? 0)")
@@ -227,11 +271,35 @@ struct InlineSettingsView: View {
 
     @ViewBuilder
     private func lineObservationCandidateLabel(prefix: String) -> some View {
-        if observationSchemaVersion == 2 {
-            Text("\(prefix): 候補 \(bodyCandidateCount ?? 0)件")
-        } else {
-            Text("\(prefix): ローカル候補 \(bodyCandidateCount ?? 0)件 · サーバーv2確認待ち")
+        Text("\(prefix): 本文のまとまり \(localBodyCandidateCount ?? 0)件（表示範囲のみ）")
+    }
+
+    private var lineObservationSemanticStatus: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("このMacで読み取れた情報")
+                .font(PanelTheme.smallFont)
+                .foregroundStyle(PanelTheme.textSecondary)
+            if observationCountsUnavailable {
+                Text("利用不可（\(lineObservationCaptureLabel)）")
+            } else {
+                let prefix = observationIsStale ? "前回観測 · " : ""
+                Text("\(prefix)段落候補 \(localBodyCandidateCount ?? 0)件 · 表示時刻 \(displayedTimeCount ?? 0)件 · 注釈 \(annotationCount ?? 0)件")
+                Text("会話名を読めた窓 \(observedLabelWindowCount ?? 0)件 · 発言者・送受信方向: 不明")
+                if observationSchemaVersion < 3 {
+                    Text("会話名・表示時刻の追加保存は、保存先の対応待ちです")
+                        .foregroundStyle(PanelTheme.textSecondary)
+                }
+            }
+            if !observationWindows.isEmpty {
+                Text(observationIsStale ? "観測窓（匿名ID・前回観測）" : "観測窓（匿名ID）")
+                    .foregroundStyle(PanelTheme.textSecondary)
+                ForEach(observationWindows) { window in
+                    let status = window.state == "captured" ? "取得済み" : window.state == "unknownWindow" ? "安全な本文領域を特定できません" : "取得できません（\(window.state)）"
+                    Text("窓 \(window.windowID) · \(window.kind == "conversation" ? "会話" : window.kind == "sidebar" ? "一覧" : "未識別") · \(status)")
+                }
+            }
         }
+        .font(PanelTheme.smallFont)
     }
 
     private var lineObservationFreshness: some View {
@@ -591,6 +659,10 @@ struct InlineSettingsView: View {
             conversationWindowCount = observation["conversationWindowCount"] as? Int
             conversationOCRSpanCount = observation["conversationOCRSpanCount"] as? Int
             bodyCandidateCount = observation["bodyCandidateCount"] as? Int
+            localBodyCandidateCount = observation["localBodyCandidateCount"] as? Int
+            displayedTimeCount = observation["displayedTimeCount"] as? Int
+            annotationCount = observation["annotationCount"] as? Int
+            observedLabelWindowCount = observation["observedLabelWindowCount"] as? Int
         } else {
             // A blocked or unavailable capture must not present an old sample as current.
             sidebarWindowCount = nil
@@ -598,7 +670,12 @@ struct InlineSettingsView: View {
             conversationWindowCount = nil
             conversationOCRSpanCount = nil
             bodyCandidateCount = nil
+            localBodyCandidateCount = nil
+            displayedTimeCount = nil
+            annotationCount = nil
+            observedLabelWindowCount = nil
         }
+        observationWindows = (observation["windows"] as? [[String: Any]])?.compactMap { LineObservationWindowSummary(diagnostic: $0) } ?? []
         lineState = model.config.lineEnabled
             ? (lineAppRunning() ? .online : .offline)
             : .unknown

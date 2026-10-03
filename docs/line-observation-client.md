@@ -138,6 +138,49 @@ without running recognition again. No timing fields enter the observation wire.
 V2 also explicitly supplies unknown identity and empty candidate arrays for
 unavailable surfaces; missing history never becomes a confirmed empty thread.
 
+## Visible-content structure (v3)
+
+The client computes `line-visible-content-v1` locally. Original `ocrSpans`
+remain unchanged. Where usable AX item regions are absent, closely aligned
+adjacent lines form a **visible text fragment**, not a verified message.
+Separate columns, large gaps and overlapping/ambiguous blocks do not merge;
+repeated text is retained. This cannot recover off-screen history or clipped
+glyphs and does not certify a complete bubble.
+
+Small Japanese AM/PM clock badges can be associated with a unique neighboring
+multiline fragment only when their geometry, font size and end alignment agree.
+Competing associations remain unknown. `displayedTimeText` preserves the OCR
+string; `sentAt` stays null with precision unknown. A centered, isolated exact
+unread-divider phrase may be retained as an annotation, never as read state or
+an unread count. All annotation source ordinals remain traceable to raw spans.
+
+For a structurally identified conversation, matching AX/window-server titles
+provide `conversationLabel` with `conversationLabelEvidence=ax_window_title`.
+It is an observed display label, not native identity or author. Generic,
+disagreeing or unavailable titles remain null. Layout/title evidence is checked
+again after capture and participates in cache validity.
+
+V3 candidates retain the v2 fields and add nullable `displayedTimeEvidence`
+(`method`, `spanOrdinals`). Snapshot `annotations` contain ordinal, text, source
+spanOrdinals, normalized rectangle, kind, evidence and nullable relatedBodyOrdinal.
+Kinds are `displayed_time` and `unread_divider`; corresponding evidence methods
+are `ocr_clock_badge_layout` and `ocr_centered_divider`. Grouping may use
+`ocr_aligned_lines`. Identity/sender/fromSelf stay unknown, tailCoverage false.
+
+Independent Hub delivery selects v3 only if authenticated capabilities advertise
+both schema 3 and `line_observation_semantic_format=line-visible-content-v1`.
+Otherwise it uses the explicitly supported v2/v1. Missing supported schemas
+block independent delivery rather than guessing compatibility. No queued bytes
+or IDs are migrated, and no legacy Gateway fallback is introduced. Public
+debug output and Settings contain only counts/status; new local extraction and
+negotiated delivery are shown separately. V3 storage/MCP/consumer acceptance is
+separate from already accepted v2 delivery.
+
+CPU diagnostics additionally measure the thread initiating synchronous Vision
+recognition. These are actual thread CPU milliseconds, not wall time, but exclude
+Vision's other worker threads/GPU and cannot be called whole-observer CPU or
+energy use. Cache-only captures omit the latest OCR CPU sample.
+
 Server retention defaults to 30 days under the approved plan, unlike Messenger.
 The existing Personal Data Hub LINE domain is the canonical SQLite store;
 this observer does not create a separate LINE database. Ingestion never triggers

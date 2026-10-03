@@ -113,17 +113,29 @@ final class LineObservationService {
             }
             status = windows.contains { $0.state == .captured } ? "observing" : (windows.first?.state.rawValue ?? "unavailable")
             snapshots = windows.map { Self.snapshot($0, schemaVersion: schemaVersion) }
-            auditSnapshots = zip(windows, snapshots).map { window, snapshot in
-                var audit = snapshot
+            auditSnapshots = windows.map { window in
+                var audit = Self.snapshot(window, schemaVersion: 3)
+                audit["localSchemaVersion"] = 3
+                audit["deliverySchemaVersion"] = schemaVersion
                 audit["historyRegions"] = window.historyRegions.map {
                     ["x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height]
                 }
                 return audit
             }
+            diagnostics.update([
+                "localBodyCandidateCount": auditSnapshots.reduce(0) { $0 + (($1["bodyCandidates"] as? [[String: Any]])?.count ?? 0) },
+                "displayedTimeCount": auditSnapshots.reduce(0) { count, snapshot in
+                    count + ((snapshot["annotations"] as? [[String: Any]])?.filter { $0["kind"] as? String == "displayed_time" }.count ?? 0)
+                },
+                "annotationCount": auditSnapshots.reduce(0) { $0 + (($1["annotations"] as? [[String: Any]])?.count ?? 0) },
+                "observedLabelWindowCount": windows.filter { $0.observedLabel != nil }.count,
+                "senderKnownCount": 0, "directionKnownCount": 0
+            ])
             diagnostics.update(["windows": windows.map { ["windowId": $0.windowID.map(String.init) as Any? ?? NSNull(),
                                                          "kind": $0.kind.rawValue, "state": $0.state.rawValue,
                                                          "width": $0.width, "height": $0.height, "spanCount": $0.rows.count,
-                                                         "bodyCandidateCount": $0.bodyCandidates.count] as [String: Any] }])
+                                                         "bodyCandidateCount": $0.bodyCandidates.count,
+                                                         "labelObserved": $0.observedLabel != nil] as [String: Any] }])
             let notifications = Self.notificationSnapshots()
             snapshots.append(contentsOf: notifications.isEmpty ? [["scope": "notification_visible_window", "coverage": "unavailable", "reason": "no_verified_line_banner", "ocrSpans": []]] : notifications)
             diagnostics.update(["windowCount": windows.filter { $0.windowID != nil }.count,
@@ -187,6 +199,8 @@ final class LineObservationService {
                             "capturePerformance": NSNull(),
                             "ocrSpanCount": 0, "sidebarWindowCount": 0, "sidebarOCRSpanCount": 0,
                             "conversationWindowCount": 0, "conversationOCRSpanCount": 0, "bodyCandidateCount": 0,
+                            "localBodyCandidateCount": 0, "displayedTimeCount": 0, "annotationCount": 0,
+                            "observedLabelWindowCount": 0, "senderKnownCount": 0, "directionKnownCount": 0,
                             "schemaVersion": schemaVersion])
     }
 
@@ -205,11 +219,12 @@ final class LineObservationService {
                 request.timeoutInterval = 3
                 request.setValue("Bearer \(provision.bearer_token)", forHTTPHeaderField: "Authorization")
                 let (data, response) = try await boundedHubResponse(request)
-                if response.statusCode == 200, provision.acceptsCapabilities(data) {
+                if response.statusCode == 200, provision.acceptsCapabilities(data),
+                   let supported = LineObservationProtocol.supportedHubVersion(capabilityData: data) {
                     hubCapabilityReady = true
                     // Generic Hub stores the unchanged current observation schema;
                     // it does not interpret OCR candidates as message facts.
-                    schemaVersion = 2
+                    schemaVersion = supported
                 }
                 return
             }
@@ -356,7 +371,7 @@ final class LineObservationService {
     private static func unavailableSnapshot(reason: String) -> [String: Any] {
         ["scope": "state", "coverage": "unavailable", "reason": reason, "ocrSpans": []]
     }
-    private static func snapshot(_ window: LineWindowObservation, schemaVersion: Int) -> [String: Any] {
+    static func snapshot(_ window: LineWindowObservation, schemaVersion: Int) -> [String: Any] {
         let scope = window.kind == .sidebar ? "sidebar_visible_window" : window.kind == .conversation ? "selected_thread_visible_window" : "state"
         var result: [String: Any] = ["scope": scope, "coverage": window.state == .captured ? "available" : "unavailable",
                 "reason": window.state == .captured ? NSNull() : window.state.rawValue as Any,
@@ -369,13 +384,33 @@ final class LineObservationService {
                      "width": row.box.width, "height": row.box.height, "confidence": row.confidence as Any? ?? NSNull(),
                      "fromSelf": NSNull(), "sender": NSNull(), "sentAt": NSNull(), "sentAtPrecision": "unknown"] as [String: Any]
                 }]
-        if schemaVersion == 2 {
-            result["bodyCandidates"] = window.bodyCandidates.map { candidate in
-                ["ordinal": candidate.ordinal, "text": candidate.text, "spanOrdinals": candidate.spanOrdinals,
+        let content = schemaVersion == 3 && window.kind == .conversation && window.state == .captured
+            ? LineVisibleContentExtractor.extract(rows: window.rows, textBlockRegions: window.historyRegions, regionMethod: "ax_history_row")
+            : nil
+        if schemaVersion >= 2 {
+            result["bodyCandidates"] = (content?.bodyCandidates ?? window.bodyCandidates).map { candidate in
+                var body: [String: Any] = ["ordinal": candidate.ordinal, "text": candidate.text, "spanOrdinals": candidate.spanOrdinals,
                  "x": candidate.box.x, "y": candidate.box.y, "width": candidate.box.width, "height": candidate.box.height,
                  "extractionMethod": candidate.extractionMethod, "coverage": candidate.coverage,
                  "sender": NSNull(), "fromSelf": NSNull(), "sentAt": NSNull(), "sentAtPrecision": "unknown",
-                 "displayedTimeText": NSNull()] as [String: Any]
+                 "displayedTimeText": NSNull()]
+                if schemaVersion == 3 {
+                    body["displayedTimeText"] = candidate.displayedTimeText as Any? ?? NSNull()
+                    let time = content?.annotations.first { $0.kind == "displayed_time" && $0.relatedBodyOrdinal == candidate.ordinal }
+                    body["displayedTimeEvidence"] = time.map { ["method": $0.evidence, "spanOrdinals": $0.spanOrdinals] as [String: Any] } as Any? ?? NSNull()
+                }
+                return body
+            }
+        }
+        if schemaVersion == 3 {
+            let label = content == nil ? nil : window.observedLabel
+            result["conversationLabel"] = label as Any? ?? NSNull()
+            result["conversationLabelEvidence"] = label == nil ? NSNull() : "ax_window_title" as Any
+            result["annotations"] = (content?.annotations ?? []).map { annotation in
+                ["ordinal": annotation.ordinal, "text": annotation.text, "spanOrdinals": annotation.spanOrdinals,
+                 "x": annotation.box.x, "y": annotation.box.y, "width": annotation.box.width, "height": annotation.box.height,
+                 "kind": annotation.kind, "evidence": annotation.evidence,
+                 "relatedBodyOrdinal": annotation.relatedBodyOrdinal as Any? ?? NSNull()] as [String: Any]
             }
         }
         return result
