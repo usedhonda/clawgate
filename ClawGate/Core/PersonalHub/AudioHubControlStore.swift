@@ -25,6 +25,15 @@ final class AudioHubControlStore {
         var staged: AudioHubRawTranscriptReader.ReadResult?
     }
 
+    /// Immutable, explicit selected-meeting intent. The registration is
+    /// durable before any index/outbox admission and is never replaced by a
+    /// later revision.
+    struct SelectedRegistration: Codable, Equatable {
+        let meetingID: String
+        let indexData: Data
+        let assets: [AudioHubSelectedMeetingAdmission.ManifestAsset]
+    }
+
     struct Upload: Codable, Equatable {
         let sourceRecordRef: String
         let revision: String
@@ -45,6 +54,7 @@ final class AudioHubControlStore {
         var checkpoints: [Checkpoint]
         var scans: [String: Scan]?
         var uploads: [String: Upload]?
+        var selectedRegistrations: [String: SelectedRegistration]?
     }
 
     private let stateURL: URL
@@ -59,7 +69,7 @@ final class AudioHubControlStore {
         guard UUID(uuidString: sourceUUID)?.uuidString.lowercased() == sourceUUID else { throw Failure.wrongSource }
         self.maxControlBytes = maxControlBytes
         stateURL = directory.appendingPathComponent("control.json")
-        state = State(version: 1, sourceUUID: sourceUUID, checkpoints: [])
+        state = State(version: 1, sourceUUID: sourceUUID, checkpoints: [], scans: nil, uploads: nil, selectedRegistrations: nil)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var directoryInfo = stat()
         guard lstat(directory.path, &directoryInfo) == 0, directoryInfo.st_mode & S_IFMT == S_IFDIR,
@@ -106,6 +116,42 @@ final class AudioHubControlStore {
         guard !storageFailed else { throw Failure.storageFailed }
         guard let scan = state.scans?[sessionID] else { throw Failure.invalidState }
         return scan
+    }
+
+    /// All persisted scanner state, including the initial and current cursor.
+    func registeredScans() throws -> [String: Scan] {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        return state.scans ?? [:]
+    }
+
+    /// Persist a frozen selected-meeting intent. The exact sorted JSON bytes
+    /// define its identity, so identical retries are idempotent while later
+    /// revisions remain available under distinct identities.
+    func registerSelected(_ registration: SelectedRegistration) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed, Self.validSelectedRegistration(registration) else { throw Failure.invalidState }
+        let identity = try Self.selectedIdentity(registration)
+        if let existing = state.selectedRegistrations?[identity] {
+            guard existing == registration else { throw Failure.invalidState }
+            return
+        }
+        var candidate = state
+        var registrations = candidate.selectedRegistrations ?? [:]
+        registrations[identity] = registration
+        candidate.selectedRegistrations = registrations
+        guard Self.valid(candidate) else { throw Failure.invalidState }
+        try replace(candidate)
+    }
+
+    func selectedRegistrations() throws -> [SelectedRegistration] {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        let registrations = state.selectedRegistrations ?? [:]
+        return try registrations.keys.sorted().map {
+            guard let registration = registrations[$0] else { throw Failure.invalidState }
+            return registration
+        }
     }
 
     /// Freeze the exact first-read bytes before queue/journal admission.
@@ -299,6 +345,10 @@ final class AudioHubControlStore {
 
     private static func valid(_ value: State) -> Bool {
         guard (value.scans ?? [:]).allSatisfy({ validSession($0.key) && validScan($0.value) }) else { return false }
+        guard (value.selectedRegistrations ?? [:]).allSatisfy({ key, registration in
+            guard let identity = try? selectedIdentity(registration), identity == key else { return false }
+            return validSelectedRegistration(registration)
+        }) else { return false }
         for (id, u) in value.uploads ?? [:] {
             guard !u.sourceRecordRef.isEmpty, !u.revision.isEmpty, !u.pipeline.isEmpty,
                   u.bodySHA256.count == 64, u.bodySHA256.allSatisfy({ $0.isHexDigit }),
@@ -339,6 +389,31 @@ final class AudioHubControlStore {
             }
         }
         return true
+    }
+
+    private static func validSelectedRegistration(_ registration: SelectedRegistration) -> Bool {
+        guard validSession(registration.meetingID), !registration.indexData.isEmpty,
+              let indexedRows = try? JSONDecoder().decode([MeetingAudioArchive.Chunk].self, from: registration.indexData),
+              Set(indexedRows.map(\.id)).count == indexedRows.count,
+              !registration.assets.isEmpty else { return false }
+        let indexedByID = Dictionary(uniqueKeysWithValues: indexedRows.map { ($0.id, $0) })
+        var assetIDs = Set<String>()
+        for asset in registration.assets {
+            guard assetIDs.insert(asset.row.id).inserted,
+                  indexedByID[asset.row.id] == asset.row,
+                  validSession(asset.row.id), validSession(asset.row.fileName),
+                  asset.original.sourceRelativePath == "meetings/\(registration.meetingID)/audio/\(asset.row.fileName)",
+                  (try? AudioHubOutbox.OriginalReference(sourceRelativePath: asset.original.sourceRelativePath,
+                      sha256: asset.original.sha256, byteLength: asset.original.byteLength)) == asset.original,
+                  asset.original.byteLength > 0 else { return false }
+        }
+        return true
+    }
+
+    private static func selectedIdentity(_ registration: SelectedRegistration) throws -> String {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let bytes = try encoder.encode(registration)
+        return hash(bytes)
     }
 
     private static func validSession(_ value: String) -> Bool {

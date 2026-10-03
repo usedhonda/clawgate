@@ -15,6 +15,12 @@ struct AudioHubSelectedMeetingAdmission {
         case conflict
     }
 
+    static func isAdmitted(meetingID: String, asset: Asset, checkpoints: [AudioHubControlStore.Checkpoint]) -> Bool {
+        let ref = sourceRef(meetingID: meetingID, rowID: asset.row.id)
+        let revision = revision(for: asset)
+        return checkpoints.contains { $0.sourceRecordRef == ref && $0.revisionRef == revision }
+    }
+
     static func admit(meetingID: String, indexData: Data, assets: [Asset],
                       selectedIDs: Set<String>, originalsRoot: URL,
                       outbox: AudioHubOutbox, control: AudioHubControlStore) throws -> [AudioHubControlStore.Checkpoint] {

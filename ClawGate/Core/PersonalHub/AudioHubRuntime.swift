@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 /// Owner-supplied activation boundary for the native audio producer.
 /// This is deliberately private configuration: an absent file means the route
@@ -8,19 +9,28 @@ struct AudioHubActivationManifest: Codable, Equatable {
     struct Session: Codable, Equatable {
         let sessionID: String
         let initial: AudioHubRawTranscriptReader.Checkpoint
+        let prefixSHA256: String
     }
 
-    struct SelectedMeeting: Codable, Equatable {
+    struct CommittedOriginal: Codable, Equatable {
+        struct SourceChunk: Codable, Equatable {
+            let id: String
+            let source: String
+            let startedAt: Double
+            let endedAt: Double?
+        }
         let meetingID: String
-        let indexRelativePath: String
-        let assets: [AudioHubSelectedMeetingAdmission.ManifestAsset]
+        let chunkID: String
+        let sha256: String
+        let byteLength: Int64
+        let sourceChunk: SourceChunk
     }
 
     let version: Int
     let maxMetadataBytes: Int
     let maxControlBytes: Int
     let sessions: [Session]
-    let selectedMeetings: [SelectedMeeting]
+    let committedOriginals: [CommittedOriginal]
 
     static let approvedMetadataBytes = 128 * 1024 * 1024
     static let approvedControlBytes = 16 * 1024 * 1024
@@ -62,7 +72,8 @@ final class AudioHubRuntime {
     private var workerAgain = false
     private var stopped = false
     private var failureCode: String?
-    var lastFailure: String? { schedulingLock.lock(); defer { schedulingLock.unlock() }; return failureCode }
+    private var registrationFailure: String?
+    var lastFailure: String? { schedulingLock.lock(); defer { schedulingLock.unlock() }; return registrationFailure ?? failureCode }
 
     /// Returns nil when the owner has not installed an activation manifest.
     init?(manifestURL: URL, sessionsRoot: URL, meetingsRoot: URL,
@@ -99,30 +110,40 @@ final class AudioHubRuntime {
     }
 
     static func valid(_ manifest: AudioHubActivationManifest) -> Bool {
-        guard manifest.version == 1,
+        guard manifest.version == 2,
               manifest.maxMetadataBytes == AudioHubActivationManifest.approvedMetadataBytes,
               manifest.maxControlBytes == AudioHubActivationManifest.approvedControlBytes,
-              !manifest.sessions.isEmpty || !manifest.selectedMeetings.isEmpty else { return false }
+              !manifest.sessions.isEmpty || !manifest.committedOriginals.isEmpty else { return false }
         guard Set(manifest.sessions.map(\.sessionID)).count == manifest.sessions.count,
               manifest.sessions.allSatisfy({ validSession($0) }) else { return false }
-        guard Set(manifest.selectedMeetings.map(\.meetingID)).count == manifest.selectedMeetings.count,
-              manifest.selectedMeetings.allSatisfy({ validMeeting($0) }) else { return false }
+        guard Set(manifest.committedOriginals.map { "\($0.meetingID)/\($0.chunkID)" }).count == manifest.committedOriginals.count,
+              manifest.committedOriginals.allSatisfy({ validOriginal($0) }) else { return false }
         return true
     }
 
     private static func validSession(_ item: AudioHubActivationManifest.Session) -> Bool {
         let c = item.initial
         guard !item.sessionID.isEmpty, item.sessionID != ".", item.sessionID != "..",
-              !item.sessionID.contains("/"), c.snapshot != nil,
+              Self.validComponent(item.sessionID), c.snapshot != nil,
+              validHash(item.prefixSHA256),
               c.offset <= UInt64(Int64.max), c.physicalLine <= UInt64(Int.max) else { return false }
         return true
     }
 
-    private static func validMeeting(_ item: AudioHubActivationManifest.SelectedMeeting) -> Bool {
-        guard !item.meetingID.isEmpty, !item.meetingID.contains("/"),
-              item.indexRelativePath == "meetings/\(item.meetingID)/audio/index.json",
-              !item.assets.isEmpty else { return false }
-        return Set(item.assets.map { $0.row.id }).count == item.assets.count
+    private static func validHash(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy { "0123456789abcdef".contains($0) }
+    }
+
+    private static func validComponent(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." && !value.unicodeScalars.contains {
+            $0 == "/" || $0 == "\\" || $0 == ":" || CharacterSet.controlCharacters.contains($0)
+        }
+    }
+
+    private static func validOriginal(_ item: AudioHubActivationManifest.CommittedOriginal) -> Bool {
+        validComponent(item.meetingID) && validComponent(item.chunkID) && item.chunkID == item.sourceChunk.id &&
+            validHash(item.sha256) && item.byteLength > 0 && !item.sourceChunk.source.isEmpty &&
+            item.sourceChunk.startedAt.isFinite && (item.sourceChunk.endedAt?.isFinite ?? true)
     }
 
     /// Recover only the listed scanner checkpoints and selected index rows.
@@ -132,19 +153,32 @@ final class AudioHubRuntime {
         do {
             for entry in manifest.sessions {
                 if scanners[entry.sessionID] != nil { continue }
-                scanners[entry.sessionID] = try AudioHubTranscriptScanner(
-                    sessionsRoot: sessionsRoot, sessionID: entry.sessionID,
-                    initialCheckpoint: entry.initial, control: control, outbox: outbox,
-                    maxReadBytes: 1 * 1024 * 1024, maxLineBytes: 512 * 1024)
+                try installBaseline(entry)
             }
-            for meeting in manifest.selectedMeetings {
-                let indexData = try Self.readIndex(meeting.indexRelativePath, under: meetingsRoot,
+            for (id, scan) in try control.registeredScans() where scanners[id] == nil {
+                scanners[id] = try makeScanner(id, initial: scan.initial)
+            }
+            // Committed originals are coverage only, never delivery work.
+            // Only explicit writer-registered future commits enter this loop.
+            let checkpoints = try control.checkpoints()
+            for registration in try control.selectedRegistrations() {
+                let waiting = registration.assets.filter {
+                    !AudioHubSelectedMeetingAdmission.isAdmitted(meetingID: registration.meetingID,
+                        asset: $0.asset, checkpoints: checkpoints)
+                }
+                if waiting.isEmpty { continue }
+                let indexData = try Self.readIndex("meetings/\(registration.meetingID)/audio/index.json", under: meetingsRoot,
                                                    maxBytes: manifest.maxControlBytes)
                 guard !indexData.isEmpty else { throw Failure.invalidPath }
+                let committed = try JSONDecoder().decode([MeetingAudioArchive.Chunk].self, from: indexData)
+                guard Set(committed.map(\.id)).count == committed.count,
+                      waiting.allSatisfy({ asset in committed.contains(asset.row) }) else {
+                    throw Failure.invalidPath
+                }
                 _ = try AudioHubSelectedMeetingAdmission.admit(
-                    meetingID: meeting.meetingID, indexData: indexData,
-                    assets: meeting.assets.map(\.asset),
-                    selectedIDs: Set(meeting.assets.map { $0.row.id }),
+                    meetingID: registration.meetingID, indexData: registration.indexData,
+                    assets: waiting.map(\.asset),
+                    selectedIDs: Set(waiting.map { $0.row.id }),
                     originalsRoot: meetingsRoot, outbox: outbox, control: control)
             }
             recordFailure(nil)
@@ -152,6 +186,78 @@ final class AudioHubRuntime {
             recordFailure("source_admission_failed")
             throw error
         }
+    }
+
+    private func makeScanner(_ id: String, initial: AudioHubRawTranscriptReader.Checkpoint) throws -> AudioHubTranscriptScanner {
+        try AudioHubTranscriptScanner(sessionsRoot: sessionsRoot, sessionID: id,
+            initialCheckpoint: initial, control: control, outbox: outbox,
+            maxReadBytes: 1 * 1024 * 1024, maxLineBytes: 512 * 1024)
+    }
+
+    private func installBaseline(_ entry: AudioHubActivationManifest.Session) throws {
+        try AudioHubBaselineReader.verify(sessionsRoot: sessionsRoot, entry: entry)
+        scanners[entry.sessionID] = try makeScanner(entry.sessionID, initial: entry.initial)
+    }
+
+    /// Called under the raw writer's file lock, before any new bytes. Only an
+    /// empty, actual source inode may create a previously unregistered scanner.
+    func registerRawWriter(sessionID: String, snapshot: AudioHubRawTranscriptReader.Snapshot) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard Self.validComponent(sessionID) else { throw Failure.invalidPath }
+        do {
+            if let entry = manifest.sessions.first(where: { $0.sessionID == sessionID }) {
+                if scanners[sessionID] == nil { try installBaseline(entry) }
+            } else if let existing = try control.registeredScans()[sessionID] {
+                if scanners[sessionID] == nil { scanners[sessionID] = try makeScanner(sessionID, initial: existing.initial) }
+            } else {
+                guard snapshot.length == 0 else { throw Failure.unconfigured }
+                scanners[sessionID] = try makeScanner(sessionID,
+                    initial: .init(offset: 0, physicalLine: 0, snapshot: snapshot))
+            }
+            let scan = try control.scan(sessionID: sessionID)
+            guard scan.initial.snapshot?.device == snapshot.device,
+                  scan.initial.snapshot?.inode == snapshot.inode,
+                  snapshot.length >= scan.cursor.offset else { throw Failure.invalidPath }
+        } catch {
+            recordRegistrationFailure("raw_registration_failed")
+            throw error
+        }
+    }
+
+    /// Freeze explicit selection intent before the source atomically commits
+    /// index.json. Recovery requires matching committed rows; a crash before
+    /// that commit cannot turn the intent into a delivery acknowledgement.
+    func registerSelectedCommit(meetingID: String, indexData: Data) throws {
+        lock.lock(); defer { lock.unlock() }
+        do {
+            guard Self.validComponent(meetingID), indexData.count <= manifest.maxControlBytes else { throw Failure.invalidPath }
+            let rows = try JSONDecoder().decode([MeetingAudioArchive.Chunk].self, from: indexData)
+            guard !rows.isEmpty, Set(rows.map(\.id)).count == rows.count else { throw Failure.invalidPath }
+            var assets: [AudioHubSelectedMeetingAdmission.ManifestAsset] = []
+            let registered = try control.selectedRegistrations().filter { $0.meetingID == meetingID }.flatMap(\.assets)
+            for row in rows {
+                guard Self.validComponent(row.id), Self.validComponent(row.fileName) else { throw Failure.invalidPath }
+                let reference = try AudioHubOriginalReader.inspect(root: meetingsRoot,
+                    relativePath: "meetings/\(meetingID)/audio/\(row.fileName)")
+                let covered = manifest.committedOriginals.contains {
+                    $0.meetingID == meetingID && $0.chunkID == row.id && $0.sha256 == reference.sha256 &&
+                    $0.byteLength == reference.byteLength && $0.sourceChunk.source == row.source &&
+                    $0.sourceChunk.startedAt == row.startedAt && $0.sourceChunk.endedAt == row.endedAt
+                }
+                let asset = AudioHubSelectedMeetingAdmission.ManifestAsset(row: row, original: reference)
+                if !covered && !registered.contains(asset) { assets.append(asset) }
+            }
+            if !assets.isEmpty {
+                try control.registerSelected(.init(meetingID: meetingID, indexData: indexData, assets: assets))
+            }
+        } catch {
+            recordRegistrationFailure("selected_registration_failed")
+            throw error
+        }
+    }
+
+    private func recordRegistrationFailure(_ value: String) {
+        schedulingLock.lock(); registrationFailure = value; schedulingLock.unlock()
     }
 
     /// Admit exactly one complete raw line for a manifest-listed session.

@@ -207,29 +207,49 @@ missing or changed. The existing thirty-day pruning is unchanged.
 
 ### Runtime activation boundary
 
-`AudioHubRuntime` is the only bounded coordinator. It can be constructed only
-from a private owner-installed activation manifest. The manifest must list each
-session's exact initial inode/device/length snapshot plus byte offset and
-physical line, and may list only caller-selected meeting index rows with their
-verified original hash/length. A missing manifest means **unconfigured**;
-runtime never chooses EOF, zero, timestamps, directory enumeration, or a
-historical backfill boundary.
+`AudioHubRuntime` is the bounded coordinator. Version-2 private activation
+configuration contains immutable verified raw baselines and committed-original
+coverage, never a list of historical originals to upload. Each raw baseline
+includes the committed offset/physical line, device/inode/length and SHA-256 of
+that exact prefix. Scanner start rechecks the prefix and inode; it never replaces
+the initial boundary with EOF, wall-clock time or a newer mirror checkpoint.
+Committed originals are compared by exact source chunk/hash/length and are not
+re-admitted under native IDs. There is no automatic directory discovery or
+backfill of unlisted historical sources.
 
 The approved budgets are one metadata state of 128 MiB and one control state of
-16 MiB (global lanes, not per-session/per-meeting multipliers). Recovery creates
-only the listed scanners and replays only the listed selected index assets.
-App startup, a successful raw append, and an atomically written selected index
-wake one coalesced background worker. Each pass scans at most 64 complete lines
-per listed session and drains at most 64 records; full batches continue, while
-failures retain exact pending bytes and back off 30 seconds. Shutdown cancels the
-worker. The existing source-specific private provision is loaded without changing
-Gateway configuration. Record kind selects the existing metadata or original
-transport; only matching durable receipts dequeue. There is no Gateway fallback.
-Manifest bytes are deducted from the one control budget. Index reads walk owned
-directory descriptors with no symlink following, bounded size and change checks.
-Ambient status exposes only configured/error state for this route. Missing/changed originals remain
-retained failures and do not evict queue records or extend the existing
-thirty-day audio policy.
+16 MiB. Activation bytes are deducted from control capacity. Future registration,
+frozen index bytes, scanner state and existing upload/control journals share that
+same control budget, not per-source allowances.
+
+For a new raw source, the source writer invokes registration while holding its
+file lock, before writing the first raw line. Only an actual empty inode may
+register an unlisted source at line zero/offset zero. Registration is durable
+before source append; restart restores registered scanners without resetting the
+cursor. An unregistered nonempty file is rejected, not silently backfilled.
+
+For a new explicitly selected asset, the writer freezes exact index bytes and
+safely inspected row/hash/length references before atomic index commit. Recovery
+requires matching actual committed index rows before admission. A crash before
+index commit leaves pending registration, not successful delivery; a crash after
+commit recovers the same immutable intent. Reorder/unrelated index additions do
+not create another asset registration. Already admitted registrations do not
+re-read pruned source indexes; pending original upload still enforces the existing
+missing/changed gap and receipt rules. No audio copy is made.
+
+If registration fails, the Hub lane records an explicit failure and cannot claim
+coverage/ACK. Local raw/index persistence and the existing actuator remain intact;
+registration failure never discards the user's source recording. Unregistered
+retained data requires an explicit reconciled boundary, not a retry at guessed EOF.
+
+Startup and successful source writes wake one coalesced background worker. Each
+pass scans at most 64 complete lines per registered session and drains at most 64
+records; full batches continue and failures retain bytes with 30-second backoff.
+The existing source-specific private provision/independent HTTPS route remains
+unchanged; only matching durable receipts dequeue. No Gateway fallback exists.
+Owned no-follow descriptor walks and bounded index reads protect admission.
+Ambient status exposes configured/error state, never source text or credentials.
+The thirty-day selected-original policy is unchanged.
 
 Originals use `selected-meeting-original` with explicit source provenance.
 `AudioHubSelectedMeetingAdmission` accepts only caller-supplied selected index
@@ -244,9 +264,9 @@ source/mirror checkpoint agreement; source compilation is not that agreement. Mi
 or retention extension. Helper crash proofs are not natural source-to-Hub
 delivery or consumer acceptance.
 
-Native start and mirror final checkpoints are not yet agreed. Agree the precise
-source reference/revision boundary with the migration owner before activating a
-source scan; never infer the boundary from timestamps or mirror record counts.
+Native start requires a source-verified and Hub-verified baseline. Mirror final
+checkpoints are separately agreed after native consumer acceptance; never infer
+either boundary from timestamps or record counts.
 Historical mirror data is not rewritten or deleted. The mirror owner stops its
 route only after source ACK, MCP read and required consumer acceptance. No helper
 enables a background scan or delivery route merely by being constructed.

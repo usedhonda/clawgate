@@ -45,6 +45,29 @@ final class AudioHubOriginalReader {
         self.snapshot = initial
     }
 
+    /// Inspect one explicitly named selected-meeting asset without copying it.
+    /// The returned reference freezes the bytes observed across the same
+    /// ownership, snapshot, hash, and reopen checks used by the reader.
+    static func inspect(root: URL, relativePath: String) throws -> AudioHubOutbox.OriginalReference {
+        guard validReference(relativePath) else { throw Error.unsafePath }
+        let descriptor = try open(root: root, relativePath: relativePath)
+        defer { close(descriptor) }
+        let initial = try snapshot(descriptor)
+        guard initial.length > 0 else { throw Error.contentMismatch }
+        let digest = try hash(descriptor, length: initial.length)
+        guard try snapshot(descriptor) == initial else { throw Error.sourceChanged }
+        let proof = try open(root: root, relativePath: relativePath)
+        defer { close(proof) }
+        guard try snapshot(proof) == initial else { throw Error.sourceChanged }
+        do {
+            return try AudioHubOutbox.OriginalReference(sourceRelativePath: relativePath,
+                                                        sha256: digest,
+                                                        byteLength: initial.length)
+        } catch {
+            throw Error.readFailed
+        }
+    }
+
     func readChunk(offset: Int64, limit: Int) throws -> Data {
         guard limit > 0, limit <= 4 * 1024 * 1024, offset >= 0 else { throw Error.invalidRange }
         let descriptor = try Self.open(root: root, relativePath: reference.sourceRelativePath)

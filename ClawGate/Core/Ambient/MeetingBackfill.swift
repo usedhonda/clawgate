@@ -13,8 +13,9 @@ final class MeetingBackfill {
     private let archive: MeetingAudioArchive
     private let transcriber: AmbientTranscriber
     private let store: MeetingStore
-    /// Optional producer hook. The index is complete and atomically persisted
-    /// before this callback; it never discovers or selects additional rows.
+    /// Persist selected intent before atomic index commit. Failure remains in
+    /// the Hub lane and does not discard the user's selected source recording.
+    var onAudioIndexWillCommit: ((String, Data) -> Void)?
     var onAudioIndexPersisted: ((String) -> Void)?
 
     init(archive: MeetingAudioArchive = MeetingAudioArchive(),
@@ -25,9 +26,13 @@ final class MeetingBackfill {
         self.transcriber = transcriber
         self.store = store
         if let audioHubRuntime {
+            self.onAudioIndexWillCommit = { [weak audioHubRuntime] meetingID, data in
+                // Runtime retains an explicit diagnostic on registration failure.
+                // Existing source index commit/retention remain independent.
+                do { try audioHubRuntime?.registerSelectedCommit(meetingID: meetingID, indexData: data) }
+                catch { }
+            }
             self.onAudioIndexPersisted = { [weak audioHubRuntime] meetingID in
-                // Selected assets remain manifest-owned; this wake only asks
-                // the configured coordinator to replay its listed meeting.
                 audioHubRuntime?.wake(originalsRoot: AmbientStorage.ambientRoot)
                 _ = meetingID
             }
@@ -206,7 +211,9 @@ final class MeetingBackfill {
             pinned.append(.init(id: chunk.id, source: chunk.source, startedAt: begin,
                                 endedAt: finish, fileName: chunk.fileName))
         }
-        try JSONEncoder().encode(pinned).write(to: directory.appendingPathComponent("index.json"), options: .atomic)
+        let indexData = try JSONEncoder().encode(pinned)
+        onAudioIndexWillCommit?(record.id, indexData)
+        try indexData.write(to: directory.appendingPathComponent("index.json"), options: .atomic)
         onAudioIndexPersisted?(record.id)
     }
 

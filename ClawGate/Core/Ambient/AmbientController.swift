@@ -13,7 +13,8 @@ enum AmbientRawTranscriptPersistenceError: Error, Equatable, CustomStringConvert
 }
 
 struct AmbientRawTranscriptAppender {
-    static func append(_ segments: [TranscriptSegment], to url: URL) throws {
+    static func append(_ segments: [TranscriptSegment], to url: URL,
+                       beforeAppend: ((AudioHubRawTranscriptReader.Snapshot) -> Void)? = nil) throws {
         let encoder = JSONEncoder()
         var data = Data()
         for segment in segments {
@@ -41,6 +42,9 @@ struct AmbientRawTranscriptAppender {
                 throw AmbientRawTranscriptPersistenceError.incompleteTail
             }
         }
+        // Registration observes the actual locked inode before its first byte.
+        // Hub failure is reported by its lane; source persistence still runs.
+        beforeAppend?(.init(device: UInt64(info.st_dev), inode: UInt64(info.st_ino), length: UInt64(info.st_size)))
         var written = 0
         try data.withUnsafeBytes { rawBuffer in
             guard let base = rawBuffer.baseAddress else {
@@ -967,7 +971,11 @@ final class AmbientController {
         }
         // Raw persistence is the admission boundary. A cleaned markdown write
         // remains derived and must not hide a successfully saved raw segment.
-        try AmbientRawTranscriptAppender.append(segments, to: rawURL)
+        try AmbientRawTranscriptAppender.append(segments, to: rawURL) { [weak self] snapshot in
+            guard let self, let runtime = self.audioHubRuntime, let sessionID = self.sessionID else { return }
+            do { try runtime.registerRawWriter(sessionID: sessionID, snapshot: snapshot) }
+            catch { self.log("audio Hub raw registration failed; continuing local source persistence") }
+        }
         append(mdLines, to: mdURL)
     }
 
