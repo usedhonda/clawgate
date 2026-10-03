@@ -6,13 +6,13 @@ import Darwin
 /// This helper deliberately does not scan sessions, persist a cursor, parse JSON,
 /// or enqueue anything.  The caller supplies both the path root and all bounds.
 struct AudioHubRawTranscriptReader {
-    struct Snapshot: Equatable {
+    struct Snapshot: Codable, Equatable {
         let device: UInt64
         let inode: UInt64
         let length: UInt64
     }
 
-    struct Checkpoint: Equatable {
+    struct Checkpoint: Codable, Equatable {
         let offset: UInt64
         let physicalLine: UInt64
         let snapshot: Snapshot?
@@ -24,7 +24,7 @@ struct AudioHubRawTranscriptReader {
         }
     }
 
-    struct ReadResult: Equatable {
+    struct ReadResult: Codable, Equatable {
         let rawLine: Data
         let physicalLine: UInt64
         let nextOffset: UInt64

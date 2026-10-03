@@ -58,25 +58,33 @@ final class AudioHubOutbox {
     private let directory: URL
     private let maxMetadataBytes: Int
     private let stateURL: URL
+    private let lockURL: URL
     private var state: State
+    private var durableDigest: String
     // An ambiguous disk commit must be reopened before any further mutation.
     private var storageFailed = false
     private let lock = NSLock()
 
     init(directory: URL, maxMetadataBytes: Int, sourceUUID: String = UUID().uuidString.lowercased()) throws {
-        guard maxMetadataBytes > 0 else { throw Error.invalidMaxMetadataBytes }
+        guard maxMetadataBytes > 0, maxMetadataBytes < Int.max else { throw Error.invalidMaxMetadataBytes }
         self.directory = directory
         self.maxMetadataBytes = maxMetadataBytes
         self.stateURL = directory.appendingPathComponent("state.json")
+        self.lockURL = directory.appendingPathComponent(".state.lock")
 
         do {
             try Self.ensureDirectory(directory)
+            let lockDescriptor = open(lockURL.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
+            guard lockDescriptor >= 0 else { throw Error.ioFailure }
+            defer { close(lockDescriptor) }
+            var lockInfo = stat()
+            guard fstat(lockDescriptor, &lockInfo) == 0,
+                  (lockInfo.st_mode & S_IFMT) == S_IFREG,
+                  lockInfo.st_uid == getuid(), lockInfo.st_mode & 0o777 == 0o600,
+                  flock(lockDescriptor, LOCK_EX | LOCK_NB) == 0 else { throw Error.ioFailure }
+            defer { _ = flock(lockDescriptor, LOCK_UN) }
             if FileManager.default.fileExists(atPath: stateURL.path) {
-                let attributes = try FileManager.default.attributesOfItem(atPath: stateURL.path)
-                guard attributes[.type] as? FileAttributeType == .typeRegular,
-                      (attributes[.posixPermissions] as? NSNumber)?.intValue == 0o600,
-                      let size = attributes[.size] as? NSNumber, size.intValue <= maxMetadataBytes else { throw Error.corruptState }
-                let data = try Data(contentsOf: stateURL)
+                let data = try Self.readBounded(stateURL, maxBytes: maxMetadataBytes)
                 let loaded = try JSONDecoder().decode(State.self, from: data)
                 guard loaded.version == 1, UUID(uuidString: loaded.sourceUUID)?.uuidString.lowercased() == loaded.sourceUUID,
                       Set(loaded.pending.map(\.externalID)).count == loaded.pending.count,
@@ -92,11 +100,12 @@ final class AudioHubOutbox {
                       }) else { throw Error.corruptState }
                 self.state = loaded
                 self.sourceUUID = loaded.sourceUUID
+                self.durableDigest = Self.sha256(data)
             } else {
                 guard UUID(uuidString: sourceUUID)?.uuidString.lowercased() == sourceUUID else { throw Error.invalidSourceRecord }
                 self.sourceUUID = sourceUUID
                 self.state = State(version: 1, sourceUUID: sourceUUID, pending: [], latestAcknowledgement: nil)
-                try Self.persist(self.state, to: stateURL, maxBytes: maxMetadataBytes)
+                self.durableDigest = try Self.persist(self.state, to: stateURL, maxBytes: maxMetadataBytes)
             }
         } catch let error as Error {
             throw error
@@ -108,6 +117,7 @@ final class AudioHubOutbox {
     func pending(limit: Int) throws -> [PendingRecord] {
         lock.lock(); defer { lock.unlock() }
         guard !storageFailed else { throw Error.ioFailure }
+        try ensureCurrentState()
         guard limit >= 0 else { return [] }
         return Array(state.pending.prefix(limit))
     }
@@ -124,6 +134,7 @@ final class AudioHubOutbox {
                                    bodySHA256: Self.sha256(body), original: original)
         lock.lock(); defer { lock.unlock() }
         guard !storageFailed else { throw Error.ioFailure }
+        try ensureCurrentState()
         if let existing = state.pending.first(where: { $0.externalID == externalID }) {
             guard existing.envelope == body, existing.original == original else { throw Error.conflict }
             return externalID
@@ -139,6 +150,7 @@ final class AudioHubOutbox {
     func acknowledge(externalID: String, expectedEnvelope: Data, receipt: Data) throws {
         lock.lock(); defer { lock.unlock() }
         guard !storageFailed else { throw Error.ioFailure }
+        try ensureCurrentState()
         guard let index = state.pending.firstIndex(where: { $0.externalID == externalID }) else { throw Error.missingRecord }
         let record = state.pending[index]
         guard record.envelope == expectedEnvelope,
@@ -151,9 +163,37 @@ final class AudioHubOutbox {
     }
 
     private func persistCandidate(_ candidate: State) throws {
-        do { try Self.persist(candidate, to: stateURL, maxBytes: maxMetadataBytes) }
+        let descriptor = open(lockURL.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard descriptor >= 0 else { storageFailed = true; throw Error.ioFailure }
+        defer { close(descriptor) }
+        var lockInfo = stat()
+        guard fstat(descriptor, &lockInfo) == 0,
+              (lockInfo.st_mode & S_IFMT) == S_IFREG,
+              lockInfo.st_uid == getuid(), lockInfo.st_mode & 0o777 == 0o600,
+              flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { storageFailed = true; throw Error.ioFailure }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        do {
+            let durable = try Self.readBounded(stateURL, maxBytes: maxMetadataBytes)
+            guard Self.sha256(durable) == durableDigest else { throw Error.conflict }
+            durableDigest = try Self.persist(candidate, to: stateURL, maxBytes: maxMetadataBytes)
+        }
         catch Error.capacityExceeded { throw Error.capacityExceeded }
+        catch Error.conflict { throw Error.conflict }
         catch { storageFailed = true; throw error }
+    }
+
+    /// Reject a stale in-memory view before exposing or mutating pending data.
+    /// The caller must reopen this instance after an external mutation.
+    private func ensureCurrentState() throws {
+        do {
+            let durable = try Self.readBounded(stateURL, maxBytes: maxMetadataBytes)
+            guard Self.sha256(durable) == durableDigest else { throw Error.conflict }
+        } catch Error.conflict {
+            throw Error.conflict
+        } catch {
+            storageFailed = true
+            throw Error.ioFailure
+        }
     }
 
     static func externalID(sourceUUID: String, sourceRecordRef: String, revision: String) -> String {
@@ -177,7 +217,7 @@ final class AudioHubOutbox {
         guard chmod(directory.path, mode_t(0o700)) == 0 else { throw Error.ioFailure }
     }
 
-    private static func persist(_ state: State, to url: URL, maxBytes: Int) throws {
+    private static func persist(_ state: State, to url: URL, maxBytes: Int) throws -> String {
         let data: Data
         do { data = try JSONEncoder().encode(state) } catch { throw Error.ioFailure }
         guard data.count <= maxBytes else { throw Error.capacityExceeded }
@@ -197,8 +237,29 @@ final class AudioHubOutbox {
             guard directoryFD >= 0 else { throw Error.ioFailure }
             defer { close(directoryFD) }
             guard fsync(directoryFD) == 0 else { throw Error.ioFailure }
+            return sha256(data)
         } catch let error as Error { try? FileManager.default.removeItem(at: temporary); throw error
         } catch { try? FileManager.default.removeItem(at: temporary); throw Error.ioFailure }
+    }
+
+    private static func readBounded(_ url: URL, maxBytes: Int) throws -> Data {
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else { throw Error.corruptState }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(), info.st_mode & 0o777 == 0o600,
+              info.st_size >= 0, info.st_size <= off_t(maxBytes) else { throw Error.corruptState }
+        var data = Data(capacity: Int(info.st_size))
+        var buffer = [UInt8](repeating: 0, count: min(maxBytes, 64 * 1024))
+        while data.count < Int(info.st_size) {
+            let wanted = min(buffer.count, Int(info.st_size) - data.count)
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, wanted) }
+            guard count > 0 else { throw Error.corruptState }
+            data.append(contentsOf: buffer[0..<count])
+        }
+        return data
     }
 
     private static func isSelectedMeetingAudioPath(_ path: String) -> Bool {

@@ -141,14 +141,42 @@ It assumes append-only input; inode/length checks cannot detect an in-place
 rewrite on the same inode. No cursor is persisted by this helper, and it does
 not parse JSON, enumerate sessions, enqueue records or enable a runtime route.
 
+## Explicit scanner and delivery orchestration (inactive)
+
+`AudioHubTranscriptScanner` requires an explicit session and initial physical
+line/byte checkpoint with device, inode and length. There is no implicit zero
+start, directory enumeration or historical backfill. Reopening must supply the
+same initial boundary; the durable current position wins. One `step()` freezes
+one complete raw line in the private control state, admits its immutable event
+or clock exclusion, then advances the cursor. A crash between those writes
+replays the frozen bytes and source/revision ID, not a fresh read of that line.
+The staged bytes, cursor and admission journal share the caller's one control
+byte budget; staging failure cannot advance the cursor or enqueue a new record.
+
+Existing queue admission is reconciled by immutable ID/body. A journaled
+admission that was delivered before cursor recovery is not re-enqueued. Invalid
+JSON and blank physical lines remain staged with an explicit error; they are
+not silently skipped. Torn tails remain unread until complete. After recovering
+a frozen line, subsequent reads still enforce the original inode/shrink checks;
+the scanner does not silently move to a rotated source. In-place rewriting of
+unread source bytes remains outside the append-only reader's guarantees.
+
+`AudioHubTranscriptDelivery.deliverOne()` explicitly sends one metadata-only
+pending envelope via the existing transport, revalidates its storage receipt,
+then writes the receipt and removal in one atomic outbox state. A send or
+receipt failure retains pending ID/body. Ambiguous persistence failures require
+reopen. File locks and durable-state comparison reject stale writers rather than
+letting an old scan/delivery instance overwrite a newer queue or cursor state.
+These helpers have no background caller and do not grant activation permission.
+
 ## Pending activation decisions
 
 Originals use `selected-meeting-original` with explicit source provenance.
 Metadata/control byte budgets have no production defaults. The pending runtime
-work is scanner orchestration and scan-position persistence,
-a contained/hash-checked original loader and chunk upload,
-receipt-to-queue orchestration, and explicit original-expiry gaps. The current
-control journal handles only transcript clock gaps, not original expiration.
+work is runtime activation after the agreed start boundary, a contained/hash-
+checked original loader and chunk upload, and explicit original-expiry gaps.
+The current control journal handles only transcript clock gaps, not original
+expiration. Helper crash proofs are not a natural source-to-Hub delivery proof.
 
 Native start and mirror final checkpoints are not yet agreed. Agree the precise
 source reference/revision boundary with the migration owner before activating a

@@ -1,7 +1,9 @@
 import Foundation
 import Darwin
+import CryptoKit
 
-/// Inactive source-admission journal, not a delivery ACK or a scan-position cursor.
+/// Inactive source-admission journal and explicit scanner checkpoint.
+/// Not a delivery ACK. Staged source bytes consume this same control budget.
 /// A caller must supply a separately agreed control budget before using it.
 final class AudioHubControlStore {
     struct Checkpoint: Codable, Equatable {
@@ -14,13 +16,20 @@ final class AudioHubControlStore {
     }
 
     enum Failure: Error, Equatable {
-        case invalidBudget, invalidState, capacityExceeded, storageFailed, wrongSource
+        case invalidBudget, invalidState, capacityExceeded, storageFailed, wrongSource, staleWriter
+    }
+
+    struct Scan: Codable, Equatable {
+        let initial: AudioHubRawTranscriptReader.Checkpoint
+        var cursor: AudioHubRawTranscriptReader.Checkpoint
+        var staged: AudioHubRawTranscriptReader.ReadResult?
     }
 
     private struct State: Codable {
         let version: Int
         let sourceUUID: String
         var checkpoints: [Checkpoint]
+        var scans: [String: Scan]?
     }
 
     private let stateURL: URL
@@ -28,6 +37,7 @@ final class AudioHubControlStore {
     private let lock = NSLock()
     private var state: State
     private var storageFailed = false
+    private var persistedHash: String?
 
     init(directory: URL, sourceUUID: String, maxControlBytes: Int) throws {
         guard maxControlBytes > 0, maxControlBytes < Int.max else { throw Failure.invalidBudget }
@@ -52,10 +62,76 @@ final class AudioHubControlStore {
                   let loaded = try? JSONDecoder().decode(State.self, from: data), loaded.version == 1,
                   loaded.sourceUUID == sourceUUID, Self.valid(loaded) else { throw Failure.invalidState }
             state = loaded
+            persistedHash = Self.hash(data)
         } else {
             guard errno == ENOENT else { throw Failure.invalidState }
             try persist(try encode(state))
         }
+    }
+
+    /// No default start position or implicit backfill. Reopen must name the
+    /// identical initial boundary; the persisted cursor takes precedence.
+    func startScan(sessionID: String, initial: AudioHubRawTranscriptReader.Checkpoint) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard Self.validCursor(initial), Self.validSession(sessionID) else { throw Failure.invalidState }
+        if let existing = state.scans?[sessionID] {
+            guard existing.initial == initial else { throw Failure.invalidState }
+            return
+        }
+        var candidate = state
+        var scans = candidate.scans ?? [:]
+        scans[sessionID] = Scan(initial: initial, cursor: initial, staged: nil)
+        candidate.scans = scans
+        try replace(candidate)
+    }
+
+    func scan(sessionID: String) throws -> Scan {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard let scan = state.scans?[sessionID] else { throw Failure.invalidState }
+        return scan
+    }
+
+    /// Freeze the exact first-read bytes before queue/journal admission.
+    func stage(sessionID: String, expected: AudioHubRawTranscriptReader.Checkpoint,
+               line: AudioHubRawTranscriptReader.ReadResult) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard var scan = state.scans?[sessionID], scan.cursor == expected else { throw Failure.invalidState }
+        if let existing = scan.staged {
+            guard existing == line else { throw Failure.invalidState }
+            return
+        }
+        scan.staged = line
+        guard Self.validScan(scan) else { throw Failure.invalidState }
+        var candidate = state; candidate.scans?[sessionID] = scan
+        try replace(candidate)
+    }
+
+    /// Admission may already have committed before a crash. A saved journal
+    /// entry, including an excluded clock gap, is mandatory before advancing.
+    func advance(sessionID: String, expectedLine: AudioHubRawTranscriptReader.ReadResult,
+                 checkpoint: Checkpoint) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard var scan = state.scans?[sessionID], scan.staged == expectedLine,
+              state.checkpoints.contains(checkpoint) else { throw Failure.invalidState }
+        let prepared = try AudioHubTranscriptWire.prepare(raw: expectedLine.rawLine,
+            sourceSessionID: sessionID, line: Int(expectedLine.physicalLine))
+        guard checkpoint.sourceRecordRef == prepared.sourceRecordRef,
+              checkpoint.revisionRef == prepared.revisionRef else { throw Failure.invalidState }
+        scan.cursor = .init(offset: expectedLine.nextOffset, physicalLine: expectedLine.nextPhysicalLine,
+                            snapshot: expectedLine.snapshot)
+        scan.staged = nil
+        var candidate = state; candidate.scans?[sessionID] = scan
+        try replace(candidate)
+    }
+
+    private func replace(_ candidate: State) throws {
+        let data = try encode(candidate)
+        do { try persist(data) } catch { storageFailed = true; throw error }
+        state = candidate
     }
 
     func checkpoints() throws -> [Checkpoint] {
@@ -106,6 +182,7 @@ final class AudioHubControlStore {
     }
 
     private static func valid(_ value: State) -> Bool {
+        guard (value.scans ?? [:]).allSatisfy({ validSession($0.key) && validScan($0.value) }) else { return false }
         var ids = Set<String>()
         for checkpoint in value.checkpoints {
             guard !checkpoint.sourceRecordRef.isEmpty,
@@ -126,7 +203,61 @@ final class AudioHubControlStore {
         return true
     }
 
+    private static func validSession(_ value: String) -> Bool {
+        !value.isEmpty && value != "." && value != ".." && !value.unicodeScalars.contains {
+            $0 == "/" || $0 == "\\" || $0 == ":" || CharacterSet.controlCharacters.contains($0)
+        }
+    }
+
+    private static func validCursor(_ value: AudioHubRawTranscriptReader.Checkpoint) -> Bool {
+        guard let snapshot = value.snapshot, snapshot.length <= UInt64(Int64.max),
+              value.offset <= snapshot.length, value.physicalLine < UInt64(Int.max) else { return false }
+        return value.offset == 0 ? value.physicalLine == 0 : value.physicalLine > 0 && value.physicalLine <= value.offset
+    }
+
+    private static func validScan(_ scan: Scan) -> Bool {
+        guard validCursor(scan.initial), validCursor(scan.cursor),
+              scan.cursor.offset >= scan.initial.offset,
+              scan.cursor.physicalLine >= scan.initial.physicalLine,
+              scan.cursor.snapshot?.device == scan.initial.snapshot?.device,
+              scan.cursor.snapshot?.inode == scan.initial.snapshot?.inode else { return false }
+        guard let line = scan.staged else { return true }
+        return !line.rawLine.isEmpty && line.rawLine.last == 0x0A &&
+            line.rawLine.dropLast().contains(0x0A) == false &&
+            line.physicalLine == scan.cursor.physicalLine + 1 &&
+            line.nextPhysicalLine == line.physicalLine && line.physicalLine < UInt64(Int.max) &&
+            line.nextOffset > scan.cursor.offset &&
+            line.nextOffset - scan.cursor.offset == UInt64(line.rawLine.count) &&
+            line.nextOffset <= line.snapshot.length && line.snapshot.length <= UInt64(Int64.max) &&
+            line.snapshot.length >= (scan.cursor.snapshot?.length ?? 0) &&
+            line.snapshot.device == scan.cursor.snapshot?.device && line.snapshot.inode == scan.cursor.snapshot?.inode
+    }
+
+    private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+
     private func persist(_ data: Data) throws {
+        let lockURL = stateURL.deletingLastPathComponent().appendingPathComponent(".control.lock")
+        let fd = open(lockURL.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { throw Failure.storageFailed }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_uid == getuid(), info.st_mode & 0o777 == 0o600,
+              flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw Failure.storageFailed }
+        defer { flock(fd, LOCK_UN) }
+        let currentFD = open(stateURL.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+        var currentHash: String?
+        if currentFD >= 0 {
+            let current = FileHandle(fileDescriptor: currentFD, closeOnDealloc: true)
+            defer { try? current.close() }
+            guard fstat(currentFD, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+                  info.st_uid == getuid(), info.st_mode & 0o777 == 0o600,
+                  info.st_size <= maxControlBytes else { throw Failure.invalidState }
+            let bytes = try current.read(upToCount: maxControlBytes + 1) ?? Data()
+            guard bytes.count <= maxControlBytes else { throw Failure.invalidState }
+            currentHash = Self.hash(bytes)
+        } else if errno != ENOENT { throw Failure.storageFailed }
+        guard currentHash == persistedHash else { throw Failure.staleWriter }
         let temporary = stateURL.deletingLastPathComponent().appendingPathComponent(".control-\(UUID().uuidString).tmp")
         let descriptor = open(temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         guard descriptor >= 0 else { throw Failure.storageFailed }
@@ -138,5 +269,6 @@ final class AudioHubControlStore {
         guard directory >= 0 else { throw Failure.storageFailed }
         defer { close(directory) }
         guard fsync(directory) == 0 else { throw Failure.storageFailed }
+        persistedHash = Self.hash(data)
     }
 }
