@@ -152,6 +152,30 @@ final class AudioHubRuntimeTests: XCTestCase {
         XCTAssertEqual(try runtime.pendingRecords(), pending)
     }
 
+    func testSelectedMissingOrChangedAfterCommitPersistsNonACKGap() throws {
+        for changed in [false, true] {
+            let fixture = try makeFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var runtime = try fixture.open()
+            let audio = fixture.root.appendingPathComponent("meetings/m/audio")
+            try FileManager.default.createDirectory(at: audio, withIntermediateDirectories: true)
+            let file = audio.appendingPathComponent("new.m4a")
+            try Data("initial".utf8).write(to: file)
+            let row = MeetingAudioArchive.Chunk(id: "new", source: "mic", startedAt: 2, endedAt: 3, fileName: "new.m4a")
+            let index = try JSONEncoder().encode([row])
+            try runtime.registerSelectedCommit(meetingID: "m", indexData: index)
+            try index.write(to: audio.appendingPathComponent("index.json"), options: .atomic)
+            if changed { try Data("changed".utf8).write(to: file) }
+            else { try FileManager.default.removeItem(at: file) }
+            XCTAssertThrowsError(try runtime.recover())
+            XCTAssertEqual(try runtime.pendingCount(), 0)
+            runtime = try fixture.open()
+            XCTAssertEqual(Array(try runtime.registrationGapReasons().values),
+                           [changed ? "source_original_changed" : "source_original_missing"])
+            XCTAssertEqual(try runtime.pendingCount(), 0)
+        }
+    }
+
     private struct Fixture {
         let root: URL
         func open() throws -> AudioHubRuntime {

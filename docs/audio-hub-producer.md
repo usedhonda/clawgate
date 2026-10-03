@@ -237,6 +237,14 @@ not create another asset registration. Already admitted registrations do not
 re-read pruned source indexes; pending original upload still enforces the existing
 missing/changed gap and receipt rules. No audio copy is made.
 
+Each future original has its own immutable registration, so a missing asset does
+not strand other originals in the same selected index. After committed-index
+validation, disappearance or content change before outbox admission records a
+durable body-free `source_original_missing` or `source_original_changed` gap in
+the same control budget. The first observed reason is retained; it is neither
+an expiry diagnosis nor an ACK. Failure to save that gap remains an explicit
+failure, with no successful admission or cursor advancement.
+
 If registration fails, the Hub lane records an explicit failure and cannot claim
 coverage/ACK. Local raw/index persistence and the existing actuator remain intact;
 registration failure never discards the user's source recording. Unregistered

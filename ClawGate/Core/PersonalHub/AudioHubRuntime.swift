@@ -161,7 +161,9 @@ final class AudioHubRuntime {
             // Committed originals are coverage only, never delivery work.
             // Only explicit writer-registered future commits enter this loop.
             let checkpoints = try control.checkpoints()
+            var selectedFailure: Error?
             for registration in try control.selectedRegistrations() {
+                do {
                 let waiting = registration.assets.filter {
                     !AudioHubSelectedMeetingAdmission.isAdmitted(meetingID: registration.meetingID,
                         asset: $0.asset, checkpoints: checkpoints)
@@ -180,7 +182,18 @@ final class AudioHubRuntime {
                     assets: waiting.map(\.asset),
                     selectedIDs: Set(waiting.map { $0.row.id }),
                     originalsRoot: meetingsRoot, outbox: outbox, control: control)
+                } catch {
+                    switch error as? AudioHubOriginalReader.Error {
+                    case .missingOriginal:
+                        try control.recordSelectedGap(registration: registration, reason: "source_original_missing")
+                    case .contentMismatch, .sourceChanged:
+                        try control.recordSelectedGap(registration: registration, reason: "source_original_changed")
+                    default: break
+                    }
+                    if selectedFailure == nil { selectedFailure = error }
+                }
             }
+            if let selectedFailure { throw selectedFailure }
             recordFailure(nil)
         } catch {
             recordFailure("source_admission_failed")
@@ -247,8 +260,10 @@ final class AudioHubRuntime {
                 let asset = AudioHubSelectedMeetingAdmission.ManifestAsset(row: row, original: reference)
                 if !covered && !registered.contains(asset) { assets.append(asset) }
             }
-            if !assets.isEmpty {
-                try control.registerSelected(.init(meetingID: meetingID, indexData: indexData, assets: assets))
+            for asset in assets {
+                // Each original owns its admission/gap; one missing asset must
+                // not strand unrelated originals from the same index commit.
+                try control.registerSelected(.init(meetingID: meetingID, indexData: indexData, assets: [asset]))
             }
         } catch {
             recordRegistrationFailure("selected_registration_failed")
@@ -269,6 +284,8 @@ final class AudioHubRuntime {
     }
 
     func pendingCount() throws -> Int { try outbox.pending(limit: Int.max).count }
+
+    func registrationGapReasons() throws -> [String: String] { try control.selectedGapReasons() }
 
     func pendingRecords() throws -> [AudioHubOutbox.PendingRecord] {
         try outbox.pending(limit: Int.max)

@@ -55,6 +55,7 @@ final class AudioHubControlStore {
         var scans: [String: Scan]?
         var uploads: [String: Upload]?
         var selectedRegistrations: [String: SelectedRegistration]?
+        var selectedGapReasons: [String: String]?
     }
 
     private let stateURL: URL
@@ -69,7 +70,8 @@ final class AudioHubControlStore {
         guard UUID(uuidString: sourceUUID)?.uuidString.lowercased() == sourceUUID else { throw Failure.wrongSource }
         self.maxControlBytes = maxControlBytes
         stateURL = directory.appendingPathComponent("control.json")
-        state = State(version: 1, sourceUUID: sourceUUID, checkpoints: [], scans: nil, uploads: nil, selectedRegistrations: nil)
+        state = State(version: 1, sourceUUID: sourceUUID, checkpoints: [], scans: nil, uploads: nil,
+                      selectedRegistrations: nil, selectedGapReasons: nil)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var directoryInfo = stat()
         guard lstat(directory.path, &directoryInfo) == 0, directoryInfo.st_mode & S_IFMT == S_IFDIR,
@@ -152,6 +154,31 @@ final class AudioHubControlStore {
             guard let registration = registrations[$0] else { throw Failure.invalidState }
             return registration
         }
+    }
+
+    /// Record a body-free source gap observed after the frozen index intent
+    /// was committed but before outbox admission. This never creates an ACK,
+    /// checkpoint, or scan advancement. The first observed reason wins.
+    func recordSelectedGap(registration: SelectedRegistration, reason: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed,
+              reason == "source_original_missing" || reason == "source_original_changed",
+              Self.validSelectedRegistration(registration),
+              let identity = try? Self.selectedIdentity(registration),
+              state.selectedRegistrations?[identity] == registration else { throw Failure.invalidState }
+        if state.selectedGapReasons?[identity] != nil { return }
+        var candidate = state
+        var gaps = candidate.selectedGapReasons ?? [:]
+        gaps[identity] = reason
+        candidate.selectedGapReasons = gaps
+        guard Self.valid(candidate) else { throw Failure.invalidState }
+        try replace(candidate)
+    }
+
+    func selectedGapReasons() throws -> [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        return state.selectedGapReasons ?? [:]
     }
 
     /// Freeze the exact first-read bytes before queue/journal admission.
@@ -348,6 +375,10 @@ final class AudioHubControlStore {
         guard (value.selectedRegistrations ?? [:]).allSatisfy({ key, registration in
             guard let identity = try? selectedIdentity(registration), identity == key else { return false }
             return validSelectedRegistration(registration)
+        }) else { return false }
+        guard (value.selectedGapReasons ?? [:]).allSatisfy({ key, reason in
+            (value.selectedRegistrations ?? [:])[key] != nil &&
+            (reason == "source_original_missing" || reason == "source_original_changed")
         }) else { return false }
         for (id, u) in value.uploads ?? [:] {
             guard !u.sourceRecordRef.isEmpty, !u.revision.isEmpty, !u.pipeline.isEmpty,

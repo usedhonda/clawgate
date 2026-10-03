@@ -25,8 +25,27 @@ final class AudioHubSourceRegistrationTests: XCTestCase {
         let control = try AudioHubControlStore(directory: controlURL, sourceUUID: source, maxControlBytes: 8_000)
         try control.registerSelected(value)
         try control.registerSelected(value)
+        try control.recordSelectedGap(registration: value, reason: "source_original_missing")
+        try control.recordSelectedGap(registration: value, reason: "source_original_changed") // first observation wins
         let reopened = try AudioHubControlStore(directory: controlURL, sourceUUID: source, maxControlBytes: 8_000)
         XCTAssertEqual(try reopened.selectedRegistrations(), [value])
+        XCTAssertEqual(try reopened.selectedGapReasons().count, 1)
+        XCTAssertEqual(try reopened.selectedGapReasons().values.first, "source_original_missing")
+    }
+
+    func testSelectedGapRequiresRegisteredIntent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = try AudioHubOutbox.OriginalReference(sourceRelativePath: "meetings/m1/audio/clip.m4a",
+                                                              sha256: String(repeating: "a", count: 64), byteLength: 1)
+        let value = try registration(id: "row-1", bytes: Data("x".utf8), original: original)
+        let control = try AudioHubControlStore(directory: root.appendingPathComponent("control"), sourceUUID: source, maxControlBytes: 8_000)
+        XCTAssertThrowsError(try control.recordSelectedGap(registration: value, reason: "source_original_missing")) {
+            XCTAssertEqual($0 as? AudioHubControlStore.Failure, .invalidState)
+        }
+        XCTAssertThrowsError(try control.recordSelectedGap(registration: value, reason: "other")) {
+            XCTAssertEqual($0 as? AudioHubControlStore.Failure, .invalidState)
+        }
     }
 
     func testCapacityFailurePreservesExistingRegistration() throws {
