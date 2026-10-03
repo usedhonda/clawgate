@@ -8,8 +8,8 @@ screen so Chi can reason about business correspondence.
 
 During migration to the personal realtime data hub, each selected page, eligible
 passive visit, and Messenger visible-window capture is also queued in durable
-`chrome.storage.local` before the existing delivery attempt. The independent
-Gateway `/api/personal-hub/chrome` route commits the event in the hub and returns
+`chrome.storage.local` before the existing delivery attempt. The legacy
+Gateway `/api/personal-hub/chrome` mirror commits the event in the hub and returns
 its external ID. Only an ID-matching committed ACK removes it from the outbox;
 offline/unknown results remain queued for retry at the 1.5-minute alarm or
 extension startup. Hub failure never suppresses the existing Chi,
@@ -26,6 +26,24 @@ event queued. ACK removal re-reads the current queue and removes only an
 unchanged, matching event, retaining observations added during the request.
 Same-ID/different-content enqueue fails without replacing the pending record.
 This does not change retention, collection scope or per-route cutover policy.
+
+Standalone admission uses separately provisioned `personalHubURL` and
+`personalHubToken` in private extension-local storage. The token must be bound
+only to the `chrome` source; never use a Gateway token or the Hub's complete
+ingest policy. The URL is a root HTTPS origin (literal-loopback HTTP is allowed
+for local transport). Credentials, redirects, query strings and non-root paths
+in the URL are rejected. Queued envelopes are sent unchanged to `/v1/events`.
+Only HTTP 200/201 with a matching version-1 storage receipt (source, external ID,
+canonical event UUID, null blob hash, zero bytes and positive sequence) can
+remove a metadata-only event. The latest receipt is saved with queue removal;
+it is bounded diagnostic evidence, not a permanent receipt history.
+
+Before independent provisioning, the legacy mirror remains active. Selecting
+the independent destination is sticky: invalid or subsequently missing settings
+retain pending events and never fall back to the Gateway. Existing page/history/
+Messenger actuator routes remain separate and unchanged until consumer read
+acceptance authorizes their shutdown. This transport support alone does not
+prove provisioning, a reloaded worker, or natural source-to-consumer admission.
 
 Everything below is taken from the source. Where behaviour is governed by an
 OpenClaw contract, this page points at the contract rather than restating it;

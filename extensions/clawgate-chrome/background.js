@@ -4,6 +4,8 @@ const DEFAULT_SETTINGS = {
   bridgePort: 8765,
   gatewayURL: '',
   gatewayToken: '',
+  personalHubURL: '',
+  personalHubToken: '',
   passiveTracking: true,
   excludedDomains: [],
 };
@@ -196,6 +198,9 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local') {
     return;
   }
+  if (changes.personalHubURL || changes.personalHubToken) {
+    getSettings().then((settings) => flushHubOutbox(settings)).catch(() => undefined);
+  }
   if (changes.bridgePort || changes.gatewayURL || changes.gatewayToken) {
     cursor = '';
     refreshBadge().catch(() => undefined);
@@ -264,6 +269,8 @@ async function getSettings() {
     bridgePort: normalizePort(settings.bridgePort),
     gatewayURL: typeof settings.gatewayURL === 'string' ? settings.gatewayURL : '',
     gatewayToken: typeof settings.gatewayToken === 'string' ? settings.gatewayToken : '',
+    personalHubURL: typeof settings.personalHubURL === 'string' ? settings.personalHubURL : '',
+    personalHubToken: typeof settings.personalHubToken === 'string' ? settings.personalHubToken : '',
     passiveTracking: typeof settings.passiveTracking === 'boolean' ? settings.passiveTracking : DEFAULT_SETTINGS.passiveTracking,
     excludedDomains: normalizeExcludedDomains(settings.excludedDomains),
   };
@@ -448,7 +455,8 @@ async function ensureContentScript(tabId) {
 }
 
 async function captureAndSend(tab, options = {}) {
-  const { gatewayURL, gatewayToken } = await getSettings();
+  const settings = await getSettings();
+  const { gatewayURL, gatewayToken } = settings;
   if (!tab?.id) {
     return;
   }
@@ -496,7 +504,7 @@ async function captureAndSend(tab, options = {}) {
 
   await enqueueHubEntry(entries[0]).catch(() => console.warn('[ClawGate] hub outbox write failed'));
   await postWebHistoryEntries(entries, { gatewayURL, gatewayToken });
-  flushHubOutbox({ gatewayURL, gatewayToken }).catch(() => undefined);
+  flushHubOutbox(settings).catch(() => undefined);
 
   await appendPassiveSendLog([{
     domain: domain || '',

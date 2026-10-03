@@ -16,6 +16,11 @@ const entry = (id, content = id) => ({ id, userInitiated: true,
   visitedAt: '2026-10-02T00:00:00Z', content });
 const accepted = (id) => ({ ok: true, json: async () => ({ ok: true,
   externalId: `chrome:${id}`, status: 'created' }) });
+const personalSettings = { personalHubURL: 'https://hub.example.test/', personalHubToken: 'fixture' };
+const personalAccepted = (id, overrides = {}) => ({ ok: true, status: 201, json: async () => ({
+  storage_receipt: { receipt_version: 1, source: 'chrome', external_id: `chrome:${id}`,
+    event_id: '00000000-0000-4000-8000-000000000001', sha256: null, byte_length: 0, ingest_sequence: 1 }, ...overrides,
+}) });
 
 test('selected page, visit, and Messenger keep separate domain provenance', () => {
   const base = { id: 'x', visitedAt: '2026-10-02T00:00:00Z' };
@@ -96,4 +101,74 @@ test('bodyless conflict stays pending without starving a later committed record'
   });
   assert.deepEqual(receipt, { pending: 1, acked: 1 });
   assert.equal(local.values.personalHubOutbox[0].external_id, 'chrome:conflict');
+});
+
+test('independent Hub requires and matches a committed storage receipt', async () => {
+  const local = storage();
+  await enqueueHubEntry(entry('personal'), local);
+  let seen;
+  const result = await flushHubOutbox(personalSettings, local, async (url, options) => {
+    seen = { url, options };
+    return personalAccepted('personal');
+  });
+  assert.equal(seen.url, 'https://hub.example.test/v1/events');
+  assert.equal(JSON.parse(seen.options.body).external_id, 'chrome:personal');
+  assert.deepEqual(result, { pending: 0, acked: 1 });
+  assert.equal(local.values.lastPersonalHubReceipt.event_id, '00000000-0000-4000-8000-000000000001');
+  assert.equal(local.values.lastPersonalHubReceipt.byte_length, 0);
+});
+
+test('mismatched independent receipt retains the exact event', async () => {
+  const local = storage();
+  await enqueueHubEntry(entry('receipt-mismatch', 'keep'), local);
+  const result = await flushHubOutbox(personalSettings, local, async () => personalAccepted('other'));
+  assert.deepEqual(result, { pending: 1, acked: 0 });
+  assert.equal(local.values.personalHubOutbox[0].metadata.entry.content, 'keep');
+});
+
+test('configured independent Hub without token does not fall back to gateway', async () => {
+  const local = storage();
+  await enqueueHubEntry(entry('no-token'), local);
+  let called = false;
+  const result = await flushHubOutbox({ ...personalSettings, personalHubToken: '', gatewayURL: 'https://gateway.example/', gatewayToken: 'legacy' }, local, async () => {
+    called = true;
+    return accepted('no-token');
+  });
+  assert.deepEqual(result, { pending: 1, acked: 0 });
+  assert.equal(called, false);
+});
+
+test('invalid independent Hub URL retains queue without gateway fallback', async () => {
+  const local = storage();
+  await enqueueHubEntry(entry('bad-url'), local);
+  const result = await flushHubOutbox({ personalHubURL: 'https://hub.example.test/path', personalHubToken: 'fixture', gatewayURL: 'https://gateway.example/', gatewayToken: 'legacy' }, local, async () => {
+    throw new Error('must not use gateway');
+  });
+  assert.deepEqual(result, { pending: 1, acked: 0 });
+});
+
+test('independent selection survives missing settings without legacy fallback', async () => {
+  const local = storage();
+  await enqueueHubEntry(entry('first-direct'), local);
+  await flushHubOutbox(personalSettings, local, async () => personalAccepted('first-direct'));
+  await enqueueHubEntry(entry('after-loss'), local);
+  let calls = 0;
+  const result = await flushHubOutbox(settings, local, async () => {
+    calls += 1;
+    return accepted('after-loss');
+  });
+  assert.equal(calls, 0);
+  assert.deepEqual(result, { pending: 1, acked: 0 });
+});
+
+test('independent receipt rejects malformed event identity', async () => {
+  const local = storage();
+  await enqueueHubEntry(entry('invalid-id'), local);
+  const response = personalAccepted('invalid-id');
+  const body = await response.json();
+  body.storage_receipt.event_id = 'not-a-hub-uuid';
+  response.json = async () => body;
+  const result = await flushHubOutbox(personalSettings, local, async () => response);
+  assert.deepEqual(result, { pending: 1, acked: 0 });
+  assert.equal(local.values.lastPersonalHubReceipt, undefined);
 });
