@@ -80,10 +80,12 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
     public let height: Int
     public let rows: [LineOCRRow]
     public let bodyCandidates: [LineBodyCandidate]
+    /// Local audit geometry only; not part of the observation wire.
+    public let historyRegions: [LineObservationRect]
 
     public init(scope: String = "line_window", state: State, kind: Kind, coverage: Coverage,
                 windowID: UInt32?, width: Int, height: Int, rows: [LineOCRRow],
-                bodyCandidates: [LineBodyCandidate] = []) {
+                bodyCandidates: [LineBodyCandidate] = [], historyRegions: [LineObservationRect] = []) {
         self.scope = scope
         self.state = state
         self.kind = kind
@@ -93,6 +95,7 @@ public struct LineWindowObservation: Codable, Equatable, Sendable {
         self.height = height
         self.rows = rows
         self.bodyCandidates = bodyCandidates
+        self.historyRegions = historyRegions
     }
 }
 
@@ -271,6 +274,11 @@ public final class LinePassiveCapture {
                                          windowID: window.windowID, width: width, height: height, rows: []), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: false, cacheMiss: false)
         }
         let fingerprint = Self.fingerprint(cropped)
+        let normalizedRegions = evidence.bodyRegions.map { frame in
+            LineObservationRect(CGRect(x: (frame.minX-window.frame.minX)/window.frame.width,
+                                       y: (window.frame.maxY-frame.maxY)/window.frame.height,
+                                       width: frame.width/window.frame.width, height: frame.height/window.frame.height))
+        }
         if let previous = cache[window.windowID], previous.fingerprint == fingerprint,
            previous.width == image.width, previous.height == image.height, previous.title == window.title,
            previous.bounds == evidence.contentFrame, previous.bodyRegions == evidence.bodyRegions {
@@ -278,7 +286,7 @@ public final class LinePassiveCapture {
             return WindowCaptureResult(observation: LineWindowObservation(state: known ? .captured : .unknownWindow, kind: previous.kind,
                                          coverage: known ? .contentExcludingChrome : .unavailable,
                                          windowID: window.windowID, width: previous.width, height: previous.height,
-                                         rows: previous.rows, bodyCandidates: previous.bodyCandidates), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: true, cacheMiss: false)
+                                         rows: previous.rows, bodyCandidates: previous.bodyCandidates, historyRegions: normalizedRegions), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: 0, screenshotReached: true, cacheHit: true, cacheMiss: false)
         }
 
         let ocrStarted = Self.monotonicNanoseconds()
@@ -304,11 +312,6 @@ public final class LinePassiveCapture {
         }.sorted { lhs, rhs in
             abs(lhs.box.y - rhs.box.y) > 0.01 ? lhs.box.y > rhs.box.y : lhs.box.x < rhs.box.x
         }
-        let normalizedRegions = evidence.bodyRegions.map { frame in
-            LineObservationRect(CGRect(x: (frame.minX-window.frame.minX)/window.frame.width,
-                                       y: (window.frame.maxY-frame.maxY)/window.frame.height,
-                                       width: frame.width/window.frame.width, height: frame.height/window.frame.height))
-        }
         let candidates = kind == .conversation
             ? LineBodyCandidateExtractor.extract(rows: usable, textBlockRegions: normalizedRegions, regionMethod: "ax_history_row") : []
         cache[window.windowID] = CachedRows(fingerprint: fingerprint, width: image.width, height: image.height,
@@ -317,7 +320,7 @@ public final class LinePassiveCapture {
                                             bodyRegions: evidence.bodyRegions, bodyCandidates: candidates)
         return WindowCaptureResult(observation: LineWindowObservation(state: .captured, kind: kind, coverage: .contentExcludingChrome,
                                      windowID: window.windowID, width: image.width, height: image.height,
-                                     rows: usable, bodyCandidates: candidates), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: ocrNanoseconds, screenshotReached: true, ocrReached: true, cacheHit: false, cacheMiss: true)
+                                     rows: usable, bodyCandidates: candidates, historyRegions: normalizedRegions), screenshotNanoseconds: screenshotNanoseconds, ocrNanoseconds: ocrNanoseconds, screenshotReached: true, ocrReached: true, cacheHit: false, cacheMiss: true)
     }
 
     private static func unavailable(_ state: LineWindowObservation.State) -> LineWindowObservation {

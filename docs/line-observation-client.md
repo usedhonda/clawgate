@@ -78,6 +78,18 @@ Polling is every 2 seconds, reducing to 10 after 30 seconds without change.
 
 ## Diagnostics and permission
 
+### Private one-shot comparison
+
+An explicit local `audit-request.json` in the private observation directory can
+request one snapshot of the actual app's existing safe capture. It requires an
+owner-only 0700 directory, a regular 0600 request, version 1, a UUID requestId,
+and an ISO expiry within five minutes. The app consumes the request before
+writing a fixed 0600 `audit-result.json`. The result contains observed text and
+local history geometry, never screenshots or excluded input fields. It is
+private diagnostic material, not a public fixture or a network endpoint.
+Without a request no export occurs. Existing debug APIs expose only the result
+status, never text. A failed write is reported as failure, not retried silently.
+
 ### Independent Hub provisioning
 
 An operator-provisioned `~/.clawgate/hub-provision/line.json` selects independent

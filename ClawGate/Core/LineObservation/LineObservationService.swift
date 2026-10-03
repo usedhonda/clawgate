@@ -98,6 +98,7 @@ final class LineObservationService {
         }
         let locked = (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool == true
         var snapshots: [[String: Any]] = []
+        var auditSnapshots: [[String: Any]] = []
         var status = "unavailable"
         clearSurfaceDiagnostics()
         if locked {
@@ -112,6 +113,13 @@ final class LineObservationService {
             }
             status = windows.contains { $0.state == .captured } ? "observing" : (windows.first?.state.rawValue ?? "unavailable")
             snapshots = windows.map { Self.snapshot($0, schemaVersion: schemaVersion) }
+            auditSnapshots = zip(windows, snapshots).map { window, snapshot in
+                var audit = snapshot
+                audit["historyRegions"] = window.historyRegions.map {
+                    ["x": $0.x, "y": $0.y, "width": $0.width, "height": $0.height]
+                }
+                return audit
+            }
             diagnostics.update(["windows": windows.map { ["windowId": $0.windowID.map(String.init) as Any? ?? NSNull(),
                                                          "kind": $0.kind.rawValue, "state": $0.state.rawValue,
                                                          "width": $0.width, "height": $0.height, "spanCount": $0.rows.count,
@@ -137,6 +145,8 @@ final class LineObservationService {
             }
         }
         snapshots = LineObservationProtocol.snapshotsForWire(snapshots, schemaVersion: schemaVersion)
+        let auditStatus = LineObservationAudit.consumeIfRequested(snapshots: auditSnapshots, capturedAt: Self.iso(now))
+        if auditStatus != .noRequest { diagnostics.update(["auditStatus": auditStatus.diagnosticStatus]) }
         diagnostics.update(["captureStatus": status, "lastObservedAt": Self.iso(now),
                             "queueCount": outbox.queuedCount, "queueBytes": outbox.queuedBytes])
         do {
