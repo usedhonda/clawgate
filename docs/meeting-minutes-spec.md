@@ -60,7 +60,7 @@ This change does **not** claim execution isolation, parallelism or a measured
 latency multiplier.
 
 The client has inactive typed dispatch/result helpers, a version-2 indexed
-execution sidecar and a bounded step executor. There is still no production
+revision-keyed execution sidecar, accepted-bundle finalizer and a bounded step executor. There is still no production
 caller or scheduling timer: activation requires matching deployed Gateway
 support in the same window; catalog availability is not provider execution.
 The last verified Gateway did not support the three flags/result RPC. The
@@ -83,7 +83,11 @@ completions retain source order. Explicit retry is allowed only for a confirmed
 retryable terminal failure and retains exact prompt bytes/session with a new key.
 Disconnect, notFound, expiration, malformed binding or an unknown ACK never
 authorize regeneration. Private fsync/locking/CAS writes reject stale writers;
-a persistence error requires reopening the sidecar.
+a persistence error requires reopening the sidecar. Sidecars use
+`minutes-execution-<revision-hash>.json`, keyed by job fingerprint and exact
+envelope hashes (including request IDs), so explicit regeneration preserves old
+owners/results without overwriting them. An unversioned legacy sidecar blocks
+activation rather than silently dropping a possibly unresolved owner.
 
 The agreed additive `executionBinding` v1 appears on ACK and authorized
 pending/terminal/expired reads; notFound is exactly `{status:"notFound"}`.
@@ -115,9 +119,28 @@ The dedicated actor step recovers existing owners through read RPC only, admits
 at most two live runs, and persists each independent response even if another
 transport fails. Its per-part parser uses the same segment/material grounding
 validator. Failed parts stop new admissions, and expired/notFound remain
-unresolved. The step does not overwrite the accepted minutes/job or enable a
-background timer; live merge/overview/UI activation remains gated on the shared
-Gateway acceptance. Synthetic scheduling proofs are not deployed max-two proof.
+unresolved. The step does not overwrite accepted minutes or enable a background timer.
+Its explicit finalizer accepts only a complete, persisted ledger matching the
+frozen job, preserves silent parts in source order, and uses the existing
+validated-bundle save path. Every supported job save and the finalizer's
+current-revision check share a private nonblocking file lock. A changed job,
+incomplete/stale ledger or write failure leaves the previous accepted bundle
+unchanged. The returned completed job is available to the overview caller;
+finalization does not silently rewrite the working job's checkpoints.
+
+Progress rendering reads completed/active **indices** from the current ledger,
+not a sequential-prefix count: an out-of-order finished part lights its own
+marker. Admission/recovery wait is distinct from results wait; neither claims
+provider execution or permits resend. Without a ledger, existing sequential
+progress remains unchanged. Live scheduler/overview activation remains gated on
+the shared Gateway acceptance. Synthetic scheduling/finalization proofs and
+source-level UI wiring are not deployed max-two or rendered UI proof.
+
+Indexed ownership also blocks ordinary sequential dispatch and metadata refresh
+on Resume, including unreadable execution records. Other sequential jobs remain
+eligible. Publication compares execution-relevant frozen job bytes under the
+shared lock; priority-only `userRequestedAt` changes do not invalidate an
+otherwise exact revision.
 
 The live integration target is a dedicated minutes scheduler, independent of the
 interactive summon slot, with at most two independent part runs in flight.

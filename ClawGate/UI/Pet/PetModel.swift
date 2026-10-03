@@ -3028,9 +3028,37 @@ final class PetModel: NSObject, ObservableObject {
         return MeetingStore()
     }
 
+    func minutesIndexedProgress(for record: MeetingRecord, job: MeetingMinutesJob?) -> MeetingMinutesExecutionProgress? {
+        guard let job else { return nil }
+        return try? MeetingMinutesExecutionProgress.load(store: minutesStore(), id: record.id, job: job)
+    }
+
+    /// An indexed owner is never resumed through ordinary sequential chat.
+    /// Unreadable records also retain ownership until explicitly recovered.
+    private func hasIndexedMinutesOwner(id: String) -> Bool {
+        let store = minutesStore()
+        do {
+            if let job = MeetingMinutesJob.load(store: store, id: id) {
+                return try MeetingMinutesExecutionState.load(store: store, id: id, job: job) != nil
+            }
+            let directory = store.directory(for: id)
+            guard FileManager.default.fileExists(atPath: directory.path) else { return false }
+            return try FileManager.default.contentsOfDirectory(atPath: directory.path).contains {
+                $0.hasPrefix("minutes-execution-") && $0.hasSuffix(".json")
+            }
+        } catch { return true }
+    }
+
     /// The actual scheduler phase, not an estimate based on a pending record.
     func minutesActivity(for record: MeetingRecord, now: Date = Date()) -> (label: String, elapsedSeconds: Int?)? {
         guard record.minutesState == "pending" || pendingSummaryPass?.id == record.id else { return nil }
+        if record.minutesState == "pending", let job = MeetingMinutesJob.load(store: minutesStore(), id: record.id) {
+            do {
+                if let progress = try MeetingMinutesExecutionProgress.load(store: minutesStore(), id: record.id, job: job) {
+                    return (connectionState == .connected ? progress.phaseLabel : "接続の回復待ち（保存済み実行の結果を確認します）", nil)
+                }
+            } catch { return ("実行記録を確認できません。安全のため再送していません", nil) }
+        }
         if connectionState != .connected { return ("接続の回復待ち", nil) }
         if pendingSummaryPass?.id == record.id {
             let awaitingRunId = sharedSummonOwner?.phase == .awaitingRunId
@@ -3070,6 +3098,13 @@ final class PetModel: NSObject, ObservableObject {
         // A second UI refresh/request for the same pending record is only a
         // queue poke. It must never dispatch a duplicate summon.
         if pendingMinutesMeetingID == record.id { return }
+        if hasIndexedMinutesOwner(id: record.id) {
+            // Keep the exact request IDs and frozen source, including for a
+            // failed record's Resume action. Dedicated recovery owns this job.
+            markMinutes(id: record.id, state: "pending", error: nil)
+            drainPendingMinutes()
+            return
+        }
         // Source refresh during a generation belongs to the next revision.
         // Only the bounded pre-dispatch audio conflict review may complete
         // preparation of the frozen input before any part has been written.
@@ -3130,7 +3165,7 @@ final class PetModel: NSObject, ObservableObject {
         }
         let now = Date()
         let queuedRecord = Self.pendingMinutesOrder(minutesStore().all(), store: minutesStore())
-            .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now })
+            .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now && !hasIndexedMinutesOwner(id: $0.id) })
         // An explicit owner request is allowed ahead of a background overview
         // rewrite. This only chooses the next idle slot; active RPCs remain
         // untouched. Automatic/legacy parts keep summary priority.

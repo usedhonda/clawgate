@@ -84,7 +84,10 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
         XCTAssertEqual(restored.parts[0].attempt, 0)
         XCTAssertFalse(restored.nextIndices.contains(0))
         let changed = MeetingMinutesJob(fingerprint: job.fingerprint, envelopes: Array(job.envelopes.reversed()), completed: [nil])
-        XCTAssertThrowsError(try MeetingMinutesExecutionState.load(store: store, id: id, job: changed))
+        XCTAssertNil(try MeetingMinutesExecutionState.load(store: store, id: id, job: changed))
+        var next = try MeetingMinutesExecutionState(job: changed)
+        try next.save(store: store, id: id)
+        XCTAssertEqual(try MeetingMinutesExecutionState.load(store: store, id: id, job: job)?.parts[0].outcome, .insufficientEvidence)
     }
 
     func testConfirmedTerminalFailureRequiresExplicitRetryAndNewOwner() throws {
@@ -112,7 +115,7 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
         _ = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
         XCTAssertThrowsError(try stale.reserve(index: 1, sessionKey: "agent:example:main", message: "fixture", store: store, id: id))
         XCTAssertEqual(try MeetingMinutesExecutionState.load(store: store, id: id, job: job)?.parts[0].status, .submitting)
-        let url = store.directory(for: id).appendingPathComponent(MeetingMinutesExecutionState.fileName)
+        let url = try MeetingMinutesExecutionState.fileURL(store: store, id: id, job: job)
         var value = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
         var parts = value["parts"] as! [[String: Any]]
         parts[0]["status"] = "running" // no runId: malformed, not a resumable run
@@ -142,7 +145,7 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
         XCTAssertEqual(restored.parts[0].attempt, 1)
         XCTAssertEqual(restored.parts[0].status, .completed)
         XCTAssertTrue(restored.parts[0].executionBinding!.matches(d.request))
-        let url = store.directory(for: id).appendingPathComponent(MeetingMinutesExecutionState.fileName)
+        let url = try MeetingMinutesExecutionState.fileURL(store: store, id: id, job: job)
         var object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
         var parts = object["parts"] as! [[String: Any]]
         var request = parts[0]["request"] as! [String: Any]

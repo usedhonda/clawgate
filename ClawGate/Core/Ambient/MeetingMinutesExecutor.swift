@@ -119,6 +119,14 @@ actor MeetingMinutesExecutor {
                         unresolvedIndices: unresolved.sorted())
     }
 
+    /// Commit only the current complete revision. The accepted bundle is the
+    /// read authority; the returned complete job feeds overview generation.
+    func finalize(record: MeetingRecord) throws -> MeetingMinutesExecutionFinalizer.Result {
+        guard !busy else { throw Failure.busy }
+        return try MeetingMinutesExecutionFinalizer.finalize(ledger: ledger, frozenJob: job,
+                                                              record: record, store: store, id: id)
+    }
+
     /// Source-order outcomes, not completion-order append. Accepted minutes/job
     /// remain untouched until the future live caller performs validated merge.
     func orderedOutcomes() -> [MeetingMinutesExecutionState.Outcome?] { ledger.orderedOutcomes }

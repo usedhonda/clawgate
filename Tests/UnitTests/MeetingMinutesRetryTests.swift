@@ -54,6 +54,34 @@ final class MeetingMinutesRetryTests: XCTestCase {
         wait(for: [done], timeout: 1)
     }
 
+    func testIndexedResumeKeepsFrozenRequestAndDoesNotBlockOrdinaryQueue() throws {
+        var record = meeting()
+        let envelope = MeetingMinutesEnvelope.build(record: record, segments: model.meetingTranscriptProvider?(record) ?? [])
+        let job = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope),
+                                   envelopes: MeetingMinutes.chunked(envelope), completed: [])
+        try job.save(store: store, id: record.id)
+        var ledger = try MeetingMinutesExecutionState(job: job)
+        _ = try ledger.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: record.id)
+        record.minutesState = "failed"
+        store.save(record)
+        let jobURL = store.directory(for: record.id).appendingPathComponent("minutes-job.json")
+        let frozen = try Data(contentsOf: jobURL)
+        model.resumeMinutes(for: record)
+        XCTAssertNil(model.pendingMinutesMeetingIDForTesting)
+        XCTAssertEqual(try Data(contentsOf: jobURL), frozen)
+        XCTAssertTrue(model.minutesActivity(for: try XCTUnwrap(store.load(id: record.id)))?.label.contains("再送はしません") == true)
+        // A damaged indexed record must not make the sequential route eligible.
+        let ledgerURL = try MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: job)
+        try Data("invalid".utf8).write(to: ledgerURL)
+        model.resumeMinutes(for: record)
+        XCTAssertNil(model.pendingMinutesMeetingIDForTesting)
+        XCTAssertEqual(try Data(contentsOf: jobURL), frozen)
+        var ordinary = record; ordinary.id = "mtg-ordinary"; ordinary.minutesState = "none"
+        store.save(ordinary)
+        model.requestMinutes(for: ordinary)
+        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, ordinary.id)
+    }
+
     func testGatewayRunErrorIsRoutedAsRunFailure() throws {
         let payload = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
         {"runId":"run-2","sessionKey":"agent:main:main","state":"error","errorMessage":"fence"}

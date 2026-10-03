@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import Darwin
 
 /// A crash-safe multi-part generation. Only completed, validated parts are
 /// checkpointed; an interrupted request resumes at the first unfinished part.
@@ -109,8 +110,42 @@ struct MeetingMinutesJob: Codable {
     }
 
     func save(store: MeetingStore, id: String) throws {
+        try Self.withRevisionLock(store: store, id: id) {
+            try JSONEncoder().encode(self).write(to: store.directory(for: id).appendingPathComponent("minutes-job.json"), options: .atomic)
+        }
+    }
+
+    /// Every job writer uses the same lock as indexed finalization. Comparison
+    /// and accepted-bundle replacement then cannot straddle a newer job save.
+    static func withCurrentRevisionLock<T>(store: MeetingStore, id: String, expected: MeetingMinutesJob,
+                                           body: () throws -> T) throws -> T {
+        try withRevisionLock(store: store, id: id) {
+            guard let current = load(store: store, id: id) else { throw MeetingMinutesError.encodingFailed }
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            // Queue priority is not execution input. A queue poke must not
+            // invalidate completed results for otherwise identical requests.
+            var currentRevision = current; currentRevision.userRequestedAt = nil
+            var expectedRevision = expected; expectedRevision.userRequestedAt = nil
+            guard try encoder.encode(currentRevision) == encoder.encode(expectedRevision) else { throw MeetingMinutesError.encodingFailed }
+            return try body()
+        }
+    }
+
+    private static func withRevisionLock<T>(store: MeetingStore, id: String, body: () throws -> T) throws -> T {
         let dir = store.directory(for: id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try JSONEncoder().encode(self).write(to: dir.appendingPathComponent("minutes-job.json"), options: .atomic)
+        var info = stat()
+        guard lstat(dir.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR, info.st_uid == getuid() else {
+            throw MeetingMinutesError.encodingFailed
+        }
+        let descriptor = open(dir.appendingPathComponent(".minutes-job.lock").path,
+                              O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard descriptor >= 0 else { throw MeetingMinutesError.encodingFailed }
+        defer { close(descriptor) }
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_uid == getuid(), info.st_mode & 0o777 == 0o600,
+              flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw MeetingMinutesError.encodingFailed }
+        defer { flock(descriptor, LOCK_UN) }
+        return try body()
     }
 }

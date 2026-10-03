@@ -7,7 +7,7 @@ import Darwin
 /// sequential-prefix checkpoint and is never rewritten by this type.
 struct MeetingMinutesExecutionState: Codable, Equatable {
     static let currentVersion = 2
-    static let fileName = "minutes-execution-state.json"
+    static let legacyFileName = "minutes-execution-state.json"
 
     enum Status: String, Codable { case pending, submitting, running, completed, failed }
     enum Outcome: Codable, Equatable {
@@ -83,7 +83,11 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
     }
 
     static func load(store: MeetingStore, id: String, job: MeetingMinutesJob) throws -> MeetingMinutesExecutionState? {
-        let url = store.directory(for: id).appendingPathComponent(fileName)
+        guard job.completed.count <= job.envelopes.count else { throw LedgerError.mismatch }
+        let dir = store.directory(for: id)
+        // Never silently ignore an unversioned legacy owner at activation.
+        guard try readPrivateFile(dir.appendingPathComponent(legacyFileName)) == nil else { throw LedgerError.mismatch }
+        let url = try fileURL(store: store, id: id, job: job)
         guard let data = try readPrivateFile(url) else { return nil }
         var decoded: MeetingMinutesExecutionState
         do { decoded = try JSONDecoder().decode(Self.self, from: data) } catch { throw LedgerError.malformed("decode failed") }
@@ -102,6 +106,16 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         }
         decoded.persistedHash = digest(data)
         return decoded
+    }
+
+    static func fileURL(store: MeetingStore, id: String, job: MeetingMinutesJob) throws -> URL {
+        let hashes = try job.envelopes.map(hash)
+        return store.directory(for: id).appendingPathComponent(try revisionFileName(fingerprint: job.fingerprint, hashes: hashes))
+    }
+
+    private static func revisionFileName(fingerprint: String, hashes: [String]) throws -> String {
+        let data = try JSONEncoder().encode([fingerprint] + hashes)
+        return "minutes-execution-" + digest(data) + ".json"
     }
 
     mutating func save(store: MeetingStore, id: String) throws {
@@ -135,7 +149,8 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         var info = stat()
         guard lstat(dir.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
               info.st_uid == getuid() else { throw LedgerError.storageFailed }
-        let url = dir.appendingPathComponent(Self.fileName)
+        guard try Self.readPrivateFile(dir.appendingPathComponent(Self.legacyFileName)) == nil else { throw LedgerError.mismatch }
+        let url = dir.appendingPathComponent(try Self.revisionFileName(fingerprint: fingerprint, hashes: parts.map(\.envelopeHash)))
         let lock = open(dir.appendingPathComponent(".minutes-execution.lock").path,
                         O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
         guard lock >= 0 else { throw LedgerError.storageFailed }

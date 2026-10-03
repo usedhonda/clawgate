@@ -865,7 +865,8 @@ private struct MeetingStatusBanner: View {
     var body: some View {
         let status = MeetingWorkspaceStatus(meeting: meeting)
         let total = job?.envelopes.count ?? 0
-        let done = min(job?.completed.count ?? 0, total)
+        let indexed = model.minutesIndexedProgress(for: meeting, job: job)
+        let done = indexed?.completedIndices.count ?? min(job?.completed.count ?? 0, total)
         if let title = bannerTitle(status: status, done: done, total: total) {
             HStack(alignment: .center, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -895,8 +896,8 @@ private struct MeetingStatusBanner: View {
                         HStack(spacing: 4) {
                             ForEach(0..<total, id: \.self) { index in
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(index < done ? WorkspaceTheme.ready
-                                          : (index == done && meeting.minutesState == "pending" ? WorkspaceTheme.accent : WorkspaceTheme.line))
+                                    .fill((indexed?.completedIndices.contains(index) ?? (index < done)) ? WorkspaceTheme.ready
+                                          : ((indexed?.activeIndices.contains(index) ?? (index == done && meeting.minutesState == "pending")) ? WorkspaceTheme.accent : WorkspaceTheme.line))
                                     .frame(width: 26, height: 8)
                             }
                             Text("\(done) / \(total) パート").font(.system(size: 12)).padding(.leading, 6)
@@ -993,7 +994,8 @@ struct MeetingWorkspaceStatus {
     var shortLabel: String {
         let job = MeetingMinutesJob.load(store: MeetingStore(), id: meeting.id)
         let total = job?.envelopes.count ?? 0
-        let done = min(job?.completed.count ?? 0, total)
+        let indexed = job.flatMap { try? MeetingMinutesExecutionProgress.load(store: MeetingStore(), id: meeting.id, job: $0) }
+        let done = indexed?.completedIndices.count ?? min(job?.completed.count ?? 0, total)
         let progress = total > 1 ? " \(done)/\(total)" : ""
         switch meeting.minutesState {
         case "ready": return "議事録あり"
