@@ -1,5 +1,61 @@
 import Foundation
 import AVFoundation
+import Darwin
+
+enum AmbientRawTranscriptPersistenceError: Error, Equatable, CustomStringConvertible {
+    case encodingFailed
+    case writeFailed
+    case incompleteTail
+
+    var description: String {
+        "raw_transcript_persistence_failed"
+    }
+}
+
+struct AmbientRawTranscriptAppender {
+    static func append(_ segments: [TranscriptSegment], to url: URL) throws {
+        let encoder = JSONEncoder()
+        var data = Data()
+        for segment in segments {
+            guard let encoded = try? encoder.encode(segment) else {
+                throw AmbientRawTranscriptPersistenceError.encodingFailed
+            }
+            data.append(encoded)
+            data.append(0x0A)
+        }
+        guard !data.isEmpty else { return }
+        let descriptor = open(url.path, O_RDWR | O_CREAT | O_APPEND | O_NOFOLLOW | O_NONBLOCK, 0o600)
+        guard descriptor >= 0 else { throw AmbientRawTranscriptPersistenceError.writeFailed }
+        defer { close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid() else { throw AmbientRawTranscriptPersistenceError.writeFailed }
+        guard flock(descriptor, LOCK_EX) == 0 else { throw AmbientRawTranscriptPersistenceError.writeFailed }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        guard fstat(descriptor, &info) == 0 else { throw AmbientRawTranscriptPersistenceError.writeFailed }
+        if info.st_size > 0 {
+            var finalByte: UInt8 = 0
+            let n = pread(descriptor, &finalByte, 1, info.st_size - 1)
+            guard n == 1, finalByte == 0x0A else {
+                throw AmbientRawTranscriptPersistenceError.incompleteTail
+            }
+        }
+        var written = 0
+        try data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else {
+                throw AmbientRawTranscriptPersistenceError.writeFailed
+            }
+            while written < data.count {
+                let count = Darwin.write(descriptor, base.advanced(by: written), data.count - written)
+                if count > 0 { written += count; continue }
+                if count < 0, errno == EINTR { continue }
+                throw AmbientRawTranscriptPersistenceError.writeFailed
+            }
+        }
+        guard fsync(descriptor) == 0 else { throw AmbientRawTranscriptPersistenceError.writeFailed }
+    }
+}
 
 /// Orchestrates the Ambient Context Stream on the client: microphone capture
 /// (rolling WAV chunks) plus whisper.cpp transcription into per-session
@@ -829,7 +885,13 @@ final class AmbientController {
                 }
                 let allSkipped = result.skipped + rollingSkipped
                 if !kept.isEmpty {
-                    self.appendTranscripts(kept)
+                    do {
+                        try self.appendTranscripts(kept)
+                    } catch {
+                        self.state.sync { self.lastError = "\(error)" }
+                        self.log("ambient raw transcript persistence failed: \(error)")
+                        return
+                    }
                     let toSend = kept
                     Task { await self.ingest.add(toSend) }
                 }
@@ -871,21 +933,20 @@ final class AmbientController {
         if let data = try? enc.encode(meta) { try? data.write(to: url) }
     }
 
-    private func appendTranscripts(_ segments: [TranscriptSegment]) {
+    private func appendTranscripts(_ segments: [TranscriptSegment]) throws {
         let dir = transcriptDir()
-        AmbientStorage.ensureDir(dir)
+        guard AmbientStorage.ensureDir(dir) else {
+            throw AmbientRawTranscriptPersistenceError.writeFailed
+        }
         let rawURL = dir.appendingPathComponent("raw.jsonl")
         let mdURL = dir.appendingPathComponent("cleaned.md")
-        let encoder = JSONEncoder()
-        var rawLines = ""
         var mdLines = ""
         for seg in segments {
-            if let data = try? encoder.encode(seg), let line = String(data: data, encoding: .utf8) {
-                rawLines += line + "\n"
-            }
             mdLines += seg.text + "\n"
         }
-        append(rawLines, to: rawURL)
+        // Raw persistence is the admission boundary. A cleaned markdown write
+        // remains derived and must not hide a successfully saved raw segment.
+        try AmbientRawTranscriptAppender.append(segments, to: rawURL)
         append(mdLines, to: mdURL)
     }
 

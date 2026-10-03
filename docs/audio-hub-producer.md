@@ -122,6 +122,16 @@ Metadata-only transcripts do not create STT jobs; originals do.
 
 ## Bounded raw-line reader
 
+The source controller now treats raw JSONL persistence as the boundary before
+downstream admission and successful-segment counting. Encoding, directory or
+append failure sets a body-free persistence diagnostic and stops that batch's
+downstream work. Appends use a locked, nontruncating regular-file descriptor
+and sync before returning success. Existing unterminated tails are preserved
+and rejected, not silently joined to the next JSON record. Partial writes can
+leave bytes on disk; failure never claims the entire batch was saved and does
+not automatically replay or truncate it. The derived markdown export remains
+independent of raw success. This is local source persistence, not a Hub ACK.
+
 `AudioHubRawTranscriptReader` reads one complete physical line with explicit
 caller-supplied read and line byte limits. It preserves LF/CRLF and blank lines
 as source bytes and counts physical lines. An unterminated tail is held without
@@ -135,8 +145,8 @@ not parse JSON, enumerate sessions, enqueue records or enable a runtime route.
 
 Originals use `selected-meeting-original` with explicit source provenance.
 Metadata/control byte budgets have no production defaults. The pending runtime
-work is scanner orchestration and scan-position persistence, propagation of
-source write failures, a contained/hash-checked original loader and chunk upload,
+work is scanner orchestration and scan-position persistence,
+a contained/hash-checked original loader and chunk upload,
 receipt-to-queue orchestration, and explicit original-expiry gaps. The current
 control journal handles only transcript clock gaps, not original expiration.
 
