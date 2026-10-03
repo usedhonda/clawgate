@@ -156,7 +156,7 @@ final class AudioHubOutbox {
         catch { storageFailed = true; throw error }
     }
 
-    private static func externalID(sourceUUID: String, sourceRecordRef: String, revision: String) -> String {
+    static func externalID(sourceUUID: String, sourceRecordRef: String, revision: String) -> String {
         var input = Data()
         for value in [sourceRecordRef, revision] {
             var length = UInt64(value.utf8.count).bigEndian

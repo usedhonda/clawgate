@@ -62,13 +62,43 @@ Repeated receipt bindings must preserve event/job/pipeline. Processing state is
 a mutable hint and does not prove successful STT. No helper here deletes an
 original. The Hub repository's `docs/contracts/stt-jobs.md` remains normative.
 
-## Pending wire and activation decisions
+## Raw transcript wire
 
-Proposed transcript kind is `clawgate.audio-transcript.v1`, with original source
-capture time and unchanged raw segment attributes, including unverified speaker
-labels. Preserve unknown privacy/identity/time fields; do not invent clear
-privacy flags or substitute processing time for missing capture time. Originals
-use `selected-meeting-original` with explicit source provenance. Exact metadata,
-source references, revisions, byte budget, native start checkpoint and mirror
-final checkpoint require owner agreement. The mirror owner stops its route only
-after source ACK, MCP read and required consumer acceptance.
+The inactive transcript builder uses `source=clawgate`, `domain=audio` and
+`kind=clawgate.audio-transcript.v1`. It preserves every JSON attribute in
+`metadata.raw_segment`; `metadata.text` is exactly `raw_segment.text`, without
+trimming, summarization or normalization. Hub literal search and full-text
+readers use that explicit text field. The envelope has unknown identity, and
+speaker labels remain source observations with unverified identity.
+
+`metadata.session_id` uses the `clawgate:session:` namespace;
+`source_session_id` retains the original source value. `source_record_ref` is
+the exact historical mirror external ID, `clawgate:session:<id>:raw:<line>`,
+with a one-based physical line number. `revision_ref` hashes the exact initial
+raw line bytes supplied to the builder as `sha256:<hex>`, not re-encoded JSON.
+`schema_version=1` and the outbox's persistent `source_uuid` bind the metadata
+to this native schema and producer. The future scanner
+must preserve those bytes, including the file's line terminator. New native IDs
+and immutable envelopes never overwrite the historical mirror's metadata.
+
+`occurred_at` comes only from the raw segment's Unix `capturedAt`. Missing or
+invalid clocks produce a body-free control-gap result with
+`reason=source_clock_unknown` and `coverage=excluded`, not an event dated at
+processing time. The result is not a durable gap record or an ACK: a future
+caller must persist it in the separately bounded control store before advancing
+any source checkpoint. If quota or physical storage prevents even that write,
+the producer must surface failure and keep the checkpoint unadvanced.
+
+Absent source privacy flags remain JSON null (unknown); observed flags are
+preserved, never replaced with an invented clear state. Downstream authorization
+to read unknown-privacy content is a separate consumer policy decision.
+Metadata-only transcripts do not create STT jobs; originals do.
+
+## Pending activation decisions
+
+Originals use `selected-meeting-original` with explicit source provenance.
+Metadata/control byte budgets have no production defaults. Durable control-gap
+storage, source integration, native start and mirror final checkpoints remain
+activation work. The mirror owner stops its route only after source ACK, MCP
+read and required consumer acceptance. None of the pure builder or receipt
+helpers enables a background scan or delivery route.
