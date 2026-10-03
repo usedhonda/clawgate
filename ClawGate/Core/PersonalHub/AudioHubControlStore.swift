@@ -208,6 +208,54 @@ final class AudioHubControlStore {
         return state.checkpoints
     }
 
+    /// Admit an immutable selected-original envelope after queue persistence.
+    /// Replay reuses an existing pending record (queue-before-journal crash) or
+    /// the existing journal checkpoint without rebuilding bytes.
+    @discardableResult
+    func admitOriginal(sourceRecordRef: String, revision: String, original: AudioHubOutbox.OriginalReference,
+                       into outbox: AudioHubOutbox,
+                       make: (String, String) throws -> Data) throws -> Checkpoint {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed, !sourceRecordRef.isEmpty, !revision.isEmpty,
+              outbox.sourceUUID == state.sourceUUID else { throw Failure.invalidState }
+        if let existing = state.checkpoints.first(where: { $0.sourceRecordRef == sourceRecordRef && $0.revisionRef == revision }) {
+            return existing
+        }
+        let externalID = AudioHubOutbox.externalID(sourceUUID: state.sourceUUID,
+                                                   sourceRecordRef: sourceRecordRef, revision: revision)
+        let existing = try outbox.pending(limit: Int.max).first(where: { $0.externalID == externalID })
+        if let existing {
+            guard existing.sourceRecordRef == sourceRecordRef, existing.revision == revision,
+                  existing.original == original else { throw Failure.invalidState }
+        }
+        let checkpoint = Checkpoint(sourceRecordRef: sourceRecordRef, revisionRef: revision,
+                                    disposition: "enqueued", externalID: externalID, reason: nil, coverage: nil)
+        var candidate = state; candidate.checkpoints.append(checkpoint)
+        guard Self.valid(candidate) else { throw Failure.invalidState }
+        let encoded = try encode(candidate)
+        if existing == nil {
+            _ = try outbox.enqueue(sourceRecordRef: sourceRecordRef, revision: revision, original: original, make: make)
+        }
+        do { try persist(encoded) } catch { storageFailed = true; throw error }
+        state = candidate
+        return checkpoint
+    }
+
+    @discardableResult
+    func excludeOriginal(sourceRecordRef: String, revision: String) throws -> Checkpoint {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed, !sourceRecordRef.isEmpty, !revision.isEmpty else { throw Failure.invalidState }
+        if let existing = state.checkpoints.first(where: { $0.sourceRecordRef == sourceRecordRef && $0.revisionRef == revision }) { return existing }
+        let checkpoint = Checkpoint(sourceRecordRef: sourceRecordRef, revisionRef: revision,
+                                    disposition: "excluded", externalID: nil,
+                                    reason: "source_clock_unknown", coverage: "excluded")
+        var candidate = state; candidate.checkpoints.append(checkpoint)
+        guard Self.valid(candidate) else { throw Failure.invalidState }
+        do { try persist(try encode(candidate)) } catch { storageFailed = true; throw error }
+        state = candidate
+        return checkpoint
+    }
+
     /// Persist a clock gap, or enqueue immutable bytes before recording admission.
     /// Replay after queue-commit/journal-failure uses the same source/revision ID.
     /// No scan offset is advanced and no item is marked delivered by this helper.

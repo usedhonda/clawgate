@@ -206,9 +206,15 @@ missing or changed. The existing thirty-day pruning is unchanged.
 ## Pending activation decisions
 
 Originals use `selected-meeting-original` with explicit source provenance.
+`AudioHubSelectedMeetingAdmission` accepts only caller-supplied selected index
+rows and never discovers or backfills meeting directories. Its source reference
+is `clawgate:meeting:<meeting-id>:audio:<index-row-id>`; row attributes plus the
+verified original hash/length define the immutable revision. Index reorder or
+unrelated append replays the first envelope and native ID. Unknown row clocks
+are durable excluded gaps, never processing-time timestamps.
 Metadata/control byte budgets have no production defaults. The pending runtime
-work is source admission from the selected meeting index with exact provenance,
-then runtime activation after the agreed start boundary and policies. The raw
+work connects explicit selected-index snapshots to the inactive admission helper,
+then enables delivery after the agreed start boundary and policies. The raw
 scanner, original loader, upload progress and receipt helpers are available but
 inactive. Missing-source gaps do not authorize queue eviction, file restoration,
 or retention extension. Helper crash proofs are not natural source-to-Hub
