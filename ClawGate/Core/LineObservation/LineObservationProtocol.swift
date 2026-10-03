@@ -2,6 +2,23 @@ import Foundation
 
 /// Failed or legacy capability responses never justify posting unsupported v2.
 enum LineObservationProtocol {
+    /// Same fixed adapter used by the legacy server bridge. Original bytes stay
+    /// in the source outbox; the caller persists these derived bytes once.
+    static func hubEnvelope(observation: Data, observationID: String) throws -> Data {
+        guard let value = try JSONSerialization.jsonObject(with: observation) as? [String: Any],
+              value["observationId"] as? String == observationID,
+              value["platform"] as? String == "line",
+              value["source"] as? String == "clawgate-line-passive-ocr",
+              let capturedAt = value["capturedAt"] as? String, !capturedAt.isEmpty else {
+            throw HubProducerProvision.Failure.invalidObservation
+        }
+        return try JSONSerialization.data(withJSONObject: [
+            "source": "line", "domain": "line", "kind": "passive-observation",
+            "occurred_at": capturedAt, "external_id": observationID,
+            "identity": NSNull(), "metadata": value
+        ], options: [.sortedKeys])
+    }
+
     /// Current producer has no confirmed identity, including unavailable surfaces.
     /// Keep legacy observations unchanged; queued payloads never pass through here.
     static func snapshotsForWire(_ snapshots: [[String: Any]], schemaVersion: Int) -> [[String: Any]] {

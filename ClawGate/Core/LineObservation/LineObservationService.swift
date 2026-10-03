@@ -37,6 +37,7 @@ final class LineObservationService {
     private var schemaVersion = 1
     private var capabilityEndpoint: String?
     private var capabilityCheckedAt = Date.distantPast
+    private var hubCapabilityReady = false
     private let session = URLSession(configuration: .ephemeral, delegate: LineObservationSessionDelegate(), delegateQueue: nil)
     private let diagnostics = LineObservationDiagnostics.shared
 
@@ -180,6 +181,37 @@ final class LineObservationService {
     }
 
     private func refreshCapabilities(config: AppConfig) async {
+        do {
+            if let provision = try HubProducerProvision.load(source: "line") {
+                try outbox?.selectIndependentHub()
+                let endpoint = provision.endpoint("v1/capabilities")
+                let credentialRevision = SHA256.hash(data: Data(provision.bearer_token.utf8)).map { String(format: "%02x", $0) }.joined()
+                let key = endpoint.absoluteString + credentialRevision
+                if capabilityEndpoint == key, Date().timeIntervalSince(capabilityCheckedAt) < 300 { return }
+                capabilityEndpoint = key
+                capabilityCheckedAt = Date()
+                hubCapabilityReady = false
+                var request = URLRequest(url: endpoint)
+                request.timeoutInterval = 3
+                request.setValue("Bearer \(provision.bearer_token)", forHTTPHeaderField: "Authorization")
+                let (data, response) = try await boundedHubResponse(request)
+                if response.statusCode == 200, provision.acceptsCapabilities(data) {
+                    hubCapabilityReady = true
+                    // Generic Hub stores the unchanged current observation schema;
+                    // it does not interpret OCR candidates as message facts.
+                    schemaVersion = 2
+                }
+                return
+            }
+            if outbox?.independentHubSelected == true {
+                hubCapabilityReady = false
+                return
+            }
+        } catch {
+            try? outbox?.selectIndependentHub()
+            hubCapabilityReady = false
+            return
+        }
         var url = URLComponents()
         url.scheme = "http"
         url.host = config.openclawHost.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -207,6 +239,17 @@ final class LineObservationService {
         do {
             let records = try outbox.pending(limit: 5)
             guard !records.isEmpty else { diagnostics.update(["deliveryStatus": "caught_up"]); return }
+            if let provision = try HubProducerProvision.load(source: "line") {
+                try outbox.selectIndependentHub()
+                guard hubCapabilityReady else {
+                    diagnostics.update(["deliveryStatus": "hub_capability_unavailable"]); backoff(); return
+                }
+                try await deliverToHub(records: records, outbox: outbox, provision: provision)
+                return
+            }
+            guard !outbox.independentHubSelected else {
+                diagnostics.update(["deliveryStatus": "hub_provision_unavailable"]); backoff(); return
+            }
             guard let gateway = OpenClawGatewayInfo.load(), !gateway.token.isEmpty else {
                 diagnostics.update(["deliveryStatus": "auth_unavailable"]); backoff(); return
             }
@@ -250,6 +293,52 @@ final class LineObservationService {
             diagnostics.update(["deliveryStatus": "transport_or_store_failed"])
             backoff()
         }
+    }
+
+    private func boundedHubResponse(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (bytes, response) = try await session.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < 65536 else { throw URLError(.dataLengthExceedsMaximum) }
+            data.append(byte)
+        }
+        return (data, http)
+    }
+
+    private func deliverToHub(records: [(id: String, data: Data)], outbox: LineObservationOutbox,
+                              provision: HubProducerProvision) async throws {
+        var acknowledged = 0
+        for record in records {
+            let envelope = try outbox.hubEnvelope(observationID: record.id) { original in
+                try LineObservationProtocol.hubEnvelope(observation: original, observationID: record.id)
+            }
+            guard envelope.count <= 20 * 1024 * 1024 else {
+                try outbox.markRejected([record.id], code: "hub_event_too_large")
+                continue
+            }
+            var request = URLRequest(url: provision.endpoint("v1/events"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 10
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(provision.bearer_token)", forHTTPHeaderField: "Authorization")
+            request.httpBody = envelope
+            let (data, response) = try await boundedHubResponse(request)
+            guard !Task.isCancelled else { return }
+            if response.statusCode == 409 {
+                try outbox.markRejected([record.id], code: "hub_content_conflict")
+                continue
+            }
+            guard [200, 201].contains(response.statusCode) else {
+                diagnostics.update(["deliveryStatus": "hub_http_\(response.statusCode)"]); backoff(); return
+            }
+            let receipt = try HubMetadataReceipt.validatedData(response: data, source: "line", externalID: record.id)
+            try outbox.acknowledgeHub(record.id, receipt: receipt)
+            acknowledged += 1
+            diagnostics.update(["deliveryStatus": "hub_committed", "lastAcknowledgedAt": Self.iso(Date())])
+        }
+        if acknowledged > 0 { retryDelay = 2; retryAt = .distantPast }
+        else { diagnostics.update(["deliveryStatus": "permanent_rejection"]); backoff() }
     }
 
     private func backoff() { retryAt = Date().addingTimeInterval(retryDelay); retryDelay = min(60, retryDelay * 2) }

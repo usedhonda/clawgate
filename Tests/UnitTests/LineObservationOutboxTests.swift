@@ -45,4 +45,52 @@ final class LineObservationOutboxTests: XCTestCase {
         XCTAssertThrowsError(try outbox.enqueue(Data(), observationID: "../escape"))
         XCTAssertThrowsError(try outbox.enqueue(Data(), observationID: "nested/path"))
     }
+
+    func testHubEnvelopeIsStableAndRawRecordRemainsUnchangedAcrossReopen() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outbox = try LineObservationOutbox(directory: directory, maxBytes: 64)
+        let raw = Data([0x11, 0x22, 0x33])
+        try outbox.enqueue(raw, observationID: "observation")
+        var makeCalls = 0
+        let first = try outbox.hubEnvelope(observationID: "observation") { input in
+            makeCalls += 1
+            return input + Data([0x44])
+        }
+        let second = try outbox.hubEnvelope(observationID: "observation") { _ in
+            makeCalls += 1
+            return Data([0xff])
+        }
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(makeCalls, 1)
+        let reopened = try LineObservationOutbox(directory: directory, maxBytes: 64)
+        let third = try reopened.hubEnvelope(observationID: "observation") { _ in
+            XCTFail("persisted envelope must not be rebuilt")
+            return Data()
+        }
+        XCTAssertEqual(third, first)
+        XCTAssertEqual(try reopened.pending().first?.data, raw)
+    }
+
+    func testHubEnvelopeCountsAgainstCapacity() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outbox = try LineObservationOutbox(directory: directory, maxBytes: 4)
+        try outbox.enqueue(Data([1, 2]), observationID: "observation")
+        XCTAssertThrowsError(try outbox.hubEnvelope(observationID: "observation") { _ in Data([3, 4, 5]) })
+        XCTAssertEqual(outbox.queuedBytes, 2)
+    }
+
+    func testHubSelectionAndReceiptPersistAcrossReopen() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let outbox = try LineObservationOutbox(directory: directory)
+        try outbox.selectIndependentHub()
+        try outbox.enqueue(Data([7]), observationID: "observation")
+        try outbox.acknowledgeHub("observation", receipt: Data([8, 9]))
+        let reopened = try LineObservationOutbox(directory: directory)
+        XCTAssertTrue(reopened.independentHubSelected)
+        XCTAssertEqual(reopened.lastHubReceipt, Data([8, 9]))
+        XCTAssertEqual(reopened.queuedCount, 0)
+    }
 }

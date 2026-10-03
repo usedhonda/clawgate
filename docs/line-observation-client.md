@@ -78,6 +78,31 @@ Polling is every 2 seconds, reducing to 10 after 30 seconds without change.
 
 ## Diagnostics and permission
 
+### Independent Hub provisioning
+
+An operator-provisioned `~/.clawgate/hub-provision/line.json` selects independent
+Hub delivery. It must be an owner-only regular file (0600, no symlink), at most
+64 KiB, with `schema_version:1`, `source:"line"`, a root HTTPS `base_url`, a
+source-specific `bearer_token`, and `allowed_domains:["line"]`. The app's audio
+source uses a separate `clawgate` descriptor and never borrows LINE authority.
+No credential is exposed by configuration/debug APIs. File installation is
+separate from implementing this reader; absence is not evidence of provisioning.
+
+Authenticated `/v1/capabilities` must confirm the exact source/domain, receipt
+version and limits. Direct storage retains the current v2 observation schema
+as opaque metadata; it does not promote body candidates into messages. The fixed
+adapter uses `source=line`, `domain=line`, `kind=passive-observation`, the original
+observation ID and capture clock. Original queue bytes remain unchanged; derived
+envelope bytes are persisted separately once, counted under the same outbox
+budget and reused on retries. Missing indexed envelopes fail closed.
+
+Only an HTTP 200/201 matching metadata-only storage receipt can dequeue, with
+the latest receipt saved atomically alongside that dequeue. Once independent
+delivery is selected, a missing/invalid descriptor or failed request never
+falls back to the Gateway. Legacy notification/control actuators are unchanged;
+their shutdown requires separate consumer acceptance. Audio-original release is
+not implemented by this metadata receipt checker.
+
 `GET /v1/debug/line-observation` exposes only machine status, counts and
 per-window capture metadata, never OCR text or credentials. Settings shows
 capture state, delivery state and pending count, and links to screen recording
