@@ -1,0 +1,14 @@
+{
+  "request": {
+    "sessionKey": "agent:example:main",
+    "idempotencyKey": "00000000-0000-4000-8000-000000000001",
+    "model": "openai/gpt-6.1-sol",
+    "thinking": "high",
+    "requestLocalContext": true,
+    "nonprojection": true,
+    "retainTerminalResult": true,
+    "message": "議事録\nCafé"
+  },
+  "scheme": "openclaw-execution-request-v1",
+  "sha256": "bfaf470fa1f71fd5175c5069318880f1c67bba9d20753065414896cad5117bd4"
+}

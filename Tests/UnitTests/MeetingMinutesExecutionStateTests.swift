@@ -2,6 +2,25 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingMinutesExecutionStateTests: XCTestCase {
+    private func response(_ d: MeetingMinutesExecutionState.Dispatch, status: String = "started", terminal: [String: Any]? = nil) throws -> IncomingPayload {
+        let binding: [String: Any] = ["version": 1, "requestFingerprintScheme": MinutesRequestFingerprint.scheme,
+            "requestFingerprint": try d.request.requestFingerprint(), "resolvedModel": MinutesExecutionSendParams.model,
+            "resolvedThinking": "high", "degraded": false, "fallbackReason": NSNull(),
+            "isolationApplied": true, "nonprojectionApplied": true, "retentionApplied": true]
+        var object: [String: Any] = ["status": status, "sessionKey": d.sessionKey, "runId": d.idempotencyKey,
+            "executionBinding": binding, "resultRetentionExpiresAt": NSNull()]
+        if status == "started" {
+            for key in ["resolvedModel", "resolvedThinking", "degraded", "fallbackReason", "isolationApplied", "nonprojectionApplied"] { object[key] = binding[key] }
+        }
+        if status == "expired" { object.removeValue(forKey: "resultRetentionExpiresAt") }
+        if let terminal { object["terminal"] = terminal; object["resultRetentionExpiresAt"] = 1_800_000_000_000 }
+        if status == "notFound" { object = ["status": "notFound"] }
+        return try JSONDecoder().decode(IncomingPayload.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+    private func ack(_ d: MeetingMinutesExecutionState.Dispatch) throws -> MinutesExecutionAck {
+        try MinutesExecutionAck.validate(response(d), expected: d.request)
+    }
+
     private func answer(_ title: String) -> MeetingMinutesExecutionState.Outcome {
         .answer(MeetingMinutes(title: title, summary: title, topics: [], decisions: [], actionItems: [],
                               openQuestions: [], evidence: [], attendance: nil, language: nil))
@@ -20,12 +39,12 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
     func testReverseCompletionReloadKeepsOrderedResults() throws {
         let (job, store, id) = try fixture(); defer { try? FileManager.default.removeItem(at: store.root) }
         var state = try MeetingMinutesExecutionState(job: job)
-        let first = try state.reserve(index: 0, sessionKey: "session", store: store, id: id)
-        let second = try state.reserve(index: 1, sessionKey: "session", store: store, id: id)
-        XCTAssertThrowsError(try state.reserve(index: 2, sessionKey: "session", store: store, id: id))
-        try state.acknowledge(second, runId: second.idempotencyKey, store: store, id: id)
+        let first = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
+        let second = try state.reserve(index: 1, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
+        XCTAssertThrowsError(try state.reserve(index: 2, sessionKey: "agent:example:main", message: "fixture", store: store, id: id))
+        try state.acknowledge(second, ack: ack(second), store: store, id: id)
         try state.complete(second, runId: second.idempotencyKey, outcome: answer("second"), store: store, id: id)
-        try state.acknowledge(first, runId: first.idempotencyKey, store: store, id: id)
+        try state.acknowledge(first, ack: ack(first), store: store, id: id)
         try state.complete(first, runId: first.idempotencyKey, outcome: answer("first"), store: store, id: id)
         let restored = try XCTUnwrap(try MeetingMinutesExecutionState.load(store: store, id: id, job: job))
         XCTAssertEqual(Array(restored.orderedOutcomes.prefix(2)), [answer("first"), answer("second")])
@@ -34,12 +53,12 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
     func testStaleOwnerRejectedAndKeyIsPersistedBeforeAck() throws {
         let (job, store, id) = try fixture(); defer { try? FileManager.default.removeItem(at: store.root) }
         var state = try MeetingMinutesExecutionState(job: job)
-        let dispatch = try state.reserve(index: 0, sessionKey: "session", store: store, id: id)
+        let dispatch = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
         let reloaded = try XCTUnwrap(try MeetingMinutesExecutionState.load(store: store, id: id, job: job))
         XCTAssertEqual(reloaded.parts[0].idempotencyKey, dispatch.idempotencyKey)
         XCTAssertEqual(reloaded.parts[0].status, .submitting)
-        XCTAssertThrowsError(try state.retry(index: 0, sessionKey: "session", store: store, id: id))
-        try state.acknowledge(dispatch, runId: dispatch.idempotencyKey, store: store, id: id)
+        XCTAssertThrowsError(try state.retry(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id))
+        try state.acknowledge(dispatch, ack: ack(dispatch), store: store, id: id)
         XCTAssertThrowsError(try state.complete(dispatch, runId: "wrong", outcome: .insufficientEvidence, store: store, id: id))
     }
 
@@ -50,7 +69,7 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
         try Data("block".utf8).write(to: blockedRoot)
         defer { try? FileManager.default.removeItem(at: blockedRoot) }
         let blockedStore = MeetingStore(root: blockedRoot)
-        XCTAssertThrowsError(try state.reserve(index: 0, sessionKey: "session", store: blockedStore, id: id))
+        XCTAssertThrowsError(try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: blockedStore, id: id))
         XCTAssertEqual(state.parts[0].status, .pending)
         XCTAssertThrowsError(try state.save(store: originalStore, id: id), "failed writer must reload before another write")
     }
@@ -71,17 +90,18 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
     func testConfirmedTerminalFailureRequiresExplicitRetryAndNewOwner() throws {
         let (job, store, id) = try fixture(); defer { try? FileManager.default.removeItem(at: store.root) }
         var state = try MeetingMinutesExecutionState(job: job)
-        let first = try state.reserve(index: 0, sessionKey: "session", store: store, id: id)
-        try state.acknowledge(first, runId: first.idempotencyKey, store: store, id: id)
+        let first = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
+        try state.acknowledge(first, ack: ack(first), store: store, id: id)
         try state.failTerminal(first, runId: first.idempotencyKey, code: "timeout", retryable: true, store: store, id: id)
-        XCTAssertThrowsError(try state.reserve(index: 0, sessionKey: "session", store: store, id: id))
-        let retry = try state.retry(index: 0, sessionKey: "session", store: store, id: id)
+        XCTAssertThrowsError(try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id))
+        XCTAssertThrowsError(try state.retry(index: 0, sessionKey: "agent:example:main", message: "changed", store: store, id: id))
+        let retry = try state.retry(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
         XCTAssertNotEqual(retry.idempotencyKey, first.idempotencyKey)
         XCTAssertEqual(retry.attempt, 2)
-        XCTAssertThrowsError(try state.acknowledge(first, runId: first.idempotencyKey, store: store, id: id))
-        try state.acknowledge(retry, runId: retry.idempotencyKey, store: store, id: id)
+        XCTAssertThrowsError(try state.acknowledge(first, ack: ack(first), store: store, id: id))
+        try state.acknowledge(retry, ack: ack(retry), store: store, id: id)
         try state.failTerminal(retry, runId: retry.idempotencyKey, code: "aborted", retryable: false, store: store, id: id)
-        XCTAssertThrowsError(try state.retry(index: 0, sessionKey: "session", store: store, id: id))
+        XCTAssertThrowsError(try state.retry(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id))
     }
 
     func testMalformedPrivateSidecarAndStaleWriterFailClosed() throws {
@@ -89,8 +109,8 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
         var state = try MeetingMinutesExecutionState(job: job)
         try state.save(store: store, id: id)
         var stale = try XCTUnwrap(try MeetingMinutesExecutionState.load(store: store, id: id, job: job))
-        _ = try state.reserve(index: 0, sessionKey: "session", store: store, id: id)
-        XCTAssertThrowsError(try stale.reserve(index: 1, sessionKey: "session", store: store, id: id))
+        _ = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
+        XCTAssertThrowsError(try stale.reserve(index: 1, sessionKey: "agent:example:main", message: "fixture", store: store, id: id))
         XCTAssertEqual(try MeetingMinutesExecutionState.load(store: store, id: id, job: job)?.parts[0].status, .submitting)
         let url = store.directory(for: id).appendingPathComponent(MeetingMinutesExecutionState.fileName)
         var value = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
@@ -104,4 +124,31 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: url, withDestinationURL: target)
         XCTAssertThrowsError(try MeetingMinutesExecutionState.load(store: store, id: id, job: job))
     }
+    func testLostAckReopensExactRequestAndRecoversTerminalWithoutNewAttempt() throws {
+        let (job, store, id) = try fixture(); defer { try? FileManager.default.removeItem(at: store.root) }
+        var state = try MeetingMinutesExecutionState(job: job)
+        let d = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "exact\nCafe\u{301}", store: store, id: id)
+        state = try XCTUnwrap(MeetingMinutesExecutionState.load(store: store, id: id, job: job))
+        XCTAssertEqual(state.recoverableDispatches, [d])
+        for status in ["expired", "notFound"] {
+            let read = try MinutesExecutionRead.validate(response(d, status: status), expected: d.request)
+            XCTAssertThrowsError(try state.reconcile(d, read: read, store: store, id: id))
+            XCTAssertEqual(state.parts[0].status, .submitting)
+        }
+        let terminal = try MinutesExecutionRead.validate(response(d, status: "terminal", terminal: ["kind": "answer", "answer": "fixture"]), expected: d.request)
+        try state.reconcile(d, read: terminal, store: store, id: id)
+        try state.complete(d, runId: d.idempotencyKey, outcome: .insufficientEvidence, store: store, id: id)
+        let restored = try XCTUnwrap(MeetingMinutesExecutionState.load(store: store, id: id, job: job))
+        XCTAssertEqual(restored.parts[0].attempt, 1)
+        XCTAssertEqual(restored.parts[0].status, .completed)
+        XCTAssertTrue(restored.parts[0].executionBinding!.matches(d.request))
+        let url = store.directory(for: id).appendingPathComponent(MeetingMinutesExecutionState.fileName)
+        var object = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        var parts = object["parts"] as! [[String: Any]]
+        var request = parts[0]["request"] as! [String: Any]
+        request["message"] = "different"; parts[0]["request"] = request; object["parts"] = parts
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        XCTAssertThrowsError(try MeetingMinutesExecutionState.load(store: store, id: id, job: job))
+    }
+
 }

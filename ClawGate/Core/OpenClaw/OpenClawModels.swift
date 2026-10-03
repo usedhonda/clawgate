@@ -356,8 +356,12 @@ struct IncomingPayload: Decodable {
     let resultRetentionExpiresAt: String?
     /// Canonical retained-result expiry is an epoch number, not a chat timestamp.
     let resultRetentionEpoch: Double?
+    let resultRetentionIsSafeInteger: Bool
+    let retentionApplied: Bool?
     let status: String?
     let minutesTerminal: MinutesTerminalPayload?
+    let executionBinding: MinutesExecutionBinding?
+    let minutesFieldNames: Set<String>
     let stream: String?
     let data: AgentDataPayload?
     let state: String?
@@ -400,6 +404,8 @@ struct IncomingPayload: Decodable {
         case resultRetentionExpiresAt
         case status
         case terminal
+        case executionBinding
+        case retentionApplied
         case stream
         case data
         case state
@@ -441,10 +447,16 @@ struct IncomingPayload: Decodable {
             resultRetentionEpoch = nil
             resultRetentionExpiresAt = try container.decodeIfPresent(String.self, forKey: .resultRetentionExpiresAt)
         }
+        if let n = try? container.decode(UInt64.self, forKey: .resultRetentionExpiresAt) {
+            resultRetentionIsSafeInteger = n > 0 && n <= 9_007_199_254_740_991
+        } else { resultRetentionIsSafeInteger = false }
+        retentionApplied = try? container.decode(Bool.self, forKey: .retentionApplied)
         // Optional minutes fields must not change unrelated RPC decoding.
         // The dedicated result validator rejects absent/malformed terminals.
         status = try? container.decode(String.self, forKey: .status)
         minutesTerminal = try? container.decode(MinutesTerminalPayload.self, forKey: .terminal)
+        executionBinding = try? container.decode(MinutesExecutionBinding.self, forKey: .executionBinding)
+        minutesFieldNames = Set(try decoder.container(keyedBy: MinutesPayloadKey.self).allKeys.map(\.stringValue))
         stream = try container.decodeIfPresent(String.self, forKey: .stream)
         data = try container.decodeIfPresent(AgentDataPayload.self, forKey: .data)
         state = try container.decodeIfPresent(String.self, forKey: .state)
@@ -465,6 +477,13 @@ struct IncomingPayload: Decodable {
         hasFallbackReason = container.contains(.fallbackReason)
         hasResultRetentionExpiresAt = container.contains(.resultRetentionExpiresAt)
     }
+}
+
+private struct MinutesPayloadKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
 }
 
 extension IncomingPayload {

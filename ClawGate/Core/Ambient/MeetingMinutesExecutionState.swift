@@ -6,7 +6,7 @@ import Darwin
 /// This is deliberately a sidecar: `MeetingMinutesJob` remains the accepted
 /// sequential-prefix checkpoint and is never rewritten by this type.
 struct MeetingMinutesExecutionState: Codable, Equatable {
-    static let currentVersion = 1
+    static let currentVersion = 2
     static let fileName = "minutes-execution-state.json"
 
     enum Status: String, Codable { case pending, submitting, running, completed, failed }
@@ -34,6 +34,9 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
     struct Part: Codable, Equatable {
         let index: Int
         let envelopeHash: String
+        var request: MinutesExecutionSendParams?
+        var requestFingerprint: String?
+        var executionBinding: MinutesExecutionBinding?
         var status: Status
         var attempt: Int
         var idempotencyKey: String?
@@ -45,7 +48,7 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
     }
     struct Dispatch: Equatable {
         let index: Int; let attempt: Int; let idempotencyKey: String
-        let sessionKey: String
+        let sessionKey: String; let request: MinutesExecutionSendParams
     }
     enum LedgerError: Error { case malformed(String), mismatch, invalidTransition, staleOwner, tooManyLiveParts, notRetryable, persistence(Error), storageFailed, staleWriter }
 
@@ -61,8 +64,8 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         let prefix = job.completed.count
         let values = try job.envelopes.enumerated().map { index, envelope -> Part in
             let outcome: Outcome? = index < prefix ? (job.completed[index].map(Outcome.answer) ?? .insufficientEvidence) : nil
-            return Part(index: index, envelopeHash: try Self.hash(envelope), status: index < prefix ? .completed : .pending,
-                        attempt: 0, idempotencyKey: nil, sessionKey: nil, runId: nil,
+            return Part(index: index, envelopeHash: try Self.hash(envelope),
+                        request: nil, requestFingerprint: nil, executionBinding: nil, status: index < prefix ? .completed : .pending, attempt: 0, idempotencyKey: nil, sessionKey: nil, runId: nil,
                         reason: nil, retryable: false, outcome: outcome)
         }
         self.init(version: Self.currentVersion, fingerprint: job.fingerprint, parts: values)
@@ -179,37 +182,59 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         guard p.index == index, p.attempt == attempt, p.idempotencyKey == key, p.sessionKey == sessionKey else { throw LedgerError.staleOwner }
     }
 
-    mutating func reserve(index: Int, sessionKey: String, store: MeetingStore, id: String) throws -> Dispatch {
-        try reserveAttempt(index: index, sessionKey: sessionKey, retry: false, store: store, id: id)
+    mutating func reserve(index: Int, sessionKey: String, message: String, store: MeetingStore, id: String) throws -> Dispatch {
+        try reserveAttempt(index: index, sessionKey: sessionKey, message: message, retry: false, store: store, id: id)
     }
 
-    private mutating func reserveAttempt(index: Int, sessionKey: String, retry: Bool, store: MeetingStore, id: String) throws -> Dispatch {
+    private mutating func reserveAttempt(index: Int, sessionKey: String, message: String, retry: Bool, store: MeetingStore, id: String) throws -> Dispatch {
         guard parts.indices.contains(index), Self.validSession(sessionKey) else { throw LedgerError.invalidTransition }
         guard parts.filter({ $0.status == .submitting || $0.status == .running }).count < 2 else { throw LedgerError.tooManyLiveParts }
         let old = parts[index]
         guard retry ? (old.status == .failed && old.retryable) : old.status == .pending,
               old.attempt < Int.max else { throw LedgerError.invalidTransition }
+        if retry {
+            guard let original = old.request, original.sessionKey == sessionKey,
+                  original.message.utf8.elementsEqual(message.utf8) else { throw LedgerError.invalidTransition }
+        }
         var candidate = self
         let key = UUID().uuidString
+        let request = MinutesExecutionSendParams(sessionKey: sessionKey, message: message, idempotencyKey: key)
+        let requestFingerprint = try request.requestFingerprint()
         candidate.parts[index].status = .submitting; candidate.parts[index].attempt += 1
+        candidate.parts[index].request = request
+        candidate.parts[index].requestFingerprint = requestFingerprint
+        candidate.parts[index].executionBinding = nil
         candidate.parts[index].idempotencyKey = key; candidate.parts[index].sessionKey = sessionKey
         candidate.parts[index].runId = nil; candidate.parts[index].reason = nil; candidate.parts[index].retryable = false; candidate.parts[index].outcome = nil
         try commit(candidate, store: store, id: id)
-        return Dispatch(index: index, attempt: candidate.parts[index].attempt, idempotencyKey: key, sessionKey: sessionKey)
+        return Dispatch(index: index, attempt: candidate.parts[index].attempt, idempotencyKey: key, sessionKey: sessionKey, request: request)
     }
 
     /// Retry is intentionally separate from initial reservation: only a
     /// confirmed terminal, retryable failure may create a new owner key.
-    mutating func retry(index: Int, sessionKey: String, store: MeetingStore, id: String) throws -> Dispatch {
+    mutating func retry(index: Int, sessionKey: String, message: String, store: MeetingStore, id: String) throws -> Dispatch {
         guard parts.indices.contains(index), parts[index].status == .failed, parts[index].retryable else { throw LedgerError.notRetryable }
-        return try reserveAttempt(index: index, sessionKey: sessionKey, retry: true, store: store, id: id)
+        return try reserveAttempt(index: index, sessionKey: sessionKey, message: message, retry: true, store: store, id: id)
     }
 
-    mutating func acknowledge(_ dispatch: Dispatch, runId: String, store: MeetingStore, id: String) throws {
-        guard runId == dispatch.idempotencyKey, parts.indices.contains(dispatch.index) else { throw LedgerError.invalidTransition }
+    mutating func acknowledge(_ dispatch: Dispatch, ack: MinutesExecutionAck, store: MeetingStore, id: String) throws {
+        guard parts.indices.contains(dispatch.index), ack.runId == dispatch.idempotencyKey,
+              ack.sessionKey == dispatch.sessionKey,
+              ack.binding.requestFingerprint == (try dispatch.request.requestFingerprint()) else { throw LedgerError.invalidTransition }
         let old = parts[dispatch.index]; try owner(old, index: dispatch.index, attempt: dispatch.attempt, key: dispatch.idempotencyKey, sessionKey: dispatch.sessionKey)
-        guard old.status == .submitting else { throw LedgerError.invalidTransition }
-        var candidate = self; candidate.parts[dispatch.index].status = .running; candidate.parts[dispatch.index].runId = runId
+        guard old.status == .submitting, old.requestFingerprint == (try dispatch.request.requestFingerprint()) else { throw LedgerError.invalidTransition }
+        var candidate = self; candidate.parts[dispatch.index].status = .running; candidate.parts[dispatch.index].runId = ack.runId
+        candidate.parts[dispatch.index].executionBinding = ack.binding
+        try commit(candidate, store: store, id: id)
+    }
+
+    mutating func reconcile(_ dispatch: Dispatch, read: MinutesExecutionRead, store: MeetingStore, id: String) throws {
+        guard parts.indices.contains(dispatch.index), read.result != .expired, read.result != .notFound, let binding = read.binding,
+              binding.requestFingerprint == (try dispatch.request.requestFingerprint()) else { throw LedgerError.invalidTransition }
+        let old = parts[dispatch.index]; try owner(old, index: dispatch.index, attempt: dispatch.attempt, key: dispatch.idempotencyKey, sessionKey: dispatch.sessionKey)
+        guard old.status == .submitting, old.requestFingerprint == (try dispatch.request.requestFingerprint()) else { throw LedgerError.invalidTransition }
+        var candidate = self; candidate.parts[dispatch.index].status = .running; candidate.parts[dispatch.index].runId = dispatch.idempotencyKey
+        candidate.parts[dispatch.index].executionBinding = binding
         try commit(candidate, store: store, id: id)
     }
 
@@ -225,7 +250,7 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
     private mutating func transitionTerminal(_ dispatch: Dispatch, runId: String, status: Status, outcome: Outcome?, reason: String?, retryable: Bool, store: MeetingStore, id: String) throws {
         guard parts.indices.contains(dispatch.index), let currentRun = parts[dispatch.index].runId, currentRun == runId else { throw LedgerError.staleOwner }
         let old = parts[dispatch.index]; try owner(old, index: dispatch.index, attempt: dispatch.attempt, key: dispatch.idempotencyKey, sessionKey: dispatch.sessionKey)
-        guard old.status == .running else { throw LedgerError.invalidTransition }
+        guard old.status == .running, old.requestFingerprint == (try dispatch.request.requestFingerprint()) else { throw LedgerError.invalidTransition }
         var candidate = self; candidate.parts[dispatch.index].status = status; candidate.parts[dispatch.index].outcome = outcome; candidate.parts[dispatch.index].reason = reason; candidate.parts[dispatch.index].retryable = retryable
         try commit(candidate, store: store, id: id)
     }
@@ -233,6 +258,13 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
     var orderedOutcomes: [Outcome?] { parts.sorted { $0.index < $1.index }.map(\.outcome) }
     var nextIndices: [Int] { parts.filter { $0.status == .pending || ($0.status == .failed && $0.retryable) }.map(\.index) }
     var hasLiveParts: Bool { parts.contains { $0.status == .submitting || $0.status == .running } }
+    var recoverableDispatches: [Dispatch] {
+        parts.compactMap { p in
+            guard (p.status == .submitting || p.status == .running), let request = p.request,
+                  let key = p.idempotencyKey, let session = p.sessionKey else { return nil }
+            return Dispatch(index: p.index, attempt: p.attempt, idempotencyKey: key, sessionKey: session, request: request)
+        }
+    }
 
     private var validInvariants: Bool {
         guard parts.map(\.index) == Array(parts.indices), parts.filter({ $0.status == .submitting || $0.status == .running }).count <= 2 else { return false }
@@ -244,19 +276,31 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
                 p.sessionKey.map(Self.validSession) == true
             let noError = p.reason == nil && !p.retryable
             switch p.status {
-            case .pending: return p.attempt == 0 && p.idempotencyKey == nil && p.sessionKey == nil && p.runId == nil && p.outcome == nil && noError
-            case .submitting: return ownerValid && p.runId == nil && p.outcome == nil && noError
-            case .running: return ownerValid && p.runId == p.idempotencyKey && p.outcome == nil && noError
+            case .pending: return p.attempt == 0 && p.idempotencyKey == nil && p.sessionKey == nil && p.runId == nil && p.outcome == nil && noError && p.request == nil && p.requestFingerprint == nil && p.executionBinding == nil
+            case .submitting: return ownerValid && p.runId == nil && p.outcome == nil && noError && requestValid(p) && p.executionBinding == nil
+            case .running: return ownerValid && p.runId == p.idempotencyKey && p.outcome == nil && noError && requestValid(p) && bindingValid(p)
             case .completed:
-                let inherited = p.attempt == 0 && p.idempotencyKey == nil && p.sessionKey == nil && p.runId == nil
-                return (inherited || (ownerValid && p.runId == p.idempotencyKey)) && p.outcome != nil && noError
-            case .failed: return ownerValid && p.runId == p.idempotencyKey && p.reason.map(Self.validCode) == true && p.outcome == nil
+                let inherited = p.attempt == 0 && p.idempotencyKey == nil && p.sessionKey == nil && p.runId == nil && p.request == nil && p.requestFingerprint == nil && p.executionBinding == nil
+                return (inherited || (ownerValid && p.runId == p.idempotencyKey && requestValid(p) && bindingValid(p))) && p.outcome != nil && noError
+            case .failed: return ownerValid && p.runId == p.idempotencyKey && p.reason.map(Self.validCode) == true && p.outcome == nil && requestValid(p) && bindingValid(p)
             }
         }
     }
 
     private static func validSession(_ value: String) -> Bool {
         !value.isEmpty && value.utf8.count <= 1024 && value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+    }
+
+    private func bindingValid(_ p: Part) -> Bool {
+        guard let request = p.request, let binding = p.executionBinding else { return false }
+        return binding.matches(request)
+    }
+
+    private func requestValid(_ p: Part) -> Bool {
+        guard let request = p.request, let fingerprint = p.requestFingerprint,
+              request.sessionKey == p.sessionKey, request.idempotencyKey == p.idempotencyKey,
+              (try? request.requestFingerprint()) == fingerprint else { return false }
+        return true
     }
 
     private static func validCode(_ code: String) -> Bool {

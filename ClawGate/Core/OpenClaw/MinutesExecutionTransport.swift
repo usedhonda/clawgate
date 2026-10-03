@@ -27,7 +27,7 @@ enum MinutesModelAck {
 
 /// Dedicated minutes wire, not a replacement for ordinary chat or Pet Log.
 /// No production caller until the Gateway activation gate is satisfied.
-struct MinutesExecutionSendParams: Encodable {
+struct MinutesExecutionSendParams: Codable, Equatable {
     static let model = "openai/gpt-6.1-sol"
     static let thinking = "high"
     let sessionKey: String
@@ -38,6 +38,27 @@ struct MinutesExecutionSendParams: Encodable {
         case sessionKey, message, idempotencyKey, model, thinking
         case requestLocalContext, nonprojection, retainTerminalResult
     }
+
+    init(sessionKey: String, message: String, idempotencyKey: String) {
+        self.sessionKey = sessionKey; self.message = message; self.idempotencyKey = idempotencyKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sessionKey = try c.decode(String.self, forKey: .sessionKey)
+        message = try c.decode(String.self, forKey: .message)
+        idempotencyKey = try c.decode(String.self, forKey: .idempotencyKey)
+        guard try c.decode(String.self, forKey: .model) == Self.model,
+              try c.decode(String.self, forKey: .thinking) == Self.thinking,
+              try c.decode(Bool.self, forKey: .requestLocalContext),
+              try c.decode(Bool.self, forKey: .nonprojection),
+              try c.decode(Bool.self, forKey: .retainTerminalResult) else {
+            throw MinutesExecutionTransportError.invalidRequest
+        }
+        _ = try requestFingerprint()
+    }
+
+    func requestFingerprint() throws -> String { try MinutesRequestFingerprint.compute(self) }
 
     func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -60,32 +81,45 @@ struct MinutesResultGetParams: Encodable {
 /// Bounded fixed errors: never put prompts, answer bodies or wire values in logs.
 enum MinutesExecutionTransportError: Error, Equatable {
     case invalidAcknowledgement, identityMismatch, modelMismatch, isolationNotApplied
-    case invalidResult
+    case invalidResult, invalidRequest, bindingMismatch
 }
 
 struct MinutesExecutionAck: Equatable {
     let sessionKey: String
     let runId: String
+    let binding: MinutesExecutionBinding
+    private init(sessionKey: String, runId: String, binding: MinutesExecutionBinding) {
+        self.sessionKey = sessionKey; self.runId = runId; self.binding = binding
+    }
 
-    static func validate(_ payload: IncomingPayload?, expected: MinutesResultGetParams) throws -> Self {
+    static func validate(_ payload: IncomingPayload?, expected: MinutesExecutionSendParams) throws -> Self {
         guard let p = payload, p.status == "started" || p.status == "pending",
-              p.hasFallbackReason, p.hasResultRetentionExpiresAt,
-              p.resultRetentionExpiresAt == nil else {
+              p.hasResultRetentionExpiresAt, p.resultRetentionExpiresAt == nil,
+              !p.minutesFieldNames.contains("terminal") else {
             throw MinutesExecutionTransportError.invalidAcknowledgement
         }
-        guard p.sessionKey == expected.sessionKey, p.runId == expected.runId,
-              !expected.sessionKey.isEmpty, !expected.runId.isEmpty else {
-            throw MinutesExecutionTransportError.identityMismatch
+        let binding = try MinutesExecutionBinding.validate(p, expected: expected, requireTopLevel: true)
+        return Self(sessionKey: expected.sessionKey, runId: expected.idempotencyKey, binding: binding)
+    }
+}
+
+/// A validated same-request result can reconcile an ACK lost in transit.
+/// Only this parser creates the wrapper; a bare terminal is not admission proof.
+struct MinutesExecutionRead: Equatable {
+    let result: MinutesExecutionResult
+    let binding: MinutesExecutionBinding?
+    private init(result: MinutesExecutionResult, binding: MinutesExecutionBinding?) {
+        self.result = result; self.binding = binding
+    }
+    static func validate(_ payload: IncomingPayload?, expected: MinutesExecutionSendParams) throws -> Self {
+        if payload?.status == "notFound" {
+            guard payload?.minutesFieldNames == ["status"] else { throw MinutesExecutionTransportError.invalidResult }
+            return Self(result: .notFound, binding: nil)
         }
-        guard p.resolvedModel == MinutesExecutionSendParams.model,
-              p.resolvedThinking == MinutesExecutionSendParams.thinking,
-              p.degraded == false, p.fallbackReason == nil else {
-            throw MinutesExecutionTransportError.modelMismatch
-        }
-        guard p.isolationApplied == true, p.nonprojectionApplied == true else {
-            throw MinutesExecutionTransportError.isolationNotApplied
-        }
-        return Self(sessionKey: expected.sessionKey, runId: expected.runId)
+        let binding = try MinutesExecutionBinding.validate(payload, expected: expected)
+        let result = try MinutesExecutionResult.validate(payload, expected: .init(
+            sessionKey: expected.sessionKey, runId: expected.idempotencyKey))
+        return Self(result: result, binding: binding)
     }
 }
 
@@ -98,7 +132,7 @@ enum MinutesExecutionResult: Equatable {
     case expired
     case notFound
 
-    static func validate(_ payload: IncomingPayload?, expected: MinutesResultGetParams) throws -> Self {
+    fileprivate static func validate(_ payload: IncomingPayload?, expected: MinutesResultGetParams) throws -> Self {
         guard let p = payload, let status = p.status else {
             throw MinutesExecutionTransportError.invalidResult
         }
@@ -116,13 +150,13 @@ enum MinutesExecutionResult: Equatable {
         switch status {
         case "pending":
             guard p.hasResultRetentionExpiresAt, p.resultRetentionExpiresAt == nil,
-                  p.minutesTerminal == nil else { throw MinutesExecutionTransportError.invalidResult }
+                  !p.minutesFieldNames.contains("terminal") else { throw MinutesExecutionTransportError.invalidResult }
             return .pending
         case "expired":
-            guard p.minutesTerminal == nil else { throw MinutesExecutionTransportError.invalidResult }
+            guard !p.minutesFieldNames.contains("resultRetentionExpiresAt"), !p.minutesFieldNames.contains("terminal") else { throw MinutesExecutionTransportError.invalidResult }
             return .expired
         case "terminal":
-            guard let expiry = p.resultRetentionEpoch, expiry.isFinite, expiry > 0,
+            guard p.resultRetentionIsSafeInteger, let expiry = p.resultRetentionEpoch, expiry.isFinite, expiry > 0, expiry <= 9_007_199_254_740_991, expiry.rounded(.towardZero) == expiry,
                   let terminal = p.minutesTerminal else { throw MinutesExecutionTransportError.invalidResult }
             switch terminal.kind {
             case "answer":
@@ -167,17 +201,15 @@ extension OpenClawWSClient {
     }
 
     /// The caller must durably reserve this key first. Never retry as chat.
-    func sendMinutesExecution(_ message: String, sessionKey: String,
-                              idempotencyKey: String) async throws -> MinutesExecutionAck {
-        let payload = try await request(method: "chat.send", params: MinutesExecutionSendParams(
-            sessionKey: sessionKey, message: message, idempotencyKey: idempotencyKey))
-        return try MinutesExecutionAck.validate(payload, expected: .init(sessionKey: sessionKey, runId: idempotencyKey))
+    func sendMinutesExecution(_ params: MinutesExecutionSendParams) async throws -> MinutesExecutionAck {
+        _ = try params.requestFingerprint()
+        let payload = try await request(method: "chat.send", params: params)
+        return try MinutesExecutionAck.validate(payload, expected: params)
     }
 
-    /// Read-only recovery; neither this function nor its errors redispatch.
-    func minutesExecutionResult(sessionKey: String, runId: String) async throws -> MinutesExecutionResult {
-        let params = MinutesResultGetParams(sessionKey: sessionKey, runId: runId)
-        return try MinutesExecutionResult.validate(try await request(method: "chat.result.get", params: params),
-                                                  expected: params)
+    /// Read-only recovery using the original durable request; never redispatch.
+    func minutesExecutionResult(_ expected: MinutesExecutionSendParams) async throws -> MinutesExecutionRead {
+        let params = MinutesResultGetParams(sessionKey: expected.sessionKey, runId: expected.idempotencyKey)
+        return try MinutesExecutionRead.validate(try await request(method: "chat.result.get", params: params), expected: expected)
     }
 }

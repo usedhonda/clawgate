@@ -59,12 +59,12 @@ checkpoint reuse is active independently of this deployment prerequisite.
 This change does **not** claim execution isolation, parallelism or a measured
 latency multiplier.
 
-The client has inactive typed dispatch/result helpers and an indexed execution
-sidecar, `minutes-execution-state.json`. These are not a live route or a
-parallel scheduler. Activation still requires matching deployed support;
-catalog model availability alone is not successful model execution. The current
-Gateway's closed send schema does not admit the three flags, so the existing
-working route is not switched to the new helpers.
+The client has inactive typed dispatch/result helpers, a version-2 indexed
+execution sidecar and a bounded step executor. There is still no production
+caller or scheduling timer: activation requires matching deployed Gateway
+support in the same window; catalog availability is not provider execution.
+The last verified Gateway did not support the three flags/result RPC. The
+working sequential route is not switched by these client changes.
 
 Model selection is independent of that isolation gate. The existing sequential
 part and overview path sends the supported `model`/`thinking` parameters and
@@ -74,22 +74,52 @@ completed checkpoints; it is not automatically retried on another model. Other
 chat and Pet Log model defaults are unchanged. This supported sequential route
 does not claim isolated history, retained-result recovery or parallel execution.
 
-The sidecar binds the frozen job fingerprint and exact envelope hash per
-index. It imports validated legacy prefix results (including silent results),
-reserves at most two live attempts, and saves each immutable attempt key before
-dispatch. Out-of-order validated completions retain source order. Only an
-explicit retry of a confirmed retryable terminal failure receives a new key;
-disconnect, missing results, expiration or an unknown dispatch ACK never
-authorize regeneration. Reopening preserves submitting/running attempts for
-reconciliation. The retained-result RPC does not contain resolved-model or
-isolation diagnostics: after a lost ACK, a terminal answer alone cannot prove
-these guarantees. ACK reconciliation must be established before activation.
-Private atomic writes, file/directory synchronization, exclusive write locks
-and optimistic revision checks prevent a stale writer from replacing a newer
-attempt. A persistence error requires reload before further writes. No
-execution sidecar modifies or deletes the existing accepted minutes/job.
+The sidecar binds the frozen job fingerprint, exact envelope hash and entire
+encoded request per index. It imports validated legacy prefix results (including
+silent results), reserves at most two live attempts, and atomically saves each
+request and key before dispatch. A v1 sidecar cannot be upgraded into proof of
+request binding and is rejected without overwriting it. Out-of-order validated
+completions retain source order. Explicit retry is allowed only for a confirmed
+retryable terminal failure and retains exact prompt bytes/session with a new key.
+Disconnect, notFound, expiration, malformed binding or an unknown ACK never
+authorize regeneration. Private fsync/locking/CAS writes reject stale writers;
+a persistence error requires reopening the sidecar.
 
-The next executor design is a dedicated minutes scheduler, independent of the
+The agreed additive `executionBinding` v1 appears on ACK and authorized
+pending/terminal/expired reads; notFound is exactly `{status:"notFound"}`.
+It contains `requestFingerprintScheme="openclaw-execution-request-v1"`,
+`requestFingerprint`, exact `resolvedModel`/`resolvedThinking`, `degraded=false`,
+explicit null `fallbackReason`, and true `isolationApplied`,
+`nonprojectionApplied`, `retentionApplied`. Existing duplicate ACK/read fields
+must agree. These are immutable admission diagnostics, not provider completion.
+The client validates all guarantees against its saved request before accepting
+an ACK or lost-ACK recovery; a terminal body alone is insufficient.
+
+Fingerprint bytes are UTF-8 of the scheme, NUL, then eight length-prefixed fields:
+canonical sessionKey, runId (= idempotencyKey), requested model, requested
+thinking, each of the three flags as ASCII `1`/`0`, and exact message. Each prefix
+is a uint32 big-endian UTF-8 byte length. No trimming, normalization, JSON
+quoting, BOM insertion or newline conversion. Overlong fields are rejected.
+Auth/device namespace remains a server ACL/storage binding, not a hash claim.
+The public fixture `Tests/Fixtures/minutes-execution-request-v1.json` includes
+Japanese, LF and a combining accent for cross-language verification.
+
+`resultRetentionExpiresAt` is explicit null while pending; terminal reads require
+a positive JSON safe integer (at most 9007199254740991), Unix epoch milliseconds.
+No seconds/milliseconds guessing or device-clock override is permitted. Expired
+reads carry immutable binding without terminal body/expiry. The server's fixed
+24-hour terminal plus 24-hour tombstone policy is unchanged and reads do not
+extend it. Neither the binding nor expiry implies permission to redispatch.
+
+The dedicated actor step recovers existing owners through read RPC only, admits
+at most two live runs, and persists each independent response even if another
+transport fails. Its per-part parser uses the same segment/material grounding
+validator. Failed parts stop new admissions, and expired/notFound remain
+unresolved. The step does not overwrite the accepted minutes/job or enable a
+background timer; live merge/overview/UI activation remains gated on the shared
+Gateway acceptance. Synthetic scheduling proofs are not deployed max-two proof.
+
+The live integration target is a dedicated minutes scheduler, independent of the
 interactive summon slot, with at most two independent part runs in flight.
 Before activating it, prove deployed Gateway concurrent work admission,
 request-local delivery, same-device/run correlation, reconnect and retained
