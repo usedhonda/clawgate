@@ -97,15 +97,32 @@ final class AppRuntime {
     )
 
     /// Ambient Context Stream (client-only). Backs /v1/ambient/* and the menu-bar controls.
+    private lazy var audioHubRuntime: AudioHubRuntime? = {
+        let manifest = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".clawgate/hub-provision/audio-activation.json")
+        do {
+            return try AudioHubRuntime(manifestURL: manifest,
+                                       sessionsRoot: AmbientStorage.sessionsRoot,
+                                       meetingsRoot: AmbientStorage.ambientRoot,
+                                       runtimeRoot: AmbientStorage.ambientRoot.appendingPathComponent("audio-hub", isDirectory: true))
+        } catch {
+            logger.log(.info, "audio Hub activation configuration invalid")
+            return nil
+        }
+    }()
+
     private lazy var ambientController = AmbientController(
         configStore: configStore,
-        log: { [weak self] msg in self?.logger.log(.info, msg) }
+        log: { [weak self] msg in self?.logger.log(.info, msg) },
+        audioHubRuntime: audioHubRuntime
     )
 
     /// The ambient controller when this host is the client, else nil (server hides the feature).
     func ambient() -> AmbientController? {
         configStore.load().isClientRole ? ambientController : nil
     }
+
+    func audioHub() -> AudioHubRuntime? { audioHubRuntime }
 
     // Keep a weak reference to the delegate for session menu updates
     weak var menuBarDelegate: MenuBarAppDelegate?
@@ -223,6 +240,7 @@ final class AppRuntime {
     }
 
     func stopServer() {
+        audioHubRuntime?.shutdown()
         Task { @MainActor in LineObservationService.shared.stop() }
         if configStore.load().lineEnabled {
             notificationBannerWatcher.stop()

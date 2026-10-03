@@ -13,13 +13,25 @@ final class MeetingBackfill {
     private let archive: MeetingAudioArchive
     private let transcriber: AmbientTranscriber
     private let store: MeetingStore
+    /// Optional producer hook. The index is complete and atomically persisted
+    /// before this callback; it never discovers or selects additional rows.
+    var onAudioIndexPersisted: ((String) -> Void)?
 
     init(archive: MeetingAudioArchive = MeetingAudioArchive(),
          transcriber: AmbientTranscriber = AmbientTranscriber(),
-         store: MeetingStore = MeetingStore()) {
+         store: MeetingStore = MeetingStore(),
+         audioHubRuntime: AudioHubRuntime? = nil) {
         self.archive = archive
         self.transcriber = transcriber
         self.store = store
+        if let audioHubRuntime {
+            self.onAudioIndexPersisted = { [weak audioHubRuntime] meetingID in
+                // Selected assets remain manifest-owned; this wake only asks
+                // the configured coordinator to replay its listed meeting.
+                audioHubRuntime?.wake(originalsRoot: AmbientStorage.ambientRoot)
+                _ = meetingID
+            }
+        }
     }
 
     func createMeeting(start: Date, end: Date, title: String? = nil,
@@ -195,6 +207,7 @@ final class MeetingBackfill {
                                 endedAt: finish, fileName: chunk.fileName))
         }
         try JSONEncoder().encode(pinned).write(to: directory.appendingPathComponent("index.json"), options: .atomic)
+        onAudioIndexPersisted?(record.id)
     }
 
     private func pinnedAudio(for record: MeetingRecord) -> (chunks: [MeetingAudioArchive.Chunk], directory: URL)? {

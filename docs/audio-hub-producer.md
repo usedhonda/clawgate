@@ -1,8 +1,8 @@
 # Native audio Hub admission foundation
 
-Status: inactive foundation. No producer loop, source scan, upload or local audio
-release is enabled by these types, even when an audio credential is provisioned.
-Source capacity and migration checkpoints must be agreed before activation.
+Status: explicit-manifest runtime. Source-only credentials do not activate it.
+The production caller requires a private owner-agreed manifest; without one,
+no source scan or upload occurs. No local original deletion is implemented.
 
 ## Ownership and scope
 
@@ -75,7 +75,7 @@ references and blob/payload fields; this is not an audio-original uploader.
 The request limit is 20 MiB, response streaming stops above 64 KiB, and request
 and resource timeouts are 30 seconds. Only a 200/201 response with the matching
 metadata receipt returns an acknowledgement. Transport never dequeues by itself,
-logs content/credentials, or falls back to Gateway. No background caller exists.
+logs content/credentials, or falls back to Gateway. The explicit-manifest runtime below is its sole background caller.
 
 ## Receipt boundary
 
@@ -168,7 +168,7 @@ then writes the receipt and removal in one atomic outbox state. A send or
 receipt failure retains pending ID/body. Ambiguous persistence failures require
 reopen. File locks and durable-state comparison reject stale writers rather than
 letting an old scan/delivery instance overwrite a newer queue or cursor state.
-These helpers have no background caller and do not grant activation permission.
+These helpers are called by the explicit-manifest runtime below, not by construction alone.
 
 ## Selected-original upload and missing-source handling (inactive)
 
@@ -180,7 +180,7 @@ replacement and mutation fail; no open handle silently extends source retention.
 No original bytes are copied into the queue or a new retained audio archive.
 
 `AudioHubOriginalTransport` requires an already frozen event envelope containing
-the matching blob hash and source/revision binding. It advertises no runtime
+the matching blob hash and source/revision binding. The manifest coordinator is its only runtime
 caller. Explicit delivery checks authenticated storage/STT capabilities, binds
 the pipeline, then persists upload ID and offsets in the existing capped control
 state. Chunks are at most 4 MiB. Lost chunk responses replay the same upload ID,
@@ -205,6 +205,32 @@ missing or changed. The existing thirty-day pruning is unchanged.
 
 ## Pending activation decisions
 
+### Runtime activation boundary
+
+`AudioHubRuntime` is the only bounded coordinator. It can be constructed only
+from a private owner-installed activation manifest. The manifest must list each
+session's exact initial inode/device/length snapshot plus byte offset and
+physical line, and may list only caller-selected meeting index rows with their
+verified original hash/length. A missing manifest means **unconfigured**;
+runtime never chooses EOF, zero, timestamps, directory enumeration, or a
+historical backfill boundary.
+
+The approved budgets are one metadata state of 128 MiB and one control state of
+16 MiB (global lanes, not per-session/per-meeting multipliers). Recovery creates
+only the listed scanners and replays only the listed selected index assets.
+App startup, a successful raw append, and an atomically written selected index
+wake one coalesced background worker. Each pass scans at most 64 complete lines
+per listed session and drains at most 64 records; full batches continue, while
+failures retain exact pending bytes and back off 30 seconds. Shutdown cancels the
+worker. The existing source-specific private provision is loaded without changing
+Gateway configuration. Record kind selects the existing metadata or original
+transport; only matching durable receipts dequeue. There is no Gateway fallback.
+Manifest bytes are deducted from the one control budget. Index reads walk owned
+directory descriptors with no symlink following, bounded size and change checks.
+Ambient status exposes only configured/error state for this route. Missing/changed originals remain
+retained failures and do not evict queue records or extend the existing
+thirty-day audio policy.
+
 Originals use `selected-meeting-original` with explicit source provenance.
 `AudioHubSelectedMeetingAdmission` accepts only caller-supplied selected index
 rows and never discovers or backfills meeting directories. Its source reference
@@ -212,11 +238,9 @@ is `clawgate:meeting:<meeting-id>:audio:<index-row-id>`; row attributes plus the
 verified original hash/length define the immutable revision. Index reorder or
 unrelated append replays the first envelope and native ID. Unknown row clocks
 are durable excluded gaps, never processing-time timestamps.
-Metadata/control byte budgets have no production defaults. The pending runtime
-work connects explicit selected-index snapshots to the inactive admission helper,
-then enables delivery after the agreed start boundary and policies. The raw
-scanner, original loader, upload progress and receipt helpers are available but
-inactive. Missing-source gaps do not authorize queue eviction, file restoration,
+Metadata/control byte budgets remain mandatory manifest fields and must match
+the approved values. Installing a manifest is a separate activation step after
+source/mirror checkpoint agreement; source compilation is not that agreement. Missing-source gaps do not authorize queue eviction, file restoration,
 or retention extension. Helper crash proofs are not natural source-to-Hub
 delivery or consumer acceptance.
 

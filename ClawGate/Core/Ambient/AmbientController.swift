@@ -141,6 +141,8 @@ final class AmbientController {
         var jevBreakerOpen: Bool = false
         var jevLastLatencyMs: Int? = nil
         var jevLastError: String? = nil
+        var audioHubConfigured: Bool = false
+        var audioHubLastError: String? = nil
     }
 
     /// One participant's speaking span from Meet's tile indicator (unix seconds).
@@ -156,6 +158,7 @@ final class AmbientController {
     private let transcriber: AmbientTranscriber
     private let diarizer: AmbientDiarizer
     private let meetingAudioArchive: MeetingAudioArchive
+    private let audioHubRuntime: AudioHubRuntime?
 
     private let state = DispatchQueue(label: "ai.clawgate.ambient.state")
     private let work = DispatchQueue(label: "ai.clawgate.ambient.transcribe")
@@ -199,6 +202,10 @@ final class AmbientController {
     /// The Bool is `resume`: continue from the written parts instead of
     /// starting over.
     var onMinutesRequested: ((MeetingRecord, Bool) -> Void)?
+    /// Optional native audio Hub hook. It is called only after raw JSONL has
+    /// been durably appended; the hook decides whether an explicit manifest
+    /// admits that session and may fail without affecting capture.
+    var onRawTranscriptPersisted: ((String) -> Void)?
     static let meetingHeartbeatTTL: TimeInterval = 30
     /// Chrome chunks wait this long so speaking edges for their span arrive first.
     static let speakerEdgeWaitSeconds = 3
@@ -242,9 +249,11 @@ final class AmbientController {
     /// Runs only while streaming.
     private lazy var healthMonitor = AmbientHealthMonitor(controller: self, log: log)
 
-    init(configStore: ConfigStore, log: @escaping (String) -> Void = { _ in }) {
+    init(configStore: ConfigStore, log: @escaping (String) -> Void = { _ in },
+         audioHubRuntime: AudioHubRuntime? = nil) {
         self.configStore = configStore
         self.log = log
+        self.audioHubRuntime = audioHubRuntime
         self.capture = AmbientCaptureManager(chunkSeconds: 30, overlapSeconds: 3, utteranceChunking: true, log: log)
         self.transcriber = AmbientTranscriber()
         self.transcriber.server = WhisperServer(log: log)
@@ -256,6 +265,13 @@ final class AmbientController {
         }
         self.systemTap.onChunkReady = { [weak self] chunk in
             self?.handleChunk(chunk)
+        }
+        if let audioHubRuntime {
+            audioHubRuntime.wake(originalsRoot: AmbientStorage.ambientRoot)
+            self.onRawTranscriptPersisted = { [weak audioHubRuntime] sessionID in
+                guard let audioHubRuntime else { return }
+                audioHubRuntime.wake(originalsRoot: AmbientStorage.ambientRoot)
+            }
         }
         self.capture.onQuarantine = { [weak self] reason in
             self?.setAutoResumeBlocked(reason: reason)
@@ -742,7 +758,9 @@ final class AmbientController {
                 jevCostTodayUSD: JevLedger().daily(on: now).costUSD,
                 jevBreakerOpen: JevBreaker().shouldSkip(now: now),
                 jevLastLatencyMs: jevLastLatencyMs,
-                jevLastError: jevLastError
+                jevLastError: jevLastError,
+                audioHubConfigured: audioHubRuntime != nil,
+                audioHubLastError: audioHubRuntime?.lastFailure
             )
         }
     }
@@ -887,6 +905,9 @@ final class AmbientController {
                 if !kept.isEmpty {
                     do {
                         try self.appendTranscripts(kept)
+                        if let sessionID = self.sessionID {
+                            self.onRawTranscriptPersisted?(sessionID)
+                        }
                     } catch {
                         self.state.sync { self.lastError = "\(error)" }
                         self.log("ambient raw transcript persistence failed: \(error)")
