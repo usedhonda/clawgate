@@ -46,9 +46,35 @@ before upload. A path reference alone proves neither bytes nor current coverage.
 State writes use private atomic replacement and file/directory synchronization.
 An ambiguous storage error prevents further mutation until reopen. A matching
 snapshot is required to acknowledge a record. The latest saved receipt is
-bounded evidence, not an unlimited historical ledger. Source scan checkpoints
+bounded evidence, not an unlimited historical ledger. Source scan positions
 and source-file expiration handling remain activation work; expired or missing
 originals must be explicit gaps, never fabricated ACKs.
+
+## Inactive control journal and metadata transport
+
+`AudioHubControlStore` requires a separately supplied positive `maxControlBytes`,
+without a default. Its private, atomically synchronized journal records each
+source reference/revision as either `enqueued` or `excluded`. `enqueued` means
+the immutable envelope was durably admitted to the outbound queue, not delivered
+to the Hub. `excluded` records `source_clock_unknown` with no transcript text.
+Replay of the same reference/revision is idempotent; revisions are distinct.
+
+The control-state budget is checked before enqueuing. If queue persistence
+fails, no admission checkpoint is written. If the queue succeeds but control
+persistence fails, the pending bytes survive and control mutation is refused
+until reopen. Replay then reuses the same native ID and envelope. A failed gap
+write cannot advance a checkpoint or be reported as an ACK. There is no implicit
+control-record eviction, receipt success, or source-file scan advancement.
+
+`AudioHubMetadataTransport` sends one persisted `clawgate.audio-transcript.v1`
+record only when explicitly called. It checks the source UUID, source/revision
+binding and envelope hash, then verifies authenticated source-specific HTTPS
+capabilities before posting the unchanged bytes. It rejects redirects, original
+references and blob/payload fields; this is not an audio-original uploader.
+The request limit is 20 MiB, response streaming stops above 64 KiB, and request
+and resource timeouts are 30 seconds. Only a 200/201 response with the matching
+metadata receipt returns an acknowledgement. Transport never dequeues by itself,
+logs content/credentials, or falls back to Gateway. No background caller exists.
 
 ## Receipt boundary
 
@@ -84,10 +110,10 @@ and immutable envelopes never overwrite the historical mirror's metadata.
 `occurred_at` comes only from the raw segment's Unix `capturedAt`. Missing or
 invalid clocks produce a body-free control-gap result with
 `reason=source_clock_unknown` and `coverage=excluded`, not an event dated at
-processing time. The result is not a durable gap record or an ACK: a future
-caller must persist it in the separately bounded control store before advancing
-any source checkpoint. If quota or physical storage prevents even that write,
-the producer must surface failure and keep the checkpoint unadvanced.
+processing time. The pure builder result is not durable; the control journal
+persists that exclusion before returning admission success. It is still not a
+delivery ACK or a scan-position cursor. If quota or physical storage prevents
+the write, the producer must surface failure and keep scan positions unadvanced.
 
 Absent source privacy flags remain JSON null (unknown); observed flags are
 preserved, never replaced with an invented clear state. Downstream authorization
@@ -97,8 +123,15 @@ Metadata-only transcripts do not create STT jobs; originals do.
 ## Pending activation decisions
 
 Originals use `selected-meeting-original` with explicit source provenance.
-Metadata/control byte budgets have no production defaults. Durable control-gap
-storage, source integration, native start and mirror final checkpoints remain
-activation work. The mirror owner stops its route only after source ACK, MCP
-read and required consumer acceptance. None of the pure builder or receipt
-helpers enables a background scan or delivery route.
+Metadata/control byte budgets have no production defaults. The pending runtime
+work is an exact-raw-line scanner and scan-position persistence, propagation of
+source write failures, a contained/hash-checked original loader and chunk upload,
+receipt-to-queue orchestration, and explicit original-expiry gaps. The current
+control journal handles only transcript clock gaps, not original expiration.
+
+Native start and mirror final checkpoints are not yet agreed. Agree the precise
+source reference/revision boundary with the migration owner before activating a
+source scan; never infer the boundary from timestamps or mirror record counts.
+Historical mirror data is not rewritten or deleted. The mirror owner stops its
+route only after source ACK, MCP read and required consumer acceptance. No helper
+enables a background scan or delivery route merely by being constructed.
