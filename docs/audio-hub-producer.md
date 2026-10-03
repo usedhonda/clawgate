@@ -245,6 +245,20 @@ the same control budget. The first observed reason is retained; it is neither
 an expiry diagnosis nor an ACK. Failure to save that gap remains an explicit
 failure, with no successful admission or cursor advancement.
 
+Registration inspects and persists each explicit index row independently. A
+missing, unreadable or unsafe row cannot prevent later healthy rows from being
+registered; the call still returns aggregate failure after visiting all rows.
+Before a verified original reference exists, failures contain only meeting ID,
+index/row SHA-256 identities and a fixed reason, never invented original hash,
+length, bytes, receipts or successful checkpoints. They share the control cap
+and retain the first observation per row across retries/reopen. Unsafe/read
+failures are distinct from missing/changed and never diagnose expiry.
+Historical committed-original failures may retain the manifest's already
+verified reference as diagnostics only; they never become upload registrations.
+Existing registered rows reuse their first asset/index binding on index-only
+updates. Failure-observation persistence errors remain explicit non-success;
+no admission or delivery ACK is fabricated.
+
 If registration fails, the Hub lane records an explicit failure and cannot claim
 coverage/ACK. Local raw/index persistence and the existing actuator remain intact;
 registration failure never discards the user's source recording. Unregistered

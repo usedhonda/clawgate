@@ -62,6 +62,28 @@ final class AudioHubSourceRegistrationTests: XCTestCase {
         XCTAssertEqual(try control.selectedRegistrations(), [first])
     }
 
+    func testUnknownRowFailureIsBoundedBodyFreeAndDurable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controlURL = root.appendingPathComponent("control")
+        let failure = AudioHubControlStore.SelectedRegistrationFailure(meetingID: "m1",
+            indexSHA256: String(repeating: "a", count: 64), rowSHA256: String(repeating: "b", count: 64),
+            reason: "source_original_read_failed", knownOriginal: nil)
+        let control = try AudioHubControlStore(directory: controlURL, sourceUUID: source, maxControlBytes: 600)
+        try control.recordSelectedRegistrationFailure(failure)
+        try control.recordSelectedRegistrationFailure(failure)
+        XCTAssertTrue(try control.selectedRegistrations().isEmpty)
+        XCTAssertTrue(try control.checkpoints().isEmpty)
+        let second = AudioHubControlStore.SelectedRegistrationFailure(meetingID: "m1",
+            indexSHA256: failure.indexSHA256, rowSHA256: String(repeating: "c", count: 64),
+            reason: "source_original_missing", knownOriginal: nil)
+        XCTAssertThrowsError(try control.recordSelectedRegistrationFailure(second)) {
+            XCTAssertEqual($0 as? AudioHubControlStore.Failure, .capacityExceeded)
+        }
+        let reopened = try AudioHubControlStore(directory: controlURL, sourceUUID: source, maxControlBytes: 600)
+        XCTAssertEqual(try reopened.selectedRegistrationFailures(), [failure])
+    }
+
     func testInspectReturnsActualSafeAssetReference() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

@@ -34,6 +34,17 @@ final class AudioHubControlStore {
         let assets: [AudioHubSelectedMeetingAdmission.ManifestAsset]
     }
 
+    /// Body-free observation when no new asset could be registered. Hashes
+    /// identify the supplied index/row, not unread original bytes. Historical
+    /// coverage may retain its already verified reference without upload intent.
+    struct SelectedRegistrationFailure: Codable, Equatable {
+        let meetingID: String
+        let indexSHA256: String
+        let rowSHA256: String
+        let reason: String
+        let knownOriginal: AudioHubOutbox.OriginalReference?
+    }
+
     struct Upload: Codable, Equatable {
         let sourceRecordRef: String
         let revision: String
@@ -56,6 +67,7 @@ final class AudioHubControlStore {
         var uploads: [String: Upload]?
         var selectedRegistrations: [String: SelectedRegistration]?
         var selectedGapReasons: [String: String]?
+        var selectedRegistrationFailures: [String: SelectedRegistrationFailure]?
     }
 
     private let stateURL: URL
@@ -179,6 +191,27 @@ final class AudioHubControlStore {
         lock.lock(); defer { lock.unlock() }
         guard !storageFailed else { throw Failure.storageFailed }
         return state.selectedGapReasons ?? [:]
+    }
+
+    func recordSelectedRegistrationFailure(_ failure: SelectedRegistrationFailure) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard Self.validSelectedFailure(failure) else { throw Failure.invalidState }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        // Reason/index changes must not multiply an observation for the same row.
+        let identity = Self.hash(try encoder.encode([failure.meetingID, failure.rowSHA256]))
+        if state.selectedRegistrationFailures?[identity] != nil { return }
+        var candidate = state
+        var failures = candidate.selectedRegistrationFailures ?? [:]
+        failures[identity] = failure
+        candidate.selectedRegistrationFailures = failures
+        try replace(candidate)
+    }
+
+    func selectedRegistrationFailures() throws -> [SelectedRegistrationFailure] {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        return (state.selectedRegistrationFailures ?? [:]).sorted { $0.key < $1.key }.map(\.value)
     }
 
     /// Freeze the exact first-read bytes before queue/journal admission.
@@ -380,6 +413,11 @@ final class AudioHubControlStore {
             (value.selectedRegistrations ?? [:])[key] != nil &&
             (reason == "source_original_missing" || reason == "source_original_changed")
         }) else { return false }
+        guard (value.selectedRegistrationFailures ?? [:]).allSatisfy({ key, failure in
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            guard let bytes = try? encoder.encode([failure.meetingID, failure.rowSHA256]) else { return false }
+            return key == hash(bytes) && validSelectedFailure(failure)
+        }) else { return false }
         for (id, u) in value.uploads ?? [:] {
             guard !u.sourceRecordRef.isEmpty, !u.revision.isEmpty, !u.pipeline.isEmpty,
                   u.bodySHA256.count == 64, u.bodySHA256.allSatisfy({ $0.isHexDigit }),
@@ -420,6 +458,19 @@ final class AudioHubControlStore {
             }
         }
         return true
+    }
+
+    private static func validSelectedFailure(_ failure: SelectedRegistrationFailure) -> Bool {
+        guard validSession(failure.meetingID),
+              [failure.indexSHA256, failure.rowSHA256].allSatisfy({
+                  $0.count == 64 && $0.allSatisfy({ "0123456789abcdef".contains($0) })
+              }), ["source_original_missing", "source_original_changed", "source_original_unsafe",
+                   "source_original_read_failed", "selected_registration_failed"].contains(failure.reason) else { return false }
+        guard let original = failure.knownOriginal else { return true }
+        return original.sourceRelativePath.hasPrefix("meetings/\(failure.meetingID)/audio/") &&
+            original.byteLength > 0 &&
+            (try? AudioHubOutbox.OriginalReference(sourceRelativePath: original.sourceRelativePath,
+                sha256: original.sha256, byteLength: original.byteLength)) == original
     }
 
     private static func validSelectedRegistration(_ registration: SelectedRegistration) -> Bool {

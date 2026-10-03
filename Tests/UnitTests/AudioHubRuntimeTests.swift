@@ -176,6 +176,102 @@ final class AudioHubRuntimeTests: XCTestCase {
         }
     }
 
+    func testSelectedRegistrationIsolatesUnreadRowsAndPreservesFirstBinding() throws {
+        for kind in ["missing", "read", "unsafe"] {
+            let fixture = try makeFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var runtime = try fixture.open()
+            let audio = fixture.root.appendingPathComponent("meetings/m/audio")
+            try FileManager.default.createDirectory(at: audio, withIntermediateDirectories: true)
+            let badFile = audio.appendingPathComponent("bad.m4a")
+            if kind == "read" {
+                try Data("unread".utf8).write(to: badFile)
+                XCTAssertEqual(chmod(badFile.path, 0), 0)
+            } else if kind == "unsafe" {
+                try FileManager.default.createSymbolicLink(at: badFile,
+                    withDestinationURL: fixture.root.appendingPathComponent("outside"))
+            }
+            defer { if kind == "read" { _ = chmod(badFile.path, 0o600) } }
+            let bad = MeetingAudioArchive.Chunk(id: "bad", source: "mic", startedAt: 2, endedAt: 3, fileName: "bad.m4a")
+            let good = MeetingAudioArchive.Chunk(id: "good", source: "mic", startedAt: 3, endedAt: 4, fileName: "good.m4a")
+            try Data("healthy".utf8).write(to: audio.appendingPathComponent("good.m4a"))
+            let index = try JSONEncoder().encode([bad, good])
+            XCTAssertThrowsError(try runtime.registerSelectedCommit(meetingID: "m", indexData: index))
+            XCTAssertEqual(runtime.lastFailure, "selected_registration_failed")
+            let failures = try runtime.registrationFailures()
+            XCTAssertEqual(failures.count, 1)
+            XCTAssertNil(failures.first?.knownOriginal)
+            XCTAssertEqual(failures.first?.reason, kind == "missing" ? "source_original_missing" :
+                kind == "read" ? "source_original_read_failed" : "source_original_unsafe")
+            XCTAssertEqual(try runtime.pendingCount(), 0)
+            try index.write(to: audio.appendingPathComponent("index.json"))
+            runtime = try fixture.open()
+            XCTAssertEqual(try runtime.registrationFailures(), failures)
+            try runtime.recover()
+            let pending = try runtime.pendingRecords()
+            XCTAssertEqual(pending.count, 1)
+            XCTAssertEqual(pending.first?.sourceRecordRef, "clawgate:meeting:m:audio:good")
+            // A source-index-only update must not change first registration bytes/ID.
+            XCTAssertThrowsError(try runtime.registerSelectedCommit(meetingID: "m",
+                indexData: JSONEncoder().encode([good, bad])))
+            runtime = try fixture.open()
+            try runtime.recover()
+            XCTAssertEqual(try runtime.pendingRecords(), pending)
+            let state = try Data(contentsOf: fixture.root.appendingPathComponent("runtime/control/control.json"))
+            let json = try XCTUnwrap(JSONSerialization.jsonObject(with: state) as? [String: Any])
+            let registrations = try XCTUnwrap(json["selectedRegistrations"] as? [String: Any])
+            XCTAssertEqual(registrations.count, 1)
+            let observations = try XCTUnwrap(json["selectedRegistrationFailures"] as? [String: Any])
+            let observation = try XCTUnwrap(observations.values.first as? [String: Any])
+            XCTAssertNil(observation["assets"])
+            XCTAssertNil(observation["sha256"])
+            XCTAssertNil(observation["byteLength"])
+        }
+    }
+
+    func testPrunedBaselineIsDiagnosticOnlyAndHealthyRowStillRegisters() throws {
+        for changed in [false, true] {
+            let fixture = try makeFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var runtime = try fixture.open()
+            let audio = fixture.root.appendingPathComponent("meetings/m/audio")
+            try FileManager.default.createDirectory(at: audio, withIntermediateDirectories: true)
+            let baseline = MeetingAudioArchive.Chunk(id: "old", source: "mic", startedAt: 1, endedAt: 2, fileName: "old.m4a")
+            let good = MeetingAudioArchive.Chunk(id: "good", source: "mic", startedAt: 3, endedAt: 4, fileName: "good.m4a")
+            try Data("healthy".utf8).write(to: audio.appendingPathComponent("good.m4a"))
+            if changed { try Data("changed".utf8).write(to: audio.appendingPathComponent("old.m4a")) }
+            let index = try JSONEncoder().encode([baseline, good])
+            XCTAssertThrowsError(try runtime.registerSelectedCommit(meetingID: "m", indexData: index))
+            let failure = try XCTUnwrap(runtime.registrationFailures().first)
+            XCTAssertEqual(failure.knownOriginal?.sha256, Self.hash(Data("old".utf8)))
+            XCTAssertEqual(failure.knownOriginal?.byteLength, 3)
+            XCTAssertEqual(failure.reason, changed ? "source_original_changed" : "source_original_missing")
+            try index.write(to: audio.appendingPathComponent("index.json"))
+            runtime = try fixture.open()
+            try runtime.recover()
+            XCTAssertEqual(try runtime.pendingRecords().map(\.sourceRecordRef), ["clawgate:meeting:m:audio:good"])
+        }
+    }
+
+    func testUnavailableFailureStoreNeverReturnsRegistrationSuccess() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let runtime = try fixture.open()
+        let lock = fixture.root.appendingPathComponent("runtime/control/.control.lock")
+        try FileManager.default.removeItem(at: lock)
+        try FileManager.default.createDirectory(at: lock, withIntermediateDirectories: true)
+        let missing = MeetingAudioArchive.Chunk(id: "missing", source: "mic", startedAt: 1, endedAt: 2, fileName: "missing.m4a")
+        XCTAssertThrowsError(try runtime.registerSelectedCommit(meetingID: "m",
+            indexData: JSONEncoder().encode([missing]))) {
+            XCTAssertEqual($0 as? AudioHubControlStore.Failure, .storageFailed)
+        }
+        XCTAssertEqual(runtime.lastFailure, "selected_registration_failed")
+        XCTAssertEqual(try runtime.pendingCount(), 0)
+        XCTAssertThrowsError(try runtime.registrationFailures())
+        let reopened = try fixture.open()
+        XCTAssertTrue(try reopened.registrationFailures().isEmpty)
+    }
+
     private struct Fixture {
         let root: URL
         func open() throws -> AudioHubRuntime {

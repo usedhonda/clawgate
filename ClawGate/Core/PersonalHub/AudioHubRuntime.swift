@@ -246,29 +246,68 @@ final class AudioHubRuntime {
             guard Self.validComponent(meetingID), indexData.count <= manifest.maxControlBytes else { throw Failure.invalidPath }
             let rows = try JSONDecoder().decode([MeetingAudioArchive.Chunk].self, from: indexData)
             guard !rows.isEmpty, Set(rows.map(\.id)).count == rows.count else { throw Failure.invalidPath }
-            var assets: [AudioHubSelectedMeetingAdmission.ManifestAsset] = []
-            let registered = try control.selectedRegistrations().filter { $0.meetingID == meetingID }.flatMap(\.assets)
+            let registrations = try control.selectedRegistrations().filter { $0.meetingID == meetingID }
+            var firstFailure: Error?
             for row in rows {
-                guard Self.validComponent(row.id), Self.validComponent(row.fileName) else { throw Failure.invalidPath }
-                let reference = try AudioHubOriginalReader.inspect(root: meetingsRoot,
-                    relativePath: "meetings/\(meetingID)/audio/\(row.fileName)")
-                let covered = manifest.committedOriginals.contains {
-                    $0.meetingID == meetingID && $0.chunkID == row.id && $0.sha256 == reference.sha256 &&
-                    $0.byteLength == reference.byteLength && $0.sourceChunk.source == row.source &&
+                let existing = registrations.first { $0.assets.contains { $0.row == row } }
+                let baseline = manifest.committedOriginals.first {
+                    $0.meetingID == meetingID && $0.chunkID == row.id && $0.sourceChunk.source == row.source &&
                     $0.sourceChunk.startedAt == row.startedAt && $0.sourceChunk.endedAt == row.endedAt
                 }
-                let asset = AudioHubSelectedMeetingAdmission.ManifestAsset(row: row, original: reference)
-                if !covered && !registered.contains(asset) { assets.append(asset) }
+                var knownOriginal = existing?.assets.first { $0.row == row }?.original
+                do {
+                    guard Self.validComponent(row.id), Self.validComponent(row.fileName) else {
+                        throw AudioHubOriginalReader.Error.unsafePath
+                    }
+                    if knownOriginal == nil, let baseline {
+                        knownOriginal = try AudioHubOutbox.OriginalReference(
+                            sourceRelativePath: "meetings/\(meetingID)/audio/\(row.fileName)",
+                            sha256: baseline.sha256, byteLength: baseline.byteLength)
+                    }
+                    if let knownOriginal, existing != nil || baseline != nil {
+                        _ = try AudioHubOriginalReader(root: meetingsRoot, reference: knownOriginal)
+                        // Keep the first index bytes even after reorder/unrelated additions.
+                        continue
+                    }
+                    let reference = try AudioHubOriginalReader.inspect(root: meetingsRoot,
+                        relativePath: "meetings/\(meetingID)/audio/\(row.fileName)")
+                    let asset = AudioHubSelectedMeetingAdmission.ManifestAsset(row: row, original: reference)
+                    try control.registerSelected(.init(meetingID: meetingID, indexData: indexData, assets: [asset]))
+                } catch {
+                    let reason: String
+                    switch error as? AudioHubOriginalReader.Error {
+                    case .missingOriginal: reason = "source_original_missing"
+                    case .contentMismatch, .sourceChanged: reason = "source_original_changed"
+                    case .unsafePath: reason = "source_original_unsafe"
+                    case .readFailed, .invalidRange: reason = "source_original_read_failed"
+                    default: reason = "selected_registration_failed"
+                    }
+                    do {
+                        if let existing, reason == "source_original_missing" || reason == "source_original_changed" {
+                            try control.recordSelectedGap(registration: existing, reason: reason)
+                        } else {
+                            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                            let rowBytes = try encoder.encode(row)
+                            try control.recordSelectedRegistrationFailure(.init(meetingID: meetingID,
+                                indexSHA256: Self.hash(indexData), rowSHA256: Self.hash(rowBytes),
+                                reason: reason, knownOriginal: knownOriginal))
+                        }
+                    } catch {
+                        // Durable observation failure is never admission success.
+                        if firstFailure == nil { firstFailure = error }
+                    }
+                    if firstFailure == nil { firstFailure = error }
+                }
             }
-            for asset in assets {
-                // Each original owns its admission/gap; one missing asset must
-                // not strand unrelated originals from the same index commit.
-                try control.registerSelected(.init(meetingID: meetingID, indexData: indexData, assets: [asset]))
-            }
+            if let firstFailure { throw firstFailure }
         } catch {
             recordRegistrationFailure("selected_registration_failed")
             throw error
         }
+    }
+
+    private static func hash(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func recordRegistrationFailure(_ value: String) {
@@ -284,6 +323,10 @@ final class AudioHubRuntime {
     }
 
     func pendingCount() throws -> Int { try outbox.pending(limit: Int.max).count }
+
+    func registrationFailures() throws -> [AudioHubControlStore.SelectedRegistrationFailure] {
+        try control.selectedRegistrationFailures()
+    }
 
     func registrationGapReasons() throws -> [String: String] { try control.selectedGapReasons() }
 
