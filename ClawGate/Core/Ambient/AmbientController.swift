@@ -972,9 +972,19 @@ final class AmbientController {
         // Raw persistence is the admission boundary. A cleaned markdown write
         // remains derived and must not hide a successfully saved raw segment.
         try AmbientRawTranscriptAppender.append(segments, to: rawURL) { [weak self] snapshot in
-            guard let self, let runtime = self.audioHubRuntime, let sessionID = self.sessionID else { return }
+            guard let self, let sessionID = self.sessionID else { return }
+            // Local persistence continues either way; an unregistered session
+            // leaves a durable, body-free gap marker instead of only a log.
+            guard let runtime = self.audioHubRuntime else {
+                AudioHubRawGapMarker.record(sessionDirectory: dir, sessionID: sessionID, reason: "runtime_unavailable")
+                return
+            }
             do { try runtime.registerRawWriter(sessionID: sessionID, snapshot: snapshot) }
-            catch { self.log("audio Hub raw registration failed; continuing local source persistence") }
+            catch {
+                let reason = (error as? AudioHubRuntime.Failure).map { "registration_\($0)" } ?? "registration_failed"
+                AudioHubRawGapMarker.record(sessionDirectory: dir, sessionID: sessionID, reason: reason)
+                self.log("audio Hub raw registration failed; continuing local source persistence")
+            }
         }
         append(mdLines, to: mdURL)
     }

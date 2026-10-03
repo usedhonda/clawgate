@@ -292,3 +292,12 @@ either boundary from timestamps or record counts.
 Historical mirror data is not rewritten or deleted. The mirror owner stops its
 route only after source ACK, MCP read and required consumer acceptance. No helper
 enables a background scan or delivery route merely by being constructed.
+
+## Unregistered raw sessions
+
+When the first registration of a raw session fails (runtime absent, control
+store full or failing, or a non-empty unregistered file), local persistence
+continues and the session directory gets a body-free `hub-raw-gap.json`
+(`version`, `sessionID`, `reason`, `recordedAt`). The first reason wins. It is
+independent of the control store, never retries, backfills or uploads, and
+marks the session as not covered by the native producer.
