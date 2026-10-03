@@ -1,5 +1,30 @@
 import Foundation
 
+/// Model selection for the existing sequential minutes route. Deliberately
+/// independent of the not-yet-supported isolated execution flags below.
+struct MinutesModelSendParams: Encodable {
+    let sessionKey: String
+    let message: String
+    let idempotencyKey: String
+    let model = MinutesExecutionSendParams.model
+    let thinking = MinutesExecutionSendParams.thinking
+}
+
+enum MinutesModelAck {
+    static func validate(_ payload: IncomingPayload?, expectedRunID: String) throws -> String {
+        guard let p = payload, p.status == "started", p.runId == expectedRunID,
+              !expectedRunID.isEmpty, p.hasFallbackReason else {
+            throw MinutesExecutionTransportError.invalidAcknowledgement
+        }
+        guard p.resolvedModel == MinutesExecutionSendParams.model,
+              p.resolvedThinking == MinutesExecutionSendParams.thinking,
+              p.degraded == false, p.fallbackReason == nil else {
+            throw MinutesExecutionTransportError.modelMismatch
+        }
+        return expectedRunID
+    }
+}
+
 /// Dedicated minutes wire, not a replacement for ordinary chat or Pet Log.
 /// No production caller until the Gateway activation gate is satisfied.
 struct MinutesExecutionSendParams: Encodable {
@@ -132,6 +157,15 @@ struct MinutesTerminalPayload: Decodable {
 }
 
 extension OpenClawWSClient {
+    /// Explicit model selection, not an isolation fallback. Used only by the
+    /// current sequential part/overview path until the separate activation gate.
+    func sendMinutesAwaitingModelRunID(_ message: String, sessionKey: String,
+                                       idempotencyKey: String) async throws -> String {
+        let payload = try await request(method: "chat.send", params: MinutesModelSendParams(
+            sessionKey: sessionKey, message: message, idempotencyKey: idempotencyKey))
+        return try MinutesModelAck.validate(payload, expectedRunID: idempotencyKey)
+    }
+
     /// The caller must durably reserve this key first. Never retry as chat.
     func sendMinutesExecution(_ message: String, sessionKey: String,
                               idempotencyKey: String) async throws -> MinutesExecutionAck {

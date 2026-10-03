@@ -201,6 +201,23 @@ final class MeetingMinutesRetryTests: XCTestCase {
         XCTAssertEqual(generating.elapsedSeconds, 3)
     }
 
+    func testWrongMinutesModelStopsWithoutRetryAndKeepsCheckpoint() throws {
+        let record = meeting()
+        model.requestMinutes(for: record)
+        let token = try XCTUnwrap(model.summonWatchdogTokenForTesting)
+        var job = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
+        job.completed = [nil]
+        try job.save(store: store, id: record.id)
+        model.invokeSummonSendFailureForTesting(token: token, source: PetModel.minutesSource,
+                                               error: MinutesExecutionTransportError.modelMismatch)
+        drainMain()
+        XCTAssertNil(model.pendingMinutesMeetingIDForTesting)
+        XCTAssertFalse(model.isSummonBusy)
+        XCTAssertEqual(store.load(id: record.id)?.minutesState, "failed")
+        XCTAssertEqual(MeetingMinutesJob.load(store: store, id: record.id)?.completed.count, 1)
+        XCTAssertEqual(model.minutesAttemptsForTesting[record.id], 1)
+    }
+
     func testExplicitRequestsArePrioritizedAndPersistAcrossMetadataRefresh() throws {
         let legacy = MeetingRecord(id: "legacy", source: "meet", startedAt: 1_790_000_000,
                                    endedAt: 1_790_000_100, timeZone: "UTC", title: "legacy",

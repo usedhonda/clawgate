@@ -2317,7 +2317,14 @@ final class PetModel: NSObject, ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
+                let runId: String
+                if source == Self.minutesSource || source == Self.minutesSummarySource {
+                    runId = try await wsClient.sendMinutesAwaitingModelRunID(
+                        prompt, sessionKey: sessionKey, idempotencyKey: token.uuidString)
+                    Self.petLogTelemetry.info("minutesModelAck source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) model=gpt-6.1-sol thinking=high")
+                } else {
+                    runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
+                }
                 await MainActor.run {
                     self.acceptSharedSummonRun(runId: runId, token: token)
                 }
@@ -2353,6 +2360,17 @@ final class PetModel: NSObject, ObservableObject {
         guard let owner = sharedSummonOwner,
               owner.token == token, owner.source == source else { return }
         if source == Self.minutesSource, pendingMinutesMeetingID != nil {
+            if error is MinutesExecutionTransportError, let id = pendingMinutesMeetingID {
+                // A wrong/missing resolution is not a transient generation
+                // failure. Keep all checkpoints; do not repeatedly ask an
+                // unverified model to regenerate this part.
+                releaseSharedSummon(owner)
+                pendingMinutesMeetingID = nil
+                pendingMinutesSegmentIDs = []
+                finishMinutes(id: id, state: "failed", error: "指定モデル GPT 6.1 Sol / high での受付を確認できませんでした。完成済みのパートは保持しています。")
+                drainPendingMinutes()
+                return
+            }
             failMinutesPart(reason: "送信に失敗しました: \(error)")
         } else {
             releaseSharedSummon(owner)

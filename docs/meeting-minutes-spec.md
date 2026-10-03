@@ -66,6 +66,14 @@ catalog model availability alone is not successful model execution. The current
 Gateway's closed send schema does not admit the three flags, so the existing
 working route is not switched to the new helpers.
 
+Model selection is independent of that isolation gate. The existing sequential
+part and overview path sends the supported `model`/`thinking` parameters and
+validates its own run ID, exact resolution, `degraded=false` and explicit null
+`fallbackReason`. An unverified resolution stops that part while preserving its
+completed checkpoints; it is not automatically retried on another model. Other
+chat and Pet Log model defaults are unchanged. This supported sequential route
+does not claim isolated history, retained-result recovery or parallel execution.
+
 The sidecar binds the frozen job fingerprint and exact envelope hash per
 index. It imports validated legacy prefix results (including silent results),
 reserves at most two live attempts, and saves each immutable attempt key before

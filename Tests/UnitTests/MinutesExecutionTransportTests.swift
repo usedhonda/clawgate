@@ -47,6 +47,29 @@ final class MinutesExecutionTransportTests: XCTestCase {
         }
     }
 
+    func testSequentialMinutesUsesExactModelWithoutClaimingIsolation() throws {
+        let request = MinutesModelSendParams(sessionKey: owner.sessionKey, message: "fixture", idempotencyKey: owner.runId)
+        let value = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as! [String: Any]
+        XCTAssertEqual(Set(value.keys), ["sessionKey", "message", "idempotencyKey", "model", "thinking"])
+        XCTAssertEqual(value["model"] as? String, "openai/gpt-6.1-sol")
+        XCTAssertEqual(value["thinking"] as? String, "high")
+        var response = ack
+        for key in ["sessionKey", "isolationApplied", "nonprojectionApplied", "resultRetentionExpiresAt"] {
+            response.removeValue(forKey: key)
+        }
+        XCTAssertEqual(try MinutesModelAck.validate(payload(response), expectedRunID: owner.runId), owner.runId)
+        response["degraded"] = true
+        XCTAssertThrowsError(try MinutesModelAck.validate(payload(response), expectedRunID: owner.runId))
+        response["degraded"] = false; response["fallbackReason"] = "model_unavailable"
+        XCTAssertThrowsError(try MinutesModelAck.validate(payload(response), expectedRunID: owner.runId))
+        response["fallbackReason"] = NSNull(); response["resolvedThinking"] = "medium"
+        XCTAssertThrowsError(try MinutesModelAck.validate(payload(response), expectedRunID: owner.runId))
+        response["resolvedThinking"] = "high"; response["resolvedModel"] = "openai/gpt-6-sol"
+        XCTAssertThrowsError(try MinutesModelAck.validate(payload(response), expectedRunID: owner.runId))
+        response["resolvedModel"] = "openai/gpt-6.1-sol"; response["runId"] = "another"
+        XCTAssertThrowsError(try MinutesModelAck.validate(payload(response), expectedRunID: owner.runId))
+    }
+
     func testTypedRecoveryPreservesPendingAndUnavailableWithoutGeneration() throws {
         var response: [String: Any] = ["status": "pending", "sessionKey": owner.sessionKey,
             "runId": owner.runId, "resultRetentionExpiresAt": NSNull()]
