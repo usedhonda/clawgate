@@ -25,11 +25,26 @@ final class AudioHubControlStore {
         var staged: AudioHubRawTranscriptReader.ReadResult?
     }
 
+    struct Upload: Codable, Equatable {
+        let sourceRecordRef: String
+        let revision: String
+        let bodySHA256: String
+        let original: AudioHubOutbox.OriginalReference
+        let pipeline: String
+        var uploadID: String?
+        var offset: Int64
+        var finalized: Bool
+        var binding: HubAudioAdmission.Binding?
+        var gapReason: String?
+        var gapCoverage: String?
+    }
+
     private struct State: Codable {
         let version: Int
         let sourceUUID: String
         var checkpoints: [Checkpoint]
         var scans: [String: Scan]?
+        var uploads: [String: Upload]?
     }
 
     private let stateURL: URL
@@ -134,6 +149,57 @@ final class AudioHubControlStore {
         state = candidate
     }
 
+    /// This is upload progress, not event delivery. The caller's control cap
+    /// includes these records; no separate or unbounded progress file exists.
+    func startUpload(record: AudioHubOutbox.PendingRecord, pipeline: String) throws -> Upload {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard let original = record.original, original.byteLength > 0, !pipeline.isEmpty,
+              Self.hash(record.envelope) == record.bodySHA256,
+              AudioHubOutbox.externalID(sourceUUID: state.sourceUUID, sourceRecordRef: record.sourceRecordRef,
+                                       revision: record.revision) == record.externalID else { throw Failure.invalidState }
+        if let old = state.uploads?[record.externalID] {
+            guard old.sourceRecordRef == record.sourceRecordRef, old.revision == record.revision,
+                  old.bodySHA256 == record.bodySHA256, old.original == original,
+                  old.pipeline == pipeline else { throw Failure.invalidState }
+            return old
+        }
+        let upload = Upload(sourceRecordRef: record.sourceRecordRef, revision: record.revision,
+            bodySHA256: record.bodySHA256, original: original, pipeline: pipeline,
+            uploadID: nil, offset: 0, finalized: false, binding: nil, gapReason: nil)
+        var candidate = state; var uploads = candidate.uploads ?? [:]
+        uploads[record.externalID] = upload; candidate.uploads = uploads
+        guard Self.valid(candidate) else { throw Failure.invalidState }
+        try replace(candidate)
+        return upload
+    }
+
+    func updateUpload(externalID: String, expected: Upload, uploadID: String? = nil,
+                      offset: Int64? = nil, finalized: Bool = false,
+                      binding: HubAudioAdmission.Binding? = nil, missing: Bool = false) throws -> Upload {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard var upload = state.uploads?[externalID], upload == expected else { throw Failure.invalidState }
+        if let uploadID {
+            guard upload.uploadID == nil || upload.uploadID == uploadID else { throw Failure.invalidState }
+            upload.uploadID = uploadID
+        }
+        if let offset {
+            guard offset >= upload.offset, offset <= upload.original.byteLength else { throw Failure.invalidState }
+            upload.offset = offset
+        }
+        if finalized { upload.finalized = true }
+        if let binding {
+            guard upload.finalized, upload.binding == nil || upload.binding == binding else { throw Failure.invalidState }
+            upload.binding = binding
+        }
+        if missing { upload.gapReason = "source_original_missing"; upload.gapCoverage = "excluded" }
+        var candidate = state; candidate.uploads?[externalID] = upload
+        guard Self.valid(candidate) else { throw Failure.invalidState }
+        try replace(candidate)
+        return upload
+    }
+
     func checkpoints() throws -> [Checkpoint] {
         lock.lock(); defer { lock.unlock() }
         guard !storageFailed else { throw Failure.storageFailed }
@@ -183,6 +249,27 @@ final class AudioHubControlStore {
 
     private static func valid(_ value: State) -> Bool {
         guard (value.scans ?? [:]).allSatisfy({ validSession($0.key) && validScan($0.value) }) else { return false }
+        for (id, u) in value.uploads ?? [:] {
+            guard !u.sourceRecordRef.isEmpty, !u.revision.isEmpty, !u.pipeline.isEmpty,
+                  u.bodySHA256.count == 64, u.bodySHA256.allSatisfy({ $0.isHexDigit }),
+                  u.original.byteLength > 0,
+                  (try? AudioHubOutbox.OriginalReference(sourceRelativePath: u.original.sourceRelativePath,
+                      sha256: u.original.sha256, byteLength: u.original.byteLength)) == u.original,
+                  AudioHubOutbox.externalID(sourceUUID: value.sourceUUID, sourceRecordRef: u.sourceRecordRef,
+                                           revision: u.revision) == id,
+                  u.offset >= 0, u.offset <= u.original.byteLength,
+                  (u.gapReason == nil && u.gapCoverage == nil) ||
+                    (u.gapReason == "source_original_missing" && u.gapCoverage == "excluded") else { return false }
+            if let uploadID = u.uploadID {
+                guard UUID(uuidString: uploadID)?.uuidString.lowercased() == uploadID else { return false }
+            } else if u.offset != 0 || u.finalized { return false }
+            if u.finalized && u.offset != u.original.byteLength { return false }
+            if let binding = u.binding {
+                guard u.finalized, UUID(uuidString: binding.eventID)?.uuidString.lowercased() == binding.eventID,
+                      let job = binding.jobID, UUID(uuidString: job)?.uuidString.lowercased() == job,
+                      binding.pipelineVersion == u.pipeline else { return false }
+            }
+        }
         var ids = Set<String>()
         for checkpoint in value.checkpoints {
             guard !checkpoint.sourceRecordRef.isEmpty,

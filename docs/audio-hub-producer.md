@@ -23,7 +23,8 @@ outside this route. Originals are restricted to selected meeting audio.
 
 These are age policies, not byte quotas. The current Ambient/Config code has no
 matching native Hub outbox byte budget or preflight free-space gate. Raw append
-currently suppresses file errors; archive errors are logged. None of that is
+now surfaces persistence failures before downstream admission; archive errors
+are logged. None of that is
 proof of durable Hub delivery or permission for unbounded additional storage.
 
 ## Durable outbound metadata
@@ -39,16 +40,16 @@ Native IDs use `clawgate:native:v1:<source UUID>:<reference/revision digest>`.
 The digest uses length-prefixed UTF-8 fields, not an ambiguous delimiter. Old
 session/chunk identities remain provenance, never overwritten with different
 metadata under an old mirror ID. Retry reuses the exact stored envelope.
-The original reference only accepts `meetings/<id>/audio/<file>`; the eventual
-file loader must also enforce containment, reject symlinks and verify hash/length
-before upload. A path reference alone proves neither bytes nor current coverage.
+The original reference only accepts `meetings/<id>/audio/<file>`; the loader
+enforces containment, rejects symlinks and verifies hash/length before upload.
+A path reference alone proves neither bytes nor current coverage.
 
 State writes use private atomic replacement and file/directory synchronization.
 An ambiguous storage error prevents further mutation until reopen. A matching
 snapshot is required to acknowledge a record. The latest saved receipt is
-bounded evidence, not an unlimited historical ledger. Source scan positions
-and source-file expiration handling remain activation work; expired or missing
-originals must be explicit gaps, never fabricated ACKs.
+bounded evidence, not an unlimited historical ledger. Missing originals produce
+explicit gaps, never fabricated ACKs. Runtime source selection and activation
+still require the agreed boundaries below.
 
 ## Inactive control journal and metadata transport
 
@@ -169,14 +170,46 @@ reopen. File locks and durable-state comparison reject stale writers rather than
 letting an old scan/delivery instance overwrite a newer queue or cursor state.
 These helpers have no background caller and do not grant activation permission.
 
+## Selected-original upload and missing-source handling (inactive)
+
+`AudioHubOriginalReader` opens only the explicit selected-meeting reference,
+walks owned directories without following symlinks, requires a regular owned
+file, and streams its full SHA-256/length check. Each bounded read reopens the
+path and checks inode/size/change times before and after reading. Removal,
+replacement and mutation fail; no open handle silently extends source retention.
+No original bytes are copied into the queue or a new retained audio archive.
+
+`AudioHubOriginalTransport` requires an already frozen event envelope containing
+the matching blob hash and source/revision binding. It advertises no runtime
+caller. Explicit delivery checks authenticated storage/STT capabilities, binds
+the pipeline, then persists upload ID and offsets in the existing capped control
+state. Chunks are at most 4 MiB. Lost chunk responses replay the same upload ID,
+offset and bytes; next-offset replies must match exactly. Finalization is
+replayable and verifies the full hash, but is not event acknowledgement.
+A lost upload-creation response can leave an unused server upload: no known ID
+is fabricated, and a later explicit attempt can create a new upload. Cleanup of
+remote orphan uploads belongs to the Hub owner, not this client.
+
+Only posting the unchanged event and validating both storage and committed STT
+intent receipts can release the pending queue record. The event/job/pipeline
+binding is persisted before dequeue and must not change on retry. Processing
+state does not mean transcription has finished. Local originals are never
+deleted by delivery, including after success. If the source has disappeared,
+the capped control state records `source_original_missing`/`coverage=excluded`
+and the pending record remains non-ACKed. This records an observation of absence,
+not proof that the cause was age pruning. Permission or unsafe-path failures
+are not mislabeled as expiry. The existing thirty-day pruning is unchanged.
+
 ## Pending activation decisions
 
 Originals use `selected-meeting-original` with explicit source provenance.
 Metadata/control byte budgets have no production defaults. The pending runtime
-work is runtime activation after the agreed start boundary, a contained/hash-
-checked original loader and chunk upload, and explicit original-expiry gaps.
-The current control journal handles only transcript clock gaps, not original
-expiration. Helper crash proofs are not a natural source-to-Hub delivery proof.
+work is source admission from the selected meeting index with exact provenance,
+then runtime activation after the agreed start boundary and policies. The raw
+scanner, original loader, upload progress and receipt helpers are available but
+inactive. Missing-source gaps do not authorize queue eviction, file restoration,
+or retention extension. Helper crash proofs are not natural source-to-Hub
+delivery or consumer acceptance.
 
 Native start and mirror final checkpoints are not yet agreed. Agree the precise
 source reference/revision boundary with the migration owner before activating a
