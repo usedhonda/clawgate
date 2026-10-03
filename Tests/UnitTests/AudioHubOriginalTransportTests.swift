@@ -119,6 +119,84 @@ final class AudioHubOriginalTransportTests: XCTestCase {
         XCTAssertEqual(try queue().pending(limit: 1).first, record)
     }
 
+    func testChangedOriginalRecordsDurableGapWithoutPostOrAck() async throws {
+        let q = try queue(); let c = try control(); let record = try enqueue(Data("fixture".utf8), into: q)
+        try Data("changed".utf8).write(to: file)
+        Stub.handler = { request, _ in
+            XCTAssertEqual(request.httpMethod, "GET")
+            return (200, try self.caps())
+        }
+        do {
+            _ = try await transport().deliverOne(outbox: q, control: c, originalsRoot: root.appendingPathComponent("originals"))
+            XCTFail("changed source")
+        } catch {
+            XCTAssertEqual(error as? AudioHubOriginalReader.Error, .contentMismatch)
+        }
+        let saved = try control().startUpload(record: record, pipeline: "fixture-v1")
+        XCTAssertEqual(saved.gapReason, "source_original_changed")
+        XCTAssertEqual(saved.gapCoverage, "excluded")
+        XCTAssertNil(saved.binding)
+        XCTAssertEqual(try queue().pending(limit: 1).first, record)
+    }
+
+    func testReplacementDuringChunkWaitRecordsSourceChangedGap() async throws {
+        let q = try queue(); let c = try control()
+        let data = Data(repeating: 7, count: 4 * 1024 * 1024 + 1)
+        let record = try enqueue(data, into: q)
+        var replaced = false
+        Stub.handler = { request, body in
+            let path = request.url!.path
+            if path == "/v1/capabilities" { return (200, try self.caps()) }
+            if path == "/v1/uploads" { return (201, try self.json(["upload_id": self.uploadID])) }
+            if request.httpMethod == "PUT" {
+                XCTAssertEqual(body.count, 4 * 1024 * 1024)
+                if !replaced {
+                    replaced = true
+                    let replacement = self.file.deletingLastPathComponent().appendingPathComponent("replacement.bin")
+                    try data.write(to: replacement)
+                    try FileManager.default.removeItem(at: self.file)
+                    try FileManager.default.moveItem(at: replacement, to: self.file)
+                }
+                return (200, try self.json(["next_offset": Int64(body.count)]))
+            }
+            XCTFail("no finalize/event after source replacement")
+            return (500, Data())
+        }
+        do {
+            _ = try await transport().deliverOne(outbox: q, control: c, originalsRoot: root.appendingPathComponent("originals"))
+            XCTFail("changed source")
+        } catch {
+            XCTAssertEqual(error as? AudioHubOriginalReader.Error, .sourceChanged)
+        }
+        let saved = try control().startUpload(record: record, pipeline: "fixture-v1")
+        XCTAssertEqual(saved.gapReason, "source_original_changed")
+        XCTAssertEqual(saved.gapCoverage, "excluded")
+        XCTAssertEqual(try queue().pending(limit: 1).first, record)
+    }
+
+    func testChangedGapCapacityFailureKeepsPendingAndNoGap() async throws {
+        let q = try queue(); let c = try control(); let record = try enqueue(Data("fixture".utf8), into: q)
+        _ = try c.startUpload(record: record, pipeline: "fixture-v1")
+        let stateURL = controlRoot.appendingPathComponent("control.json")
+        let exactSize = try FileManager.default.attributesOfItem(atPath: stateURL.path)[.size] as! NSNumber
+        let limited = try AudioHubControlStore(directory: controlRoot, sourceUUID: source, maxControlBytes: exactSize.intValue)
+        try Data("changed".utf8).write(to: file)
+        Stub.handler = { request, _ in
+            XCTAssertEqual(request.httpMethod, "GET")
+            return (200, try self.caps())
+        }
+        do {
+            _ = try await transport().deliverOne(outbox: q, control: limited, originalsRoot: root.appendingPathComponent("originals"))
+            XCTFail("changed source")
+        } catch {
+            XCTAssertEqual(error as? AudioHubControlStore.Failure, .capacityExceeded)
+        }
+        let reopened = try control()
+        let saved = try reopened.startUpload(record: record, pipeline: "fixture-v1")
+        XCTAssertNil(saved.gapReason)
+        XCTAssertEqual(try queue().pending(limit: 1).first, record)
+    }
+
     func testPersistedIntentBindingCannotChangeOnRetry() async throws {
         let q = try queue(); let c = try control(); let record = try enqueue(Data("fixture".utf8), into: q)
         var nextJob = jobID

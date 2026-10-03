@@ -196,9 +196,12 @@ binding is persisted before dequeue and must not change on retry. Processing
 state does not mean transcription has finished. Local originals are never
 deleted by delivery, including after success. If the source has disappeared,
 the capped control state records `source_original_missing`/`coverage=excluded`
-and the pending record remains non-ACKed. This records an observation of absence,
-not proof that the cause was age pruning. Permission or unsafe-path failures
-are not mislabeled as expiry. The existing thirty-day pruning is unchanged.
+and the pending record remains non-ACKed. If a selected original's content or
+identity changes after its reference was frozen, it records
+`source_original_changed`/`coverage=excluded` with the same non-ACK behavior.
+These are observations, not proof that the cause was age pruning or any other
+retention policy. Permission or unsafe-path failures are not mislabeled as
+missing or changed. The existing thirty-day pruning is unchanged.
 
 ## Pending activation decisions
 

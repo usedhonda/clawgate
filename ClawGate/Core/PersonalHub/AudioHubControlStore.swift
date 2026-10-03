@@ -176,7 +176,8 @@ final class AudioHubControlStore {
 
     func updateUpload(externalID: String, expected: Upload, uploadID: String? = nil,
                       offset: Int64? = nil, finalized: Bool = false,
-                      binding: HubAudioAdmission.Binding? = nil, missing: Bool = false) throws -> Upload {
+                      binding: HubAudioAdmission.Binding? = nil, missing: Bool = false,
+                      changed: Bool = false) throws -> Upload {
         lock.lock(); defer { lock.unlock() }
         guard !storageFailed else { throw Failure.storageFailed }
         guard var upload = state.uploads?[externalID], upload == expected else { throw Failure.invalidState }
@@ -194,6 +195,7 @@ final class AudioHubControlStore {
             upload.binding = binding
         }
         if missing { upload.gapReason = "source_original_missing"; upload.gapCoverage = "excluded" }
+        if changed { upload.gapReason = "source_original_changed"; upload.gapCoverage = "excluded" }
         var candidate = state; candidate.uploads?[externalID] = upload
         guard Self.valid(candidate) else { throw Failure.invalidState }
         try replace(candidate)
@@ -259,7 +261,8 @@ final class AudioHubControlStore {
                                            revision: u.revision) == id,
                   u.offset >= 0, u.offset <= u.original.byteLength,
                   (u.gapReason == nil && u.gapCoverage == nil) ||
-                    (u.gapReason == "source_original_missing" && u.gapCoverage == "excluded") else { return false }
+                    ((u.gapReason == "source_original_missing" || u.gapReason == "source_original_changed") &&
+                     u.gapCoverage == "excluded") else { return false }
             if let uploadID = u.uploadID {
                 guard UUID(uuidString: uploadID)?.uuidString.lowercased() == uploadID else { return false }
             } else if u.offset != 0 || u.finalized { return false }

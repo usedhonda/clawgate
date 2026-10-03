@@ -114,6 +114,12 @@ final class AudioHubOriginalTransport {
         } catch AudioHubOriginalReader.Error.missingOriginal {
             _ = try control.updateUpload(externalID: record.externalID, expected: progress, missing: true)
             throw AudioHubOriginalReader.Error.missingOriginal
+        } catch AudioHubOriginalReader.Error.contentMismatch {
+            _ = try control.updateUpload(externalID: record.externalID, expected: progress, changed: true)
+            throw AudioHubOriginalReader.Error.contentMismatch
+        } catch AudioHubOriginalReader.Error.sourceChanged {
+            _ = try control.updateUpload(externalID: record.externalID, expected: progress, changed: true)
+            throw AudioHubOriginalReader.Error.sourceChanged
         }
     }
 
