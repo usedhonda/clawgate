@@ -190,6 +190,7 @@ struct InlineSettingsView: View {
         case "noLineWindows": return "取得できるLINE窓がありません"
         case "disabled": return "停止中"
         case "outbox_full": return "未保存データが上限に達したため取得停止"
+        case "observation_limits_exceeded": return "観測データが上限を超えたため一部取得制限"
         case "screen_locked": return "画面ロック中"
         case "storage_unavailable", "outbox_write_failed": return "ローカル保存を確認してください"
         case "captureUnavailable", "unavailable": return "取得できる画面がありません"
@@ -203,12 +204,20 @@ struct InlineSettingsView: View {
         switch observationDelivery {
         case "committed", "caught_up": return "保存済み"
         case "http_404": return "サーバー未対応・データ保持中"
+        case "hub_committed": return "Hubに保存済み"
+        case "hub_capability_unavailable": return "Hub機能を確認できずデータ保持中"
+        case "hub_http_401", "hub_http_403": return "Hub接続情報を確認してください"
+        case "hub_http_404": return "Hubエンドポイント未対応・データ保持中"
         case "partial_ack": return "一部保存済み"
         case "permanent_rejection": return "受理されないデータを保持中"
         case "auth_unavailable": return "接続情報を確認してください"
         case "idle": return "待機中"
         case "backpressure": return "保存待ちの上限に到達"
-        default: return "保存を確認できず再試行中"
+        default:
+            if observationDelivery.hasPrefix("hub_http_") {
+                return "Hub送信失敗・再試行中"
+            }
+            return "保存を確認できず再試行中"
         }
     }
 
