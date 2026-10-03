@@ -342,6 +342,7 @@ struct IncomingMessage: Decodable {
 struct IncomingPayload: Decodable {
     let type: String?
     let `protocol`: Int?
+    let features: GatewayFeaturesPayload?
     let snapshot: SnapshotPayload?
     let nonce: String?
     let sessionId: String?
@@ -390,6 +391,7 @@ struct IncomingPayload: Decodable {
     private enum CodingKeys: String, CodingKey {
         case type
         case `protocol`
+        case features
         case snapshot
         case nonce
         case sessionId
@@ -429,6 +431,7 @@ struct IncomingPayload: Decodable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         type = try container.decodeIfPresent(String.self, forKey: .type)
         `protocol` = try container.decodeIfPresent(Int.self, forKey: .protocol)
+        features = try container.decodeIfPresent(GatewayFeaturesPayload.self, forKey: .features)
         snapshot = try container.decodeIfPresent(SnapshotPayload.self, forKey: .snapshot)
         nonce = try container.decodeIfPresent(String.self, forKey: .nonce)
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
@@ -477,6 +480,14 @@ struct IncomingPayload: Decodable {
         hasFallbackReason = container.contains(.fallbackReason)
         hasResultRetentionExpiresAt = container.contains(.resultRetentionExpiresAt)
     }
+}
+
+/// Capabilities advertised by the Gateway in the authenticated `hello-ok`
+/// response.  An omitted methods list means that capability is unknown/
+/// unsupported; it is never inferred from the client request surface.
+struct GatewayFeaturesPayload: Decodable, Equatable {
+    let methods: [String]?
+    let events: [String]?
 }
 
 private struct MinutesPayloadKey: CodingKey {

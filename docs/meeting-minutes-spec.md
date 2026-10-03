@@ -60,9 +60,10 @@ This change does **not** claim execution isolation, parallelism or a measured
 latency multiplier.
 
 The client has inactive typed dispatch/result helpers, a version-2 indexed
-revision-keyed execution sidecar, accepted-bundle finalizer and a bounded step executor. There is still no production
-caller or scheduling timer: activation requires matching deployed Gateway
-support in the same window; catalog availability is not provider execution.
+revision-keyed execution sidecar, accepted-bundle finalizer and a bounded step executor.
+A default-off single-part pilot caller is connected; the general max-two scheduler
+and overview caller are not yet activated. Activation requires matching deployed
+Gateway support in the same window; catalog availability is not provider execution.
 The last verified Gateway did not support the three flags/result RPC. The
 working sequential route is not switched by these client changes.
 
@@ -141,6 +142,31 @@ on Resume, including unreadable execution records. Other sequential jobs remain
 eligible. Publication compares execution-relevant frozen job bytes under the
 shared lock; priority-only `userRequestedAt` changes do not invalidate an
 otherwise exact revision.
+
+### Staged dedicated admission
+
+The app includes a one-part admission caller on its existing authenticated
+Pet WebSocket. It is off by default: the private local deployment checkpoint
+`clawgate.minutes.singleRunAcceptance` must contain exactly `version: 1`,
+`meetingID`, and `revisionFileName` for the frozen indexed revision. This is
+not a server capability or general user preference. It is set only after the
+Gateway owner reports deployed readiness. A different/recreated revision does
+not inherit that admission. No credentials or message bodies are in this marker.
+
+The caller requires the current authenticated hello advertisement to include
+both `chat.send` and `chat.result.get`. It reserves one new part total, persists
+that admission budget through the ledger, and reads the same request every five
+seconds until terminal or transport loss. Restart cannot reset the one-part
+budget. Expired/notFound stop that polling pass without granting regeneration.
+Normal UI/TTS event routing excludes only exactly registered dedicated run IDs;
+unrelated events remain unchanged. Registration precedes send and retained read.
+
+A complete pilot part remains in its indexed ledger. It does not enable max-two,
+rewrite the ordinary prefix, launch overview synthesis, or claim whole-meeting
+completion. Those follow the same-window strict ACK/read/terminal acceptance.
+Absent the checkpoint, normal sequential minutes remain the live route; indexed
+owners never fall back to that route. Method advertisement is preflight only,
+not evidence of actual provider model or projection isolation.
 
 The live integration target is a dedicated minutes scheduler, independent of the
 interactive summon slot, with at most two independent part runs in flight.

@@ -38,6 +38,42 @@ final class MeetingMinutesExecutorTests: XCTestCase {
         }
     }
 
+    func testSinglePartAdmissionBudgetSurvivesReopenAndExactPilotRevision() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let record = MeetingRecord(id: "mtg-pilot", source: "manual", startedAt: 0, endedAt: 20,
+            timeZone: "UTC", title: "Fixture", conferenceCode: nil, participants: [], minutesState: "pending", minutesError: nil)
+        let segments = (0..<8).map { TranscriptSegment(startSeconds: Double($0), endSeconds: Double($0 + 1), text: String(repeating: "x", count: 100)) }
+        let envelope = MeetingMinutesEnvelope.build(record: record, segments: segments)
+        let job = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope), envelopes: MeetingMinutes.chunked(envelope, maxCharacters: 300), completed: [])
+        XCTAssertGreaterThan(job.envelopes.count, 1)
+        let suite = "minutes-pilot-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertNil(MeetingMinutesPilot.load(defaults: defaults))
+        defaults.set(["version": 1, "meetingID": record.id,
+            "revisionFileName": try MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: job).lastPathComponent],
+            forKey: MeetingMinutesPilot.defaultsKey)
+        let pilot = try XCTUnwrap(MeetingMinutesPilot.load(defaults: defaults))
+        XCTAssertTrue(pilot.matches(store: store, id: record.id, job: job))
+        let fresh = MeetingMinutesJob.updating(envelope, previous: job)
+        XCTAssertFalse(pilot.matches(store: store, id: record.id, job: fresh))
+        let wire = Wire()
+        let executor = try MeetingMinutesExecutor(job: job, store: store, id: record.id, sessionKey: "agent:example:main",
+            send: { request in try await MinutesExecutionAck.validate(wire.payload(request, status: "started"), expected: request) },
+            read: { try await wire.read($0) })
+        let first = try await executor.step(maxConcurrentParts: 1, maximumStartedParts: 1)
+        XCTAssertEqual(first.live, 1); XCTAssertTrue(first.admissionLimitReached)
+        let restored = try MeetingMinutesExecutor(job: job, store: store, id: record.id, sessionKey: "agent:example:main",
+            send: { _ in XCTFail("one-part pilot may not send a second part after reopen"); throw URLError(.badServerResponse) },
+            read: { try await wire.read($0) })
+        let recovered = try await restored.step(maxConcurrentParts: 1, maximumStartedParts: 1)
+        XCTAssertEqual(recovered.completed, 1); XCTAssertEqual(recovered.live, 0)
+        let held = try await restored.step(maxConcurrentParts: 1, maximumStartedParts: 1)
+        XCTAssertEqual(held.completed, 1); XCTAssertEqual(held.live, 0)
+        XCTAssertTrue(held.admissionLimitReached)
+    }
+
     func testTwoReservationsLostAckAndReopenUseReadOnlyRecovery() async throws {
         let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         defer { try? FileManager.default.removeItem(at: store.root) }

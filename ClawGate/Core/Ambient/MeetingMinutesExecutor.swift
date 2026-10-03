@@ -1,16 +1,19 @@
 import Foundation
 
-/// Dedicated bounded execution, deliberately not wired to the live PetModel.
+/// Dedicated bounded execution; PetModel currently uses only the default-off
+/// exact-revision single-part acceptance pilot.
 /// Each step reserves before dispatch, recovers existing owners read-only and
 /// processes every response independently. No implicit retries or chat fallback.
 actor MeetingMinutesExecutor {
-    enum Failure: Error { case busy, invalidPart }
+    enum Failure: Error { case busy, invalidPart, invalidAdmissionLimit }
     struct Progress {
         let completed: Int
         let total: Int
         let live: Int
         let failed: Int
         let unresolvedIndices: [Int]
+        let retainedUnavailableIndices: [Int]
+        let admissionLimitReached: Bool
     }
     typealias Send = (MinutesExecutionSendParams) async throws -> MinutesExecutionAck
     typealias Read = (MinutesExecutionSendParams) async throws -> MinutesExecutionRead
@@ -38,7 +41,10 @@ actor MeetingMinutesExecutor {
 
     /// Production scheduling/activation must be supplied only after the shared
     /// Gateway gate. Transport failures leave durable owners for a later read.
-    func step() async throws -> Progress {
+    func step(maxConcurrentParts: Int = 2, maximumStartedParts: Int? = nil) async throws -> Progress {
+        guard (1...2).contains(maxConcurrentParts), maximumStartedParts.map({ $0 >= 0 }) ?? true else {
+            throw Failure.invalidAdmissionLimit
+        }
         guard !busy else { throw Failure.busy }
         busy = true; defer { busy = false }
         try Task.checkCancellation()
@@ -47,13 +53,17 @@ actor MeetingMinutesExecutor {
         // A confirmed failed part requires explicit owner action. It must not
         // silently retry or keep filling subsequent work while recovery fails.
         if !ledger.parts.contains(where: { $0.status == .failed }) {
-            for p in ledger.parts.filter({ $0.status == .pending }).prefix(2 - recovering.count) {
+            let started = ledger.parts.filter { $0.attempt > 0 }.count
+            let budget = maximumStartedParts.map { max(0, $0 - started) } ?? 2
+            let slots = min(max(0, maxConcurrentParts - recovering.count), budget)
+            for p in ledger.parts.filter({ $0.status == .pending }).prefix(slots) {
                 let message = try MeetingMinutesPrompt.buildMessage(envelope: job.envelopes[p.index])
                 fresh.append(try ledger.reserve(index: p.index, sessionKey: sessionKey, message: message, store: store, id: id))
             }
         }
         let sender = send, reader = read
         var unresolved: [Int] = []
+        var retainedUnavailable: [Int] = []
         var persistenceError: Error?
         await withTaskGroup(of: Event.self) { group in
             for d in recovering {
@@ -78,7 +88,7 @@ actor MeetingMinutesExecutor {
                     case .ack(let d, let ack): try ledger.acknowledge(d, ack: ack, store: store, id: id)
                     case .read(let d, let result):
                         if result.result == .expired || result.result == .notFound {
-                            unresolved.append(d.index); continue
+                            unresolved.append(d.index); retainedUnavailable.append(d.index); continue
                         }
                         guard result.binding?.matches(d.request) == true else {
                             unresolved.append(d.index); continue
@@ -116,7 +126,11 @@ actor MeetingMinutesExecutor {
                         total: ledger.parts.count,
                         live: ledger.recoverableDispatches.count,
                         failed: ledger.parts.filter { $0.status == .failed }.count,
-                        unresolvedIndices: unresolved.sorted())
+                        unresolvedIndices: unresolved.sorted(),
+                        retainedUnavailableIndices: retainedUnavailable.sorted(),
+                        admissionLimitReached: maximumStartedParts.map { limit in
+                            ledger.parts.filter { $0.attempt > 0 }.count >= limit
+                        } ?? false)
     }
 
     /// Commit only the current complete revision. The accepted bundle is the

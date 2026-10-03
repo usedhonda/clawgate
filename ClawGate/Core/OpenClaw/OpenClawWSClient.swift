@@ -136,6 +136,53 @@ actor OpenClawWSClient {
     private var authToken: String?
     private var pendingRequestId: String?
     private var handshakeComplete = false
+    /// Methods advertised by the Gateway's `hello-ok` for the live connection.
+    /// The generation binding prevents a previous socket's advertisement from
+    /// being used as preflight evidence after reconnect.
+    private var advertisedGatewayMethods: Set<String>?
+    private var advertisedGatewayMethodsGeneration: UInt64?
+    /// Exact run IDs owned by the dedicated minutes transport. Correlated
+    /// chat/agent broadcasts are kept off the ordinary PetModel stream.
+    private var minutesExecutionRunIDs = Set<String>()
+
+    /// True only when this connected, handshaken generation advertised both
+    /// RPCs required by the dedicated minutes preflight. Advertisement is a
+    /// catalog signal, not proof of provider/runtime execution.
+    func supportsDedicatedMinutesExecution() -> Bool {
+        guard isConnected, handshakeComplete,
+              advertisedGatewayMethodsGeneration == connectionGeneration,
+              let methods = advertisedGatewayMethods else { return false }
+        return methods.contains("chat.send") && methods.contains("chat.result.get")
+    }
+
+    /// Register a durable run owner before dispatch or retained-result read.
+    /// Empty IDs are ignored; event correlation never falls back to
+    /// session or message identity.
+    func registerMinutesExecutionRunID(_ runID: String) {
+        guard !runID.isEmpty else { return }
+        minutesExecutionRunIDs.insert(runID)
+    }
+
+    #if DEBUG
+    /// Test seam for the generation-bound capability preflight. Production
+    /// state is populated only by the authenticated hello-ok response above.
+    func seedGatewayAdvertisementForTesting(methods: [String], generation: UInt64,
+                                            connected: Bool, handshaken: Bool) {
+        advertisedGatewayMethods = Set(methods)
+        advertisedGatewayMethodsGeneration = generation
+        connectionGeneration = generation
+        isConnected = connected
+        handshakeComplete = handshaken
+    }
+
+    func beginConnectionGenerationForTesting() {
+        connectionGeneration &+= 1
+        advertisedGatewayMethods = nil
+        advertisedGatewayMethodsGeneration = nil
+    }
+
+    func registeredMinutesRunIDsForTesting() -> Set<String> { minutesExecutionRunIDs }
+    #endif
 
     /// Diagnostics counters, reported on `/v1/debug/ws`. `connectionGeneration`
     /// cannot answer these: it is bumped by connect AND teardown, at the top of
@@ -181,6 +228,8 @@ actor OpenClawWSClient {
         connectionGeneration &+= 1
         connectAttempts += 1
         let gen = connectionGeneration
+        advertisedGatewayMethods = nil
+        advertisedGatewayMethodsGeneration = nil
 
         authToken = token
         let config = URLSessionConfiguration.ephemeral
@@ -293,6 +342,9 @@ actor OpenClawWSClient {
         connectionGeneration &+= 1
         isConnected = false
         handshakeComplete = false
+        advertisedGatewayMethods = nil
+        advertisedGatewayMethodsGeneration = nil
+        minutesExecutionRunIDs.removeAll()
         consecutiveHealthTimeouts = 0
         connectedAt = nil
         healthLoopTask?.cancel()
@@ -668,12 +720,22 @@ actor OpenClawWSClient {
             await sendConnectRequest(nonce: payload?.nonce)
             return
         }
-        for event in Self.routeIncomingEvent(name: name, payload: payload) {
+        for event in Self.routeIncomingEvent(name: name, payload: payload,
+                                             excludingRunIDs: minutesExecutionRunIDs) {
             continuation?.yield(event)
         }
     }
 
-    static func routeIncomingEvent(name: String, payload: IncomingPayload?) -> [OpenClawEvent] {
+    static func routeIncomingEvent(name: String, payload: IncomingPayload?,
+                                   excludingRunIDs: Set<String> = []) -> [OpenClawEvent] {
+        // Dedicated minutes runs are request-local. Their correlated chat and
+        // agent broadcasts must not reach PetModel's normal message/TTS UI;
+        // events without an exact runId remain on the ordinary path.
+        if (name == "chat" || name == "agent"),
+           let runID = payload?.runId,
+           excludingRunIDs.contains(runID) {
+            return []
+        }
         switch name {
         case "agent":
             guard payload?.stream == "assistant",
@@ -824,6 +886,8 @@ actor OpenClawWSClient {
         if let pendingId = pendingRequestId, responseId == pendingId {
             pendingRequestId = nil
             if ok, let p = msg.payload, p.type == "hello-ok" {
+                advertisedGatewayMethods = Set(p.features?.methods ?? [])
+                advertisedGatewayMethodsGeneration = connectionGeneration
                 let sessionKey = p.snapshot?.sessionDefaults?.mainSessionKey ?? "agent:main:main"
                 let sessionId = p.sessionId ?? p.sessionKey ?? responseId
                 handshakeComplete = true
@@ -836,6 +900,8 @@ actor OpenClawWSClient {
 
         // Fallback for responses without matching id
         if ok, let p = msg.payload, p.type == "hello-ok" {
+            advertisedGatewayMethods = Set(p.features?.methods ?? [])
+            advertisedGatewayMethodsGeneration = connectionGeneration
             let sessionKey = p.snapshot?.sessionDefaults?.mainSessionKey ?? "agent:main:main"
             handshakeComplete = true
             continuation?.yield(.connected(sessionId: "unknown", sessionKey: sessionKey))

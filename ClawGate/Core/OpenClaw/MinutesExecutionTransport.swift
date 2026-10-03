@@ -26,7 +26,7 @@ enum MinutesModelAck {
 }
 
 /// Dedicated minutes wire, not a replacement for ordinary chat or Pet Log.
-/// No production caller until the Gateway activation gate is satisfied.
+/// The default-off pilot caller requires the Gateway activation checkpoint.
 struct MinutesExecutionSendParams: Codable, Equatable {
     static let model = "openai/gpt-6.1-sol"
     static let thinking = "high"
@@ -203,12 +203,14 @@ extension OpenClawWSClient {
     /// The caller must durably reserve this key first. Never retry as chat.
     func sendMinutesExecution(_ params: MinutesExecutionSendParams) async throws -> MinutesExecutionAck {
         _ = try params.requestFingerprint()
+        registerMinutesExecutionRunID(params.idempotencyKey)
         let payload = try await request(method: "chat.send", params: params)
         return try MinutesExecutionAck.validate(payload, expected: params)
     }
 
     /// Read-only recovery using the original durable request; never redispatch.
     func minutesExecutionResult(_ expected: MinutesExecutionSendParams) async throws -> MinutesExecutionRead {
+        registerMinutesExecutionRunID(expected.idempotencyKey)
         let params = MinutesResultGetParams(sessionKey: expected.sessionKey, runId: expected.idempotencyKey)
         return try MinutesExecutionRead.validate(try await request(method: "chat.result.get", params: params), expected: expected)
     }

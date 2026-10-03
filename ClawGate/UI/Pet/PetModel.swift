@@ -1400,6 +1400,8 @@ final class PetModel: NSObject, ObservableObject {
     func cleanup() {
         guard !didCleanup else { return }
         didCleanup = true
+        minutesPilotTask?.cancel()
+        minutesPilotTask = nil
         meetingSourcesTimer?.invalidate()
         meetingSourcesTimer = nil
         // cleanup() runs only from the app's teardown on quit/terminate, so the
@@ -2977,6 +2979,8 @@ final class PetModel: NSObject, ObservableObject {
     /// active generation. Kept separate so the UI does not carry send wait
     /// time into the model-generation phase.
     private var minutesGenerationStartedAt: Date?
+    private var minutesPilotTask: Task<Void, Never>?
+    private var minutesPilotLabels: [String: String] = [:]
     private var pendingMinutesMeetingID: String?
     private var pendingMinutesSegmentIDs: Set<String> = []
     /// Attempts per meeting, so a permanently busy slot gives up instead of
@@ -3049,9 +3053,81 @@ final class PetModel: NSObject, ObservableObject {
         } catch { return true }
     }
 
+    private func isMinutesPilotTarget(id: String) -> Bool {
+        let store = minutesStore()
+        guard let pilot = MeetingMinutesPilot.load(),
+              let job = MeetingMinutesJob.load(store: store, id: id) else { return false }
+        return pilot.matches(store: store, id: id, job: job)
+    }
+
+    /// First same-window acceptance is exactly one new part, not a global
+    /// switch. Normal minutes and the interactive slot keep their own owners.
+    private func startMinutesPilotIfNeeded() {
+        guard minutesPilotTask == nil, !didCleanup,
+              connectionState == .connected, let key = sessionKey,
+              pendingMinutesMeetingID == nil, pendingSummaryPass == nil else { return }
+        let store = minutesStore()
+        guard let pilot = MeetingMinutesPilot.load(),
+              let record = store.load(id: pilot.meetingID), record.minutesState == "pending",
+              let job = MeetingMinutesJob.load(store: store, id: record.id),
+              pilot.matches(store: store, id: record.id, job: job) else { return }
+        minutesPilotLabels[record.id] = "専用実行経路の準備を確認中"
+        let client = wsClient
+        minutesPilotTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.minutesPilotTask = nil; self.meetingsRevision += 1 }
+            guard await client.supportsDedicatedMinutesExecution() else {
+                self.minutesPilotLabels[record.id] = "専用実行経路の準備待ち（未送信）"
+                return
+            }
+            do {
+                let executor = try MeetingMinutesExecutor(job: job, store: store, id: record.id,
+                    sessionKey: key, send: { try await client.sendMinutesExecution($0) },
+                    read: { try await client.minutesExecutionResult($0) })
+                while !Task.isCancelled {
+                    guard self.connectionState == .connected,
+                          await client.supportsDedicatedMinutesExecution() else {
+                        self.minutesPilotLabels[record.id] = "接続の回復待ち（保存済み実行の結果を確認します）"
+                        return
+                    }
+                    // Do not let a changed revision or withdrawn checkpoint
+                    // admit work from a task captured before that change.
+                    guard self.isMinutesPilotTarget(id: record.id),
+                          let current = MeetingMinutesJob.load(store: store, id: record.id),
+                          try MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: current) ==
+                              MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: job) else { return }
+                    let progress = try await executor.step(maxConcurrentParts: 1, maximumStartedParts: 1)
+                    self.meetingsRevision += 1
+                    if progress.failed > 0 {
+                        self.minutesPilotLabels[record.id] = "専用実行の結果を確認してください。完成分は保存されています"
+                        return
+                    }
+                    if !progress.retainedUnavailableIndices.isEmpty {
+                        self.minutesPilotLabels[record.id] = "保存済み結果を取得できません。期限切れ・未確認の実行は再送しません"
+                        return
+                    }
+                    if progress.live == 0 && progress.admissionLimitReached {
+                        self.minutesPilotLabels[record.id] = "専用実行の1パート確認済み（次段階の受入待ち）"
+                        return
+                    }
+                    self.minutesPilotLabels[record.id] = progress.unresolvedIndices.isEmpty
+                        ? "専用実行の結果待ち（1パート）"
+                        : "保存済み実行の復旧確認待ち（再送しません）"
+                    // No resend: subsequent steps only read the reserved key.
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+            } catch is CancellationError {
+                // Durable owners survive teardown; no ordinary-chat fallback.
+            } catch {
+                self.minutesPilotLabels[record.id] = "実行記録を確認できません。安全のため再送していません"
+            }
+        }
+    }
+
     /// The actual scheduler phase, not an estimate based on a pending record.
     func minutesActivity(for record: MeetingRecord, now: Date = Date()) -> (label: String, elapsedSeconds: Int?)? {
         guard record.minutesState == "pending" || pendingSummaryPass?.id == record.id else { return nil }
+        if let label = minutesPilotLabels[record.id] { return (label, nil) }
         if record.minutesState == "pending", let job = MeetingMinutesJob.load(store: minutesStore(), id: record.id) {
             do {
                 if let progress = try MeetingMinutesExecutionProgress.load(store: minutesStore(), id: record.id, job: job) {
@@ -3098,7 +3174,7 @@ final class PetModel: NSObject, ObservableObject {
         // A second UI refresh/request for the same pending record is only a
         // queue poke. It must never dispatch a duplicate summon.
         if pendingMinutesMeetingID == record.id { return }
-        if hasIndexedMinutesOwner(id: record.id) {
+        if hasIndexedMinutesOwner(id: record.id) || isMinutesPilotTarget(id: record.id) {
             // Keep the exact request IDs and frozen source, including for a
             // failed record's Resume action. Dedicated recovery owns this job.
             markMinutes(id: record.id, state: "pending", error: nil)
@@ -3153,6 +3229,7 @@ final class PetModel: NSObject, ObservableObject {
     /// slot and transport are available. Waiting for a busy slot or a
     /// reconnect does not consume a generation attempt.
     private func drainPendingMinutes() {
+        startMinutesPilotIfNeeded()
         guard pendingMinutesMeetingID == nil,
               connectionState == .connected,
               sessionKey != nil,
@@ -3165,7 +3242,7 @@ final class PetModel: NSObject, ObservableObject {
         }
         let now = Date()
         let queuedRecord = Self.pendingMinutesOrder(minutesStore().all(), store: minutesStore())
-            .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now && !hasIndexedMinutesOwner(id: $0.id) })
+            .first(where: { (minutesNotBefore[$0.id] ?? .distantPast) <= now && !hasIndexedMinutesOwner(id: $0.id) && !isMinutesPilotTarget(id: $0.id) })
         // An explicit owner request is allowed ahead of a background overview
         // rewrite. This only chooses the next idle slot; active RPCs remain
         // untouched. Automatic/legacy parts keep summary priority.
