@@ -44,7 +44,9 @@ run the existing grounded overview pass.
 
 The target dedicated execution path requires typed `chat.send` flags
 `requestLocalContext`, `nonprojection`, and `retainTerminalResult`, all true.
-No model/thinking override is planned. The ACK must explicitly confirm
+The minutes-only target requests `openai/gpt-6.1-sol` with `thinking=high`;
+Pet Log and ordinary-chat defaults remain unchanged. The ACK must confirm
+that exact resolution without degradation or fallback, as well as
 `isolationApplied` and `nonprojectionApplied`; absent/false confirmation is
 an activation failure, not an ordinary-chat fallback. Input must consist of the frozen minutes
 request, not preceding conversational turns; output must not project into
@@ -56,6 +58,28 @@ still sequential, and the existing settling gap remains in force. Input
 checkpoint reuse is active independently of this deployment prerequisite.
 This change does **not** claim execution isolation, parallelism or a measured
 latency multiplier.
+
+The client has inactive typed dispatch/result helpers and an indexed execution
+sidecar, `minutes-execution-state.json`. These are not a live route or a
+parallel scheduler. Activation still requires matching deployed support;
+catalog model availability alone is not successful model execution. The current
+Gateway's closed send schema does not admit the three flags, so the existing
+working route is not switched to the new helpers.
+
+The sidecar binds the frozen job fingerprint and exact envelope hash per
+index. It imports validated legacy prefix results (including silent results),
+reserves at most two live attempts, and saves each immutable attempt key before
+dispatch. Out-of-order validated completions retain source order. Only an
+explicit retry of a confirmed retryable terminal failure receives a new key;
+disconnect, missing results, expiration or an unknown dispatch ACK never
+authorize regeneration. Reopening preserves submitting/running attempts for
+reconciliation. The retained-result RPC does not contain resolved-model or
+isolation diagnostics: after a lost ACK, a terminal answer alone cannot prove
+these guarantees. ACK reconciliation must be established before activation.
+Private atomic writes, file/directory synchronization, exclusive write locks
+and optimistic revision checks prevent a stale writer from replacing a newer
+attempt. A persistence error requires reload before further writes. No
+execution sidecar modifies or deletes the existing accepted minutes/job.
 
 The next executor design is a dedicated minutes scheduler, independent of the
 interactive summon slot, with at most two independent part runs in flight.

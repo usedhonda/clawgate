@@ -354,6 +354,10 @@ struct IncomingPayload: Decodable {
     let isolationApplied: Bool?
     let nonprojectionApplied: Bool?
     let resultRetentionExpiresAt: String?
+    /// Canonical retained-result expiry is an epoch number, not a chat timestamp.
+    let resultRetentionEpoch: Double?
+    let status: String?
+    let minutesTerminal: MinutesTerminalPayload?
     let stream: String?
     let data: AgentDataPayload?
     let state: String?
@@ -394,6 +398,8 @@ struct IncomingPayload: Decodable {
         case isolationApplied
         case nonprojectionApplied
         case resultRetentionExpiresAt
+        case status
+        case terminal
         case stream
         case data
         case state
@@ -428,7 +434,17 @@ struct IncomingPayload: Decodable {
         fallbackReason = try container.decodeIfPresent(String.self, forKey: .fallbackReason)
         isolationApplied = try container.decodeIfPresent(Bool.self, forKey: .isolationApplied)
         nonprojectionApplied = try container.decodeIfPresent(Bool.self, forKey: .nonprojectionApplied)
-        resultRetentionExpiresAt = try container.decodeIfPresent(String.self, forKey: .resultRetentionExpiresAt)
+        if let epoch = try? container.decode(Double.self, forKey: .resultRetentionExpiresAt) {
+            resultRetentionEpoch = epoch
+            resultRetentionExpiresAt = String(epoch)
+        } else {
+            resultRetentionEpoch = nil
+            resultRetentionExpiresAt = try container.decodeIfPresent(String.self, forKey: .resultRetentionExpiresAt)
+        }
+        // Optional minutes fields must not change unrelated RPC decoding.
+        // The dedicated result validator rejects absent/malformed terminals.
+        status = try? container.decode(String.self, forKey: .status)
+        minutesTerminal = try? container.decode(MinutesTerminalPayload.self, forKey: .terminal)
         stream = try container.decodeIfPresent(String.self, forKey: .stream)
         data = try container.decodeIfPresent(AgentDataPayload.self, forKey: .data)
         state = try container.decodeIfPresent(String.self, forKey: .state)
