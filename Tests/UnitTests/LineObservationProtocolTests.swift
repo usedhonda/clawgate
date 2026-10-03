@@ -29,7 +29,12 @@ final class LineObservationProtocolTests: XCTestCase {
         XCTAssertEqual(try JSONSerialization.data(withJSONObject: v2["ocrSpans"]!, options: [.sortedKeys]),
                        try JSONSerialization.data(withJSONObject: v3["ocrSpans"]!, options: [.sortedKeys]))
         XCTAssertEqual(v3["conversationLabel"] as? String, "Example conversation")
-        XCTAssertEqual(v3["conversationLabelEvidence"] as? String, "ax_window_title")
+        let evidence = try XCTUnwrap(v3["conversationLabelEvidence"] as? [String: Any])
+        XCTAssertEqual(evidence["method"] as? String, "ax_window_title")
+        XCTAssertEqual(evidence["axObservationOrdinal"] as? Int, 0)
+        let ax = try XCTUnwrap(v3["axObservations"] as? [[String: Any]])
+        XCTAssertEqual(ax.first?["windowId"] as? String, "42")
+        XCTAssertEqual(ax.first?["value"] as? String, v3["conversationLabel"] as? String)
         XCTAssertTrue(v3["conversationKey"] is NSNull)
         XCTAssertEqual(v3["identityConfidence"] as? String, "unknown")
         XCTAssertEqual(v3["tailCoverage"] as? Bool, false)
@@ -42,6 +47,66 @@ final class LineObservationProtocolTests: XCTestCase {
         let unavailable = LineObservationProtocol.snapshotsForWire([["scope": "selected_thread_visible_window", "coverage": "unavailable", "conversationLabel": "stale"]], schemaVersion: 3)[0]
         XCTAssertTrue(unavailable["conversationLabel"] is NSNull)
         XCTAssertEqual((unavailable["annotations"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((unavailable["axObservations"] as? [[String: Any]])?.count, 0)
+    }
+
+    private func fixture() throws -> [String: Any] {
+        let path = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/line-observation-v3.json")
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any])
+    }
+
+    func testV3FixtureRoundTripsWithoutChangingEnvelope() throws {
+        let envelope = try fixture()
+        let metadata = try XCTUnwrap(envelope["metadata"] as? [String: Any])
+        let result = try LineObservationProtocol.boundedV3Observation(metadata)
+        XCTAssertFalse(result.limited)
+        XCTAssertEqual(try LineObservationProtocol.hubEnvelope(observation: result.data, observationID: metadata["observationId"] as! String),
+                       try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]))
+    }
+
+    func testV3InvalidEvidenceAndExceededBoundsBecomeExplicitUnavailable() throws {
+        let metadata = try XCTUnwrap(try fixture()["metadata"] as? [String: Any])
+        let snapshot = try XCTUnwrap((metadata["snapshots"] as? [[String: Any]])?.first)
+        var missingEvidence = snapshot
+        missingEvidence.removeValue(forKey: "conversationLabelEvidence")
+        var wrongWindow = snapshot
+        var ax = snapshot["axObservations"] as! [[String: Any]]
+        ax[0]["windowId"] = "different-window"
+        wrongWindow["axObservations"] = ax
+        var longSpan = snapshot
+        var spans = snapshot["ocrSpans"] as! [[String: Any]]
+        spans[0]["text"] = String(repeating: "😀", count: 2001)
+        longSpan["ocrSpans"] = spans
+        var manySpans = snapshot
+        manySpans["ocrSpans"] = Array(repeating: spans[0], count: 501)
+        var duplicateReference = snapshot
+        var bodies = snapshot["bodyCandidates"] as! [[String: Any]]
+        bodies[0]["spanOrdinals"] = [0, 1, 2]
+        duplicateReference["bodyCandidates"] = bodies
+        // Valid per-field lengths but a complete envelope larger than 2 MiB.
+        var largeSnapshot = snapshot
+        largeSnapshot["conversationLabel"] = NSNull()
+        largeSnapshot["conversationLabelEvidence"] = NSNull()
+        largeSnapshot["axObservations"] = [] as [[String: Any]]
+        largeSnapshot["annotations"] = [] as [[String: Any]]
+        let text = String(repeating: "字", count: 4000)
+        largeSnapshot["ocrSpans"] = (0..<100).map { ["ordinal": $0, "text": text] as [String: Any] }
+        largeSnapshot["bodyCandidates"] = (0..<100).map { ["ordinal": $0, "text": text, "spanOrdinals": [$0]] as [String: Any] }
+        for snapshots in [[missingEvidence], [wrongWindow], [longSpan], [manySpans], [duplicateReference],
+                          Array(repeating: snapshot, count: 33), [largeSnapshot]] {
+            var input = metadata
+            input["snapshots"] = snapshots
+            let result = try LineObservationProtocol.boundedV3Observation(input)
+            XCTAssertTrue(result.limited)
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: result.data) as? [String: Any])
+            let output = try XCTUnwrap((value["snapshots"] as? [[String: Any]])?.first)
+            XCTAssertEqual(output["coverage"] as? String, "unavailable")
+            XCTAssertEqual(output["reason"] as? String, "observation_limits_exceeded")
+            XCTAssertEqual((output["ocrSpans"] as? [[String: Any]])?.count, 0)
+            XCTAssertEqual((value["state"] as? [String: Any])?["captureStatus"] as? String, "observation_limits_exceeded")
+            XCTAssertEqual(value["observationId"] as? String, metadata["observationId"] as? String)
+        }
     }
     func testV2FallbackSurfacesExplicitlyPreserveUnknownAttributionAndV1IsUnchanged() throws {
         let candidate: [String: Any] = ["ordinal": 0, "text": "sample", "spanOrdinals": [0]]

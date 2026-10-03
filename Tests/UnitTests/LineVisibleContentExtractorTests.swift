@@ -2,6 +2,17 @@ import XCTest
 @testable import ClawGate
 
 final class LineVisibleContentExtractorTests: XCTestCase {
+    func testGroupingRespectsUTF16TextLimitWithoutLosingOriginalRows() {
+        let text = String(repeating: "😀", count: 1000)
+        let rows = [row(text, 0.15, 0.65, 0.6, 0.04), row(text, 0.15, 0.60, 0.6, 0.04)]
+        for regions: [LineObservationRect] in [[], [.init(x: 0.1, y: 0.55, width: 0.7, height: 0.2)]] {
+            let result = LineVisibleContentExtractor.extract(rows: rows, textBlockRegions: regions)
+            XCTAssertEqual(result.bodyCandidates.map(\.text), [text, text])
+            XCTAssertEqual(result.bodyCandidates.map(\.spanOrdinals), [[0], [1]])
+            XCTAssertEqual(result.bodyCandidates.map(\.ordinal), [0, 1])
+            XCTAssertTrue(result.annotations.isEmpty)
+        }
+    }
     func testCompetingClockBadgesAndAXEmbeddedDividerAreNotPromoted() {
         let rows = [row("first", 0.15, 0.7, 0.6, 0.04), row("middle", 0.15, 0.65, 0.6, 0.04),
                     row("last", 0.15, 0.6, 0.6, 0.04),

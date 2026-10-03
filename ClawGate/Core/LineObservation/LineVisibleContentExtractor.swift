@@ -47,8 +47,18 @@ public enum LineVisibleContentExtractor {
         let hasValidRegions = textBlockRegions.contains(where: isValid)
         let base: [LineBodyCandidate]
         if hasValidRegions {
-            base = LineBodyCandidateExtractor.extract(rows: rows, textBlockRegions: textBlockRegions,
-                                                       regionMethod: regionMethod)
+            let grouped = LineBodyCandidateExtractor.extract(rows: rows, textBlockRegions: textBlockRegions,
+                                                               regionMethod: regionMethod)
+            base = grouped.flatMap { candidate -> [LineBodyCandidate] in
+                guard candidate.text.utf16.count > 4000 else { return [candidate] }
+                return candidate.spanOrdinals.map { ordinal in
+                    LineBodyCandidate(ordinal: ordinal, text: rows[ordinal].text, spanOrdinals: [ordinal],
+                                      box: rows[ordinal].box, extractionMethod: "ocr_span")
+                }
+            }.enumerated().map { ordinal, candidate in
+                LineBodyCandidate(ordinal: ordinal, text: candidate.text, spanOrdinals: candidate.spanOrdinals,
+                                  box: candidate.box, extractionMethod: candidate.extractionMethod)
+            }
         } else {
             base = alignedCandidates(validRows: valid)
         }
@@ -105,7 +115,8 @@ public enum LineVisibleContentExtractor {
                 gap <= 0.5 * max(item.element.box.height, previous.1.box.height) &&
                 gap >= -0.15 * min(item.element.box.height, previous.1.box.height) &&
                 sizeRatio >= 0.75 && sizeRatio <= 1.33
-            if aligned { last.append((item.offset, item.element)); groups[groups.count - 1] = last }
+            let combinedLength = last.reduce(0) { $0 + $1.1.text.utf16.count } + last.count + item.element.text.utf16.count
+            if aligned && combinedLength <= 4000 { last.append((item.offset, item.element)); groups[groups.count - 1] = last }
             else { groups.append([(item.offset, item.element)]) }
         }
         return groups.sorted { ($0.first?.1.box.y ?? 0) > ($1.first?.1.box.y ?? 0) }.enumerated().map { ordinal, group in

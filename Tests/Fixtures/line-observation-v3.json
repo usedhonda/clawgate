@@ -1,0 +1,66 @@
+{
+  "source": "line",
+  "domain": "line",
+  "kind": "passive-observation",
+  "identity": null,
+  "external_id": "line:00000000-0000-4000-8000-000000000001:1",
+  "occurred_at": "2026-01-01T00:00:00.123Z",
+  "metadata": {
+    "schemaVersion": 3,
+    "platform": "line",
+    "source": "clawgate-line-passive-ocr",
+    "producerInstance": "00000000-0000-4000-8000-000000000001",
+    "deviceId": "00000000-0000-4000-8000-000000000002",
+    "seq": 1,
+    "observationId": "line:00000000-0000-4000-8000-000000000001:1",
+    "capturedAt": "2026-01-01T00:00:00.123Z",
+    "snapshots": [
+      {
+        "scope": "selected_thread_visible_window",
+        "coverage": "available",
+        "reason": null,
+        "windowId": "synthetic-window-1",
+        "windowWidth": 1000,
+        "windowHeight": 1000,
+        "coordinateSystem": "normalized_bottom_left",
+        "conversationKey": null,
+        "identityConfidence": "unknown",
+        "tailCoverage": false,
+        "ocrSpans": [
+          { "ordinal": 0, "text": "First synthetic line", "x": 0.15, "y": 0.65, "width": 0.6, "height": 0.04, "confidence": null, "fromSelf": null, "sender": null, "sentAt": null, "sentAtPrecision": "unknown" },
+          { "ordinal": 1, "text": "Second synthetic line", "x": 0.15, "y": 0.60, "width": 0.6, "height": 0.04, "confidence": null, "fromSelf": null, "sender": null, "sentAt": null, "sentAtPrecision": "unknown" },
+          { "ordinal": 2, "text": "午後 1:23", "x": 0.85, "y": 0.59, "width": 0.1, "height": 0.025, "confidence": null, "fromSelf": null, "sender": null, "sentAt": null, "sentAtPrecision": "unknown" },
+          { "ordinal": 3, "text": "ここから未読メッセージ", "x": 0.35, "y": 0.40, "width": 0.3, "height": 0.025, "confidence": null, "fromSelf": null, "sender": null, "sentAt": null, "sentAtPrecision": "unknown" }
+        ],
+        "bodyCandidates": [
+          {
+            "ordinal": 0,
+            "text": "First synthetic line\nSecond synthetic line",
+            "spanOrdinals": [0, 1],
+            "x": 0.15,
+            "y": 0.60,
+            "width": 0.6,
+            "height": 0.09,
+            "extractionMethod": "ocr_aligned_lines",
+            "coverage": "visible_fragment",
+            "sender": null,
+            "fromSelf": null,
+            "sentAt": null,
+            "sentAtPrecision": "unknown",
+            "displayedTimeText": "午後 1:23",
+            "displayedTimeEvidence": { "method": "ocr_clock_badge_layout", "spanOrdinals": [2] }
+          }
+        ],
+        "conversationLabel": "Example conversation",
+        "conversationLabelEvidence": { "method": "ax_window_title", "axObservationOrdinal": 0 },
+        "axObservations": [
+          { "ordinal": 0, "windowId": "synthetic-window-1", "attribute": "AXTitle", "value": "Example conversation", "corroboratedBy": "SCWindow.title" }
+        ],
+        "annotations": [
+          { "ordinal": 0, "text": "午後 1:23", "spanOrdinals": [2], "x": 0.85, "y": 0.59, "width": 0.1, "height": 0.025, "kind": "displayed_time", "evidence": "ocr_clock_badge_layout", "relatedBodyOrdinal": 0 },
+          { "ordinal": 1, "text": "ここから未読メッセージ", "spanOrdinals": [3], "x": 0.35, "y": 0.40, "width": 0.3, "height": 0.025, "kind": "unread_divider", "evidence": "ocr_centered_divider", "relatedBodyOrdinal": null }
+        ]
+      }
+    ]
+  }
+}

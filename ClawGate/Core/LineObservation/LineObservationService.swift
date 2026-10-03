@@ -181,7 +181,14 @@ final class LineObservationService {
                     "snapshots": snapshots,
                     "state": ["captureStatus": status, "queueCount": outbox.queuedCount, "queueBytes": outbox.queuedBytes]
                 ]
-                let data = try JSONSerialization.data(withJSONObject: observation, options: [.sortedKeys])
+                let data: Data
+                if schemaVersion == 3 {
+                    let bounded = try LineObservationProtocol.boundedV3Observation(observation)
+                    data = bounded.data
+                    if bounded.limited { diagnostics.update(["captureStatus": "observation_limits_exceeded"]) }
+                } else {
+                    data = try JSONSerialization.data(withJSONObject: observation, options: [.sortedKeys])
+                }
                 try outbox.enqueue(data, observationID: allocation.id)
                 lastSignature = signature
                 lastHeartbeat = now
@@ -403,9 +410,13 @@ final class LineObservationService {
             }
         }
         if schemaVersion == 3 {
-            let label = content == nil ? nil : window.observedLabel
+            let label = content == nil || window.windowID == nil ? nil : window.observedLabel
             result["conversationLabel"] = label as Any? ?? NSNull()
-            result["conversationLabelEvidence"] = label == nil ? NSNull() : "ax_window_title" as Any
+            result["conversationLabelEvidence"] = label == nil ? NSNull() : ["method": "ax_window_title", "axObservationOrdinal": 0] as Any
+            result["axObservations"] = label.map { [
+                ["ordinal": 0, "windowId": String(window.windowID!), "attribute": "AXTitle",
+                 "value": $0, "corroboratedBy": "SCWindow.title"] as [String: Any]
+            ] } ?? []
             result["annotations"] = (content?.annotations ?? []).map { annotation in
                 ["ordinal": annotation.ordinal, "text": annotation.text, "spanOrdinals": annotation.spanOrdinals,
                  "x": annotation.box.x, "y": annotation.box.y, "width": annotation.box.width, "height": annotation.box.height,
