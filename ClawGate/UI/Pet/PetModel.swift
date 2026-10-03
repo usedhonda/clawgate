@@ -2035,6 +2035,9 @@ final class PetModel: NSObject, ObservableObject {
     func setConnectionStateForTesting(_ state: ConnectionState) { connectionState = state }
     func setMeetingStoreForTesting(_ store: MeetingStore) { meetingStoreOverrideForTesting = store }
     var pendingMinutesMeetingIDForTesting: String? { pendingMinutesMeetingID }
+    var minutesActivityPhaseStartedAtForTesting: (dispatch: Date?, generation: Date?) {
+        (minutesActivityStartedAt, minutesGenerationStartedAt)
+    }
     var minutesAttemptsForTesting: [String: Int] { minutesAttempts }
     func completeMinutesReplyForTesting(_ text: String) {
         appendSummonEntry(text: text, source: Self.minutesSource)
@@ -2079,11 +2082,12 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Test seam: the Gateway ACK for the in-flight summon arrived with `runId`.
     func acknowledgeSharedSummonForTesting(runId: String) {
-        guard var owner = sharedSummonOwner else { return }
-        owner.runId = runId
-        owner.phase = .running
-        sharedSummonOwner = owner
-        pendingSummonRunId = runId
+        guard let token = sharedSummonOwner?.token else { return }
+        acceptSharedSummonRun(runId: runId, token: token)
+    }
+
+    func acknowledgeSharedSummonForTesting(runId: String, token: UUID) {
+        acceptSharedSummonRun(runId: runId, token: token)
     }
 
     func releaseSharedSummonForTesting(token: UUID) {
@@ -2214,6 +2218,10 @@ final class PetModel: NSObject, ObservableObject {
         summonWatchdogToken = nil
         pendingSummonSource = nil
         pendingSummonRunId = nil
+        if owner.source == Self.minutesSource || owner.source == Self.minutesSummarySource {
+            minutesActivityStartedAt = nil
+            minutesGenerationStartedAt = nil
+        }
         if owner.source == "log_scene_naming" {
             pendingSceneNamingIDs = []
         }
@@ -2311,17 +2319,27 @@ final class PetModel: NSObject, ObservableObject {
             do {
                 let runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
                 await MainActor.run {
-                    guard var owner = self.sharedSummonOwner, owner.token == token else { return }
-                    owner.runId = runId
-                    owner.phase = .running
-                    self.sharedSummonOwner = owner
-                    self.pendingSummonRunId = runId
+                    self.acceptSharedSummonRun(runId: runId, token: token)
                 }
             } catch {
                 await MainActor.run {
                     self.handleSummonSendFailure(token: token, source: source, error: error)
                 }
             }
+        }
+    }
+
+    /// Accept a run id only for the still-current summon owner. This is shared
+    /// by the production ACK callback and the deterministic test seam so a
+    /// stale ACK cannot move the generation clock.
+    private func acceptSharedSummonRun(runId: String, token: UUID) {
+        guard var owner = sharedSummonOwner, owner.token == token else { return }
+        owner.runId = runId
+        owner.phase = .running
+        sharedSummonOwner = owner
+        pendingSummonRunId = runId
+        if owner.source == Self.minutesSource || owner.source == Self.minutesSummarySource {
+            minutesGenerationStartedAt = Date()
         }
     }
 
@@ -2937,6 +2955,10 @@ final class PetModel: NSObject, ObservableObject {
     /// The meeting whose minutes are in flight, if any.
     private var conflictReviewInFlight = Set<String>()
     @Published private var minutesActivityStartedAt: Date?
+    /// Set when the Gateway ACK transitions a minutes summon from dispatch to
+    /// active generation. Kept separate so the UI does not carry send wait
+    /// time into the model-generation phase.
+    private var minutesGenerationStartedAt: Date?
     private var pendingMinutesMeetingID: String?
     private var pendingMinutesSegmentIDs: Set<String> = []
     /// Attempts per meeting, so a permanently busy slot gives up instead of
@@ -2990,15 +3012,24 @@ final class PetModel: NSObject, ObservableObject {
 
     /// The actual scheduler phase, not an estimate based on a pending record.
     func minutesActivity(for record: MeetingRecord, now: Date = Date()) -> (label: String, elapsedSeconds: Int?)? {
-        let elapsed = minutesActivityStartedAt.map { max(0, Int(now.timeIntervalSince($0))) }
         guard record.minutesState == "pending" || pendingSummaryPass?.id == record.id else { return nil }
         if connectionState != .connected { return ("接続の回復待ち", nil) }
         if pendingSummaryPass?.id == record.id {
-            return ("会議全体の概要を統合中", elapsed)
+            let awaitingRunId = sharedSummonOwner?.phase == .awaitingRunId
+            let startedAt = (awaitingRunId ? minutesActivityStartedAt :
+                (minutesGenerationStartedAt ?? minutesActivityStartedAt))
+            let elapsed = startedAt.map {
+                max(0, Int(now.timeIntervalSince($0)))
+            }
+            return (awaitingRunId ? "概要の生成依頼を送信中" : "会議全体の概要を統合中", elapsed)
         }
         guard record.minutesState == "pending" else { return nil }
         if pendingMinutesMeetingID == record.id {
-            let label = sharedSummonOwner?.phase == .awaitingRunId ? "生成依頼を送信中" : "AIがこのパートの議事録を生成中"
+            let awaitingRunId = sharedSummonOwner?.phase == .awaitingRunId
+            let startedAt = (awaitingRunId ? minutesActivityStartedAt :
+                (minutesGenerationStartedAt ?? minutesActivityStartedAt))
+            let elapsed = startedAt.map { max(0, Int(now.timeIntervalSince($0))) }
+            let label = awaitingRunId ? "生成依頼を送信中" : "AIがこのパートの議事録を生成中"
             return (label, elapsed)
         }
         if conflictReviewInFlight.contains(record.id) { return ("食い違う区間の音声を再認識中", nil) }
@@ -3174,6 +3205,7 @@ final class PetModel: NSObject, ObservableObject {
         markMinutes(id: record.id, state: "pending", error: nil)
         minutesRunSawDelta = false
         minutesActivityStartedAt = Date()
+        minutesGenerationStartedAt = nil
         sendSummon(message, source: Self.minutesSource)
         // A failed admission remains pending and is retried by the next slot
         // release/reconnect; it is not a generation failure.
@@ -3330,6 +3362,7 @@ final class PetModel: NSObject, ObservableObject {
             pendingSummaryPass = (id, input)
             minutesRunSawDelta = false
             minutesActivityStartedAt = Date()
+            minutesGenerationStartedAt = nil
             sendSummon(message, source: Self.minutesSummarySource)
             if sharedSummonOwner?.source != Self.minutesSummarySource {
                 // Not admitted; try again on the next drain.

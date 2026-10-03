@@ -178,6 +178,29 @@ final class MeetingMinutesRetryTests: XCTestCase {
         XCTAssertNil(model.minutesActivity(for: store.load(id: waiting.id)!)?.elapsedSeconds)
     }
 
+    func testActivityElapsedResetsWhenGenerationStarts() throws {
+        let record = meeting()
+        model.requestMinutes(for: record)
+        let active = try XCTUnwrap(store.load(id: record.id))
+        let dispatchStarted = try XCTUnwrap(model.minutesActivityPhaseStartedAtForTesting.dispatch)
+        let sending = try XCTUnwrap(model.minutesActivity(for: active,
+                                                          now: dispatchStarted.addingTimeInterval(8)))
+        XCTAssertEqual(sending.label, "生成依頼を送信中")
+        XCTAssertEqual(sending.elapsedSeconds, 8)
+
+        let staleToken = UUID()
+        model.acknowledgeSharedSummonForTesting(runId: "run-stale", token: staleToken)
+        XCTAssertNil(model.minutesActivityPhaseStartedAtForTesting.generation,
+                     "an ACK for an unrelated owner must not reset phase timing")
+        model.acknowledgeSharedSummonForTesting(runId: "run-minutes")
+        let generationStarted = try XCTUnwrap(model.minutesActivityPhaseStartedAtForTesting.generation)
+        XCTAssertGreaterThanOrEqual(generationStarted, dispatchStarted)
+        let generating = try XCTUnwrap(model.minutesActivity(for: active,
+                                                             now: generationStarted.addingTimeInterval(3)))
+        XCTAssertEqual(generating.label, "AIがこのパートの議事録を生成中")
+        XCTAssertEqual(generating.elapsedSeconds, 3)
+    }
+
     func testExplicitRequestsArePrioritizedAndPersistAcrossMetadataRefresh() throws {
         let legacy = MeetingRecord(id: "legacy", source: "meet", startedAt: 1_790_000_000,
                                    endedAt: 1_790_000_100, timeZone: "UTC", title: "legacy",

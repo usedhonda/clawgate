@@ -454,8 +454,13 @@ it does not itself guarantee a particular model response duration.
 
 Pending status distinguishes connection wait, other work/meeting wait,
 retry backoff, inter-part gap, conflict audio review, RPC admission,
-part generation and overview integration. Active request elapsed time is
-shown separately from completed-part progress. It is not a completion ETA.
+part generation and overview integration. Dispatch elapsed time starts when
+the request is sent; generation elapsed time starts only when its current
+owner receives the Gateway run ACK. A late ACK for a released owner cannot
+reset the current phase clock. Overview dispatch and integration follow the
+same distinction. These clocks are session-local, exclude earlier queue and
+retry waits, and are shown separately from completed-part progress; neither
+is an end-to-end duration or a completion ETA.
 Failures show a concise category and checkpoint-preserving recovery; raw
 stored diagnostics are selectable only in an expandable technical section.
 Input-range disclaimers belong to app scope UI, not speech-grounded minutes.
