@@ -92,7 +92,15 @@ final class LineObservationProtocolTests: XCTestCase {
         largeSnapshot["annotations"] = [] as [[String: Any]]
         let text = String(repeating: "字", count: 4000)
         largeSnapshot["ocrSpans"] = (0..<100).map { ["ordinal": $0, "text": text] as [String: Any] }
-        largeSnapshot["bodyCandidates"] = (0..<100).map { ["ordinal": $0, "text": text, "spanOrdinals": [$0]] as [String: Any] }
+        largeSnapshot["bodyCandidates"] = (0..<100).map { ordinal -> [String: Any] in
+            var candidate = (snapshot["bodyCandidates"] as! [[String: Any]])[0]
+            candidate["ordinal"] = ordinal
+            candidate["text"] = text
+            candidate["spanOrdinals"] = [ordinal]
+            candidate["displayedTimeText"] = NSNull()
+            candidate["displayedTimeEvidence"] = NSNull()
+            return candidate
+        }
         for snapshots in [[missingEvidence], [wrongWindow], [longSpan], [manySpans], [duplicateReference],
                           Array(repeating: snapshot, count: 33), [largeSnapshot]] {
             var input = metadata
@@ -106,6 +114,34 @@ final class LineObservationProtocolTests: XCTestCase {
             XCTAssertEqual((output["ocrSpans"] as? [[String: Any]])?.count, 0)
             XCTAssertEqual((value["state"] as? [String: Any])?["captureStatus"] as? String, "observation_limits_exceeded")
             XCTAssertEqual(value["observationId"] as? String, metadata["observationId"] as? String)
+        }
+    }
+
+    func testV3ReferencesUseExplicitBodyOrdinalAndRejectInvalidGeometryOrLinks() throws {
+        var metadata = try XCTUnwrap(try fixture()["metadata"] as? [String: Any])
+        var snapshot = (metadata["snapshots"] as! [[String: Any]])[0]
+        var bodies = snapshot["bodyCandidates"] as! [[String: Any]]
+        var annotations = snapshot["annotations"] as! [[String: Any]]
+        bodies[0]["ordinal"] = 4
+        annotations[0]["relatedBodyOrdinal"] = 4
+        snapshot["bodyCandidates"] = bodies
+        snapshot["annotations"] = annotations
+        metadata["snapshots"] = [snapshot]
+        XCTAssertFalse(try LineObservationProtocol.boundedV3Observation(metadata).limited)
+        for variant in 0..<4 {
+            var invalid = snapshot
+            var changedBodies = bodies
+            var changedAnnotations = annotations
+            switch variant {
+            case 0: changedAnnotations[0]["relatedBodyOrdinal"] = 0 // array index is not the ordinal
+            case 1: changedBodies[0]["x"] = Double.infinity
+            case 2: changedAnnotations[0]["width"] = 1.1
+            default: changedBodies[0]["displayedTimeEvidence"] = ["method": "ocr_clock_badge_layout", "spanOrdinals": [3]]
+            }
+            invalid["bodyCandidates"] = changedBodies
+            invalid["annotations"] = changedAnnotations
+            metadata["snapshots"] = [invalid]
+            XCTAssertTrue(try LineObservationProtocol.boundedV3Observation(metadata).limited)
         }
     }
     func testV2FallbackSurfacesExplicitlyPreserveUnknownAttributionAndV1IsUnchanged() throws {

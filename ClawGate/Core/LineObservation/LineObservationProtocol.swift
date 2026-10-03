@@ -102,9 +102,32 @@ enum LineObservationProtocol {
         var used = Set<Int>()
         for item in bodies + annotations {
             guard let text = item["text"] as? String, !text.isEmpty, text.utf16.count <= 4000,
+                  validV3Geometry(item),
                   let refs = item["spanOrdinals"] as? [Int], !refs.isEmpty, refs.count <= 500,
                   Set(refs).count == refs.count, Set(refs).isSubset(of: indices), used.isDisjoint(with: refs) else { return false }
             used.formUnion(refs)
+        }
+        let bodyOrdinals = bodies.compactMap { $0["ordinal"] as? Int }
+        guard bodyOrdinals.count == bodies.count, Set(bodyOrdinals).count == bodies.count,
+              bodyOrdinals.allSatisfy({ $0 >= 0 && $0 < 500 }) else { return false }
+        for (index, annotation) in annotations.enumerated() {
+            guard annotation["ordinal"] as? Int == index else { return false }
+            if let related = annotation["relatedBodyOrdinal"] as? Int {
+                guard bodyOrdinals.contains(related), annotation["kind"] as? String == "displayed_time" else { return false }
+            } else if !(annotation["relatedBodyOrdinal"] is NSNull) { return false }
+        }
+        for body in bodies {
+            if let time = body["displayedTimeText"] as? String {
+                guard let evidence = body["displayedTimeEvidence"] as? [String: Any],
+                      evidence["method"] as? String == "ocr_clock_badge_layout",
+                      let refs = evidence["spanOrdinals"] as? [Int],
+                      annotations.filter({ annotation in
+                          annotation["kind"] as? String == "displayed_time" &&
+                          annotation["evidence"] as? String == "ocr_clock_badge_layout" &&
+                          annotation["relatedBodyOrdinal"] as? Int == body["ordinal"] as? Int &&
+                          annotation["text"] as? String == time && annotation["spanOrdinals"] as? [Int] == refs
+                      }).count == 1 else { return false }
+            } else if !(body["displayedTimeText"] is NSNull) || !(body["displayedTimeEvidence"] is NSNull) { return false }
         }
         let isConversation = snapshot["scope"] as? String == "selected_thread_visible_window" && snapshot["coverage"] as? String == "available"
         if isConversation {
@@ -119,6 +142,12 @@ enum LineObservationProtocol {
                   let windowID = snapshot["windowId"] as? String, ax[0]["windowId"] as? String == windowID else { return false }
         } else if !(snapshot["conversationLabel"] is NSNull) || !(snapshot["conversationLabelEvidence"] is NSNull) || !ax.isEmpty { return false }
         return true
+    }
+
+    private static func validV3Geometry(_ item: [String: Any]) -> Bool {
+        let values = ["x", "y", "width", "height"].compactMap { item[$0] as? Double }
+        guard values.count == 4, values.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else { return false }
+        return values[0] + values[2] <= 1 && values[1] + values[3] <= 1
     }
 
     /// Version alone is not semantic compatibility. Never upgrade existing queued bytes.

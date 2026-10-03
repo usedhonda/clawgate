@@ -47,6 +47,13 @@ The producer has no confirmed identity. `identity` is always JSON `null` and
 
 Current snapshot fields and `ocrSpans` remain unchanged. Snapshot ordinals and
 candidate/annotation ordinals are local to that snapshot, never message IDs.
+Every body candidate has an explicit unique `ordinal` (0...499); after
+classification these values may have gaps and are **not array indexes**.
+`relatedBodyOrdinal` resolves that explicit ordinal in this snapshot only,
+or is `null` if correspondence is unknown. Annotation ordinals are their
+zero-based array indexes. Span references resolve the stored raw span ordinals
+in the same snapshot. Invalid or cross-snapshot references are not accepted.
+All arrays and references are fixed on first persistence and unchanged on retry.
 Each raw span is retained. On an available conversation, body span references
 and annotation span references are disjoint and together cover every raw span
 exactly once. A grouped candidate joins source text literally (line breaks are
@@ -67,7 +74,9 @@ V3 adds these required fields to every snapshot:
 
 Only `AXTitle` observations are exported. Source AX and ScreenCaptureKit
 titles must match and be rechecked after capture; this is corroboration, never
-identity. Labels are capped at 512 UTF-8 bytes. If unknown, label,
+identity. Conversation structure must also have been identified by the producer.
+These are producer adoption conditions, not independent Hub/consumer verification;
+matching labels never authorize merging conversations. Labels are capped at 512 UTF-8 bytes. If unknown, label,
 label evidence, and AX observations are respectively `null`, `null`, and `[]`.
 No other AX attributes, drafts, or input-field contents are exported.
 
@@ -100,6 +109,11 @@ units; and the 2 MiB single-request cap. V3 additionally permits at most 500
 annotations and at most 500 valid, same-snapshot span references across
 candidate/annotation references. Clock extraction remains within the existing
 4,000 UTF-16-unit text bound and adds no new capacity. Enum strings are exact.
+Candidate and annotation geometry is window-relative, normalized bottom-left:
+`x`, `y`, `width`, `height` must be finite and within 0...1, with
+`x + width <= 1` and `y + height <= 1`, matching legacy candidate admission.
+Raw span geometry is retained unchanged. Text mixed with a clock/divider is
+not removed wholesale: ambiguous classification stays a body candidate.
 
 There is no truncation. If a limit would be exceeded, the producer marks the
 surface/observation unavailable with reason `observation_limits_exceeded`,
@@ -126,6 +140,8 @@ store persistence, duplicate/conflict handling, MCP page readback, and natural
 v3-source ACK must each be proven before Hub semantic acceptance. Chi/consumer
 acceptance is a separate gate. Capability negotiation alone is not proof of
 any of those downstream behaviors.
+The advertisement denotes independent Hub storage/scoped MCP read support,
+not Gateway-route v3 support, Chi semantic acceptance, or actuation permission.
 
 ## Synthetic fixture
 
