@@ -148,7 +148,7 @@ otherwise exact revision.
 The app includes a one-part admission caller on its existing authenticated
 Pet WebSocket. It is off by default: the private local deployment checkpoint
 `clawgate.minutes.singleRunAcceptance` must contain exactly `version: 1`,
-`meetingID`, and `revisionFileName` for the frozen indexed revision. This is
+`meetingID`, and `jobSHA256` (SHA256 of the exact saved `minutes-job.json` bytes). This is
 not a server capability or general user preference. It is set only after the
 Gateway owner reports deployed readiness. A different/recreated revision does
 not inherit that admission. No credentials or message bodies are in this marker.
@@ -163,7 +163,14 @@ unrelated events remain unchanged. Registration precedes send and retained read.
 
 A complete pilot part remains in its indexed ledger. It does not enable max-two,
 rewrite the ordinary prefix, launch overview synthesis, or claim whole-meeting
-completion. Those follow the same-window strict ACK/read/terminal acceptance.
+completion. After same-window strict ACK/read/terminal acceptance, an explicit
+version-2 checkpoint adds `mode: "boundedMeeting"` for the same exact job bytes.
+That route admits at most two part runs, publishes validated source-ordered
+results, then synthesizes the overview through a separate durable dedicated
+request. Overview input/calendar binding use the original frozen envelope,
+not later edits to the convenience meeting record. Overview failure retains joined results; recovery never sends ordinary
+chat. A terminal overview ledger is checked before base publication on restart,
+so a previously rewritten overview is not reset to the joined text.
 Absent the checkpoint, normal sequential minutes remain the live route; indexed
 owners never fall back to that route. Method advertisement is preflight only,
 not evidence of actual provider model or projection isolation.

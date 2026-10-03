@@ -31,6 +31,34 @@ struct MeetingMinutesExecutionFinalizer {
                          record: MeetingRecord,
                          store: MeetingStore,
                          id: String) throws -> Result {
+        let prepared = try prepare(ledger: ledger, frozenJob: frozenJob, record: record, id: id)
+        let completedJob = prepared.completedJob
+        let bound = prepared.combined
+        return try MeetingMinutesJob.withCurrentRevisionLock(store: store, id: id, expected: frozenJob) {
+            guard let currentLedger = try MeetingMinutesExecutionState.load(store: store, id: id, job: frozenJob),
+                  currentLedger == ledger else {
+                throw FinalizationError.staleJob
+            }
+            if let accepted = store.loadAcceptedMinutes(id: id),
+               accepted.fingerprint == frozenJob.fingerprint,
+               accepted.minutes == bound,
+               accepted.segments == Self.uniqueSegments(frozenJob.envelopes.flatMap(\.segments)),
+               accepted.unresolvedNotes == (frozenJob.envelopes.first?.unresolvedNotes ?? []),
+               accepted.supplementalMaterials == frozenJob.materialCitationSnapshot,
+               accepted.supplementalInput == frozenJob.allSupplementalMaterials {
+                return Result(completedJob: completedJob, combined: bound,
+                              wroteAcceptedBundle: false)
+            }
+            try store.saveValidatedMinutes(bound, for: record, job: completedJob)
+            return Result(completedJob: completedJob, combined: bound,
+                          wroteAcceptedBundle: true)
+        }
+    }
+
+    /// Prepare exact source-ordered output without replacing an already
+    /// published overview during restart recovery.
+    static func prepare(ledger: MeetingMinutesExecutionState, frozenJob: MeetingMinutesJob,
+                        record: MeetingRecord, id: String) throws -> Result {
         guard id == record.id,
               ledger.version == MeetingMinutesExecutionState.currentVersion,
               ledger.fingerprint == frozenJob.fingerprint,
@@ -74,26 +102,9 @@ struct MeetingMinutesExecutionFinalizer {
             userRequestedAt: frozenJob.userRequestedAt,
             reusedPartCount: frozenJob.reusedPartCount)
 
-        return try MeetingMinutesJob.withCurrentRevisionLock(store: store, id: id, expected: frozenJob) {
-            guard let currentLedger = try MeetingMinutesExecutionState.load(store: store, id: id, job: frozenJob),
-                  currentLedger == ledger else {
-                throw FinalizationError.staleJob
-            }
-            let bound = combined.boundToCalendarEvent(record.calendarEventID)
-            if let accepted = store.loadAcceptedMinutes(id: id),
-               accepted.fingerprint == frozenJob.fingerprint,
-               accepted.minutes == bound,
-               accepted.segments == Self.uniqueSegments(frozenJob.envelopes.flatMap(\.segments)),
-               accepted.unresolvedNotes == (frozenJob.envelopes.first?.unresolvedNotes ?? []),
-               accepted.supplementalMaterials == frozenJob.materialCitationSnapshot,
-               accepted.supplementalInput == frozenJob.allSupplementalMaterials {
-                return Result(completedJob: completedJob, combined: bound,
-                              wroteAcceptedBundle: false)
-            }
-            try store.saveValidatedMinutes(bound, for: record, job: completedJob)
-            return Result(completedJob: completedJob, combined: bound,
-                          wroteAcceptedBundle: true)
-        }
+        return Result(completedJob: completedJob,
+                      combined: combined.boundToCalendarEvent(frozenJob.envelopes.first?.calendarEventID),
+                      wroteAcceptedBundle: false)
     }
 
     private static func uniqueSegments(_ values: [MeetingMinutesSegment]) -> [MeetingMinutesSegment] {

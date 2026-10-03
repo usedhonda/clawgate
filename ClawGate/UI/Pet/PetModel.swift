@@ -3060,8 +3060,8 @@ final class PetModel: NSObject, ObservableObject {
         return pilot.matches(store: store, id: id, job: job)
     }
 
-    /// First same-window acceptance is exactly one new part, not a global
-    /// switch. Normal minutes and the interactive slot keep their own owners.
+    /// The private rollout selects one exact revision. Single-part admission
+    /// precedes explicit bounded-meeting activation; ordinary owners stay separate.
     private func startMinutesPilotIfNeeded() {
         guard minutesPilotTask == nil, !didCleanup,
               connectionState == .connected, let key = sessionKey,
@@ -3096,9 +3096,11 @@ final class PetModel: NSObject, ObservableObject {
                           let current = MeetingMinutesJob.load(store: store, id: record.id),
                           try MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: current) ==
                               MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: job) else { return }
-                    let progress = try await executor.step(maxConcurrentParts: 1, maximumStartedParts: 1)
+                    let progress = try await executor.step(
+                        maxConcurrentParts: pilot.mode == .singlePart ? 1 : 2,
+                        maximumStartedParts: pilot.mode == .singlePart ? 1 : nil)
                     self.meetingsRevision += 1
-                    if progress.failed > 0 {
+                    if progress.failed > 0 && progress.live == 0 {
                         self.minutesPilotLabels[record.id] = "専用実行の結果を確認してください。完成分は保存されています"
                         return
                     }
@@ -3106,18 +3108,56 @@ final class PetModel: NSObject, ObservableObject {
                         self.minutesPilotLabels[record.id] = "保存済み結果を取得できません。期限切れ・未確認の実行は再送しません"
                         return
                     }
+                    if pilot.mode == .boundedMeeting && progress.completed == progress.total {
+                        let prepared = try await executor.completedResult(record: record)
+                        if !MeetingMinutesSummaryPass.needed(partCount: prepared.completedJob.envelopes.count) {
+                            _ = try await executor.finalize(record: record)
+                            self.finishMinutes(id: record.id, state: "ready", error: nil)
+                            return
+                        }
+                        let overview = try MeetingMinutesOverviewExecutor(frozenJob: job,
+                            completedJob: prepared.completedJob, record: record, store: store,
+                            id: record.id, sessionKey: key,
+                            send: { try await client.sendMinutesExecution($0) },
+                            read: { try await client.minutesExecutionResult($0) })
+                        if !(await overview.hasCompletedOutcome()) { _ = try await executor.finalize(record: record) }
+                        while !Task.isCancelled {
+                            guard self.connectionState == .connected,
+                                  await client.supportsDedicatedMinutesExecution() else { return }
+                            self.minutesPilotLabels[record.id] = "会議全体の概要を専用経路で統合中"
+                            self.meetingsRevision += 1
+                            switch try await overview.step() {
+                            case .completed:
+                                self.finishMinutes(id: record.id, state: "ready", error: nil)
+                                return
+                            case .failed:
+                                self.finishMinutes(id: record.id, state: "ready", error: "概要の統合を採用できませんでした。各パートの議事録は保存されています")
+                                return
+                            case .unavailable:
+                                self.minutesPilotLabels[record.id] = "概要の保存済み実行を復旧待ち（再送しません）"
+                                return
+                            case .recovering:
+                                self.minutesPilotLabels[record.id] = "概要の受付・復旧確認待ち（再送しません）"
+                            case .pending: break
+                            }
+                            try await Task.sleep(nanoseconds: 5_000_000_000)
+                        }
+                        return
+                    }
                     if progress.live == 0 && progress.admissionLimitReached {
                         self.minutesPilotLabels[record.id] = "専用実行の1パート確認済み（次段階の受入待ち）"
                         return
                     }
                     self.minutesPilotLabels[record.id] = progress.unresolvedIndices.isEmpty
-                        ? "専用実行の結果待ち（1パート）"
+                        ? "専用実行の結果待ち（\(progress.live)パート）"
                         : "保存済み実行の復旧確認待ち（再送しません）"
                     // No resend: subsequent steps only read the reserved key.
                     try await Task.sleep(nanoseconds: 5_000_000_000)
                 }
             } catch is CancellationError {
                 // Durable owners survive teardown; no ordinary-chat fallback.
+            } catch MeetingMinutesExecutionFinalizer.FinalizationError.noMinutes {
+                self.finishMinutes(id: record.id, state: "failed", error: "根拠となる発言が足りませんでした。旧議事録は保持しています")
             } catch {
                 self.minutesPilotLabels[record.id] = "実行記録を確認できません。安全のため再送していません"
             }

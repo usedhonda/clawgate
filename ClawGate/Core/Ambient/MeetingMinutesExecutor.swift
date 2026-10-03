@@ -133,6 +133,12 @@ actor MeetingMinutesExecutor {
                         } ?? false)
     }
 
+    func completedResult(record: MeetingRecord) throws -> MeetingMinutesExecutionFinalizer.Result {
+        guard !busy else { throw Failure.busy }
+        return try MeetingMinutesExecutionFinalizer.prepare(ledger: ledger, frozenJob: job,
+                                                            record: record, id: id)
+    }
+
     /// Commit only the current complete revision. The accepted bundle is the
     /// read authority; the returned complete job feeds overview generation.
     func finalize(record: MeetingRecord) throws -> MeetingMinutesExecutionFinalizer.Result {

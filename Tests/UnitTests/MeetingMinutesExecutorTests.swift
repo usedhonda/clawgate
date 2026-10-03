@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import ClawGate
 
 final class MeetingMinutesExecutorTests: XCTestCase {
@@ -51,13 +52,21 @@ final class MeetingMinutesExecutorTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         XCTAssertNil(MeetingMinutesPilot.load(defaults: defaults))
+        try job.save(store: store, id: record.id)
+        let jobBytes = try Data(contentsOf: store.directory(for: record.id).appendingPathComponent("minutes-job.json"))
+        let jobHash = SHA256.hash(data: jobBytes).map { String(format: "%02x", $0) }.joined()
         defaults.set(["version": 1, "meetingID": record.id,
-            "revisionFileName": try MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: job).lastPathComponent],
+            "jobSHA256": jobHash],
             forKey: MeetingMinutesPilot.defaultsKey)
         let pilot = try XCTUnwrap(MeetingMinutesPilot.load(defaults: defaults))
         XCTAssertTrue(pilot.matches(store: store, id: record.id, job: job))
         let fresh = MeetingMinutesJob.updating(envelope, previous: job)
         XCTAssertFalse(pilot.matches(store: store, id: record.id, job: fresh))
+        defaults.set(["version": 2, "meetingID": record.id, "jobSHA256": jobHash, "mode": "boundedMeeting"],
+                     forKey: MeetingMinutesPilot.defaultsKey)
+        let bounded = try XCTUnwrap(MeetingMinutesPilot.load(defaults: defaults))
+        XCTAssertEqual(bounded.mode, .boundedMeeting)
+        XCTAssertTrue(bounded.matches(store: store, id: record.id, job: job))
         let wire = Wire()
         let executor = try MeetingMinutesExecutor(job: job, store: store, id: record.id, sessionKey: "agent:example:main",
             send: { request in try await MinutesExecutionAck.validate(wire.payload(request, status: "started"), expected: request) },
