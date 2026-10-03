@@ -120,11 +120,22 @@ preserved, never replaced with an invented clear state. Downstream authorization
 to read unknown-privacy content is a separate consumer policy decision.
 Metadata-only transcripts do not create STT jobs; originals do.
 
+## Bounded raw-line reader
+
+`AudioHubRawTranscriptReader` reads one complete physical line with explicit
+caller-supplied read and line byte limits. It preserves LF/CRLF and blank lines
+as source bytes and counts physical lines. An unterminated tail is held without
+advancing the position. It rejects symlinks, non-owned directories/files,
+non-regular files, replacement, truncation and invalid line-boundary cursors.
+It assumes append-only input; inode/length checks cannot detect an in-place
+rewrite on the same inode. No cursor is persisted by this helper, and it does
+not parse JSON, enumerate sessions, enqueue records or enable a runtime route.
+
 ## Pending activation decisions
 
 Originals use `selected-meeting-original` with explicit source provenance.
 Metadata/control byte budgets have no production defaults. The pending runtime
-work is an exact-raw-line scanner and scan-position persistence, propagation of
+work is scanner orchestration and scan-position persistence, propagation of
 source write failures, a contained/hash-checked original loader and chunk upload,
 receipt-to-queue orchestration, and explicit original-expiry gaps. The current
 control journal handles only transcript clock gaps, not original expiration.
