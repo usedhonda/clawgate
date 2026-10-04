@@ -2041,6 +2041,7 @@ final class PetModel: NSObject, ObservableObject {
         (minutesActivityStartedAt, minutesGenerationStartedAt)
     }
     var minutesAttemptsForTesting: [String: Int] { minutesAttempts }
+    func requestMissingMinutesForTesting() { requestMissingMinutes() }
     func completeMinutesReplyForTesting(_ text: String) {
         appendSummonEntry(text: text, source: Self.minutesSource)
     }
@@ -2823,8 +2824,25 @@ final class PetModel: NSObject, ObservableObject {
             meetingMaterials[candidate.id] = MeetingGoogleMaterials.load(candidateID: candidate.id)
         }
         refreshMeetingSources()
+        requestMissingMinutes()
         meetingSourcesTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             self?.refreshMeetingSources()
+            self?.requestMissingMinutes()
+        }
+    }
+
+    /// The one request made 90s after a call ends is lost when the app
+    /// restarts inside that window, which left three real meetings of
+    /// 2026-09-30 without minutes. Meetings that ended a while ago with a
+    /// usable transcript and no request yet are queued here; parked meetings
+    /// and merged fragments are skipped by `requestMinutes` and the filter.
+    func requestMissingMinutes() {
+        let cutoff = Date().addingTimeInterval(-600)
+        for record in minutesStore().all()
+        where record.minutesState == "none" && record.mergedIntoMeetingID == nil && record.source != "calendar" {
+            guard let end = record.endedAt, Date(timeIntervalSince1970: end) < cutoff,
+                  meetingTranscript(for: record).count >= 10 else { continue }
+            requestMinutes(for: record)
         }
     }
 

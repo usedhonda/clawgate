@@ -455,7 +455,12 @@ idempotent and overwrites them. Minutes are deliberately NOT kept in
 ## Scheduling
 
 Minutes are requested once, `MenuBarApp.minutesAfterCallSeconds` (90s) after the
-call ends — long enough for the final audio chunk to close and be transcribed.
+call ends — long enough for the final audio chunk to close and be transcribed. The
+`PetModel.requestMissingMinutes` sweep (at start and every 5 minutes) also queues
+a meeting that ended more than 10 minutes ago, has no minutes request yet
+(`minutesState` none), is not merged into another meeting or calendar-only, and
+has at least 10 transcript segments, so a request lost to an app restart inside
+the 90s window does not leave the meeting without minutes.
 
 The request **waits its turn**: it never preempts a Log question or scene
 naming. A `pending` record is a durable queue entry, so a busy summon slot,

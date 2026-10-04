@@ -284,4 +284,14 @@ final class MeetingMinutesRetryTests: XCTestCase {
         XCTAssertEqual(refreshed.userRequestedAt, Date(timeIntervalSince1970: 1_790_000_600))
         XCTAssertEqual(refreshed.completed.count, 1, "metadata refresh must preserve the checkpoint")
     }
+
+    /// 2026-09-30: three real meetings never had minutes requested because the
+    /// one-time request after the call was lost to a restart.
+    func testEndedMeetingWithTranscriptButNoRequestIsQueued() throws {
+        var record = meeting()
+        record.endedAt = Date().addingTimeInterval(-3600).timeIntervalSince1970
+        store.save(record)
+        model.requestMissingMinutesForTesting()
+        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
+    }
 }
