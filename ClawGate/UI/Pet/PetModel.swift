@@ -3054,6 +3054,16 @@ final class PetModel: NSObject, ObservableObject {
         } catch { return true }
     }
 
+    /// Why a meeting is parked outside ordinary sequential generation, or nil.
+    /// Every automatic entry already skips such a meeting; this makes the hold
+    /// visible instead of looking like a stalled "作成中".
+    func minutesHoldReason(for record: MeetingRecord) -> String? {
+        guard record.minutesState == "pending" || record.minutesState == "failed" else { return nil }
+        guard hasIndexedMinutesOwner(id: record.id) || isMinutesPilotTarget(id: record.id) else { return nil }
+        return minutesPilotLabels[record.id]
+            ?? "専用の実行経路の対応待ちのため保留中です。この会議は再送しません。Chi 側の対応を確認してから再開します。"
+    }
+
     private func isMinutesPilotTarget(id: String) -> Bool {
         let store = minutesStore()
         guard let pilot = MeetingMinutesPilot.load(),

@@ -81,7 +81,7 @@ struct MeetingWorkspaceView: View {
     }
 
     private func meetingRow(_ meeting: MeetingRecord) -> some View {
-        let status = MeetingWorkspaceStatus(meeting: meeting)
+        let status = MeetingWorkspaceStatus(meeting: meeting, held: model.minutesHoldReason(for: meeting) != nil)
         let active = meeting.id == selectedID
         return Button {
             selectedID = meeting.id
@@ -773,7 +773,8 @@ private struct MeetingWorkspaceDetail: View {
         case .checking?: return "資料を確認しています…"
         case .permissionDenied?: return "資料を読む権限がありません。"
         case .serviceUnavailable?: return "Google Docs API の有効化が必要です。資料がないとは判定していません。"
-        case .failed?: return "資料を読み取れませんでした。"
+        case .failed?:
+            return "資料を読み取れませんでした。Drive で確認できた範囲では、この文書は今のアカウントから見えない状態です（共有されていない、または削除済みの可能性があります）。通信の一時的な失敗ではありません。共有の依頼や権限の変更はこの画面からは行いません。"
         case .ambiguous?: return "この会議の資料の候補が複数あり、決められませんでした。"
         default: return "この会議に紐づく資料はありません。"
         }
@@ -841,7 +842,7 @@ private struct MeetingSourcesRow: View {
         switch material?.status {
         case .serviceUnavailable?: return "取得できず（Docs API 未有効）"
         case .permissionDenied?: return "取得できず（権限なし）"
-        case .failed?: return "取得できず"
+        case .failed?: return "取得できず（文書が見えない）"
         case .ambiguous?: return "候補が複数"
         case .checking?: return "確認中"
         case .available?:
@@ -914,6 +915,9 @@ private struct MeetingStatusBanner: View {
     }
 
     private func bannerTitle(status: MeetingWorkspaceStatus, done: Int, total: Int) -> String? {
+        if model.minutesHoldReason(for: meeting) != nil {
+            return total > 1 ? "保留中です（\(total) パート中 \(done) パート完成）" : "保留中です"
+        }
         switch meeting.minutesState {
         case "pending":
             return total > 1 ? "議事録を作っています（\(total) パート中 \(done) パート完成）" : "議事録を作っています"
@@ -927,7 +931,10 @@ private struct MeetingStatusBanner: View {
     }
 
     private func bannerDetail(done: Int, total: Int) -> MeetingMinutesFailurePresentation? {
-        MeetingMinutesFailurePresentation.make(error: meeting.minutesError,
+        if let hold = model.minutesHoldReason(for: meeting) {
+            return MeetingMinutesFailurePresentation(summary: hold, technicalDetails: nil)
+        }
+        return MeetingMinutesFailurePresentation.make(error: meeting.minutesError,
                                                 state: meeting.minutesState,
                                                 completedParts: done,
                                                 totalParts: total)
@@ -993,6 +1000,7 @@ struct MeetingMinutesFailurePresentation: Equatable {
 
 struct MeetingWorkspaceStatus {
     let meeting: MeetingRecord
+    var held = false
 
     var shortLabel: String {
         let job = MeetingMinutesJob.load(store: MeetingStore(), id: meeting.id)
@@ -1000,6 +1008,7 @@ struct MeetingWorkspaceStatus {
         let indexed = job.flatMap { try? MeetingMinutesExecutionProgress.load(store: MeetingStore(), id: meeting.id, job: $0) }
         let done = indexed?.completedIndices.count ?? min(job?.completed.count ?? 0, total)
         let progress = total > 1 ? " \(done)/\(total)" : ""
+        if held { return "保留中\(progress)" }
         switch meeting.minutesState {
         case "ready": return "議事録あり"
         case "pending":
