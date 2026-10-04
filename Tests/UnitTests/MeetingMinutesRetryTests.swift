@@ -295,3 +295,24 @@ final class MeetingMinutesRetryTests: XCTestCase {
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
     }
 }
+
+/// The dedicated minutes connection accepts only the exact closed hello.
+final class DedicatedMinutesConnectionHelloTests: XCTestCase {
+    private func hello(_ extra: String) throws -> IncomingPayload {
+        try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","executionConnection":{"version":1,"purpose":"retained-minutes","profileBound":true,
+         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false\(extra)}}
+        """.utf8))
+    }
+
+    func testOnlyTheExactClosedHelloIsAccepted() throws {
+        XCTAssertTrue(OpenClawWSClient.helloAccepted(try hello(""), purpose: "retained-minutes"))
+        // An extra key, a missing object, or another purpose is not this contract.
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(try hello(",\"x\":1"), purpose: "retained-minutes"))
+        let missing = try JSONDecoder().decode(IncomingPayload.self, from: Data("{\"type\":\"hello-ok\"}".utf8))
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(missing, purpose: "retained-minutes"))
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(try hello(""), purpose: "other"))
+        // An ordinary connection is unchanged.
+        XCTAssertTrue(OpenClawWSClient.helloAccepted(missing, purpose: nil))
+    }
+}

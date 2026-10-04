@@ -96,8 +96,31 @@ actor OpenClawWSClient {
     /// `ClientInfo.id` and the signature payload, unchanged by this.
     let role: String
 
-    init(role: String = "unknown") {
+    /// `"retained-minutes"` makes this the dedicated minutes connection: the
+    /// `gateway-client` / `interactive` tuple, `connect.executionPurpose`, and a
+    /// hello that must carry the exact closed `executionConnection` or the
+    /// connection is dropped. nil is the ordinary connection, unchanged.
+    let executionPurpose: String?
+
+    init(role: String = "unknown", executionPurpose: String? = nil) {
         self.role = role
+        self.executionPurpose = executionPurpose
+    }
+
+    /// Whether a hello-ok may be accepted on this connection. An ordinary
+    /// connection accepts any hello; a dedicated one only the exact contract.
+    static func helloAccepted(_ payload: IncomingPayload, purpose: String?) -> Bool {
+        guard let purpose else { return true }
+        return purpose == ExecutionConnectionPayload.retainedMinutes.purpose
+            && payload.executionConnection == .retainedMinutes
+    }
+
+    private func rejectUnconfirmedDedicatedHello() {
+        advertisedGatewayMethods = nil
+        advertisedGatewayMethodsGeneration = nil
+        handshakeComplete = false
+        continuation?.yield(.error(.connectionFailed("dedicated minutes connection was not confirmed by the Gateway")))
+        disconnect(reason: "dedicated_connection_unconfirmed")
     }
 
     private var webSocketTask: URLSessionWebSocketTask?
@@ -565,10 +588,13 @@ actor OpenClawWSClient {
             let normalizedNonce = nonce?.isEmpty == false ? nonce : nil
             let role = "operator"
             let scopes = ["operator.read", "operator.write", "operator.admin"]
+            // The signed tuple and the advertised tuple must be the same values.
+            let clientID = executionPurpose == nil ? "cli" : "gateway-client"
+            let clientMode = executionPurpose == nil ? "cli" : "interactive"
 
             // Build signature payload
             let version = normalizedNonce != nil ? "v2" : "v1"
-            var components = [version, identity.deviceId, "cli", "cli", role,
+            var components = [version, identity.deviceId, clientID, clientMode, role,
                               scopes.joined(separator: ","), String(signedAtMs), token]
             if let n = normalizedNonce { components.append(n) }
             let payload = components.joined(separator: "|")
@@ -578,7 +604,7 @@ actor OpenClawWSClient {
                 type: "req", id: requestId, method: "connect",
                 params: ConnectParams(
                     minProtocol: 3, maxProtocol: 4,
-                    client: ClientInfo(id: "cli", version: "1.0.0", platform: "macos", mode: "cli"),
+                    client: ClientInfo(id: clientID, version: "1.0.0", platform: "macos", mode: clientMode),
                     role: role, scopes: scopes,
                     auth: AuthParams(token: token),
                     locale: "ja-JP",
@@ -602,7 +628,8 @@ actor OpenClawWSClient {
                         signature: signature,
                         signedAt: signedAtMs,
                         nonce: normalizedNonce
-                    )
+                    ),
+                    executionPurpose: executionPurpose
                 )
             )
 
@@ -886,6 +913,7 @@ actor OpenClawWSClient {
         if let pendingId = pendingRequestId, responseId == pendingId {
             pendingRequestId = nil
             if ok, let p = msg.payload, p.type == "hello-ok" {
+                guard Self.helloAccepted(p, purpose: executionPurpose) else { rejectUnconfirmedDedicatedHello(); return }
                 advertisedGatewayMethods = Set(p.features?.methods ?? [])
                 advertisedGatewayMethodsGeneration = connectionGeneration
                 let sessionKey = p.snapshot?.sessionDefaults?.mainSessionKey ?? "agent:main:main"
@@ -900,6 +928,7 @@ actor OpenClawWSClient {
 
         // Fallback for responses without matching id
         if ok, let p = msg.payload, p.type == "hello-ok" {
+            guard Self.helloAccepted(p, purpose: executionPurpose) else { rejectUnconfirmedDedicatedHello(); return }
             advertisedGatewayMethods = Set(p.features?.methods ?? [])
             advertisedGatewayMethodsGeneration = connectionGeneration
             let sessionKey = p.snapshot?.sessionDefaults?.mainSessionKey ?? "agent:main:main"

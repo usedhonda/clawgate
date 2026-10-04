@@ -256,6 +256,8 @@ struct ConnectParams: Encodable {
     let locale: String
     let userAgent: String
     let device: ConnectDeviceParams?
+    /// Optional literal; absent leaves the connection's behavior unchanged.
+    var executionPurpose: String? = nil
 }
 
 struct ClientInfo: Encodable {
@@ -343,6 +345,8 @@ struct IncomingPayload: Decodable {
     let type: String?
     let `protocol`: Int?
     let features: GatewayFeaturesPayload?
+    /// Closed object the Gateway returns only for a dedicated connection.
+    let executionConnection: ExecutionConnectionPayload?
     let snapshot: SnapshotPayload?
     let nonce: String?
     let sessionId: String?
@@ -392,6 +396,7 @@ struct IncomingPayload: Decodable {
         case type
         case `protocol`
         case features
+        case executionConnection
         case snapshot
         case nonce
         case sessionId
@@ -432,6 +437,7 @@ struct IncomingPayload: Decodable {
         type = try container.decodeIfPresent(String.self, forKey: .type)
         `protocol` = try container.decodeIfPresent(Int.self, forKey: .protocol)
         features = try container.decodeIfPresent(GatewayFeaturesPayload.self, forKey: .features)
+        executionConnection = try? container.decodeIfPresent(ExecutionConnectionPayload.self, forKey: .executionConnection)
         snapshot = try container.decodeIfPresent(SnapshotPayload.self, forKey: .snapshot)
         nonce = try container.decodeIfPresent(String.self, forKey: .nonce)
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
@@ -660,5 +666,45 @@ struct PetLogDispatchAck: Equatable {
         default:
             throw PetLogDispatchAckValidationError.invalidModel(model)
         }
+    }
+}
+
+/// `hello.executionConnection` for a dedicated connection (oc-general
+/// ws-event-contract, "Retained execution minutes: dedicated connection"). The
+/// object is closed: any other key, or any other value, is not this contract.
+struct ExecutionConnectionPayload: Decodable, Equatable {
+    let version: Int
+    let purpose: String
+    let profileBound: Bool
+    let defaultSubscriptionApplied: Bool
+    let ttsParticipationApplied: Bool
+
+    private struct AnyKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { return nil }
+    }
+
+    init(from decoder: Decoder) throws {
+        let keys = try decoder.container(keyedBy: AnyKey.self)
+        guard Set(keys.allKeys.map(\.stringValue)) == ["version", "purpose", "profileBound",
+                                                       "defaultSubscriptionApplied", "ttsParticipationApplied"] else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "not a closed executionConnection"))
+        }
+        version = try keys.decode(Int.self, forKey: AnyKey(stringValue: "version")!)
+        purpose = try keys.decode(String.self, forKey: AnyKey(stringValue: "purpose")!)
+        profileBound = try keys.decode(Bool.self, forKey: AnyKey(stringValue: "profileBound")!)
+        defaultSubscriptionApplied = try keys.decode(Bool.self, forKey: AnyKey(stringValue: "defaultSubscriptionApplied")!)
+        ttsParticipationApplied = try keys.decode(Bool.self, forKey: AnyKey(stringValue: "ttsParticipationApplied")!)
+    }
+
+    /// The only value a retained-minutes connection may be handed.
+    static let retainedMinutes = ExecutionConnectionPayload(version: 1, purpose: "retained-minutes", profileBound: true,
+                                                            defaultSubscriptionApplied: false, ttsParticipationApplied: false)
+
+    private init(version: Int, purpose: String, profileBound: Bool, defaultSubscriptionApplied: Bool, ttsParticipationApplied: Bool) {
+        self.version = version; self.purpose = purpose; self.profileBound = profileBound
+        self.defaultSubscriptionApplied = defaultSubscriptionApplied; self.ttsParticipationApplied = ttsParticipationApplied
     }
 }

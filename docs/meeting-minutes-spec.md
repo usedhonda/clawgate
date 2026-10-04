@@ -613,3 +613,18 @@ claim/reference pairs reject the reply. Existing claim-only v6 replies remain
 valid for durable and in-flight jobs. Accepted files retain full claim strings,
 not the response-only references. This reduces duplicate output text without
 omitting meeting detail; measured end-to-end latency improvement is not assumed.
+
+### Dedicated retained-minutes connection (client shape, inactive)
+
+`OpenClawWSClient(role:executionPurpose:)` with `"retained-minutes"` connects as
+the `gateway-client` / `interactive` tuple (the signed device payload and the
+advertised client info use the same values), sends `connect.executionPurpose`,
+and accepts the Gateway's `hello-ok` only when it carries the exact closed
+`executionConnection` object `{version:1, purpose:"retained-minutes",
+profileBound:true, defaultSubscriptionApplied:false, ttsParticipationApplied:false}`
+(`ExecutionConnectionPayload`). A missing, extra-keyed or different object drops
+the connection; there is no downgrade to the ordinary socket. The ordinary Pet and
+ingest sockets are unchanged. This shape is not wired to any caller: the pilot
+still uses the existing connection until the activation decision, because the
+first pilot run is recorded as admission-rejected and is never resent without an
+explicit retry.
