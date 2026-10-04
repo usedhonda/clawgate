@@ -1,4 +1,5 @@
 import { enqueueHubEntry, enqueueHubThreadList, flushHubOutbox } from './hub-outbox.js';
+import { isNewerVersion } from './self-update.js';
 
 const DEFAULT_SETTINGS = {
   bridgePort: 8765,
@@ -22,6 +23,8 @@ const PASSIVE_QUEUE_LIMIT = 50;
 const PASSIVE_FLUSH_ALARM = 'clawgate-passive-flush';
 const PASSIVE_FLUSH_PERIOD_MINUTES = 1.5;
 const PASSIVE_SEND_LOG_LIMIT = 200;
+const SELF_UPDATE_ALARM = 'clawgate-self-update-check';
+const SELF_UPDATE_PERIOD_MINUTES = 10;
 
 // Confirmed against oc-general's docs/contracts/messenger-capture.md.
 const MESSENGER_CAPTURE_ENDPOINT = '/api/messenger-capture';
@@ -139,7 +142,36 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
 });
 
+// An unpacked extension keeps running the code it was loaded with until it is
+// reloaded. When the manifest on disk names a newer version, reload once for
+// that version; the Hub outbox and every setting live in chrome.storage and
+// survive. A version already tried is never tried again, so a reload that did
+// not change the running version cannot loop.
+async function checkSelfUpdate() {
+  try {
+    const running = chrome.runtime.getManifest().version;
+    const response = await fetch(chrome.runtime.getURL('manifest.json'), { cache: 'no-store' });
+    const disk = (await response.json()).version;
+    if (!isNewerVersion(disk, running)) {
+      return;
+    }
+    const { selfUpdateAttemptedFor } = await chrome.storage.local.get({ selfUpdateAttemptedFor: '' });
+    if (selfUpdateAttemptedFor === disk) {
+      return;
+    }
+    await chrome.storage.local.set({ selfUpdateAttemptedFor: disk });
+    await flushPassiveQueue().catch(() => undefined);
+    chrome.runtime.reload();
+  } catch {
+    // Not an unpacked extension, or the file is unreadable: nothing to do.
+  }
+}
+
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === SELF_UPDATE_ALARM) {
+    checkSelfUpdate().catch(() => undefined);
+    return;
+  }
   if (alarm.name !== PASSIVE_FLUSH_ALARM) {
     return;
   }
@@ -377,6 +409,10 @@ async function ensurePassiveAlarm() {
   await chrome.alarms.create(PASSIVE_FLUSH_ALARM, {
     periodInMinutes: PASSIVE_FLUSH_PERIOD_MINUTES,
   });
+  await chrome.alarms.create(SELF_UPDATE_ALARM, {
+    periodInMinutes: SELF_UPDATE_PERIOD_MINUTES,
+  });
+  checkSelfUpdate().catch(() => undefined);
 }
 
 function scheduleNextPoll(delayMs = POLL_INTERVAL_MS) {
