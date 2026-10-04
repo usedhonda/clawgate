@@ -15,6 +15,7 @@ struct MeetingWorkspaceView: View {
     @State private var tab: Tab = .minutes
     @State private var scrollTarget: String?
     @State private var copied = false
+    @State private var showArchiveSheet = false
 
     enum Tab: String, CaseIterable, Identifiable {
         case minutes = "議事録", transcript = "文字起こし", materials = "資料"
@@ -41,6 +42,13 @@ struct MeetingWorkspaceView: View {
         }
         .background(WorkspaceTheme.ground)
         .preferredColorScheme(.light)
+        .sheet(isPresented: $showArchiveSheet) {
+            MeetingArchiveSheet(model: model) { record in
+                reload()
+                selectedID = record.id
+                tab = .minutes
+            }
+        }
         .onAppear { reload() }
         .onChange(of: model.meetingsRevision) { _ in reload() }
         .onChange(of: searchText) { _ in reload() }
@@ -58,6 +66,8 @@ struct MeetingWorkspaceView: View {
                 TextField("タイトル・参加者で検索", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 14))
+                Button("過去の会議を作る…") { showArchiveSheet = true }
+                    .font(.system(size: 13))
             }
             .padding(.horizontal, 18).padding(.top, 18).padding(.bottom, 10)
             ScrollView {

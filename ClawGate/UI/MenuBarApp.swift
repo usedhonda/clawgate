@@ -250,6 +250,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 DispatchQueue.main.async { completion(result) }
             }
         }
+        petModel.onOpenMinutesWindow = { [weak self] in self?.meetingOpenMinutes() }
         ambient.onMinutesRequested = { [weak self] record, resume in
             DispatchQueue.main.async {
                 if resume { self?.petModel.resumeMinutes(for: record) }

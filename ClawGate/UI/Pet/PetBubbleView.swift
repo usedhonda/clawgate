@@ -579,7 +579,7 @@ struct PetChatContainerView: View {
             case "log":
                 AmbientLogPetView(model: model)
             case "minutes":
-                MeetingMinutesPetView(model: model)
+                MinutesOpenWindowView(model: model)
             default:
                 NotificationListView(model: model)
             }

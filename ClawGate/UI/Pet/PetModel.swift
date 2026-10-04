@@ -2990,6 +2990,8 @@ final class PetModel: NSObject, ObservableObject {
     /// A meeting waiting out a retry backoff or the pause between parts is
     /// skipped by the drain until this time.
     private var minutesNotBefore: [String: Date] = [:]
+    /// Opens the minutes window (set by the menu bar app).
+    var onOpenMinutesWindow: (() -> Void)?
     /// Meetings whose joined multi-part minutes still await the overview
     /// rewrite, and the one in flight. In memory only: after a restart the
     /// joined minutes simply stay as they are.
