@@ -97,6 +97,57 @@ function externalIdFor(entry, messenger, occurredAt) {
   return `chrome:${entry.id}:${signature}:${Date.parse(occurredAt)}`;
 }
 
+// FNV-1a over the content, twice with different seeds: a short signature for
+// the id and the unchanged-recapture check. It identifies a version; it is not
+// a security boundary.
+function signatureOf(text) {
+  let a = 0x811c9dc5, b = 0x01000193 ^ 0x9e3779b9;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x85ebca6b) >>> 0;
+  }
+  return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+const THREAD_LIST_PREVIEW_CHARS = 300;
+const THREAD_LIST_MAX_BYTES = 200 * 1024;
+const THREAD_LIST_SIGNATURE_KEY = 'personalHubThreadListSignature';
+
+// One capture of the Messenger sidebar as one immutable Hub event (kind
+// thread-list). Rows keep what the DOM rendered; the label is never turned
+// into an instant. Oversized lists keep the leading rows and say so.
+export function hubEventForThreadList(list) {
+  if (!list || !Array.isArray(list.rows) || typeof list.capturedAt !== 'string' ||
+      !Number.isFinite(Date.parse(list.capturedAt))) return null;
+  const threads = list.rows.map((row) => ({
+    threadId: `messenger:${row.threadId}`,
+    name: row.name || '',
+    isGroup: row.isGroup === true,
+    unread: row.unread === true,
+    previewText: String(row.previewText || '').slice(0, THREAD_LIST_PREVIEW_CHARS),
+    lastActivityLabel: row.lastActivityLabel || '',
+  }));
+  const folders = (Array.isArray(list.folders) ? list.folders : [])
+    .map((f) => ({ folder: f.name, unreadCount: f.unreadCount }));
+  const signature = signatureOf(JSON.stringify({ threads, folders }));
+  const meta = { capturedAt: list.capturedAt, captureScope: list.captureScope || 'visible_window', threads, folders };
+  while (JSON.stringify(meta).length > THREAD_LIST_MAX_BYTES && meta.threads.length > 0) {
+    meta.threads = meta.threads.slice(0, Math.max(0, Math.floor(meta.threads.length * 0.9) - 1));
+    meta.truncated = true;
+  }
+  return {
+    source: 'chrome',
+    domain: 'messenger',
+    kind: 'thread-list',
+    occurred_at: list.capturedAt,
+    external_id: `chrome:messenger-list:${signature}:${Date.parse(list.capturedAt)}`,
+    identity: null,
+    metadata: { list: meta },
+    _signature: signature,
+  };
+}
+
 const LEGACY_MESSENGER_ID = /^chrome:messenger:[^:]+$/;
 
 // A thread sent under the old fixed id may sit in the queue with a conflicting
@@ -134,6 +185,20 @@ export async function enqueueHubEntry(entry, storage = chrome.storage.local) {
     const existing = queue.find((item) => item?.external_id === event.external_id);
     if (existing) return sameRecord(existing, event);
     await storage.set({ [KEY]: [...queue, event] });
+    return true;
+  });
+}
+
+// Queue the sidebar list unless it is unchanged since the last one queued.
+export async function enqueueHubThreadList(list, storage = chrome.storage.local) {
+  const built = hubEventForThreadList(list);
+  if (!built) return false;
+  const { _signature: signature, ...event } = built;
+  return exclusive(storage, async () => {
+    const previous = await storage.get({ [THREAD_LIST_SIGNATURE_KEY]: '' });
+    if (previous[THREAD_LIST_SIGNATURE_KEY] === signature) return false;
+    const queue = await readQueue(storage);
+    await storage.set({ [KEY]: [...queue, clone(event)], [THREAD_LIST_SIGNATURE_KEY]: signature });
     return true;
   });
 }

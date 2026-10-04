@@ -1,4 +1,4 @@
-import { enqueueHubEntry, flushHubOutbox } from './hub-outbox.js';
+import { enqueueHubEntry, enqueueHubThreadList, flushHubOutbox } from './hub-outbox.js';
 
 const DEFAULT_SETTINGS = {
   bridgePort: 8765,
@@ -615,7 +615,14 @@ async function captureMessengerNow(tab) {
   if (!entry) {
     return;
   }
+  // The sidebar changes independently of the open thread, so it is queued for
+  // the Hub before the unchanged-thread check; an unchanged list is skipped
+  // inside. The old Gateway path keeps receiving it with the entries.
+  if (latestThreadList) {
+    await enqueueHubThreadList(latestThreadList).catch(() => console.warn('[ClawGate] hub outbox write failed'));
+  }
   if (isPassiveDuplicate(entry.threadUrl, entry.contentSignature)) {
+    flushHubOutbox(settings).catch(() => undefined);
     return;
   }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { enqueueHubEntry, flushHubOutbox, hubEventForEntry } from './hub-outbox.js';
+import { enqueueHubEntry, enqueueHubThreadList, flushHubOutbox, hubEventForEntry, hubEventForThreadList } from './hub-outbox.js';
 
 function storage() {
   const values = {};
@@ -189,4 +189,29 @@ test('Messenger captures are immutable versions and a legacy fixed id is re-keye
   });
   assert.equal(sent.external_id, a.external_id);
   assert.equal(local.values.personalHubOutbox[0].external_id, a.external_id);
+});
+
+test('Messenger sidebar list is one immutable thread-list event, unchanged lists are skipped, oversize is truncated', async () => {
+  const list = (preview) => ({ capturedAt: '2026-10-04T03:00:00Z', captureScope: 'visible_window',
+    rows: [{ threadId: '9', name: 'n', isGroup: false, unread: true, previewText: preview, lastActivityLabel: '5分' }],
+    folders: [{ name: 'inbox', unreadCount: 2 }] });
+  const event = hubEventForThreadList(list('x'.repeat(500)));
+  assert.equal(event.kind, 'thread-list');
+  assert.match(event.external_id, /^chrome:messenger-list:[0-9a-f]{16}:\d+$/);
+  assert.equal(event.metadata.list.threads[0].threadId, 'messenger:9');
+  assert.equal(event.metadata.list.threads[0].previewText.length, 300);
+  assert.deepEqual(event.metadata.list.folders, [{ folder: 'inbox', unreadCount: 2 }]);
+
+  const local = storage();
+  assert.equal(await enqueueHubThreadList(list('a'), local), true);
+  assert.equal(await enqueueHubThreadList(list('a'), local), false);
+  assert.equal(await enqueueHubThreadList(list('b'), local), true);
+  assert.equal(local.values.personalHubOutbox.length, 2);
+  assert.ok(!('_signature' in local.values.personalHubOutbox[0]));
+
+  const huge = { capturedAt: '2026-10-04T03:00:00Z', rows: Array.from({ length: 2000 }, (_, i) => ({
+    threadId: String(i), name: 'n'.repeat(200), previewText: 'p'.repeat(300), lastActivityLabel: 'l'.repeat(100) })), folders: [] };
+  const big = hubEventForThreadList(huge);
+  assert.equal(big.metadata.list.truncated, true);
+  assert.ok(JSON.stringify(big.metadata).length <= 200 * 1024);
 });
