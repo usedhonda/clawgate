@@ -46,6 +46,7 @@ struct MeetingArchiveSheet: View {
             }
             .font(.system(size: 13))
             coverageLine
+            Spacer(minLength: 0)
             HStack {
                 Button("閉じる") { dismiss() }
                 Spacer()
