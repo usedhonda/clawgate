@@ -172,3 +172,21 @@ test('independent receipt rejects malformed event identity', async () => {
   assert.deepEqual(result, { pending: 1, acked: 0 });
   assert.equal(local.values.lastPersonalHubReceipt, undefined);
 });
+
+test('Messenger captures are immutable versions and a legacy fixed id is re-keyed once', async () => {
+  const base = { id: 'messenger:t1', platform: 'messenger', capturedAt: '2026-10-04T01:00:00Z' };
+  const a = hubEventForEntry({ ...base, contentSignature: '3-aaa' });
+  const b = hubEventForEntry({ ...base, contentSignature: '4-bbb', capturedAt: '2026-10-04T01:05:00Z' });
+  assert.notEqual(a.external_id, b.external_id);
+  assert.match(a.external_id, /^chrome:messenger:t1:3-aaa:\d+$/);
+
+  const local = storage();
+  const legacy = { ...a, external_id: 'chrome:messenger:t1', metadata: { ...a.metadata, entry: { ...base, contentSignature: '3-aaa' } } };
+  local.values.personalHubOutbox = [legacy];
+  let sent = null;
+  await flushHubOutbox(personalSettings, local, async (_url, options) => {
+    sent = JSON.parse(options.body); return { ok: false, status: 500, json: async () => ({}) };
+  });
+  assert.equal(sent.external_id, a.external_id);
+  assert.equal(local.values.personalHubOutbox[0].external_id, a.external_id);
+});

@@ -86,6 +86,28 @@ async function postWithTimeout(url, options, post, timeoutMs) {
   } finally { clearTimeout(timer); }
 }
 
+// The Hub keeps (source, external_id) immutable and rejects the same id with
+// different content as a conflict (409). A Messenger thread's id is stable
+// while its content grows, so each capture is its own immutable version:
+// thread id, content signature and capture time. Other entries are captured
+// once and keep the plain id.
+function externalIdFor(entry, messenger, occurredAt) {
+  if (!messenger) return `chrome:${entry.id}`;
+  const signature = typeof entry.contentSignature === 'string' && entry.contentSignature ? entry.contentSignature : 'none';
+  return `chrome:${entry.id}:${signature}:${Date.parse(occurredAt)}`;
+}
+
+const LEGACY_MESSENGER_ID = /^chrome:messenger:[^:]+$/;
+
+// A thread sent under the old fixed id may sit in the queue with a conflicting
+// body; re-key it once as a version so it can be accepted instead of being
+// re-sent forever.
+function upgradeLegacy(event) {
+  if (!event || event.domain !== 'messenger' || !LEGACY_MESSENGER_ID.test(event.external_id || '')) return event;
+  const rebuilt = hubEventForEntry(event.metadata?.entry);
+  return rebuilt ? rebuilt : event;
+}
+
 export function hubEventForEntry(entry) {
   if (!entry || typeof entry.id !== 'string' || !entry.id) return null;
   const messenger = entry.platform === 'messenger';
@@ -97,7 +119,7 @@ export function hubEventForEntry(entry) {
     domain: messenger ? 'messenger' : selected ? 'page' : 'history',
     kind: messenger ? 'visible-window' : selected ? 'selected-page' : 'visit',
     occurred_at: occurredAt,
-    external_id: `chrome:${entry.id}`,
+    external_id: externalIdFor(entry, messenger, occurredAt),
     identity: null,
     metadata: { capture_scope: messenger ? 'visible_window' : selected ? 'explicit_selected_page' : 'passive_visit',
       entry },
@@ -138,7 +160,12 @@ export async function flushHubOutbox(settings, storage = chrome.storage.local, p
   const active = flushFlights.get(storage);
   if (active) return active;
   const flight = (async () => {
-    const queue = await exclusive(storage, () => readQueue(storage));
+    const queue = await exclusive(storage, async () => {
+      const stored = await readQueue(storage);
+      const upgraded = stored.map(upgradeLegacy);
+      if (upgraded.some((event, index) => event !== stored[index])) await storage.set({ [KEY]: upgraded });
+      return upgraded;
+    });
     if (!queue.length) return { pending: 0, acked: 0 };
     const snapshot = queue.map((event) => clone(event));
     const acknowledged = [];
