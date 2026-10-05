@@ -560,7 +560,41 @@ function extractMessengerThreadList() {
   if (!list.length && !folders.length) {
     return null;
   }
-  return { capturedAt: new Date().toISOString(), captureScope: 'visible_window', rows: list, folders };
+  const result = { capturedAt: new Date().toISOString(), captureScope: 'visible_window', rows: list, folders };
+  // Folder counts stopped arriving around 2026-09-23 with no extension change.
+  // While they are missing, leave a body-free sample of what the page labels
+  // outside the thread grid, so the cause is read from evidence.
+  if (!folders.length) {
+    result.folderProbe = probeMessengerFolders();
+  }
+  return result;
+}
+
+function probeMessengerFolders() {
+  const labels = [];
+  for (const el of document.querySelectorAll('[aria-label]')) {
+    if (labels.length >= 24 || el.closest('[role="grid"]')) {
+      continue;
+    }
+    const label = normalizeText(el.getAttribute('aria-label') || '');
+    if (!label || label.length > 80 || !/(未読|unread|\d)/i.test(label)) {
+      continue;
+    }
+    labels.push({
+      tag: el.tagName.toLowerCase(),
+      role: el.getAttribute('role') || '',
+      inNavigation: Boolean(el.closest('[role="navigation"]')),
+      inTablist: Boolean(el.closest('[role="tablist"]')),
+      label,
+    });
+  }
+  return {
+    navigationCount: document.querySelectorAll('[role="navigation"]').length,
+    tablistCount: document.querySelectorAll('[role="tablist"]').length,
+    tabLabels: Array.from(document.querySelectorAll('[role="tab"]')).slice(0, 12)
+      .map((el) => normalizeText(el.getAttribute('aria-label') || el.textContent || '').slice(0, 60)),
+    labels,
+  };
 }
 
 function hashString(value) {

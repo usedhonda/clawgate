@@ -744,9 +744,13 @@ async function buildMessengerEntry(tab) {
     // The thread list describes the sidebar, not this thread, so the contract
     // carries it as a sibling of `entries` and never merged into one. It is
     // held here rather than on the entry so that shape cannot drift.
-    latestThreadList = messenger.threadList && Array.isArray(messenger.threadList.rows)
-      ? messenger.threadList
-      : null;
+    // The folder probe is a local diagnostic; it never rides to the Gateway or Hub.
+    const { folderProbe, ...threadList } = messenger.threadList || {};
+    latestThreadList = Array.isArray(threadList.rows) ? threadList : null;
+    if (folderProbe) {
+      chrome.storage.local.set({ messengerFolderProbe: { at: new Date().toISOString(), probe: folderProbe } })
+        .catch(() => undefined);
+    }
 
     return {
       id: `messenger:${threadId}`,
