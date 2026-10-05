@@ -24,6 +24,9 @@ const state = {
 init().catch(() => undefined);
 
 async function init() {
+  // The running build, so a reload can be told apart from no reload.
+  const versionLabel = document.getElementById('extension-version');
+  if (versionLabel) versionLabel.textContent = `v${chrome.runtime.getManifest().version}`;
   const stored = await chrome.storage.local.get({ excludedDomains: [], passiveSendLog: [] });
   state.excludedDomains = normalizeDomainList(stored.excludedDomains);
   state.sendLog = Array.isArray(stored.passiveSendLog) ? stored.passiveSendLog : [];
