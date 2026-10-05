@@ -519,7 +519,8 @@ private struct MeetingWorkspaceDetail: View {
                             .padding(.bottom, 6)
                         }
                     }
-                    listCard("未解決・要確認", minutes.openQuestions + (accepted?.unresolvedNotes ?? []),
+                    listCard("未解決・要確認",
+                             WorkspaceFormat.collapseNearDuplicates(minutes.openQuestions + (accepted?.unresolvedNotes ?? [])),
                              citations, empty: "なし", evidence: evidence)
                 }
             }
@@ -1209,6 +1210,40 @@ enum WorkspaceFormat {
         }
         output.append(AttributedString(ns.substring(from: offset)))
         return output
+    }
+
+    /// Parts of a long meeting each raise the same open question in their own
+    /// words, and joining them only drops exact repeats. Keep the first of any
+    /// group that overlaps a lot in character pairs, or that names the same
+    /// figures and overlaps moderately; distinct questions share little
+    /// beyond endings and are kept.
+    static func collapseNearDuplicates(_ items: [String], threshold: Double = 0.5) -> [String] {
+        func pairs(_ text: String) -> Set<String> {
+            let chars = Array(text.filter { !$0.isWhitespace && !"。、，．.,「」『』".contains($0) })
+            guard chars.count > 1 else { return Set(chars.map(String.init)) }
+            return Set((0..<(chars.count - 1)).map { String(chars[$0...$0 + 1]) })
+        }
+        func figures(_ text: String) -> Set<String> {
+            var runs = Set<String>(), current = ""
+            for ch in text {
+                if (ch.isASCII && ch.isNumber) || "０１２３４５６７８９".contains(ch) { current.append(ch) } else if !current.isEmpty { runs.insert(current); current = "" }
+            }
+            if !current.isEmpty { runs.insert(current) }
+            return runs
+        }
+        var kept: [(text: String, pairs: Set<String>, figures: Set<String>)] = []
+        for item in items {
+            let current = pairs(item), nums = figures(item)
+            let duplicate = kept.contains { other in
+                let union = other.pairs.union(current).count
+                guard union > 0 else { return false }
+                let overlap = Double(other.pairs.intersection(current).count) / Double(union)
+                let sameFigures = nums.count >= 2 && nums == other.figures
+                return overlap >= threshold || (sameFigures && overlap >= 0.25)
+            }
+            if !duplicate { kept.append((item, current, nums)) }
+        }
+        return kept.map(\.text)
     }
 
     /// The Mac's own user is the meeting owner; their name reads as "あなた".

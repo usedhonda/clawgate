@@ -316,3 +316,19 @@ final class DedicatedMinutesConnectionHelloTests: XCTestCase {
         XCTAssertTrue(OpenClawWSClient.helloAccepted(missing, purpose: nil))
     }
 }
+
+/// Parts of one meeting each phrase the same open question differently.
+final class OpenQuestionCollapseTests: XCTestCase {
+    func testNearDuplicateQuestionsCollapseAndDistinctOnesStay() {
+        let items = [
+            "売上目標は10億円か、1〜2億円か。数字が食い違っている。",
+            "言及された売上目標は10億円か1〜2億円か。数字が一致しない。",
+            "売上目標は10億円か、1〜2億円か。文字起こしの数字が食い違っている。",
+            "新しい拠点の開設時期をいつにするか。",
+            "採用の優先順位をどう決めるか。"
+        ]
+        let collapsed = WorkspaceFormat.collapseNearDuplicates(items)
+        XCTAssertEqual(collapsed.count, 3)
+        XCTAssertTrue(collapsed.contains(items[3]) && collapsed.contains(items[4]))
+    }
+}
