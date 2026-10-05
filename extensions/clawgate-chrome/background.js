@@ -260,6 +260,8 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 async function ensureDefaults() {
+  // A diagnostic from 0.12.9 stored page labels; it is not kept.
+  await chrome.storage.local.remove('messengerFolderProbe').catch(() => undefined);
   const current = await chrome.storage.local.get(DEFAULT_SETTINGS);
   const next = {
     bridgePort: normalizePort(current.bridgePort),
@@ -744,13 +746,9 @@ async function buildMessengerEntry(tab) {
     // The thread list describes the sidebar, not this thread, so the contract
     // carries it as a sibling of `entries` and never merged into one. It is
     // held here rather than on the entry so that shape cannot drift.
-    // The folder probe is a local diagnostic; it never rides to the Gateway or Hub.
-    const { folderProbe, ...threadList } = messenger.threadList || {};
-    latestThreadList = Array.isArray(threadList.rows) ? threadList : null;
-    if (folderProbe) {
-      chrome.storage.local.set({ messengerFolderProbe: { at: new Date().toISOString(), probe: folderProbe } })
-        .catch(() => undefined);
-    }
+    latestThreadList = messenger.threadList && Array.isArray(messenger.threadList.rows)
+      ? messenger.threadList
+      : null;
 
     return {
       id: `messenger:${threadId}`,
