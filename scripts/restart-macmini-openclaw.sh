@@ -131,10 +131,12 @@ fi
 ./scripts/restart-local-clawgate.sh "${LOCAL_RESTART_ARGS[@]}"
 sleep 1
 
-launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
-sleep 2
-launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true
-sleep 2
+if [[ "$PLUGIN_CLIENT_ONLY_FLAG" != "1" ]]; then
+  launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
+  sleep 2
+  launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true
+  sleep 2
+fi
 
 if [[ "$STOP_RELAY_FLAG" == "1" ]]; then
   pkill -f "ClawGateRelay --host" >/dev/null 2>&1 || true

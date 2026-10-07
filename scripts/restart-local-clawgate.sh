@@ -70,7 +70,7 @@ if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
     echo "Missing or symlinked plugin destination directory: $PLUGIN_CLAWGATE_DST/src" >&2
     exit 1
   fi
-  if [[ -e "$PLUGIN_CLIENT_DST" && ( ! -f "$PLUGIN_CLIENT_DST" || -L "$PLUGIN_CLIENT_DST" ) ]]; then
+  if [[ ! -f "$PLUGIN_CLIENT_DST" || -L "$PLUGIN_CLIENT_DST" ]]; then
     echo "Plugin client destination is not a regular file: $PLUGIN_CLIENT_DST" >&2
     exit 1
   fi

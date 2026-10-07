@@ -61,6 +61,10 @@ if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$BUILD_HOSTA" == "true" ]]; then
   echo "--plugin-client-only cannot be combined with --build-hosta" >&2
   exit 2
 fi
+if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+  echo "--plugin-client-only cannot be combined with --skip-plugin-sync" >&2
+  exit 2
+fi
 if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_SYNC" != "true" ]]; then
   echo "--plugin-client-only requires --skip-sync (use selective files-from sync first)" >&2
   exit 2
@@ -203,9 +207,6 @@ if [[ "$BUILD_HOSTA" == "true" ]]; then
   REMOTE_PLUGIN_SYNC_ARG=""
   if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
     REMOTE_PLUGIN_SYNC_ARG=" --skip-plugin-sync"
-  fi
-  if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
-    REMOTE_PLUGIN_SYNC_ARG+=" --plugin-client-only"
   fi
   if ! ssh "$REMOTE_HOST" "KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
     echo
