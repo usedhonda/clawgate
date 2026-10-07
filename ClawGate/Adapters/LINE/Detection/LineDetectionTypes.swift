@@ -34,6 +34,9 @@ struct LineDetectionStateSnapshot: Codable {
     let isPolling: Bool
     let consecutiveTimeouts: Int
     let skippedPollCount: Int
+    var ocrFailureStreak: Int = 0
+    var ocrFailureReason: String = ""
+    var ocrFailureSince: String = ""
     let timestamp: String
 
     enum CodingKeys: String, CodingKey {
@@ -51,6 +54,9 @@ struct LineDetectionStateSnapshot: Codable {
         case isPolling = "is_polling"
         case consecutiveTimeouts = "consecutive_timeouts"
         case skippedPollCount = "skipped_poll_count"
+        case ocrFailureStreak = "ocr_failure_streak"
+        case ocrFailureReason = "ocr_failure_reason"
+        case ocrFailureSince = "ocr_failure_since"
         case timestamp
     }
 }

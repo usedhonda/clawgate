@@ -335,6 +335,7 @@ final class LINEInboundWatcher {
     /// Signal diagnostics: written by each collect*Signal, read by doPoll for pipeline JSON
     private var lastStructuralDiag: [String: String] = [:]
     private var lastPixelDiag: [String: String] = [:]
+    private var ocrFailureTracker = LineOCRFailureTracker()
 
     /// Text cursor: bottom N lines of last emitted OCR poll, used to skip already-seen content on next poll
     private var lastEmittedTextCursor: [String] = []
@@ -421,6 +422,7 @@ final class LINEInboundWatcher {
         let polling = isPolling
         let timeoutCount = consecutiveTimeouts
         let skipped = skippedPollCount
+        let failures = ocrFailureTracker
         stateLock.unlock()
         return LineDetectionStateSnapshot(
             mode: detectionMode,
@@ -437,6 +439,9 @@ final class LINEInboundWatcher {
             isPolling: polling,
             consecutiveTimeouts: timeoutCount,
             skippedPollCount: skipped,
+            ocrFailureStreak: failures.streak,
+            ocrFailureReason: failures.reason,
+            ocrFailureSince: failures.since.map(isoString) ?? "",
             timestamp: ISO8601DateFormatter().string(from: Date())
         )
     }
@@ -1427,8 +1432,14 @@ final class LINEInboundWatcher {
             lastPixelDiag = burst.bubbleDiagnostics.merging([
                 "pixel_baseline_captured": "true", "pixel_signal_result": "nil_bubble_ocr_retry"
             ]) { _, new in new }
+            stateLock.lock()
+            ocrFailureTracker.recordFailure(reason: burst.bubbleDiagnostics["ocr_failure_reason"] ?? "", at: Date())
+            stateLock.unlock()
             return nil
         }
+        stateLock.lock()
+        ocrFailureTracker.recordSuccess()
+        stateLock.unlock()
         if burst.frameSkippedNoCutDescription == "1" {
             logger.log(.debug, "LINEInboundWatcher: frame fallback without y-cut (continuing)")
         }
@@ -1760,6 +1771,7 @@ final class LINEInboundWatcher {
                 "ocr_bubble_count": String(selectedDebug.bubbleCount),
                 "ocr_input_pixels": String(selectedDebug.recognizedPixels),
                 "ocr_cache_hits": String(selectedDebug.cacheHits),
+                "ocr_failure_reason": selectedDebug.failureReason,
             ]
         )
     }

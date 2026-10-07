@@ -109,10 +109,23 @@ enum InboundBubbleOCR {
             detection.rects.map { NSStringFromRect($0) }.joined(separator: ";"))
     }
 
-    static func recognize(_ image: CGImage, scope: String, config: VisionOCR.OCRConfig) -> Result? {
+    /// Why `recognize` gave up. A nil with no recorded reason used to be
+    /// indistinguishable from a quiet room, so a stuck recogniser could drop
+    /// every new bubble for days without leaving a trace.
+    enum RecognizeFailure: String {
+        case detectorUncertain = "detector_uncertain"
+        case cropFailed = "crop_failed"
+        case atlasFailed = "atlas_failed"
+        case visionError = "vision_error"
+        case visionNoResults = "vision_no_results"
+        case incompleteRecognition = "incomplete_recognition"
+    }
+
+    static func recognize(_ image: CGImage, scope: String, config: VisionOCR.OCRConfig,
+                          failure: UnsafeMutablePointer<RecognizeFailure?>? = nil) -> Result? {
         let detection = InboundBubbleDetector.detect(in: image)
-        guard detection.status != .uncertain else { return nil }
-        guard let crops = crops(in: image, rects: detection.rects) else { return nil }
+        guard detection.status != .uncertain else { failure?.pointee = .detectorUncertain; return nil }
+        guard let crops = crops(in: image, rects: detection.rects) else { failure?.pointee = .cropFailed; return nil }
         guard !crops.isEmpty else {
             return Result(observations: [], bubbleCount: 0, recognizedPixels: 0, cacheHits: 0)
         }
@@ -136,7 +149,7 @@ enum InboundBubbleOCR {
 
         var recognizedPixels = 0
         if !pending.isEmpty {
-            guard let prepared = atlas(pending.map { crops[$0] }) else { return nil }
+            guard let prepared = atlas(pending.map { crops[$0] }) else { failure?.pointee = .atlasFailed; return nil }
             recognizedPixels = prepared.image.width * prepared.image.height
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
@@ -150,8 +163,8 @@ enum InboundBubbleOCR {
                 request.revision = VNRecognizeTextRequestRevision2
             }
             do { try VNImageRequestHandler(cgImage: prepared.image, options: [:]).perform([request]) }
-            catch { return nil }
-            guard let observations = request.results else { return nil }
+            catch { failure?.pointee = .visionError; return nil }
+            guard let observations = request.results else { failure?.pointee = .visionNoResults; return nil }
             var recognized = [[Observation]](repeating: [], count: pending.count)
             for observation in observations {
                 let candidates = observation.topCandidates(config.candidateCount)
@@ -169,7 +182,7 @@ enum InboundBubbleOCR {
                 recognized[index].append(Observation(text: text.string, boundingBox: normalized))
             }
             // A partial OCR failure must not advance the watcher's previous frame.
-            guard recognized.allSatisfy({ !$0.isEmpty }) else { return nil }
+            guard recognized.allSatisfy({ !$0.isEmpty }) else { failure?.pointee = .incompleteRecognition; return nil }
             lock.lock()
             for (slot, index) in pending.enumerated() {
                 let sorted = recognized[slot].sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }

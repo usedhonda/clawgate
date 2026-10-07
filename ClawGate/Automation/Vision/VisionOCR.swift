@@ -31,6 +31,7 @@ enum VisionOCR {
         var bubbleCount: Int = 0
         var recognizedPixels: Int = 0
         var cacheHits: Int = 0
+        var failureReason: String = ""
     }
 
     /// Extract text from a screen rectangle (in global CG coordinates).
@@ -166,8 +167,10 @@ enum VisionOCR {
         config: OCRConfig = .default,
         cacheScope: String = ""
     ) -> [AcceptedInboundObservation]? {
-        guard let result = InboundBubbleOCR.recognize(image, scope: cacheScope, config: config) else {
+        var failure: InboundBubbleOCR.RecognizeFailure?
+        guard let result = InboundBubbleOCR.recognize(image, scope: cacheScope, config: config, failure: &failure) else {
             debug?.pointee.bubbleStatus = "uncertain"
+            debug?.pointee.failureReason = failure?.rawValue ?? ""
             return nil
         }
         debug?.pointee.bubbleStatus = result.bubbleCount == 0 ? "noBubbles" : "ready"

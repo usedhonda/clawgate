@@ -500,6 +500,14 @@ struct DoctorChecks {
         if !snapshot.isPolling, (pollAge ?? Int.max) > 90 {
             return DoctorCheck(name: "line_inbound_flow", status: "error", message: "LINE inbound poll loop appears stopped", details: details)
         }
+        if snapshot.ocrFailureStreak >= LineOCRFailureTracker.faultThreshold {
+            return DoctorCheck(
+                name: "line_inbound_flow",
+                status: "warning",
+                message: "LINE inbound recognition keeps failing while bubbles are visible",
+                details: "\(details) ocr_failure_streak=\(snapshot.ocrFailureStreak) reason=\(snapshot.ocrFailureReason) since=\(snapshot.ocrFailureSince)"
+            )
+        }
         return DoctorCheck(name: "line_inbound_flow", status: "ok", message: "LINE inbound flow is active", details: details)
     }
 
