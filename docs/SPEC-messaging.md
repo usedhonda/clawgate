@@ -56,6 +56,14 @@ Host A (Server / macmini)                   Host B (Client / local)
 | shared-state.js | JS | `extensions/openclaw-plugin/src/shared-state.js` | Active project bridge (60s TTL) |
 | client.js | JS | `extensions/openclaw-plugin/src/client.js` | HTTP client (clawgateSend, clawgatePoll, etc.) |
 
+Hostname discovery for bridge bootstrap runs outside the HTTP event loop. Requests
+read an immediate snapshot (loopback until discovery succeeds), with single-flight
+refresh at most once per 60 seconds after completion. Discovery has a shared
+3-second deadline and a 1 MiB subprocess stdout limit; failures retain the last
+valid snapshot. Child output is drained while running, and timed-out or oversized
+children are terminated without an unbounded wait. Gateway host selection and
+the bootstrap response schema remain unchanged.
+
 ### Unified tproj mailbox (OpenClaw)
 
 The opt-in `tproj-mailbox` participant claims bounded service envelopes and
