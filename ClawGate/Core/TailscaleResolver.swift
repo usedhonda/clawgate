@@ -1,6 +1,5 @@
 import Foundation
 import Darwin
-import SystemConfiguration
 
 /// Resolves the best hostname this machine can advertise to peers, in order:
 ///   1. Tailscale name (works from anywhere on the tailnet)
@@ -26,8 +25,10 @@ enum OwnHostnameResolver {
     }
 
     private static func bonjourHostname() -> String? {
-        var name = (SCDynamicStoreCopyLocalHostName(nil) as String? ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // gethostname reads kernel state, unlike Host.current() / DNS discovery.
+        var buffer = [CChar](repeating: 0, count: Int(MAXHOSTNAMELEN) + 1)
+        guard gethostname(&buffer, buffer.count - 1) == 0 else { return nil }
+        var name = String(cString: buffer).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return nil }
         // Sanitize: replace spaces with hyphens (Bonjour disallows spaces).
         name = name.replacingOccurrences(of: " ", with: "-")
