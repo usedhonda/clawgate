@@ -218,8 +218,10 @@ export async function clawgateTmuxPromptState(apiUrl, project, traceId = "") {
 export async function telegramSend(botToken, chatId, text, opts = {}) {
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const body = { chat_id: chatId, text };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
     const json = await res.json();
     return json.ok
       ? { ok: true, result: { message_id: String(json.result?.message_id ?? ""), timestamp: new Date().toISOString() } }
@@ -227,6 +229,8 @@ export async function telegramSend(botToken, chatId, text, opts = {}) {
   } catch (err) {
     // Wrap to prevent bot token in URL from leaking into stack traces
     return { ok: false, error: { message: `Telegram send failed: ${err?.message || "network error"}`, code: 0 } };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
