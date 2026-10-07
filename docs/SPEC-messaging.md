@@ -1020,3 +1020,12 @@ DEDUP_WINDOW_MS    =       0  (disabled)
 MAX_ROUNDS         =       3  (autonomous)
 ACTIVE_PROJECT_TTL =  60,000  (shared-state)
 ```
+
+### Selective plugin-client deployment
+
+When only `extensions/openclaw-plugin/src/client.js` is ready to reflect on a
+host, sync that file explicitly, then run the canonical restart with
+`--skip-sync --plugin-client-only`. The selective mode validates regular
+source and destination files, copies atomically, and never deletes or
+overwrites other plugin files. It cannot be combined with a full plugin sync
+or Host A build/sign flow.

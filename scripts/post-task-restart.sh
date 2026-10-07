@@ -18,16 +18,18 @@ set -euo pipefail
 # bundle is restarted.
 #   ./scripts/post-task-restart.sh --build-hosta
 #   ./scripts/post-task-restart.sh --build-hosta --skip-plugin-sync
+#   ./scripts/post-task-restart.sh --plugin-client-only
 
 REMOTE_HOST="macmini"
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_SYNC=false
 SKIP_PLUGIN_SYNC=false
+PLUGIN_CLIENT_ONLY=false
 REQUIRE_HOSTA_LOCAL_SIGN=false
 BUILD_HOSTA=false
-CLAWGATE_ROLE="host_b_client"
-OPS_SCRIPT_NAME="post-task-restart.sh"
+export CLAWGATE_ROLE="host_b_client"
+export OPS_SCRIPT_NAME="post-task-restart.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -39,6 +41,8 @@ while [[ $# -gt 0 ]]; do
       SKIP_SYNC=true; shift ;;
     --skip-plugin-sync)
       SKIP_PLUGIN_SYNC=true; shift ;;
+    --plugin-client-only)
+      PLUGIN_CLIENT_ONLY=true; shift ;;
     --skip-remote-build)
       shift ;;  # deprecated: remote build path was removed (kept for backward compat)
     --skip-local-relay)
@@ -52,6 +56,15 @@ while [[ $# -gt 0 ]]; do
       exit 2 ;;
   esac
 done
+
+if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$BUILD_HOSTA" == "true" ]]; then
+  echo "--plugin-client-only cannot be combined with --build-hosta" >&2
+  exit 2
+fi
+if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_SYNC" != "true" ]]; then
+  echo "--plugin-client-only requires --skip-sync (use selective files-from sync first)" >&2
+  exit 2
+fi
 
 cd "$PROJECT_PATH"
 
@@ -167,6 +180,7 @@ echo "Remote host : $REMOTE_HOST"
 echo "Project path: $PROJECT_PATH"
 echo "Skip sync   : $SKIP_SYNC"
 echo "Skip plugins: $SKIP_PLUGIN_SYNC"
+echo "Client only : $PLUGIN_CLIENT_ONLY"
 echo "Require HostA local sign: $REQUIRE_HOSTA_LOCAL_SIGN"
 echo "Build HostA (SSH sign)  : $BUILD_HOSTA"
 
@@ -190,6 +204,9 @@ if [[ "$BUILD_HOSTA" == "true" ]]; then
   if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
     REMOTE_PLUGIN_SYNC_ARG=" --skip-plugin-sync"
   fi
+  if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
+    REMOTE_PLUGIN_SYNC_ARG+=" --plugin-client-only"
+  fi
   if ! ssh "$REMOTE_HOST" "KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
     echo
     echo "[fallback] Host A build/sign over SSH failed. Run on macmini local desktop session:"
@@ -201,6 +218,9 @@ else
   REMOTE_RESTART_ARGS=(--remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" --skip-build)
   if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
     REMOTE_RESTART_ARGS+=(--skip-plugin-sync)
+  fi
+  if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
+    REMOTE_RESTART_ARGS+=(--plugin-client-only)
   fi
   if ! ./scripts/restart-macmini-openclaw.sh "${REMOTE_RESTART_ARGS[@]}"; then
     echo
@@ -221,9 +241,12 @@ AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStre
 # Host B restart (canonical local path).
 echo "[local] Restart Host B ClawGate.app"
 LOCAL_RESTART_ARGS=(./scripts/restart-local-clawgate.sh)
-if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
-  LOCAL_RESTART_ARGS+=(--skip-plugin-sync)
-fi
+  if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+    LOCAL_RESTART_ARGS+=(--skip-plugin-sync)
+  fi
+  if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
+    LOCAL_RESTART_ARGS+=(--plugin-client-only)
+  fi
 "${LOCAL_RESTART_ARGS[@]}"
 
 echo

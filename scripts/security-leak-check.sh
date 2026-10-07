@@ -146,7 +146,8 @@ run_self_test() {
   local home_prefix="/Users"
   local personal_path="${home_prefix}/usedhonda/dev/project"
   local token_prefix="ghp_"
-  local secret_token="${token_prefix}$(printf 'x%.0s' {1..21})"
+  local secret_token
+  secret_token="${token_prefix}$(printf 'x%.0s' {1..21})"
 
   run_self_test_case "root_AGENTS_allowed" "pass" "AGENTS.md" "# public shared contract\n@notes" || failures=$((failures + 1))
   run_self_test_case "root_CLAUDE_allowed" "pass" "CLAUDE.md" "# public shared contract\n@AGENTS.md" || failures=$((failures + 1))
