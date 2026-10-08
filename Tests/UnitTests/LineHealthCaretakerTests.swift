@@ -40,6 +40,26 @@ final class LineHealthCaretakerTests: XCTestCase {
         XCTAssertEqual(result.repairReason, "watcher_stale")
     }
 
+    func testDecisionDefersRepairWhenLineIsBackground() {
+        let result = LineCaretakerDecisionEngine.decide(
+            LineCaretakerDecisionInput(
+                isSending: false,
+                sentRecently: false,
+                inCooldown: false,
+                lineRunning: true,
+                watcherStale: true,
+                surfaceAbnormal: true,
+                forcedReanchorDue: true,
+                dedupPipelineDegraded: true,
+                lineForeground: false
+            )
+        )
+
+        XCTAssertFalse(result.shouldRepair)
+        XCTAssertNil(result.mode)
+        XCTAssertEqual(result.assessmentReason, "line_background_deferred")
+    }
+
     func testDecisionDoesNotForegroundHealthySurfaceWhenReanchorDue() {
         let result = LineCaretakerDecisionEngine.decide(
             LineCaretakerDecisionInput(

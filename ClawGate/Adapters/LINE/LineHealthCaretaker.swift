@@ -178,7 +178,8 @@ final class LineHealthCaretaker {
                 watcherStale: isWatcherStale(watcherSnapshot, now: now),
                 surfaceAbnormal: surfaceSnapshot?.abnormal ?? true,
                 forcedReanchorDue: now >= currentForcedRepairDueAt(),
-                dedupPipelineDegraded: dedupPipelineDegraded
+                dedupPipelineDegraded: dedupPipelineDegraded,
+                lineForeground: NSWorkspace.shared.frontmostApplication?.bundleIdentifier == lineAdapter.bundleIdentifier
             )
         )
 
@@ -200,9 +201,9 @@ final class LineHealthCaretaker {
             case .probeOnly:
                 recoveredSnapshot = try lineAdapter.probeDefaultConversationSurface()
             case .recoverIfNeeded:
-                recoveredSnapshot = try lineAdapter.recoverDefaultConversationSurfaceIfNeeded()
+                recoveredSnapshot = try lineAdapter.recoverDefaultConversationSurfaceIfNeeded(allowActivation: false)
             case .forceRecover:
-                recoveredSnapshot = try lineAdapter.forceRecoverDefaultConversationSurface()
+                recoveredSnapshot = try lineAdapter.forceRecoverDefaultConversationSurface(allowActivation: false)
             }
 
             updateState(
@@ -219,6 +220,11 @@ final class LineHealthCaretaker {
                 "LineHealthCaretaker: repaired surface reason=\(repairReason) mode=\(mode.rawValue) abnormal_after=\(recoveredSnapshot.abnormal)"
             )
         } catch let error as BridgeRuntimeError {
+            if error.code == "line_foreground_lost" {
+                updateState(lastAssessmentReason: "line_background_deferred")
+                logger.log(.info, "LineHealthCaretaker: foreground changed during repair; deferring without cooldown")
+                return
+            }
             updateState(
                 lastAssessmentReason: decision.assessmentReason,
                 lastRepairAt: now,

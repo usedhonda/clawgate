@@ -104,6 +104,29 @@ struct LineCaretakerDecisionInput {
     let surfaceAbnormal: Bool
     let forcedReanchorDue: Bool
     let dedupPipelineDegraded: Bool
+    let lineForeground: Bool
+
+    init(
+        isSending: Bool,
+        sentRecently: Bool,
+        inCooldown: Bool,
+        lineRunning: Bool,
+        watcherStale: Bool,
+        surfaceAbnormal: Bool,
+        forcedReanchorDue: Bool,
+        dedupPipelineDegraded: Bool,
+        lineForeground: Bool = true
+    ) {
+        self.isSending = isSending
+        self.sentRecently = sentRecently
+        self.inCooldown = inCooldown
+        self.lineRunning = lineRunning
+        self.watcherStale = watcherStale
+        self.surfaceAbnormal = surfaceAbnormal
+        self.forcedReanchorDue = forcedReanchorDue
+        self.dedupPipelineDegraded = dedupPipelineDegraded
+        self.lineForeground = lineForeground
+    }
 }
 
 struct LineCaretakerDecisionResult {
@@ -136,6 +159,14 @@ enum LineCaretakerDecisionEngine {
                 shouldRepair: false,
                 mode: nil,
                 assessmentReason: "line_not_running",
+                repairReason: nil
+            )
+        }
+        if !input.lineForeground {
+            return LineCaretakerDecisionResult(
+                shouldRepair: false,
+                mode: nil,
+                assessmentReason: "line_background_deferred",
                 repairReason: nil
             )
         }

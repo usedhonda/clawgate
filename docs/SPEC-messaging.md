@@ -3,6 +3,17 @@
 > Last updated: 2026-02-19
 > Source of truth: Swift source under `ClawGate/` + JS plugin under `extensions/openclaw-plugin/src/`
 
+## LINE caretaker foreground safety
+
+Periodic LINE health repair is a background maintenance operation. It may probe
+LINE while another app is frontmost, but it must defer recovery until LINE is
+already frontmost. The periodic path must never activate, unhide, raise, or
+restore LINE (or the previously frontmost app), and must retain its pending
+repair/forced-repair state when deferred. If focus changes during a repair, the
+operation aborts without applying repair cooldown or recording a completed
+repair. Explicit sends and manual recovery keep their existing activation
+behavior.
+
 ---
 
 ## 1. Architecture Overview
