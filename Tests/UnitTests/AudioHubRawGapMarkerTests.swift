@@ -13,4 +13,15 @@ final class AudioHubRawGapMarkerTests: XCTestCase {
         XCTAssertEqual(marker.sessionID, "ctx-a")
         XCTAssertEqual(marker.reason, "runtime_unavailable")
     }
+
+    func testInvalidExistingMarkerIsReportedAsSaveFailure() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("raw-gap-invalid-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent(AudioHubRawGapMarker.fileName)
+        try Data("not-json".utf8).write(to: url)
+
+        XCTAssertFalse(AudioHubRawGapMarker.record(sessionDirectory: dir, sessionID: "ctx-a", reason: "runtime_unavailable"))
+        XCTAssertNil(AudioHubRawGapMarker.load(sessionDirectory: dir))
+    }
 }
