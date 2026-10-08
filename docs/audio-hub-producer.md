@@ -300,4 +300,7 @@ store full or failing, or a non-empty unregistered file), local persistence
 continues and the session directory gets a body-free `hub-raw-gap.json`
 (`version`, `sessionID`, `reason`, `recordedAt`). The first reason wins. It is
 independent of the control store, never retries, backfills or uploads, and
-marks the session as not covered by the native producer.
+marks the session as not covered by the native producer. If the marker cannot
+be saved (including when an existing marker is corrupt or belongs to another
+session), the save returns non-success and the controller emits only a
+body-free diagnostic; local raw persistence still continues.

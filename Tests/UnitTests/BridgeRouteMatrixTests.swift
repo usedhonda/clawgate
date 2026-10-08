@@ -11,7 +11,7 @@ import XCTest
 /// route change) is provably behavior-preserving.
 final class BridgeRouteMatrixTests: XCTestCase {
 
-    /// Canonical expected route table (42 entries). Any add/remove/method
+    /// Canonical expected route table (45 entries). Any add/remove/method
     /// change to `BridgeRequestHandler.routes` breaks this freeze.
     private static let expectedRoutes: [(HTTPMethod, String)] = [
         (.GET, "/v1/health"),
@@ -36,6 +36,7 @@ final class BridgeRouteMatrixTests: XCTestCase {
         (.POST, "/v1/oauth/safari-open"),
         (.GET, "/v1/debug/line-dedup"),
         (.GET, "/v1/debug/line-health"),
+        (.GET, "/v1/debug/line-observation"),
         (.GET, "/v1/debug/tmux-direct"),
         (.GET, "/v1/debug/reminders"),
         (.GET, "/v1/debug/ws"),
@@ -62,7 +63,7 @@ final class BridgeRouteMatrixTests: XCTestCase {
 
     /// Routes reachable via the in-process federation switch
     /// (`BridgeCore.handleFederationCommand`). This is a strict subset of the
-    /// full route table — the remaining 23 routes fall to federation's default
+    /// full route table — the remaining 24 routes fall to federation's default
     /// 404 branch. Freezing it turns the 3rd route enumeration into a
     /// drift-detectable guard (3 duplicated lists -> 2 + guard).
     private static let federationRoutes: [(HTTPMethod, String)] = [

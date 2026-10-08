@@ -178,7 +178,8 @@ final class LineHealthCaretaker {
                 watcherStale: isWatcherStale(watcherSnapshot, now: now),
                 surfaceAbnormal: surfaceSnapshot?.abnormal ?? true,
                 forcedReanchorDue: now >= currentForcedRepairDueAt(),
-                dedupPipelineDegraded: dedupPipelineDegraded
+                dedupPipelineDegraded: dedupPipelineDegraded,
+                lineForeground: NSWorkspace.shared.frontmostApplication?.bundleIdentifier == lineAdapter.bundleIdentifier
             )
         )
 
@@ -193,16 +194,15 @@ final class LineHealthCaretaker {
             return
         }
 
-        let previousFrontmostApp = NSWorkspace.shared.frontmostApplication
         do {
             let recoveredSnapshot: LineSurfaceHealthSnapshot
             switch mode {
             case .probeOnly:
                 recoveredSnapshot = try lineAdapter.probeDefaultConversationSurface()
             case .recoverIfNeeded:
-                recoveredSnapshot = try lineAdapter.recoverDefaultConversationSurfaceIfNeeded()
+                recoveredSnapshot = try lineAdapter.recoverDefaultConversationSurfaceIfNeeded(allowActivation: false)
             case .forceRecover:
-                recoveredSnapshot = try lineAdapter.forceRecoverDefaultConversationSurface()
+                recoveredSnapshot = try lineAdapter.forceRecoverDefaultConversationSurface(allowActivation: false)
             }
 
             updateState(
@@ -219,6 +219,11 @@ final class LineHealthCaretaker {
                 "LineHealthCaretaker: repaired surface reason=\(repairReason) mode=\(mode.rawValue) abnormal_after=\(recoveredSnapshot.abnormal)"
             )
         } catch let error as BridgeRuntimeError {
+            if error.code == "line_foreground_lost" {
+                updateState(lastAssessmentReason: "line_background_deferred")
+                logger.log(.info, "LineHealthCaretaker: foreground changed during repair; deferring without cooldown")
+                return
+            }
             updateState(
                 lastAssessmentReason: decision.assessmentReason,
                 lastRepairAt: now,
@@ -243,7 +248,6 @@ final class LineHealthCaretaker {
             logger.log(.warning, "LineHealthCaretaker: repair failed reason=\(repairReason) assessment=\(decision.assessmentReason) error=\(error)")
         }
 
-        restoreFrontmostApplication(previousFrontmostApp)
     }
 
     private func isWatcherStale(_ snapshot: LineDetectionStateSnapshot, now: Date) -> Bool {
@@ -251,20 +255,6 @@ final class LineHealthCaretaker {
             return true
         }
         return now.timeIntervalSince(lastCompleted) > Constants.watcherStaleThreshold
-    }
-
-    private func restoreFrontmostApplication(_ app: NSRunningApplication?) {
-        guard let app,
-              app.bundleIdentifier != lineAdapter.bundleIdentifier else {
-            return
-        }
-
-        let semaphore = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
-            _ = app.activate(options: [.activateIgnoringOtherApps])
-            semaphore.signal()
-        }
-        _ = semaphore.wait(timeout: .now() + 1)
     }
 
     private func currentForcedRepairDueAt() -> Date {

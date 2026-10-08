@@ -34,6 +34,9 @@ struct LineDetectionStateSnapshot: Codable {
     let isPolling: Bool
     let consecutiveTimeouts: Int
     let skippedPollCount: Int
+    var ocrFailureStreak: Int = 0
+    var ocrFailureReason: String = ""
+    var ocrFailureSince: String = ""
     let timestamp: String
 
     enum CodingKeys: String, CodingKey {
@@ -51,6 +54,9 @@ struct LineDetectionStateSnapshot: Codable {
         case isPolling = "is_polling"
         case consecutiveTimeouts = "consecutive_timeouts"
         case skippedPollCount = "skipped_poll_count"
+        case ocrFailureStreak = "ocr_failure_streak"
+        case ocrFailureReason = "ocr_failure_reason"
+        case ocrFailureSince = "ocr_failure_since"
         case timestamp
     }
 }
@@ -98,6 +104,29 @@ struct LineCaretakerDecisionInput {
     let surfaceAbnormal: Bool
     let forcedReanchorDue: Bool
     let dedupPipelineDegraded: Bool
+    let lineForeground: Bool
+
+    init(
+        isSending: Bool,
+        sentRecently: Bool,
+        inCooldown: Bool,
+        lineRunning: Bool,
+        watcherStale: Bool,
+        surfaceAbnormal: Bool,
+        forcedReanchorDue: Bool,
+        dedupPipelineDegraded: Bool,
+        lineForeground: Bool = true
+    ) {
+        self.isSending = isSending
+        self.sentRecently = sentRecently
+        self.inCooldown = inCooldown
+        self.lineRunning = lineRunning
+        self.watcherStale = watcherStale
+        self.surfaceAbnormal = surfaceAbnormal
+        self.forcedReanchorDue = forcedReanchorDue
+        self.dedupPipelineDegraded = dedupPipelineDegraded
+        self.lineForeground = lineForeground
+    }
 }
 
 struct LineCaretakerDecisionResult {
@@ -130,6 +159,14 @@ enum LineCaretakerDecisionEngine {
                 shouldRepair: false,
                 mode: nil,
                 assessmentReason: "line_not_running",
+                repairReason: nil
+            )
+        }
+        if !input.lineForeground {
+            return LineCaretakerDecisionResult(
+                shouldRepair: false,
+                mode: nil,
+                assessmentReason: "line_background_deferred",
                 repairReason: nil
             )
         }

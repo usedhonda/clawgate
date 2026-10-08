@@ -976,13 +976,19 @@ final class AmbientController {
             // Local persistence continues either way; an unregistered session
             // leaves a durable, body-free gap marker instead of only a log.
             guard let runtime = self.audioHubRuntime else {
-                AudioHubRawGapMarker.record(sessionDirectory: dir, sessionID: sessionID, reason: "runtime_unavailable")
+                let markerSaved = AudioHubRawGapMarker.record(sessionDirectory: dir, sessionID: sessionID, reason: "runtime_unavailable")
+                if !markerSaved {
+                    self.log("audio Hub raw gap marker save failed; continuing local source persistence")
+                }
                 return
             }
             do { try runtime.registerRawWriter(sessionID: sessionID, snapshot: snapshot) }
             catch {
                 let reason = (error as? AudioHubRuntime.Failure).map { "registration_\($0)" } ?? "registration_failed"
-                AudioHubRawGapMarker.record(sessionDirectory: dir, sessionID: sessionID, reason: reason)
+                let markerSaved = AudioHubRawGapMarker.record(sessionDirectory: dir, sessionID: sessionID, reason: reason)
+                if !markerSaved {
+                    self.log("audio Hub raw gap marker save failed; continuing local source persistence")
+                }
                 self.log("audio Hub raw registration failed; continuing local source persistence")
             }
         }

@@ -26,15 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode 16
-        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
 
       - name: Cache SPM
         uses: actions/cache@v4
         with:
           path: .build
-          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-
+          key: spm-${{ runner.os }}-xcode-26.3-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-xcode-26.3-
 
       - name: Build
         run: swift build
@@ -68,17 +68,17 @@ jobs:
           done
           echo "has_line_changes=$HAS_LINE" >> "$GITHUB_OUTPUT"
 
-      - name: Select Xcode 16
+      - name: Select Xcode 26.3
         if: steps.line-check.outputs.has_line_changes == 'true'
-        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
 
       - name: Cache SPM
         if: steps.line-check.outputs.has_line_changes == 'true'
         uses: actions/cache@v4
         with:
           path: .build
-          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-
+          key: spm-${{ runner.os }}-xcode-26.3-${{ hashFiles('Package.resolved') }}
+          restore-keys: spm-${{ runner.os }}-xcode-26.3-
 
       - name: Run LINE-specific Swift tests
         if: steps.line-check.outputs.has_line_changes == 'true'

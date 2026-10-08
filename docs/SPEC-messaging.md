@@ -3,6 +3,23 @@
 > Last updated: 2026-02-19
 > Source of truth: Swift source under `ClawGate/` + JS plugin under `extensions/openclaw-plugin/src/`
 
+## LINE caretaker foreground safety
+
+Periodic LINE health repair is a background maintenance operation. It may probe
+LINE while another app is frontmost, but it must defer recovery until LINE is
+already frontmost. The periodic path must never activate, unhide, raise, or
+restore LINE (or the previously frontmost app), and must retain its pending
+repair/forced-repair state when deferred. If focus changes during a repair, the
+operation aborts without applying repair cooldown or recording a completed
+repair. Explicit sends and manual recovery keep their existing activation
+behavior.
+
+Operational restart verification may opt into `--line-read-only`, which uses a
+GET `/v1/conversations?adapter=line&limit=1` probe and never navigates LINE.
+When deploying a locally signed bundle, `post-task-restart.sh --signed-bundle`
+requires `--skip-sync --skip-plugin-sync`, restarts Host B once, and invokes the
+canonical signed-bundle transfer; it does not build or sign on Host A.
+
 ---
 
 ## 1. Architecture Overview
@@ -55,6 +72,14 @@ Host A (Server / macmini)                   Host B (Client / local)
 | context-cache.js | JS | `extensions/openclaw-plugin/src/context-cache.js` | Hash-based context cache, progress trails, task goals |
 | shared-state.js | JS | `extensions/openclaw-plugin/src/shared-state.js` | Active project bridge (60s TTL) |
 | client.js | JS | `extensions/openclaw-plugin/src/client.js` | HTTP client (clawgateSend, clawgatePoll, etc.) |
+
+Hostname discovery for bridge bootstrap runs outside the HTTP event loop. Requests
+read an immediate snapshot (loopback until discovery succeeds), with single-flight
+refresh at most once per 60 seconds after completion. Discovery has a shared
+3-second deadline and a 1 MiB subprocess stdout limit; failures retain the last
+valid snapshot. Child output is drained while running, and timed-out or oversized
+children are terminated without an unbounded wait. Gateway host selection and
+the bootstrap response schema remain unchanged.
 
 ### Unified tproj mailbox (OpenClaw)
 
@@ -1012,3 +1037,12 @@ DEDUP_WINDOW_MS    =       0  (disabled)
 MAX_ROUNDS         =       3  (autonomous)
 ACTIVE_PROJECT_TTL =  60,000  (shared-state)
 ```
+
+### Selective plugin-client deployment
+
+When only `extensions/openclaw-plugin/src/client.js` is ready to reflect on a
+host, sync that file explicitly, then run the canonical restart with
+`--skip-sync --plugin-client-only`. The selective mode validates regular
+source and destination files, copies atomically, and never deletes or
+overwrites other plugin files. It cannot be combined with a full plugin sync
+or Host A build/sign flow.

@@ -73,15 +73,15 @@ final class MeetingMinutesTests: XCTestCase {
         XCTAssertEqual(model.minutesAttemptsForTesting["mtg-second", default: 0], 0)
 
         model.releaseSharedSummonForTesting(token: busyToken)
-        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-second")
-        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-second"], 1)
+        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-first")
+        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-first"], 1)
 
         // A terminal failure is still a real completion; the queue must then
         // advance to the remaining meeting rather than stall or duplicate.
         model.releaseCurrentSharedSummonForTesting()
         model.completeMinutesReplyForTesting("not JSON")
-        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-first")
-        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-first"], 1)
+        XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-second")
+        XCTAssertEqual(model.minutesAttemptsForTesting["mtg-second"], 1)
     }
 
     func testEnvelopeNumbersSegmentsAndKeepsTheirStreamAndName() {

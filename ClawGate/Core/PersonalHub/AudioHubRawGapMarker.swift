@@ -20,7 +20,17 @@ enum AudioHubRawGapMarker {
     @discardableResult
     static func record(sessionDirectory: URL, sessionID: String, reason: String, now: Date = Date()) -> Bool {
         let url = sessionDirectory.appendingPathComponent(fileName)
-        if FileManager.default.fileExists(atPath: url.path) { return true }
+        if FileManager.default.fileExists(atPath: url.path) {
+            // Treat an existing marker as success only when it is a valid,
+            // body-free marker for this session. A corrupt or mismatched file
+            // is a save failure; never overwrite the first valid gap.
+            guard let existing = load(sessionDirectory: sessionDirectory),
+                  existing.version == 1,
+                  existing.sessionID == sessionID,
+                  !existing.reason.isEmpty,
+                  !existing.recordedAt.isEmpty else { return false }
+            return true
+        }
         let marker = Marker(version: 1, sessionID: sessionID, reason: reason,
                             recordedAt: ISO8601DateFormatter().string(from: now))
         guard let data = try? JSONEncoder().encode(marker) else { return false }

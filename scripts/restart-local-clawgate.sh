@@ -8,6 +8,7 @@ set -euo pipefail
 #   ./scripts/restart-local-clawgate.sh
 #   ./scripts/restart-local-clawgate.sh --skip-build
 #   ./scripts/restart-local-clawgate.sh --skip-plugin-sync
+#   ./scripts/restart-local-clawgate.sh --plugin-client-only
 #   ./scripts/restart-local-clawgate.sh --project-path "$(pwd)"
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -15,10 +16,11 @@ PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_BUILD=false
 SKIP_SYNC=false
 SKIP_PLUGIN_SYNC=false
+PLUGIN_CLIENT_ONLY=false
 SKIP_SIGN=false
 WAIT_SECONDS=8
-CLAWGATE_ROLE="host_b_client"
-OPS_SCRIPT_NAME="restart-local-clawgate.sh"
+export CLAWGATE_ROLE="host_b_client"
+export OPS_SCRIPT_NAME="restart-local-clawgate.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
       SKIP_SYNC=true; shift ;;
     --skip-plugin-sync)
       SKIP_PLUGIN_SYNC=true; shift ;;
+    --plugin-client-only)
+      PLUGIN_CLIENT_ONLY=true; shift ;;
     --skip-sign)
       SKIP_SIGN=true; shift ;;
     --wait-seconds)
@@ -40,8 +44,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+  echo "--plugin-client-only cannot be combined with --skip-plugin-sync" >&2
+  exit 2
+fi
+
 source "$PROJECT_PATH/scripts/lib-ops-log.sh"
-ops_log info "restart_begin" "local restart started (skip_build=$SKIP_BUILD skip_sync=$SKIP_SYNC skip_plugin_sync=$SKIP_PLUGIN_SYNC skip_sign=$SKIP_SIGN)"
+ops_log info "restart_begin" "local restart started (skip_build=$SKIP_BUILD skip_sync=$SKIP_SYNC skip_plugin_sync=$SKIP_PLUGIN_SYNC plugin_client_only=$PLUGIN_CLIENT_ONLY skip_sign=$SKIP_SIGN)"
 trap 'ops_log error "restart_failed" "local restart failed (line=$LINENO exit=$?)"' ERR
 
 APP_PATH="$PROJECT_PATH/ClawGate.app"
@@ -50,6 +59,23 @@ BUILD_BIN="$PROJECT_PATH/.build/debug/ClawGate"
 PLUGIN_CLAWGATE_SRC="$PROJECT_PATH/extensions/openclaw-plugin"
 PLUGIN_CLAWGATE_DST="$HOME/.openclaw/extensions/clawgate"
 
+if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
+  PLUGIN_CLIENT_SRC="$PLUGIN_CLAWGATE_SRC/src/client.js"
+  PLUGIN_CLIENT_DST="$PLUGIN_CLAWGATE_DST/src/client.js"
+  if [[ ! -f "$PLUGIN_CLIENT_SRC" || -L "$PLUGIN_CLIENT_SRC" ]]; then
+    echo "Missing or symlinked plugin client source: $PLUGIN_CLIENT_SRC" >&2
+    exit 1
+  fi
+  if [[ ! -d "$PLUGIN_CLAWGATE_DST/src" || -L "$PLUGIN_CLAWGATE_DST/src" ]]; then
+    echo "Missing or symlinked plugin destination directory: $PLUGIN_CLAWGATE_DST/src" >&2
+    exit 1
+  fi
+  if [[ ! -f "$PLUGIN_CLIENT_DST" || -L "$PLUGIN_CLIENT_DST" ]]; then
+    echo "Plugin client destination is not a regular file: $PLUGIN_CLIENT_DST" >&2
+    exit 1
+  fi
+fi
+
 cd "$PROJECT_PATH"
 
 echo "== restart-local-clawgate =="
@@ -57,6 +83,7 @@ echo "Project path: $PROJECT_PATH"
 echo "Skip build  : $SKIP_BUILD"
 echo "Skip sync   : $SKIP_SYNC"
 echo "Skip plugins: $SKIP_PLUGIN_SYNC"
+echo "Client only : $PLUGIN_CLIENT_ONLY"
 echo "Skip sign   : $SKIP_SIGN"
 
 if [[ "$SKIP_BUILD" != "true" ]]; then
@@ -122,7 +149,12 @@ else
   echo "[2/5] Skip app-binary sync (by option)"
 fi
 
-if [[ "$SKIP_PLUGIN_SYNC" != "true" ]]; then
+if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
+  echo "[3/5] Sync OpenClaw plugin client.js only"
+  PLUGIN_CLIENT_TMP="$(mktemp "$PLUGIN_CLAWGATE_DST/src/.client.js.tmp.XXXXXX")"
+  cp "$PLUGIN_CLIENT_SRC" "$PLUGIN_CLIENT_TMP"
+  mv -f "$PLUGIN_CLIENT_TMP" "$PLUGIN_CLAWGATE_DST/src/client.js"
+elif [[ "$SKIP_PLUGIN_SYNC" != "true" ]]; then
   echo "[3/5] Sync OpenClaw plugins"
   sync_plugin_dir() {
     local src="$1"

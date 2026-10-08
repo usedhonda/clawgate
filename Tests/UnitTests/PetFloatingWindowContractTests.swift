@@ -114,10 +114,17 @@ final class PetFloatingWindowContractTests: XCTestCase {
         let source = try source("ClawGate/UI/MenuBarApp.swift")
         let body = try functionBody(from: source, functionName: "toggleMainPanel", nextFunctionHeader: "private func prepareExpandedPanelForOpen(_ panel: NSPanel) {")
 
-        XCTAssertTrue(body.contains("event.type == .rightMouseUp"),
-                      "right-click path must stay intact")
-        XCTAssertTrue(body.contains("showStatusItemMenu()"),
-                      "right-click must continue opening the status menu")
+        let leftBranch = try XCTUnwrap(body.range(of: "event.type == .leftMouseUp"))
+        let panelGuard = try XCTUnwrap(body.range(of: "guard let panel = mainPanel"))
+        XCTAssertLessThan(leftBranch.upperBound, panelGuard.lowerBound,
+                          "left-click menu branch must return before panel reveal")
+        let leftBranchBody = body[leftBranch.lowerBound..<panelGuard.lowerBound]
+        XCTAssertTrue(leftBranchBody.contains("showStatusItemMenu()"),
+                      "left-click must open the status menu")
+        XCTAssertTrue(leftBranchBody.contains("return"),
+                      "left-click menu branch must not fall through")
+        XCTAssertTrue(source.contains("button.sendAction(on: [.leftMouseUp, .rightMouseUp])"),
+                      "the status item must register both click paths")
         XCTAssertTrue(body.contains("panel.isVisible"),
                       "left-click close path must stay intact")
         XCTAssertTrue(body.contains("petWindowController?.bringChatToFrontIfVisible()"),

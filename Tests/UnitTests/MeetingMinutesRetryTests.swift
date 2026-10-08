@@ -301,7 +301,7 @@ final class DedicatedMinutesConnectionHelloTests: XCTestCase {
     private func hello(_ extra: String) throws -> IncomingPayload {
         try JSONDecoder().decode(IncomingPayload.self, from: Data("""
         {"type":"hello-ok","executionConnection":{"version":1,"purpose":"retained-minutes","profileBound":true,
-         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false\(extra)}}
+         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false\(extra)},"auth":{"role":"operator","scopes":["operator.read","operator.write","operator.admin"]}}
         """.utf8))
     }
 
@@ -314,6 +314,44 @@ final class DedicatedMinutesConnectionHelloTests: XCTestCase {
         XCTAssertFalse(OpenClawWSClient.helloAccepted(try hello(""), purpose: "other"))
         // An ordinary connection is unchanged.
         XCTAssertTrue(OpenClawWSClient.helloAccepted(missing, purpose: nil))
+
+        let missingAuth = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","executionConnection":{"version":1,"purpose":"retained-minutes","profileBound":true,
+         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false}}
+        """.utf8))
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(missingAuth, purpose: "retained-minutes"))
+
+        let wrongRole = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","executionConnection":{"version":1,"purpose":"retained-minutes","profileBound":true,
+         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false},"auth":{"role":"viewer","scopes":["operator.admin"]}}
+        """.utf8))
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(wrongRole, purpose: "retained-minutes"))
+
+        let missingAdmin = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","executionConnection":{"version":1,"purpose":"retained-minutes","profileBound":true,
+         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false},"auth":{"role":"operator","scopes":["operator.read"]}}
+        """.utf8))
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(missingAdmin, purpose: "retained-minutes"))
+
+        let malformedAuth = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","auth":"not-an-object"}
+        """.utf8))
+        XCTAssertNil(malformedAuth.auth)
+        XCTAssertTrue(OpenClawWSClient.helloAccepted(malformedAuth, purpose: nil))
+    }
+
+    func testDedicatedReadinessUsesOnlyCurrentGenerationAdvertisement() async throws {
+        let client = OpenClawWSClient(role: "minutes", executionPurpose: "retained-minutes")
+        await client.seedGatewayAdvertisementForTesting(
+            methods: ["chat.send", "chat.result.get"], generation: 7,
+            connected: true, handshaken: true)
+        try await client.waitForDedicatedMinutesReadiness(timeout: 0.2)
+
+        await client.beginConnectionGenerationForTesting()
+        do {
+            try await client.waitForDedicatedMinutesReadiness(timeout: 0.05)
+            XCTFail("stale capability advertisement must not satisfy readiness")
+        } catch { }
     }
 }
 

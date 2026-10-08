@@ -75,6 +75,9 @@ final class MeetingFusionTests: XCTestCase {
         model.setSessionKeyForTesting("test-session")
         model.setConnectionStateForTesting(.connected)
         model.suppressLogSendForTesting = true
+        let originalGap = PetModel.minutesPartGapSeconds
+        PetModel.minutesPartGapSeconds = 0
+        defer { PetModel.minutesPartGapSeconds = originalGap }
         model.meetingTranscriptProvider = { _ in (0..<3).map { _ in
             TranscriptSegment(startSeconds: 0, endSeconds: 1, text: String(repeating: "discussion ", count: 900))
         } }

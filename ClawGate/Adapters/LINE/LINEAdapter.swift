@@ -887,7 +887,8 @@ final class LINEAdapter: AdapterProtocol {
         rootWindow: AXUIElement,
         windowFrame: CGRect,
         nodes: [AXNode],
-        defaultConversation: String
+        defaultConversation: String,
+        allowActivation: Bool = true
     ) throws -> (snapshot: LineSurfaceHealthSnapshot, nodes: [AXNode]) {
         let initialAssessment = try assessSendSurface(
             rootWindow: rootWindow,
@@ -913,8 +914,10 @@ final class LINEAdapter: AdapterProtocol {
             windowFrame: windowFrame,
             nodes: nodes,
             defaultConversation: defaultConversation,
-            forcePaneReanchor: mode == .forceRecover
+            forcePaneReanchor: mode == .forceRecover,
+            allowActivation: allowActivation
         )
+        try ensureForegroundForRecovery(allowActivation: allowActivation)
         let recoveredFrame = AXQuery.copyFrameAttribute(rootWindow) ?? windowFrame
         let recoveredAssessment = try assessSendSurface(
             rootWindow: rootWindow,
@@ -962,7 +965,7 @@ final class LINEAdapter: AdapterProtocol {
         ).snapshot
     }
 
-    func recoverDefaultConversationSurfaceIfNeeded() throws -> LineSurfaceHealthSnapshot {
+    func recoverDefaultConversationSurfaceIfNeeded(allowActivation: Bool = true) throws -> LineSurfaceHealthSnapshot {
         let defaultConversation = configuredDefaultConversation()
         guard !defaultConversation.isEmpty else {
             throw BridgeRuntimeError(
@@ -983,18 +986,19 @@ final class LINEAdapter: AdapterProtocol {
             )
         }
 
-        let context = try surfaceContext(app: app, allowActivation: true, expectedConversation: defaultConversation)
+        let context = try surfaceContext(app: app, allowActivation: allowActivation, expectedConversation: defaultConversation)
         return try defaultConversationSurface(
             mode: .recoverIfNeeded,
             app: app,
             rootWindow: context.rootWindow,
             windowFrame: context.windowFrame,
             nodes: context.nodes,
-            defaultConversation: defaultConversation
+            defaultConversation: defaultConversation,
+            allowActivation: allowActivation
         ).snapshot
     }
 
-    func forceRecoverDefaultConversationSurface() throws -> LineSurfaceHealthSnapshot {
+    func forceRecoverDefaultConversationSurface(allowActivation: Bool = true) throws -> LineSurfaceHealthSnapshot {
         let defaultConversation = configuredDefaultConversation()
         guard !defaultConversation.isEmpty else {
             throw BridgeRuntimeError(
@@ -1014,14 +1018,15 @@ final class LINEAdapter: AdapterProtocol {
                 details: nil
             )
         }
-        let context = try surfaceContext(app: app, allowActivation: true, expectedConversation: defaultConversation)
+        let context = try surfaceContext(app: app, allowActivation: allowActivation, expectedConversation: defaultConversation)
         return try defaultConversationSurface(
             mode: .forceRecover,
             app: app,
             rootWindow: context.rootWindow,
             windowFrame: context.windowFrame,
             nodes: context.nodes,
-            defaultConversation: defaultConversation
+            defaultConversation: defaultConversation,
+            allowActivation: allowActivation
         ).snapshot
     }
 
@@ -1197,11 +1202,14 @@ final class LINEAdapter: AdapterProtocol {
     /// could not restore it. Clearing stuck search state, surfacing the window,
     /// then nudging its position forces AppKit/Qt to re-render the conversation
     /// view. Returns fresh descendants after the nudge.
-    private func forceWindowReRender(app: NSRunningApplication, rootWindow: AXUIElement) -> [AXNode] {
+    private func forceWindowReRender(app: NSRunningApplication, rootWindow: AXUIElement, allowActivation: Bool) throws -> [AXNode] {
+        try ensureForegroundForRecovery(allowActivation: allowActivation)
         AXActions.sendEscape()
         usleep(120_000)
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
-        AXActions.surface(app: appElement, window: rootWindow)
+        if allowActivation {
+            AXActions.surface(app: appElement, window: rootWindow)
+        }
         if let frame = AXQuery.copyFrameAttribute(rootWindow) {
             AXActions.setWindowPosition(rootWindow, to: CGPoint(x: frame.origin.x + 12, y: frame.origin.y + 12))
             usleep(120_000)
@@ -1217,9 +1225,14 @@ final class LINEAdapter: AdapterProtocol {
         windowFrame: CGRect,
         nodes: [AXNode],
         defaultConversation: String,
-        forcePaneReanchor: Bool
+        forcePaneReanchor: Bool,
+        allowActivation: Bool
     ) throws -> [AXNode] {
-        activate(app: app)
+        if allowActivation {
+            activate(app: app)
+        } else {
+            try ensureForegroundForRecovery(allowActivation: false)
+        }
 
         // When the message input is missing from the AX tree, the window content
         // is un-rendered (2026-06-07 outbound outage). Force a re-render before the
@@ -1231,7 +1244,7 @@ final class LINEAdapter: AdapterProtocol {
             selector: LineSelectors.messageInputU, in: preRenderNodes, windowFrame: preRenderFrame
         ) ?? legacyResolve(LineSelectors.messageInput, in: preRenderNodes)) != nil
         if !inputPresent {
-            let rerendered = forceWindowReRender(app: app, rootWindow: rootWindow)
+            let rerendered = try forceWindowReRender(app: app, rootWindow: rootWindow, allowActivation: allowActivation)
             let rerenderedFrame = AXQuery.copyFrameAttribute(rootWindow) ?? preRenderFrame
             if let assessment = try? assessSendSurface(
                 rootWindow: rootWindow,
@@ -1258,6 +1271,7 @@ final class LINEAdapter: AdapterProtocol {
             )
         }
 
+        try ensureForegroundForRecovery(allowActivation: allowActivation)
         AXActions.setFocused(searchField.node.element)
         usleep(100_000)
         guard AXActions.setValue(defaultConversation, on: searchField.node.element) else {
@@ -1349,6 +1363,7 @@ final class LINEAdapter: AdapterProtocol {
             .info,
             "LINE default recovery search click row_y=\(Int(row.frame.minY)) row_h=\(Int(row.frame.height)) matched_name=\(matchedSameAsTarget)"
         )
+        try ensureForegroundForRecovery(allowActivation: allowActivation)
         _ = AXActions.clickAtCenter(row.element)
 
         var inputFound = AXActions.poll(intervalMs: 50, timeoutMs: 200) {
@@ -1374,6 +1389,7 @@ final class LINEAdapter: AdapterProtocol {
                         .info,
                         "LINE default recovery retry search result click row_y=\(Int(retryRow.frame.minY)) row_h=\(Int(retryRow.frame.height))"
                     )
+                    try ensureForegroundForRecovery(allowActivation: allowActivation)
                     _ = AXActions.clickAtCenter(retryRow.element)
                     inputFound = AXActions.poll(intervalMs: 50, timeoutMs: 200) {
                         self.hasMessageInput(rootWindow: rootWindow, fallbackWindowFrame: freshWindowFrame)
@@ -1447,6 +1463,18 @@ final class LINEAdapter: AdapterProtocol {
         }
         activateDone.wait()
         usleep(150_000)
+    }
+
+    private func ensureForegroundForRecovery(allowActivation: Bool) throws {
+        guard allowActivation || NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleIdentifier else {
+            throw BridgeRuntimeError(
+                code: "line_foreground_lost",
+                message: "LINE is no longer the foreground application",
+                retriable: true,
+                failedStep: "recover_default_conversation",
+                details: "periodic_repair_requires_foreground_line"
+            )
+        }
     }
 
     private func messageSignalRect(for windowFrame: CGRect) -> CGRect {
