@@ -370,8 +370,7 @@ private struct MeetingWorkspaceDetail: View {
                 Spacer()
                 if let copyText {
                     Button(copied ? "コピーしました" : copyLabel) {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(copyText, forType: .string)
+                        ClipboardWatcher.shared.writeOwnedString(copyText)
                         copied = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
                     }
