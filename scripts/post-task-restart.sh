@@ -210,21 +210,25 @@ echo "Build HostA (SSH sign)  : $BUILD_HOSTA"
 echo "Signed bundle           : $SIGNED_BUNDLE"
 echo "LINE read-only verify   : $LINE_READ_ONLY"
 
-# Capture before either restart path; this is a read-only defaults(1) read.
-AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
-
 # Keep federation token aligned if explicitly provided in environment.
 if [[ -n "${FEDERATION_TOKEN:-}" ]]; then
   ssh "$REMOTE_HOST" "defaults write com.clawgate.app clawgate.federationToken -string '$FEDERATION_TOKEN' || true; defaults write ClawGate clawgate.federationToken -string '$FEDERATION_TOKEN' || true" >/dev/null 2>&1 || true
 fi
 
 if [[ "$SIGNED_BUNDLE" == "true" ]]; then
+  # Capture before local restart; this is a read-only defaults(1) read.
+  AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
   echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
   ./scripts/restart-local-clawgate.sh --skip-plugin-sync
   echo "[hostA] Deploy locally signed bundle (no remote build/sign)"
   ./scripts/deploy-signed-bundle.sh --remote-host "$REMOTE_HOST"
 elif [[ "$SKIP_SYNC" != "true" ]]; then
   ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
+fi
+
+if [[ "$SIGNED_BUNDLE" != "true" ]]; then
+  # Preserve the default path's historical capture point after Host A restart.
+  AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
 fi
 
 if [[ "$SIGNED_BUNDLE" == "true" ]]; then
