@@ -53,6 +53,16 @@ final class InboundBubbleDetectorTests: XCTestCase {
         XCTAssertEqual(rect, CGRect(x: 100, y: 200, width: 700, height: 100))
     }
 
+    func testTallRoundedBubbleUsesFixedCornerRadiusAndRejectsFlatCard() {
+        let image = makeImage(width: 800, height: 600) { context in
+            bubble(context, CGRect(x: 50, y: 70, width: 300, height: 180))
+            fill(context, CGRect(x: 50, y: 330, width: 300, height: 180), color: (239, 239, 239))
+        }
+        let result = InboundBubbleDetector.detect(in: image)
+        XCTAssertEqual(result.status, .ready)
+        XCTAssertEqual(result.rects, [CGRect(x: 50, y: 70, width: 300, height: 180)])
+    }
+
     func testCleanCanvasHasNoBubbles() {
         let image = makeImage(width: 300, height: 200) { _ in }
         let result = InboundBubbleDetector.detect(in: image)

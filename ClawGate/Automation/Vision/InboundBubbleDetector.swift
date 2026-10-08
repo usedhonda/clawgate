@@ -115,9 +115,26 @@ enum InboundBubbleDetector {
 
         // A bubble has fill at the middle of each horizontal edge but not at
         // all four rounded corners. This rejects flat separators and dates.
-        // Radius scales with the sampled bubble. A fixed 12px window rejects
-        // the same bubble at 2x capture scale after downsampling.
-        let cornerExtent = max(2, boxHeight / 6)
+        // Infer the sampled corner radius from the neutral edge inset instead
+        // of scaling it from total height. LINE keeps a roughly fixed radius
+        // while multiline bubbles grow vertically; height/6 therefore makes
+        // tall rounded bubbles look like flat cards. Edge insets also scale
+        // naturally after 2x captures are downsampled.
+        func edgeInsetAtRow(_ y: Int) -> Int {
+            guard let first = (c.minX...c.maxX).first(where: { mask[y * width + $0] != 0 }),
+                  let last = (c.minX...c.maxX).last(where: { mask[y * width + $0] != 0 }) else { return 0 }
+            return min(first - c.minX, c.maxX - last)
+        }
+        func edgeInsetAtColumn(_ x: Int) -> Int {
+            guard let first = (c.minY...c.maxY).first(where: { mask[$0 * width + x] != 0 }),
+                  let last = (c.minY...c.maxY).last(where: { mask[$0 * width + x] != 0 }) else { return 0 }
+            return min(first - c.minY, c.maxY - last)
+        }
+        let cornerExtent = max(2, min(
+            min(boxWidth, boxHeight) / 2,
+            [edgeInsetAtRow(c.minY), edgeInsetAtRow(c.maxY),
+             edgeInsetAtColumn(c.minX), edgeInsetAtColumn(c.maxX)].max() ?? 0
+        ))
         let cornerW = cornerExtent
         let cornerH = cornerExtent
         var cornerFill = 0

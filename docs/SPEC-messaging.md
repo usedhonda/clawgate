@@ -865,6 +865,10 @@ text inputs. Unsupported or ambiguous surfaces fail closed, without retrying
 unrestricted full-frame OCR. A bubble clipped at the viewport boundary is not
 finalized from its visible fragment.
 
+Rounded-corner validation estimates the corner window from the sampled edge
+inset, not total bubble height, so multiline bubbles with LINE's fixed-radius
+corners remain eligible while similarly placed flat gray cards remain rejected.
+
 Selected regions retain native resolution and are packed with white gutters
 into one OCR atlas. Every recognized observation maps back to its original
 screen coordinates before positional deduplication. OCR results may be reused
