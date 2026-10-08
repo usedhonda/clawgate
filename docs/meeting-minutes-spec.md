@@ -614,7 +614,7 @@ valid for durable and in-flight jobs. Accepted files retain full claim strings,
 not the response-only references. This reduces duplicate output text without
 omitting meeting detail; measured end-to-end latency improvement is not assumed.
 
-### Dedicated retained-minutes connection (client shape, inactive)
+### Dedicated retained-minutes connection (client shape, gated caller)
 
 `OpenClawWSClient(role:executionPurpose:)` with `"retained-minutes"` connects as
 the `gateway-client` / `interactive` tuple (the signed device payload and the
@@ -624,7 +624,11 @@ and accepts the Gateway's `hello-ok` only when it carries the exact closed
 profileBound:true, defaultSubscriptionApplied:false, ttsParticipationApplied:false}`
 (`ExecutionConnectionPayload`). A missing, extra-keyed or different object drops
 the connection; there is no downgrade to the ordinary socket. The ordinary Pet and
-ingest sockets are unchanged. This shape is not wired to any caller: the pilot
-still uses the existing connection until the activation decision, because the
-first pilot run is recorded as admission-rejected and is never resent without an
-explicit retry.
+ingest sockets are unchanged. The exact-job pilot uses an independent instance
+of this client only when the explicit local pilot checkpoint is present; the
+default remains inactive and the app creates no checkpoint. Its stream is
+consumed and discarded rather than routed to PetModel, and the dedicated client
+does not issue health, history, or session-subscription RPCs. Parent disconnect,
+cleanup, or dedicated stream loss tears it down; a lost ACK, notFound, expired,
+or previously rejected run is never regenerated or sent through the ordinary
+socket.

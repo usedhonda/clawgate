@@ -111,8 +111,12 @@ actor OpenClawWSClient {
     /// connection accepts any hello; a dedicated one only the exact contract.
     static func helloAccepted(_ payload: IncomingPayload, purpose: String?) -> Bool {
         guard let purpose else { return true }
-        return purpose == ExecutionConnectionPayload.retainedMinutes.purpose
-            && payload.executionConnection == .retainedMinutes
+        guard purpose == ExecutionConnectionPayload.retainedMinutes.purpose,
+              payload.executionConnection == .retainedMinutes,
+              let auth = payload.auth,
+              auth.role == "operator",
+              Set(auth.scopes ?? []) == ["operator.read", "operator.write", "operator.admin"] else { return false }
+        return true
     }
 
     private func rejectUnconfirmedDedicatedHello() {
@@ -176,6 +180,21 @@ actor OpenClawWSClient {
               advertisedGatewayMethodsGeneration == connectionGeneration,
               let methods = advertisedGatewayMethods else { return false }
         return methods.contains("chat.send") && methods.contains("chat.result.get")
+    }
+
+    /// Wait for the dedicated hello contract without issuing any RPC. The
+    /// retained-minutes socket has no health/history/subscription traffic;
+    /// readiness is established only by its authenticated hello advertisement.
+    func waitForDedicatedMinutesReadiness(timeout: TimeInterval = 10) async throws {
+        guard executionPurpose == ExecutionConnectionPayload.retainedMinutes.purpose else {
+            throw OpenClawError.connectionFailed("dedicated minutes readiness requested on ordinary connection")
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if supportsDedicatedMinutesExecution() { return }
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw OpenClawError.connectionFailed("dedicated minutes hello was not confirmed")
     }
 
     /// Register a durable run owner before dispatch or retained-result read.
@@ -286,7 +305,11 @@ actor OpenClawWSClient {
         Self.registry.register(self)
 
         Task { await receiveLoop(generation: gen) }
-        startHealthCheckTask(generation: gen)
+        // Dedicated retained-minutes connections are deliberately RPC-limited:
+        // no health probe may consume their only admitted method surface.
+        if executionPurpose == nil {
+            startHealthCheckTask(generation: gen)
+        }
         startFrameWatchdogTask(generation: gen)
 
         // Handshake timeout

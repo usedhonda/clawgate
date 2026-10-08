@@ -347,6 +347,9 @@ struct IncomingPayload: Decodable {
     let features: GatewayFeaturesPayload?
     /// Closed object the Gateway returns only for a dedicated connection.
     let executionConnection: ExecutionConnectionPayload?
+    /// Body-free handshake authorization facts. Device tokens are deliberately
+    /// not retained or logged; dedicated readiness only needs role/scopes.
+    let auth: HelloAuthPayload?
     let snapshot: SnapshotPayload?
     let nonce: String?
     let sessionId: String?
@@ -397,6 +400,7 @@ struct IncomingPayload: Decodable {
         case `protocol`
         case features
         case executionConnection
+        case auth
         case snapshot
         case nonce
         case sessionId
@@ -438,6 +442,7 @@ struct IncomingPayload: Decodable {
         `protocol` = try container.decodeIfPresent(Int.self, forKey: .protocol)
         features = try container.decodeIfPresent(GatewayFeaturesPayload.self, forKey: .features)
         executionConnection = try? container.decodeIfPresent(ExecutionConnectionPayload.self, forKey: .executionConnection)
+        auth = try container.decodeIfPresent(HelloAuthPayload.self, forKey: .auth)
         snapshot = try container.decodeIfPresent(SnapshotPayload.self, forKey: .snapshot)
         nonce = try container.decodeIfPresent(String.self, forKey: .nonce)
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
@@ -486,6 +491,11 @@ struct IncomingPayload: Decodable {
         hasFallbackReason = container.contains(.fallbackReason)
         hasResultRetentionExpiresAt = container.contains(.resultRetentionExpiresAt)
     }
+}
+
+struct HelloAuthPayload: Decodable, Equatable {
+    let role: String?
+    let scopes: [String]?
 }
 
 /// Capabilities advertised by the Gateway in the authenticated `hello-ok`

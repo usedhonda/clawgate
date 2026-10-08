@@ -147,8 +147,13 @@ final class PetModel: NSObject, ObservableObject {
     lazy var moveController = MoveController(stateMachine: stateMachine)
 
     private let wsClient = OpenClawWSClient(role: "pet")
+    /// Independent, purpose-bound transport for the exact-job minutes pilot.
+    /// It is inert until the explicit local pilot checkpoint is present.
+    private let minutesWSClient = OpenClawWSClient(role: "minutes", executionPurpose: "retained-minutes")
     private var sessionKey: String?
     private var eventTask: Task<Void, Never>?
+    private var minutesEventTask: Task<Void, Never>?
+    private var minutesConnectionAttempted = false
     /// When `connectionState` last became `.connecting`. Cleared once it
     /// leaves `.connecting` (to `.connected`, `.disconnected`, or `.error`).
     /// Used by `shouldForceReconnect` to detect a connect attempt stuck
@@ -238,6 +243,7 @@ final class PetModel: NSObject, ObservableObject {
                 }
                 // Stream ended
                 await MainActor.run {
+                    self.teardownMinutesConnection()
                     self.connectionState = .disconnected
                     self.connectingSince = nil
                     self.stateMachine.handle(.disconnected)
@@ -245,6 +251,7 @@ final class PetModel: NSObject, ObservableObject {
             } catch {
                 NSLog("[Pet] Connection error: %@", "\(error)")
                 await MainActor.run {
+                    self.teardownMinutesConnection()
                     self.connectionState = .error("\(error)")
                     self.connectingSince = nil
                     self.stateMachine.handle(.disconnected)
@@ -257,8 +264,43 @@ final class PetModel: NSObject, ObservableObject {
         eventTask?.cancel()
         eventTask = nil
         Task { await wsClient.disconnect() }
+        teardownMinutesConnection()
         connectionState = .disconnected
         stateMachine.handle(.disconnected)
+    }
+
+    /// Close the dedicated minutes socket with the ordinary Pet socket. Its
+    /// stream is intentionally consumed and discarded; no event reaches the
+    /// normal message, notification, or TTS pipeline.
+    private func teardownMinutesConnection() {
+        minutesEventTask?.cancel()
+        minutesEventTask = nil
+        minutesConnectionAttempted = false
+        Task { await minutesWSClient.disconnect(reason: "pet-disconnect") }
+    }
+
+    private func connectMinutesIfNeeded() async throws {
+        guard !minutesConnectionAttempted else {
+            try await minutesWSClient.waitForDedicatedMinutesReadiness()
+            return
+        }
+        guard let gatewayConfig = readOpenClawGatewayConfig() else {
+            throw OpenClawError.connectionFailed("Gateway config not found")
+        }
+        let appConfig = ConfigStore().load()
+        let host = appConfig.openclawHost.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+        guard !host.isEmpty, (1...65535).contains(appConfig.openclawPort),
+              let url = URL(string: "ws://\(host):\(appConfig.openclawPort)/") else {
+            throw OpenClawError.connectionFailed("Invalid URL")
+        }
+        let stream = try await minutesWSClient.connect(url: url, token: gatewayConfig.token)
+        minutesConnectionAttempted = true
+        minutesEventTask = Task { @MainActor [weak self] in
+            for await _ in stream { }
+            guard !Task.isCancelled else { return }
+            self?.teardownMinutesConnection()
+        }
+        try await minutesWSClient.waitForDedicatedMinutesReadiness()
     }
 
     /// `disconnect()` for the one case where this process is about to stop
@@ -1402,6 +1444,7 @@ final class PetModel: NSObject, ObservableObject {
         didCleanup = true
         minutesPilotTask?.cancel()
         minutesPilotTask = nil
+        teardownMinutesConnection()
         meetingSourcesTimer?.invalidate()
         meetingSourcesTimer = nil
         // cleanup() runs only from the app's teardown on quit/terminate, so the
@@ -3103,11 +3146,12 @@ final class PetModel: NSObject, ObservableObject {
               let job = MeetingMinutesJob.load(store: store, id: record.id),
               pilot.matches(store: store, id: record.id, job: job) else { return }
         minutesPilotLabels[record.id] = "専用実行経路の準備を確認中"
-        let client = wsClient
+        let client = minutesWSClient
         minutesPilotTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.minutesPilotTask = nil; self.meetingsRevision += 1 }
-            guard await client.supportsDedicatedMinutesExecution() else {
+            do { try await self.connectMinutesIfNeeded() }
+            catch {
                 self.minutesPilotLabels[record.id] = "専用実行経路の準備待ち（未送信）"
                 return
             }
