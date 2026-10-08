@@ -870,7 +870,8 @@ inset, not total bubble height, so multiline bubbles with LINE's fixed-radius
 corners remain eligible while similarly placed flat gray cards remain rejected.
 
 Selected regions retain native resolution and are packed with white gutters
-into one OCR atlas. Every recognized observation maps back to its original
+into one OCR atlas. The atlas canvas is at least 128x128 pixels for Vision's
+small-image reader without scaling the selected pixels. Every recognized observation maps back to its original
 screen coordinates before positional deduplication. OCR results may be reused
 for identical bubble pixels within the same conversation; this cache is not
 delivery deduplication and must preserve separate occurrences of repeated text.

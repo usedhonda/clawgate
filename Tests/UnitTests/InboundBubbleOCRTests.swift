@@ -25,6 +25,22 @@ final class InboundBubbleOCRTests: XCTestCase {
         return context.makeImage()!
     }
 
+    private func shortBubbleImage() -> CGImage {
+        let context = CGContext(data: nil, width: 800, height: 600, bitsPerComponent: 8,
+            bytesPerRow: 3200, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 800, height: 600))
+        let rect = CGRect(x: 80, y: 488, width: 86, height: 32)
+        context.setFillColor(CGColor(gray: 239.0 / 255, alpha: 1))
+        context.addPath(CGPath(roundedRect: rect, cornerWidth: 10, cornerHeight: 10, transform: nil))
+        context.fillPath()
+        context.textPosition = CGPoint(x: 96, y: rect.minY + 8)
+        let text = NSAttributedString(string: "OK", attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.black])
+        CTLineDraw(CTLineCreateWithAttributedString(text), context)
+        return context.makeImage()!
+    }
+
     func testVerifiedTimeOnlyBodySurvivesAndCacheKeepsSeparateOccurrences() throws {
         let first = try XCTUnwrap(InboundBubbleOCR.recognize(image(), scope: "test", config: .default))
         XCTAssertEqual(first.bubbleCount, 1)
@@ -46,6 +62,25 @@ final class InboundBubbleOCRTests: XCTestCase {
             crop: CGRect(x: 100, y: 600, width: 800, height: 100), imageSize: CGSize(width: 1600, height: 1200))
         XCTAssertEqual(box.minX, 180.0 / 1600, accuracy: 0.0001)
         XCTAssertEqual(VisionOCR.globalTopDownY(for: box, in: CGRect(x: 0, y: 120, width: 800, height: 600)), 445, accuracy: 0.0001)
+    }
+
+    func testShortBubblePaddingPreservesSourceMappingAndCache() throws {
+        let source = shortBubbleImage()
+        let first = try XCTUnwrap(InboundBubbleOCR.recognize(source, scope: "short-bubble", config: .default))
+        XCTAssertEqual(first.bubbleCount, 1)
+        XCTAssertEqual(first.recognizedPixels, 128 * 128)
+        let box = try XCTUnwrap(first.observations.first?.boundingBox)
+        XCTAssertGreaterThan(box.minX, 0.08)
+        XCTAssertLessThan(box.maxX, 0.4)
+        XCTAssertGreaterThan(box.minY, 0.7)
+        XCTAssertLessThan(box.maxY, 0.95)
+
+        let cached = try XCTUnwrap(InboundBubbleOCR.recognize(source, scope: "short-bubble", config: .default))
+        XCTAssertEqual(cached.cacheHits, 1)
+        XCTAssertEqual(cached.recognizedPixels, 0)
+        let cachedBox = try XCTUnwrap(cached.observations.first?.boundingBox)
+        XCTAssertEqual(cachedBox.minX, box.minX, accuracy: 0.0001)
+        XCTAssertEqual(cachedBox.minY, box.minY, accuracy: 0.0001)
     }
 
     /// Private captured conversations never become repository fixtures.

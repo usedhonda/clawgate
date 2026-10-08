@@ -104,8 +104,10 @@ enum InboundBubbleOCR {
     private static func atlas(_ crops: [Crop]) -> (image: CGImage, placements: [CGRect])? {
         guard !crops.isEmpty else { return nil }
         let gutter = 12
-        let width = (crops.map { $0.image.width }.max() ?? 0) + gutter * 2
-        let height = crops.reduce(gutter) { $0 + $1.image.height + gutter }
+        // Keep source pixels at native scale while giving Vision a useful
+        // minimum reader canvas for tiny single-bubble atlases.
+        let width = max(128, (crops.map { $0.image.width }.max() ?? 0) + gutter * 2)
+        let height = max(128, crops.reduce(gutter) { $0 + $1.image.height + gutter })
         guard let context = CGContext(data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(),
