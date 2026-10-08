@@ -36,11 +36,45 @@ enum InboundBubbleOCR {
 
     private static let lock = NSLock()
     private static var entries: [Entry] = []
+    private static let visionDiagnosticLock = NSLock()
+    private static var recentVisionDiagnostics: [String: Date] = [:]
+    private static let visionDiagnosticInterval: TimeInterval = 60
+    private static let maxVisionDiagnosticKeys = 64
+    private static let visionDiagnosticArtifactURL = URL(fileURLWithPath: "/tmp/clawgate-ocr-debug/latest-vision-error.json")
 
     static func clearCache() {
         lock.lock()
         entries.removeAll()
         lock.unlock()
+    }
+
+    private static func logVisionFailure(_ error: Error, image: CGImage, revision: Int) {
+        let nsError = error as NSError
+        let key = "\(nsError.domain)|\(nsError.code)|\(image.width)x\(image.height)|\(revision)"
+        let now = Date()
+        visionDiagnosticLock.lock()
+        let shouldLog = recentVisionDiagnostics[key].map { now.timeIntervalSince($0) >= visionDiagnosticInterval } ?? true
+        if shouldLog {
+            recentVisionDiagnostics[key] = now
+            if recentVisionDiagnostics.count > maxVisionDiagnosticKeys,
+               let oldestKey = recentVisionDiagnostics.min(by: { $0.value < $1.value })?.key {
+                recentVisionDiagnostics.removeValue(forKey: oldestKey)
+            }
+        }
+        visionDiagnosticLock.unlock()
+        guard shouldLog else { return }
+        let artifact: [String: Any] = [
+            "domain": nsError.domain,
+            "code": nsError.code,
+            "width": image.width,
+            "height": image.height,
+            "actualRevision": revision,
+            "timestamp": ISO8601DateFormatter().string(from: now)
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: artifact, options: [.sortedKeys]) {
+            try? data.write(to: visionDiagnosticArtifactURL, options: [.atomic])
+        }
+        NSLog("[InboundBubbleOCR] vision request failed domain=\(nsError.domain) code=\(nsError.code) atlas=\(image.width)x\(image.height) revision=\(revision)")
     }
 
     /// Window titles can be just "LINE"; the chat header also namespaces reuse.
@@ -163,7 +197,11 @@ enum InboundBubbleOCR {
                 request.revision = VNRecognizeTextRequestRevision2
             }
             do { try VNImageRequestHandler(cgImage: prepared.image, options: [:]).perform([request]) }
-            catch { failure?.pointee = .visionError; return nil }
+            catch {
+                logVisionFailure(error, image: prepared.image, revision: request.revision)
+                failure?.pointee = .visionError
+                return nil
+            }
             guard let observations = request.results else { failure?.pointee = .visionNoResults; return nil }
             var recognized = [[Observation]](repeating: [], count: pending.count)
             for observation in observations {
