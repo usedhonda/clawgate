@@ -19,6 +19,8 @@ set -euo pipefail
 #   ./scripts/post-task-restart.sh --build-hosta
 #   ./scripts/post-task-restart.sh --build-hosta --skip-plugin-sync
 #   ./scripts/post-task-restart.sh --plugin-client-only
+#   ./scripts/post-task-restart.sh --signed-bundle --skip-sync --skip-plugin-sync
+#   ./scripts/post-task-restart.sh --line-read-only
 
 REMOTE_HOST="macmini"
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
@@ -28,6 +30,8 @@ SKIP_PLUGIN_SYNC=false
 PLUGIN_CLIENT_ONLY=false
 REQUIRE_HOSTA_LOCAL_SIGN=false
 BUILD_HOSTA=false
+SIGNED_BUNDLE=false
+LINE_READ_ONLY=false
 export CLAWGATE_ROLE="host_b_client"
 export OPS_SCRIPT_NAME="post-task-restart.sh"
 
@@ -51,6 +55,10 @@ while [[ $# -gt 0 ]]; do
       REQUIRE_HOSTA_LOCAL_SIGN=true; shift ;;
     --build-hosta)
       BUILD_HOSTA=true; shift ;;
+    --signed-bundle)
+      SIGNED_BUNDLE=true; shift ;;
+    --line-read-only)
+      LINE_READ_ONLY=true; shift ;;
     *)
       echo "Unknown arg: $1" >&2
       exit 2 ;;
@@ -67,6 +75,18 @@ if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_PLUGIN_SYNC" == "true" ]]; then
 fi
 if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_SYNC" != "true" ]]; then
   echo "--plugin-client-only requires --skip-sync (use selective files-from sync first)" >&2
+  exit 2
+fi
+if [[ "$SIGNED_BUNDLE" == "true" && ( "$SKIP_SYNC" != "true" || "$SKIP_PLUGIN_SYNC" != "true" ) ]]; then
+  echo "--signed-bundle requires --skip-sync --skip-plugin-sync" >&2
+  exit 2
+fi
+if [[ "$SIGNED_BUNDLE" == "true" && "$BUILD_HOSTA" == "true" ]]; then
+  echo "--signed-bundle cannot be combined with --build-hosta" >&2
+  exit 2
+fi
+if [[ "$SIGNED_BUNDLE" == "true" && "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
+  echo "--signed-bundle cannot be combined with --plugin-client-only" >&2
   exit 2
 fi
 
@@ -187,17 +207,29 @@ echo "Skip plugins: $SKIP_PLUGIN_SYNC"
 echo "Client only : $PLUGIN_CLIENT_ONLY"
 echo "Require HostA local sign: $REQUIRE_HOSTA_LOCAL_SIGN"
 echo "Build HostA (SSH sign)  : $BUILD_HOSTA"
+echo "Signed bundle           : $SIGNED_BUNDLE"
+echo "LINE read-only verify   : $LINE_READ_ONLY"
+
+# Capture before either restart path; this is a read-only defaults(1) read.
+AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
 
 # Keep federation token aligned if explicitly provided in environment.
 if [[ -n "${FEDERATION_TOKEN:-}" ]]; then
   ssh "$REMOTE_HOST" "defaults write com.clawgate.app clawgate.federationToken -string '$FEDERATION_TOKEN' || true; defaults write ClawGate clawgate.federationToken -string '$FEDERATION_TOKEN' || true" >/dev/null 2>&1 || true
 fi
 
-if [[ "$SKIP_SYNC" != "true" ]]; then
+if [[ "$SIGNED_BUNDLE" == "true" ]]; then
+  echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
+  ./scripts/restart-local-clawgate.sh --skip-plugin-sync
+  echo "[hostA] Deploy locally signed bundle (no remote build/sign)"
+  ./scripts/deploy-signed-bundle.sh --remote-host "$REMOTE_HOST"
+elif [[ "$SKIP_SYNC" != "true" ]]; then
   ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
 fi
 
-if [[ "$BUILD_HOSTA" == "true" ]]; then
+if [[ "$SIGNED_BUNDLE" == "true" ]]; then
+  : # signed-bundle branch already restarted Host B and deployed/restarted Host A
+elif [[ "$BUILD_HOSTA" == "true" ]]; then
   # Host A build + codesign + restart via the canonical macmini-local-sign path,
   # invoked over SSH with an explicit keychain unlock (the script unlocks the
   # keychain itself, which is what makes SSH codesign reliable — deployment.md §2).
@@ -234,21 +266,18 @@ else
   fi
 fi
 
-# Capture the app's own persisted auto-resume intent before restarting, so the
-# verify step below knows whether it is allowed to expect streaming to resume.
-# This is a read-only defaults(1) read, never a stream/recover trigger.
-AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
-
 # Host B restart (canonical local path).
-echo "[local] Restart Host B ClawGate.app"
-LOCAL_RESTART_ARGS=(./scripts/restart-local-clawgate.sh)
+if [[ "$SIGNED_BUNDLE" != "true" ]]; then
+  echo "[local] Restart Host B ClawGate.app"
+  LOCAL_RESTART_ARGS=(./scripts/restart-local-clawgate.sh)
   if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
     LOCAL_RESTART_ARGS+=(--skip-plugin-sync)
   fi
   if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
     LOCAL_RESTART_ARGS+=(--plugin-client-only)
   fi
-"${LOCAL_RESTART_ARGS[@]}"
+  "${LOCAL_RESTART_ARGS[@]}"
+fi
 
 echo
 echo "[verify] Host B health"
@@ -268,12 +297,17 @@ echo "ok"
 echo "[verify] Host A LINE conversation"
 LINE_CONV=$(ssh "$REMOTE_HOST" "curl -fsS -m 3 http://127.0.0.1:8765/v1/config 2>/dev/null" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',{}).get('line',{}).get('default_conversation',''))" 2>/dev/null || true)
 if [[ -n "$LINE_CONV" ]]; then
-  ENSURE_RESULT=$(ssh "$REMOTE_HOST" "curl -fsS -m 10 -X POST http://127.0.0.1:8765/v1/line/ensure-conversation -H 'Content-Type: application/json' -d '{\"conversation\":\"$LINE_CONV\"}'" 2>/dev/null || true)
-  ENSURE_OK=$(echo "$ENSURE_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "False")
-  if [[ "$ENSURE_OK" == "True" ]]; then
-    echo "ok (navigated to '$LINE_CONV')"
+  if [[ "$LINE_READ_ONLY" == "true" ]]; then
+    ssh "$REMOTE_HOST" "curl -fsS -m 10 'http://127.0.0.1:8765/v1/conversations?adapter=line&limit=1' >/dev/null"
+    echo "ok (read-only conversation probe; no navigation)"
   else
-    echo "WARN: LINE conversation navigation failed: $ENSURE_RESULT" >&2
+    ENSURE_RESULT=$(ssh "$REMOTE_HOST" "curl -fsS -m 10 -X POST http://127.0.0.1:8765/v1/line/ensure-conversation -H 'Content-Type: application/json' -d '{\"conversation\":\"$LINE_CONV\"}'" 2>/dev/null || true)
+    ENSURE_OK=$(echo "$ENSURE_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "False")
+    if [[ "$ENSURE_OK" == "True" ]]; then
+      echo "ok (navigated to '$LINE_CONV')"
+    else
+      echo "WARN: LINE conversation navigation failed: $ENSURE_RESULT" >&2
+    fi
   fi
 else
   echo "WARN: defaultConversation not configured, skipping LINE nav" >&2

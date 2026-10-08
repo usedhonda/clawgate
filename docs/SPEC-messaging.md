@@ -14,6 +14,12 @@ operation aborts without applying repair cooldown or recording a completed
 repair. Explicit sends and manual recovery keep their existing activation
 behavior.
 
+Operational restart verification may opt into `--line-read-only`, which uses a
+GET `/v1/conversations?adapter=line&limit=1` probe and never navigates LINE.
+When deploying a locally signed bundle, `post-task-restart.sh --signed-bundle`
+requires `--skip-sync --skip-plugin-sync`, restarts Host B once, and invokes the
+canonical signed-bundle transfer; it does not build or sign on Host A.
+
 ---
 
 ## 1. Architecture Overview
