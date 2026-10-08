@@ -623,8 +623,10 @@ and accepts the Gateway's `hello-ok` only when it carries the exact closed
 `executionConnection` object `{version:1, purpose:"retained-minutes",
 profileBound:true, defaultSubscriptionApplied:false, ttsParticipationApplied:false}`
 (`ExecutionConnectionPayload`). A missing, extra-keyed or different object drops
-the connection; there is no downgrade to the ordinary socket. The ordinary Pet and
-ingest sockets are unchanged. The exact-job pilot uses an independent instance
+the connection; there is no downgrade to the ordinary socket. Dedicated readiness
+also requires hello auth role `operator` and an effective `operator.admin` scope;
+ordinary payload decoding remains tolerant of unrelated or malformed auth metadata.
+The ordinary Pet and ingest sockets are unchanged. The exact-job pilot uses an independent instance
 of this client only when the explicit local pilot checkpoint is present; the
 default remains inactive and the app creates no checkpoint. Its stream is
 consumed and discarded rather than routed to PetModel, and the dedicated client

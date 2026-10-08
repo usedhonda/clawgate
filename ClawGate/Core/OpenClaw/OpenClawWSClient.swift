@@ -115,7 +115,7 @@ actor OpenClawWSClient {
               payload.executionConnection == .retainedMinutes,
               let auth = payload.auth,
               auth.role == "operator",
-              Set(auth.scopes ?? []) == ["operator.read", "operator.write", "operator.admin"] else { return false }
+              auth.scopes?.contains("operator.admin") == true else { return false }
         return true
     }
 

@@ -442,7 +442,9 @@ struct IncomingPayload: Decodable {
         `protocol` = try container.decodeIfPresent(Int.self, forKey: .protocol)
         features = try container.decodeIfPresent(GatewayFeaturesPayload.self, forKey: .features)
         executionConnection = try? container.decodeIfPresent(ExecutionConnectionPayload.self, forKey: .executionConnection)
-        auth = try container.decodeIfPresent(HelloAuthPayload.self, forKey: .auth)
+        // Ordinary payload decoding stays tolerant of malformed/irrelevant
+        // auth metadata; dedicated readiness fails closed on a nil auth value.
+        auth = try? container.decodeIfPresent(HelloAuthPayload.self, forKey: .auth)
         snapshot = try container.decodeIfPresent(SnapshotPayload.self, forKey: .snapshot)
         nonce = try container.decodeIfPresent(String.self, forKey: .nonce)
         sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)

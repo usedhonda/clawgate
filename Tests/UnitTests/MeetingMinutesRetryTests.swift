@@ -320,6 +320,24 @@ final class DedicatedMinutesConnectionHelloTests: XCTestCase {
          "defaultSubscriptionApplied":false,"ttsParticipationApplied":false}}
         """.utf8))
         XCTAssertFalse(OpenClawWSClient.helloAccepted(missingAuth, purpose: "retained-minutes"))
+
+        let wrongRole = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","executionConnection":{"version":1,"purpose":"retained-minutes","profileBound":true,
+         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false},"auth":{"role":"viewer","scopes":["operator.admin"]}}
+        """.utf8))
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(wrongRole, purpose: "retained-minutes"))
+
+        let missingAdmin = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","executionConnection":{"version":1,"purpose":"retained-minutes","profileBound":true,
+         "defaultSubscriptionApplied":false,"ttsParticipationApplied":false},"auth":{"role":"operator","scopes":["operator.read"]}}
+        """.utf8))
+        XCTAssertFalse(OpenClawWSClient.helloAccepted(missingAdmin, purpose: "retained-minutes"))
+
+        let malformedAuth = try JSONDecoder().decode(IncomingPayload.self, from: Data("""
+        {"type":"hello-ok","auth":"not-an-object"}
+        """.utf8))
+        XCTAssertNil(malformedAuth.auth)
+        XCTAssertTrue(OpenClawWSClient.helloAccepted(malformedAuth, purpose: nil))
     }
 
     func testDedicatedReadinessUsesOnlyCurrentGenerationAdvertisement() async throws {

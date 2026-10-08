@@ -294,6 +294,10 @@ final class PetModel: NSObject, ObservableObject {
             throw OpenClawError.connectionFailed("Invalid URL")
         }
         let stream = try await minutesWSClient.connect(url: url, token: gatewayConfig.token)
+        guard !Task.isCancelled, !didCleanup, connectionState == .connected, sessionKey != nil else {
+            await minutesWSClient.disconnect(reason: "minutes-owner-lost")
+            throw CancellationError()
+        }
         minutesConnectionAttempted = true
         minutesEventTask = Task { @MainActor [weak self] in
             for await _ in stream { }
