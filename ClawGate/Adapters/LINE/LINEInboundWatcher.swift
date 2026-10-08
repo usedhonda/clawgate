@@ -1402,7 +1402,12 @@ final class LINEInboundWatcher {
         if !baselineCaptured {
             let baseline = burstInboundOCR(from: fixedAnchor, windowID: lineWindowID)
             guard baseline.succeeded else {
-                lastPixelDiag = ["pixel_baseline_captured": "false", "pixel_signal_result": "nil_baseline_ocr_retry"]
+                lastPixelDiag = baseline.bubbleDiagnostics.merging([
+                    "pixel_baseline_captured": "false", "pixel_signal_result": "nil_baseline_ocr_retry"
+                ]) { _, new in new }
+                stateLock.lock()
+                ocrFailureTracker.recordFailure(reason: baseline.bubbleDiagnostics["ocr_failure_reason"] ?? "", at: Date())
+                stateLock.unlock()
                 return nil
             }
             if baseline.frameSkippedNoCutDescription == "1" {
@@ -1413,6 +1418,9 @@ final class LINEInboundWatcher {
             lastImageHash = hash
             lastPixelOCRAt = Date()
             baselineCaptured = true
+            stateLock.lock()
+            ocrFailureTracker.recordSuccess()
+            stateLock.unlock()
             logger.log(.debug, "LINEInboundWatcher: pixel baseline captured (hash: \(hash), lane=\(baseline.laneXDescription), y_cut=\(baseline.cutYDescription), text_head=[\(baselineHead)])")
             lastPixelDiag = ["pixel_baseline_captured": "true", "pixel_hash_changed": "n/a", "pixel_hash": "\(hash)", "pixel_ocr_text_head": baselineHead, "pixel_signal_result": "nil_baseline"]
             return nil
