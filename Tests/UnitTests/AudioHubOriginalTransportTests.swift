@@ -102,7 +102,7 @@ final class AudioHubOriginalTransportTests: XCTestCase {
         XCTAssertEqual(try q.pending(limit: 1).first, record)
         q = try queue(); c = try control(); intents = true
         let delivered = try await transport().deliverOne(outbox: q, control: c, originalsRoot: root.appendingPathComponent("originals"))
-        XCTAssertTrue(delivered); XCTAssertEqual(creates, 1); XCTAssertEqual(puts, [0, 0, 4 * 1024 * 1024])
+        XCTAssertTrue(delivered); XCTAssertEqual(creates, 1); XCTAssertEqual(puts, [Int64(0), Int64(0), Int64(4 * 1024 * 1024)])
         XCTAssertTrue(try queue().pending(limit: 1).isEmpty)
         XCTAssertEqual(try Data(contentsOf: file), data)
     }
