@@ -346,12 +346,15 @@ final class ReminderReadoutTests: XCTestCase {
         let root = tempTraceRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let svc = service(suite: suite, traceStoreRoot: root)
+        // The merged service API intentionally uses the live clock; keep this
+        // disk-only fixture inside its today/yesterday retention window.
+        let current = Date()
         // As if written by an earlier process, or lost from the ring buffer —
         // nothing here comes from this instance's memory.
-        let diskOnly = ReminderTrace(at: now, reminderId: "disk-only", kind: nil, speakOn: nil,
+        let diskOnly = ReminderTrace(at: current, reminderId: "disk-only", kind: nil, speakOn: nil,
                                      expiresAt: nil, decision: "speak", outcome: "played",
                                      receiptStatus: 200, receiptError: nil,
-                                     pid: 999, processStartedAt: now.addingTimeInterval(-500))
+                                     pid: 999, processStartedAt: current.addingTimeInterval(-500))
         ReminderTraceStore.append(diskOnly, root: root)
 
         XCTAssertTrue(svc.recentTraces().isEmpty)
