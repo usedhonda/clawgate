@@ -8,6 +8,10 @@ import Foundation
 /// pure flip is here (parameterized on `desktopMaxY`). `roughlySameFrame` moved
 /// verbatim.
 enum PetGeometry {
+    static func isSubstantiveWindow(_ frame: CGRect, minimumSize: CGSize = CGSize(width: 640, height: 480)) -> Bool {
+        frame.width >= minimumSize.width && frame.height >= minimumSize.height
+    }
+
     static func roughlySameFrame(_ lhs: CGRect, _ rhs: CGRect, tolerance: CGFloat = 20) -> Bool {
         abs(lhs.origin.x - rhs.origin.x) < tolerance
             && abs(lhs.origin.y - rhs.origin.y) < tolerance

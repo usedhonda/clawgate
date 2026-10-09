@@ -7,6 +7,11 @@ import XCTest
 /// the formulas, not copied from runtime output.
 final class PetGeometryTests: XCTestCase {
 
+    func testSubstantiveWindowDecisionHoldsSmallFrontmostWindow() {
+        XCTAssertFalse(PetGeometry.isSubstantiveWindow(CGRect(x: 0, y: 0, width: 585, height: 700)))
+        XCTAssertTrue(PetGeometry.isSubstantiveWindow(CGRect(x: 0, y: 0, width: 800, height: 600)))
+    }
+
     // MARK: - roughlySameFrame (default tolerance = 20, strict <)
 
     func testRoughlySameFrameIdenticalRects() {

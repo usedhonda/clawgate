@@ -279,11 +279,13 @@ This preserves both attachment and facing correctness.
 
 ### Candidate size and transient windows
 
-- Chi ignores CG candidates smaller than 640x480 logical points, using the
-  same shared width/height limits across every tracking path.
-- Layer-0 candidates are filtered in CG Z-order. A skipped undersized
-  candidate never replaces the accepted context; an underlying eligible
-  candidate may still be accepted according to Z-order.
+- Chi resolves the first layer-0 CG window in on-screen Z-order before size
+  classification. A frontmost window smaller than 640x480 logical points is
+  unsuitable, so Chi holds its current position instead of searching behind
+  that window.
+- The same frontmost-first size decision is shared across normal, immediate,
+  and app-switch tracking paths; no lower CG candidate can replace an
+  unsuitable front window.
 - Matching AX elements for floating windows, system floating windows, dialogs,
   or modal windows are rejected. A missing AX match does not itself reject the
   CG candidate.
@@ -292,8 +294,9 @@ This preserves both attachment and facing correctness.
 
 ### No valid candidate side
 
-- Visible mode: use fallback placement inside the visible screen bounds
-- Hidden mode: if no side can hide behind, unhide rather than floating in a broken concealed state
+- Visible mode: stop movement and preserve the current position
+- Hidden mode: if no side can hide behind, unhide and stop rather than floating
+  in a broken concealed state
 
 ### Topmost/focused disagreement
 

@@ -899,10 +899,14 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     private func resolveTrackedWindow(for app: NSRunningApplication) -> TrackedWindowResolution {
-        guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier) else {
-            return AXQuery.topmostWindowBounds(pid: app.processIdentifier, minSize: .zero) == nil
-                ? .unavailable
-                : .ignored
+        // Resolve the actual frontmost normal window first. A small front
+        // window is still the visual truth; hold placement instead of falling
+        // through to a larger window behind it.
+        guard let cgBounds = AXQuery.topmostWindowBounds(pid: app.processIdentifier, minSize: .zero) else {
+            return .unavailable
+        }
+        guard PetGeometry.isSubstantiveWindow(cgBounds, minimumSize: AXQuery.substantiveWindowMinimumSize) else {
+            return .ignored
         }
 
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
@@ -964,7 +968,9 @@ final class PetModel: NSObject, ObservableObject {
         } else if leftX >= visibleScreen.minX {
             target = NSPoint(x: leftX, y: bottomY)
         } else {
-            target = NSPoint(x: visibleScreen.maxX - petSize - 8, y: visibleScreen.minY + 8)
+            moveController.stop()
+            isHiding = saved
+            return
         }
         target.x = max(visibleScreen.minX, min(target.x, visibleScreen.maxX - petSize))
         target.y = max(visibleScreen.minY, min(target.y, visibleScreen.maxY - petSize))
@@ -1074,8 +1080,11 @@ final class PetModel: NSObject, ObservableObject {
         }
 
         guard !candidates.isEmpty else {
-            let fallback = NSPoint(x: screen.maxX - petSize - 8, y: screen.minY + 8)
-            moveController.moveTo(fallback, waveOnArrival: waveOnArrival)
+            if isHiding {
+                unhide()
+                clearPlacementLock()
+            }
+            moveController.stop()
             return
         }
 
