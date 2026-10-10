@@ -54,13 +54,13 @@ case "$mode" in
         fi
         if [[ -f "$dst" ]]; then
           mkdir -p "$(dirname "$backup")"
-          cp "$dst" "$backup"
+          cp -p "$dst" "$backup"
           printf 'restore\t%s\n' "$rel" >> "$files_file"
         else
           printf 'remove\t%s\n' "$rel" >> "$files_file"
         fi
         mkdir -p "$(dirname "$dst")"
-        cp "$src" "$dst"
+        cp -p "$src" "$dst"
       done
     fi
     restart_args=(--project-path "$project_path" --skip-build --skip-sync --skip-plugin-sync)
@@ -81,7 +81,7 @@ case "$mode" in
       case "$action" in
         restore)
           mkdir -p "$(dirname "$dst")"
-          cp "$backup_path/$rel" "$dst"
+          cp -p "$backup_path/$rel" "$dst"
           ;;
         remove)
           [[ ! -L "$dst" ]] || { echo "Refusing symlinked rollback file: $dst" >&2; exit 1; }
