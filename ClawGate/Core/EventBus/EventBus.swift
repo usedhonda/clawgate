@@ -6,6 +6,20 @@ struct BridgeEvent: Codable {
     let adapter: String
     let payload: [String: String]
     let observedAt: String
+    let admission: BridgeAdmission?
+
+    init(id: Int64, type: String, adapter: String, payload: [String: String], observedAt: String, admission: BridgeAdmission? = nil) {
+        self.id = id; self.type = type; self.adapter = adapter; self.payload = payload; self.observedAt = observedAt; self.admission = admission
+    }
+
+    enum CodingKeys: String, CodingKey { case id, type, adapter, payload, observedAt, admission }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int64.self, forKey: .id); type = try c.decode(String.self, forKey: .type)
+        adapter = try c.decode(String.self, forKey: .adapter); payload = try c.decode([String: String].self, forKey: .payload)
+        observedAt = try c.decode(String.self, forKey: .observedAt); admission = try c.decodeIfPresent(BridgeAdmission.self, forKey: .admission)
+    }
 }
 
 final class EventBus {
@@ -25,6 +39,7 @@ final class EventBus {
     private let maxEvents = 1000
     private var _lastAppendAt: Date?
     private let nextIDPersistenceURL: URL?
+    let admissionIssuer: BridgeAdmissionIssuer?
 
     var lastAppendAt: Date? {
         lock.lock()
@@ -32,7 +47,8 @@ final class EventBus {
         return _lastAppendAt
     }
 
-    init(persistenceDirectory: URL? = nil) {
+    init(persistenceDirectory: URL? = nil, admissionIssuer: BridgeAdmissionIssuer? = nil) {
+        self.admissionIssuer = admissionIssuer
         // nextID persistence prevents cursor desync across ClawGate restarts.
         // Downstream Gateway plugin polls /v1/poll?since=N; if we reset nextID
         // to 1 on every restart, the plugin's stale cursor would silently drop
@@ -53,14 +69,31 @@ final class EventBus {
 
     @discardableResult
     func append(type: String, adapter: String, payload: [String: String]) -> BridgeEvent {
-        lock.lock()
+        append(type: type, adapter: adapter, payload: payload, provenance: nil)
+    }
 
+    @discardableResult
+    func appendWatcherAccepted(type: String, adapter: String, payload: [String: String]) -> BridgeEvent {
+        append(type: type, adapter: adapter, payload: payload, provenance: .watcherAccepted)
+    }
+
+    @discardableResult
+    func appendDebugInjected(type: String, adapter: String, payload: [String: String]) -> BridgeEvent {
+        append(type: type, adapter: adapter, payload: payload, provenance: .debugInjected)
+    }
+
+    @discardableResult
+    private func append(type: String, adapter: String, payload: [String: String], provenance: BridgeAdmissionProvenance?) -> BridgeEvent {
+        lock.lock()
+        let observedAt = ISO8601DateFormatter().string(from: Date())
         let event = BridgeEvent(
             id: nextID,
             type: type,
             adapter: adapter,
             payload: payload,
-            observedAt: ISO8601DateFormatter().string(from: Date())
+            observedAt: observedAt,
+            admission: provenance.flatMap { admissionIssuer?.admission(eventId: nextID, type: type, adapter: adapter, observedAt: observedAt, provenance: $0) }
+                ?? BridgeAdmission(admissionId: "unknown", generation: "unknown", eventId: nextID, eventType: type, adapter: adapter, observedAt: observedAt, provenance: .unknown, issuerKeyId: nil, failureReason: provenance == nil ? "not_issuered" : "issuer_unavailable")
         )
 
         nextID += 1

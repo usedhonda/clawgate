@@ -726,7 +726,7 @@ final class LINEInboundWatcher {
             payload[k] = v
         }
 
-        _ = eventBus.append(type: decision.eventType, adapter: "line", payload: payload)
+        _ = eventBus.appendWatcherAccepted(type: decision.eventType, adapter: "line", payload: payload)
         recordEmittedTextCursor(text: emittedText, conversation: decision.conversation)
         logger.log(.debug, "LINEInboundWatcher: \(decision.eventType) via fusion score=\(decision.score), conf=\(decision.confidence), signals=\(decision.signals.joined(separator: ","))")
         savePipelineResult(
@@ -764,7 +764,7 @@ final class LINEInboundWatcher {
             payload[k] = v
         }
 
-        _ = eventBus.append(type: eventType, adapter: "line", payload: payload)
+        _ = eventBus.appendWatcherAccepted(type: eventType, adapter: "line", payload: payload)
         recordEmittedTextCursor(text: emittedText, conversation: signal.conversation)
         lastSignalNames = [signal.name]
         lastScore = signal.score

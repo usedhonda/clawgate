@@ -21,10 +21,20 @@ final class AppRuntime {
     )
 
     private lazy var registry = AdapterRegistry(adapters: enabledAdapters())
+    private lazy var bridgeAdmissionIssuer: BridgeAdmissionIssuer? = {
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".clawgate/bridge-issuer", isDirectory: true)
+        guard let issuer = BridgeAdmissionIssuer(provisionedDirectory: root) else {
+            logger.log(.info, "bridge admission issuer unavailable: provisioning_incomplete")
+            return nil
+        }
+        return issuer
+    }()
     private lazy var eventBus = EventBus(
         persistenceDirectory: FileManager.default
             .homeDirectoryForCurrentUser
-            .appendingPathComponent(".clawgate", isDirectory: true)
+            .appendingPathComponent(".clawgate", isDirectory: true),
+        admissionIssuer: bridgeAdmissionIssuer
     )
     private lazy var core = BridgeCore(
         eventBus: eventBus,

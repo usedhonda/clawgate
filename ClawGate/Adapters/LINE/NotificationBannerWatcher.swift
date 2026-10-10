@@ -182,7 +182,7 @@ final class NotificationBannerWatcher {
         let isEcho = recentSendTracker.isLikelyEcho(text: messageText)
         let eventType = isEcho ? "echo_message" : "inbound_message"
 
-        _ = eventBus.append(
+        _ = eventBus.appendWatcherAccepted(
             type: eventType,
             adapter: "line",
             payload: [

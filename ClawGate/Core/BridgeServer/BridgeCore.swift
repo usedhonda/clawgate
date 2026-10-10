@@ -1065,7 +1065,7 @@ final class BridgeCore {
                     payload[key] = value
                 }
             }
-            let event = eventBus.append(type: eventType, adapter: adapter, payload: payload)
+            let event = eventBus.appendDebugInjected(type: eventType, adapter: adapter, payload: payload)
             logger.log(.info, "debug/inject: type=\(eventType) adapter=\(adapter) eventID=\(event.id)")
             let result: [String: String] = [
                 "event_id": "\(event.id)",
@@ -1509,7 +1509,7 @@ final class BridgeCore {
         )
     }
 
-    func poll(since: Int64?) -> HTTPResult {
+    func poll(since: Int64?, pathAndQuery: String = "/v1/poll", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
         pollTimestampLock.lock()
         lastGatewayPollAt = Date()
         pollTimestampLock.unlock()
@@ -1537,7 +1537,25 @@ final class BridgeCore {
         }
 
         let response = PollResponse(ok: true, events: data.events, nextCursor: data.nextCursor)
-        return jsonResponse(status: .ok, body: encode(response))
+        let body = encode(response)
+        guard let challenge = headers.first(name: "X-ClawGate-Challenge") else {
+            return jsonResponse(status: .ok, body: body)
+        }
+        guard BridgeAdmissionIssuer.validChallenge(challenge) else {
+            let error = ErrorPayload(code: "invalid_challenge", message: "X-ClawGate-Challenge must be 64 lowercase hexadecimal characters", retriable: false, failedStep: "poll_authentication", details: nil)
+            return jsonResponse(status: .badRequest, body: encode(APIResponse<[String: String]>(ok: false, result: nil, error: error)))
+        }
+        guard let signed = eventBus.admissionIssuer?.sign(method: "GET", uri: pathAndQuery, challenge: challenge, status: 200, body: body) else {
+            let error = ErrorPayload(code: "issuer_unavailable", message: "Authenticated poll issuer is unavailable", retriable: true, failedStep: "poll_authentication", details: nil)
+            return jsonResponse(status: .serviceUnavailable, body: encode(APIResponse<[String: String]>(ok: false, result: nil, error: error)))
+        }
+        var responseHeaders = HTTPHeaders()
+        responseHeaders.add(name: "Content-Type", value: "application/json; charset=utf-8")
+        responseHeaders.add(name: "Content-Length", value: "\(body.count)")
+        responseHeaders.add(name: "X-ClawGate-Issuer-Version", value: "1")
+        responseHeaders.add(name: "X-ClawGate-Issuer-Key-Id", value: signed.keyId)
+        responseHeaders.add(name: "X-ClawGate-Issuer-Signature", value: signed.signature.base64EncodedString())
+        return HTTPResult(status: .ok, headers: responseHeaders, body: body)
     }
 
     func axdump(adapter adapterName: String, pathAndQuery: String = "/v1/axdump", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {

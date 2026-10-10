@@ -253,7 +253,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         // Poll: EventBus.poll() is lightweight (NSLock only), respond on event loop
         if head.method == .GET && path == "/v1/poll" {
             let since = components?.queryItems?.first(where: { $0.name == "since" })?.value.flatMap(Int64.init)
-            let result = core.poll(since: since)
+            let result = core.poll(since: since, pathAndQuery: head.uri, headers: head.headers)
             writeResponse(context: context, result: result)
             return
         }
