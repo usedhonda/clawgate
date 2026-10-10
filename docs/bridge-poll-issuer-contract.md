@@ -9,10 +9,11 @@ adds the independent admission metadata, and signs the exact returned bytes with
 - `X-ClawGate-Issuer-Key-Id: SHA256(raw Ed25519 public key)` (lowercase hex)
 - `X-ClawGate-Issuer-Signature: base64 Ed25519`
 
-The signature covers `clawgate.poll.v1`, then each of method (`GET`), exact
-request URI, challenge, decimal status, key id, and lowercase SHA256 of the
-exact response body. Each value is encoded as a uint32 big-endian byte length
-followed by UTF-8 bytes. Invalid challenges return a structured failure and are
+The signature starts with raw UTF-8 `clawgate.poll.v1` (no length prefix), then
+six fields in order: method (`GET`), exact request URI, challenge, decimal
+status, key id, and lowercase SHA256 of the exact response body. Each of those
+six fields is encoded as a uint32 big-endian byte length followed by UTF-8
+bytes. Invalid challenges return a structured failure and are
 never signed; an absent challenge remains the legacy unsigned poll.
 
 Events carry a body-free immutable `admission` envelope. Watcher and debug
