@@ -23,6 +23,7 @@ candidate_id="$(shasum -a 256 "$MANIFEST" | awk '{print substr($1,1,16)}')"
 remote_stage="$PROJECT_PATH/.runtime/communication-candidate-$candidate_id"
 required_scripts=(
   scripts/lib-ops-log.sh scripts/lib-communication-restart.sh
+  scripts/communication-candidate.py
   scripts/communication-maintenance.sh scripts/communication-maintenance-apply.sh
   scripts/communication-maintenance-rollback.sh scripts/restart-local-clawgate.sh
   scripts/macmini-local-sign-and-restart.sh

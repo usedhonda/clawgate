@@ -162,7 +162,9 @@ case "$mode" in
         echo "ClawGate.app did not stop before rollback." >&2
         exit 1
       fi
-      mv "$app_target" "$backup_path/ClawGate.app.failed" 2>/dev/null || true
+      if [[ -e "$app_target" ]]; then
+        mv "$app_target" "$backup_path/ClawGate.app.failed"
+      fi
       mv "$backup_path/ClawGate.app.previous" "$app_target"
     fi
     while IFS=$'\t' read -r action rel; do
