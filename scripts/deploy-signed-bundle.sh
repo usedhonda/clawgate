@@ -3,8 +3,13 @@
 # invoking codesign in an SSH session. Keeps the previous bundle for rollback.
 set -euo pipefail
 
+COMMUNICATION_STAGE=false
+if [[ "$1" == "--communication-stage" ]]; then
+  COMMUNICATION_STAGE=true
+  shift
+fi
 if [[ $# -ne 2 || "$1" != "--remote-host" || -z "$2" ]]; then
-  echo "Usage: $0 --remote-host <ssh-alias>" >&2
+  echo "Usage: $0 [--communication-stage] --remote-host <ssh-alias>" >&2
   exit 2
 fi
 remote_host="$2"
@@ -24,10 +29,11 @@ remote_archive="/tmp/clawgate-signed-$$.tgz"
 tar -czf "$archive" "$app"
 scp -q "$archive" "$remote_host:$remote_archive"
 
-ssh "$remote_host" /bin/bash -s -- "$remote_archive" "$expected_hash" <<'REMOTE'
+ssh "$remote_host" /bin/bash -s -- "$remote_archive" "$expected_hash" "$COMMUNICATION_STAGE" <<'REMOTE'
 set -euo pipefail
 archive="$1"
 expected_hash="$2"
+stage_only="$3"
 project="$HOME/projects/ios/clawgate"
 stage="$project/.runtime/deploy-stage-$$"
 backup="$project/.runtime/ClawGate.app.pre-$(date +%Y%m%d-%H%M%S)"
@@ -41,6 +47,12 @@ case "$authority" in
 esac
 actual_hash="$(shasum -a 256 "$stage/ClawGate.app/Contents/MacOS/ClawGate" | awk '{print $1}')"
 [[ "$actual_hash" == "$expected_hash" ]] || { echo "Transferred binary hash mismatch" >&2; exit 1; }
+
+if [[ "$stage_only" == "true" ]]; then
+  printf '%s\n' "$stage/ClawGate.app" > "$project/.runtime/communication-staged-app.path"
+  echo "STAGED_APP_PATH=$stage/ClawGate.app"
+  exit 0
+fi
 
 rollback() {
   if [[ -d "$backup" ]]; then

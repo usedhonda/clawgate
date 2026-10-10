@@ -7,6 +7,37 @@ communication_admission_requested() {
   [[ -n "${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}" || -n "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}" ]]
 }
 
+communication_candidate_manifest="${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
+
+communication_validate_candidate() {
+  [[ -n "$communication_candidate_manifest" ]] || {
+    echo "Communication candidate manifest is required for staged apply." >&2
+    return 1
+  }
+  [[ -f "$communication_candidate_manifest" && ! -L "$communication_candidate_manifest" ]] || {
+    echo "Communication candidate manifest is missing or symlinked: $communication_candidate_manifest" >&2
+    return 1
+  }
+  python3 - "$PWD" "$communication_candidate_manifest" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+path = pathlib.Path(sys.argv[2]).resolve()
+if not path.is_relative_to(root):
+    raise SystemExit("candidate manifest must be inside the project")
+PY
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/communication-candidate.py" --manifest "$communication_candidate_manifest" >/dev/null
+}
+
+communication_candidate_files_from() {
+  communication_validate_candidate
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/communication-candidate.py" --manifest "$communication_candidate_manifest"
+  python3 - "$PWD" "$communication_candidate_manifest" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+print(pathlib.Path(sys.argv[2]).resolve().relative_to(root))
+PY
+}
+
 communication_require_admission() {
   local manifest="${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}"
   local current="${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}"

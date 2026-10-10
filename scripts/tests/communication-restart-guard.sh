@@ -10,6 +10,7 @@ canonical="$tmp/gateway-restart"
 apply="$tmp/apply"
 rollback="$tmp/rollback"
 check="$tmp/check-communication-change"
+candidate="$tmp/candidate.json"
 
 cat > "$canonical" <<'EOF'
 #!/usr/bin/env bash
@@ -39,6 +40,24 @@ assert args[0] == "--manifest" and args[2] == "--current"
 assert pathlib.Path(args[1]).is_file() and pathlib.Path(args[3]).is_file()
 EOF
 chmod 755 "$check"
+
+python3 - "$ROOT" "$candidate" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+path = root / "scripts/lib-communication-restart.sh"
+manifest = {
+    "version": 1,
+    "base_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+    "files": [{"path": "scripts/lib-communication-restart.sh", "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}],
+}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(manifest))
+PY
+python3 "$ROOT/scripts/communication-candidate.py" --manifest "$candidate" >/dev/null
+sed 's/"base_revision": "[^"]*"/"base_revision": "invalid"/' "$candidate" > "$tmp/candidate-invalid.json"
+if python3 "$ROOT/scripts/communication-candidate.py" --manifest "$tmp/candidate-invalid.json" >/dev/null 2>&1; then
+  echo "FAIL: basehash mismatch was accepted" >&2
+  exit 1
+fi
 
 if GATEWAY_RESTART_COMMUNICATION_MANIFEST="$tmp/manifest" \
    GATEWAY_RESTART_COMMUNICATION_CURRENT="" \
@@ -88,6 +107,9 @@ fi
 # only files touched by this operation.
 maintenance_project="$tmp/project"
 mkdir -p "$maintenance_project/extensions/openclaw-plugin/src" "$maintenance_project/scripts"
+mkdir -p "$maintenance_project/ClawGate.app/Contents" "$maintenance_project/.runtime/staged-app/Contents"
+printf 'old-app\n' > "$maintenance_project/ClawGate.app/Contents/marker"
+printf 'new-app\n' > "$maintenance_project/.runtime/staged-app/Contents/marker"
 cp "$ROOT/scripts/communication-maintenance.sh" "$maintenance_project/scripts/communication-maintenance.sh"
 cat > "$maintenance_project/scripts/restart-local-clawgate.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -96,23 +118,35 @@ EOF
 chmod 755 "$maintenance_project/scripts/restart-local-clawgate.sh"
 printf 'new\n' > "$maintenance_project/extensions/openclaw-plugin/src/client.js"
 printf 'old\n' > "$tmp/home-client.js"
-export HOME="$tmp/home"
-mkdir -p "$HOME/.openclaw/extensions/clawgate/src"
-cp "$tmp/home-client.js" "$HOME/.openclaw/extensions/clawgate/src/client.js"
-printf 'keep\n' > "$HOME/.openclaw/extensions/clawgate/third-party-helper.js"
+plugin_dest="$tmp/home/.openclaw/extensions/clawgate"
+mkdir -p "$plugin_dest/src"
+cp "$tmp/home-client.js" "$plugin_dest/src/client.js"
+printf 'keep\n' > "$plugin_dest/third-party-helper.js"
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
 CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state" \
+CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin_dest" \
+CLAWGATE_COMMUNICATION_TEST_MODE=1 \
+CLAWGATE_COMMUNICATION_CANDIDATE_FILES="extensions/openclaw-plugin/src/client.js" \
+CLAWGATE_COMMUNICATION_STAGED_APP="$maintenance_project/.runtime/staged-app" \
   "$ROOT/scripts/communication-maintenance.sh" apply
-[[ "$(<"$HOME/.openclaw/extensions/clawgate/src/client.js")" == "new" ]] || { echo "FAIL: apply did not update owned file" >&2; exit 1; }
-[[ -f "$HOME/.openclaw/extensions/clawgate/third-party-helper.js" ]] || { echo "FAIL: apply removed unrelated helper" >&2; exit 1; }
+[[ "$(<"$plugin_dest/src/client.js")" == "new" ]] || { echo "FAIL: apply did not update owned file" >&2; exit 1; }
+[[ -f "$plugin_dest/third-party-helper.js" ]] || { echo "FAIL: apply removed unrelated helper" >&2; exit 1; }
+[[ "$(<"$maintenance_project/ClawGate.app/Contents/marker")" == "new-app" ]] || { echo "FAIL: staged app was not applied" >&2; exit 1; }
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
 CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state" \
+CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin_dest" \
+CLAWGATE_COMMUNICATION_TEST_MODE=1 \
+CLAWGATE_COMMUNICATION_CANDIDATE_FILES="extensions/openclaw-plugin/src/client.js" \
+CLAWGATE_COMMUNICATION_STAGED_APP="$maintenance_project/.runtime/staged-app" \
   "$ROOT/scripts/communication-maintenance.sh" rollback
-[[ "$(<"$HOME/.openclaw/extensions/clawgate/src/client.js")" == "old" ]] || { echo "FAIL: rollback did not restore owned file" >&2; exit 1; }
-[[ -f "$HOME/.openclaw/extensions/clawgate/third-party-helper.js" ]] || { echo "FAIL: rollback removed unrelated helper" >&2; exit 1; }
+[[ "$(<"$plugin_dest/src/client.js")" == "old" ]] || { echo "FAIL: rollback did not restore owned file" >&2; exit 1; }
+[[ -f "$plugin_dest/third-party-helper.js" ]] || { echo "FAIL: rollback removed unrelated helper" >&2; exit 1; }
+[[ "$(<"$maintenance_project/ClawGate.app/Contents/marker")" == "old-app" ]] || { echo "FAIL: rollback did not restore app" >&2; exit 1; }
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
 CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state-skip" \
+CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin_dest" \
+CLAWGATE_COMMUNICATION_TEST_MODE=1 \
 CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC=1 \
   "$ROOT/scripts/communication-maintenance.sh" apply
-[[ "$(<"$HOME/.openclaw/extensions/clawgate/src/client.js")" == "old" ]] || { echo "FAIL: skip-plugin-sync was ignored" >&2; exit 1; }
+[[ "$(<"$plugin_dest/src/client.js")" == "old" ]] || { echo "FAIL: skip-plugin-sync was ignored" >&2; exit 1; }
 echo "maintenance exact-file apply/rollback: PASS"

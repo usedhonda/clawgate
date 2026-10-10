@@ -94,13 +94,25 @@ cd "$PROJECT_PATH"
 source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
 communication_require_admission
 if communication_admission_requested; then
-  if [[ "$SKIP_SYNC" != "true" || "$BUILD_HOSTA" == "true" || "$SIGNED_BUNDLE" == "true" ]]; then
-    echo "Communication admission currently supports only --skip-sync restart-only flow; build-hosta, signed-bundle, and preguard sync are rejected before effects." >&2
+  if [[ "$BUILD_HOSTA" == "true" && "$SKIP_SYNC" == "true" ]]; then
+    echo "build-hosta communication staging requires source sync; do not use --skip-sync." >&2
+    exit 1
+  fi
+  if [[ ( "$BUILD_HOSTA" == "true" || "$SIGNED_BUNDLE" == "true" ) && -z "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}" ]]; then
+    echo "Staged communication candidate manifest is required for build-hosta or signed-bundle." >&2
+    exit 1
+  fi
+  if [[ "$SKIP_SYNC" != "true" && -z "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}" ]]; then
+    echo "Communication candidate manifest is required before source staging." >&2
     exit 1
   fi
   if [[ -n "${FEDERATION_TOKEN:-}" ]]; then
     echo "FEDERATION_TOKEN cannot be written before communication admission; unset it and retry the admitted flow." >&2
     exit 1
+  fi
+  if [[ -n "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}" ]]; then
+    communication_validate_candidate
+    export CLAWGATE_COMMUNICATION_CANDIDATE_FILES="$(communication_candidate_files_from)"
   fi
   export CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH"
   export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY="$([[ "$PLUGIN_CLIENT_ONLY" == "true" ]] && echo 1 || echo 0)"
@@ -236,11 +248,31 @@ if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   # Capture before local restart; this is a read-only defaults(1) read.
   AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
   echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
-  ./scripts/restart-local-clawgate.sh --skip-plugin-sync
-  echo "[hostA] Deploy locally signed bundle (no remote build/sign)"
-  ./scripts/deploy-signed-bundle.sh --remote-host "$REMOTE_HOST"
+  ./scripts/restart-local-clawgate.sh --skip-plugin-sync --skip-sign
+  if communication_admission_requested; then
+    echo "[hostA] Stage locally signed bundle for admitted maintenance"
+    ./scripts/deploy-signed-bundle.sh --communication-stage --remote-host "$REMOTE_HOST"
+    STAGED_APP_REMOTE="$(ssh "$REMOTE_HOST" "cat '$PROJECT_PATH/.runtime/communication-staged-app.path'")"
+    [[ -n "$STAGED_APP_REMOTE" ]] || { echo "Remote staged app path is missing." >&2; exit 1; }
+    export CLAWGATE_COMMUNICATION_STAGED_APP="$STAGED_APP_REMOTE"
+    ./scripts/restart-macmini-openclaw \
+      --remote-host "$REMOTE_HOST" \
+      --project-path "$PROJECT_PATH" \
+      --skip-build \
+      --skip-plugin-sync
+  else
+    echo "[hostA] Deploy locally signed bundle (no remote build/sign)"
+    ./scripts/deploy-signed-bundle.sh --remote-host "$REMOTE_HOST"
+  fi
 elif [[ "$SKIP_SYNC" != "true" ]]; then
-  ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
+  if communication_admission_requested; then
+    candidate_files_from="$(mktemp)"
+    printf '%s\n' "$CLAWGATE_COMMUNICATION_CANDIDATE_FILES" > "$candidate_files_from"
+    ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST" --files-from "$candidate_files_from"
+    rm -f "$candidate_files_from"
+  else
+    ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
+  fi
 fi
 
 if [[ "$SIGNED_BUNDLE" != "true" ]]; then
@@ -263,7 +295,9 @@ elif [[ "$BUILD_HOSTA" == "true" ]]; then
   fi
   printf -v REMOTE_MANIFEST_Q '%q' "${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}"
   printf -v REMOTE_CURRENT_Q '%q' "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}"
-  if ! ssh "$REMOTE_HOST" "GATEWAY_RESTART_COMMUNICATION_MANIFEST=$REMOTE_MANIFEST_Q GATEWAY_RESTART_COMMUNICATION_CURRENT=$REMOTE_CURRENT_Q KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
+  printf -v REMOTE_CANDIDATE_FILES_Q '%q' "${CLAWGATE_COMMUNICATION_CANDIDATE_FILES:-}"
+  printf -v REMOTE_CANDIDATE_MANIFEST_Q '%q' "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
+  if ! ssh "$REMOTE_HOST" "GATEWAY_RESTART_COMMUNICATION_MANIFEST=$REMOTE_MANIFEST_Q GATEWAY_RESTART_COMMUNICATION_CURRENT=$REMOTE_CURRENT_Q CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST=$REMOTE_CANDIDATE_MANIFEST_Q CLAWGATE_COMMUNICATION_CANDIDATE_FILES=$REMOTE_CANDIDATE_FILES_Q CLAWGATE_COMMUNICATION_MAINTENANCE=1 KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
     echo
     echo "[fallback] Host A build/sign over SSH failed. Run on macmini local desktop session:"
     echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"
