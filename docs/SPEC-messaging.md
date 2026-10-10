@@ -1057,9 +1057,12 @@ or Host A build/sign flow.
 The canonical companion helper preserves the installed legacy audio handoff.
 The buffered reply dispatcher and outbound text/media callers allocate one
 immutable, body-free correlation handle at semantic finalization, before
-redirect, suppression or dedup decisions. Its fingerprint is SHA256 over the
-exact UTF8 semantic text, limited to 16384 UTF16 units. The correlation ID is
-not the post-send message ID. Confirmation uses only an actual successful
+redirect, suppression or dedup decisions. For a plain buffered reply, pure
+Telegram-block extraction and LINE normalization first fix the companion text;
+that identical projection is hashed and retained as the buffered send text.
+No post-routing rehash or mutation of the fingerprint is allowed. Its fingerprint
+is SHA256 over the exact UTF8 finalized text, limited to 16384 UTF16 units.
+The correlation ID is not the post-send message ID. Confirmation uses only an actual successful
 LINE send's returned message ID and a clock captured at that success; legacy
 fallback IDs are never promoted into confirmation evidence.
 

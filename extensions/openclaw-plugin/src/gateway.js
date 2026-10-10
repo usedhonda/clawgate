@@ -2332,6 +2332,16 @@ export function extractSendTelegramBlocks(text) {
   return blocks.length > 0 ? { telegramTexts: blocks, remaining: remaining.trim() } : null;
 }
 
+/** Fix the plain buffered companion projection before routing has side effects. */
+export function prepareBufferedLineReply(text, { project = "" } = {}) {
+  const telegramExtract = extractSendTelegramBlocks(text);
+  const remaining = telegramExtract ? telegramExtract.remaining : text;
+  return Object.freeze({
+    text: normalizeLineReplyText(remaining, { project }),
+    telegramExtract,
+  });
+}
+
 // ── Autonomous task chaining ──────────────────────────────────
 
 /**
@@ -3004,16 +3014,18 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   const deliver = async (payload) => {
     let text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
-    // Semantic finalization precedes routing/suppression. The dispatcher does
-    // not yet carry admitted origin or effective policy; do not infer either.
+    // Fix the exact companion text through pure projection before any routing,
+    // suppression or await. The same bytes are hashed and buffered below.
+    const replyProjection = prepareBufferedLineReply(text, { project: event.payload?.project || "" });
+    // The dispatcher does not carry admitted origin/effective policy yet.
     const replyExpectation = createLineReplyExpectation({
-      text, sourceReplySessionKey: ctx.SessionKey,
+      text: replyProjection.text, sourceReplySessionKey: ctx.SessionKey,
       admittedOrigin: undefined, policySessionKey: undefined,
     });
     observeLineReplyExpectation(replyExpectation);
 
     // Extract <send_telegram> blocks — send those parts to Telegram, continue with remainder
-    const telegramExtract = extractSendTelegramBlocks(text);
+    const telegramExtract = replyProjection.telegramExtract;
     if (telegramExtract) {
       for (const tgText of telegramExtract.telegramTexts) {
         try { await sendTmuxMessage(conversation, tgText, traceId, { channel: "telegram" }); } catch (err) {
@@ -3276,7 +3288,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
       return;
     }
 
-    const lineText = normalizeLineReplyText(text, { project: event.payload?.project || "" });
+    const lineText = replyProjection.text;
     log?.debug?.(`clawgate: [${accountId}] collected reply block[${collectedLineBlocks.length + 1}] for "${conversation}": "${lineText.slice(0, 80)}"`);
     collectedLineBlocks.push({ text: lineText, replyExpectation });
   };
