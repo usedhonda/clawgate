@@ -235,6 +235,12 @@ if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   echo "[hostA] Deploy locally signed bundle (no remote build/sign)"
   ./scripts/deploy-signed-bundle.sh --remote-host "$REMOTE_HOST"
   if communication_admission_requested; then
+    echo "[hostA] Restart Gateway through admitted maintenance"
+    ./scripts/restart-macmini-openclaw \
+      --remote-host "$REMOTE_HOST" \
+      --project-path "$PROJECT_PATH" \
+      --skip-build \
+      --skip-plugin-sync
     echo "[local] Restart Host B app/Gateway through admitted maintenance"
     communication_gateway_restart
   fi
