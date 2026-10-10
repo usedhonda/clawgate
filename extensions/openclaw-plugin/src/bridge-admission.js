@@ -70,8 +70,8 @@ export function verifyPollResponse({ publicKeyHex, challenge, uri, status, heade
     }),
   });
   const seen = new Set();
+  const stagedAdmissions = [];
   response.events.forEach((event, eventIndex) => {
-    pollEvidence.set(event, Object.freeze({ envelope, eventIndex }));
     const a = event.admission;
     if (!a) return; // No protected identity is still unknown, never inferred from adapter.
     const expected = ["admission_id", "generation", "event_id", "event_type", "adapter", "observed_at", "provenance"];
@@ -89,8 +89,12 @@ export function verifyPollResponse({ publicKeyHex, challenge, uri, status, heade
     }
     if (a.provenance !== "unknown") seen.add(a.admission_id);
     const proof = Object.freeze({ ...a, responseKeyId: keyId });
-    admittedEvents.set(event, proof);
+    stagedAdmissions.push([event, proof]);
   });
+  response.events.forEach((event, eventIndex) => {
+    pollEvidence.set(event, Object.freeze({ envelope, eventIndex }));
+  });
+  for (const [event, proof] of stagedAdmissions) admittedEvents.set(event, proof);
   // Retain the exact signed projection: a verified object must not later carry
   // different content while retaining its WeakMap admission capability.
   return freezeJson(response);
