@@ -34,7 +34,7 @@ def main():
     root = pathlib.Path.cwd().resolve()
     out = []
     for item in files:
-        if set(item) != {"path", "sha256"}:
+        if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
             fail("file_schema")
         rel = item["path"]
         if not isinstance(rel, str) or not rel or rel.startswith("/") or "/../" in f"/{rel}/" or rel.startswith("../"):
