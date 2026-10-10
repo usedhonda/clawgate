@@ -90,7 +90,9 @@ case "$mode" in
       rels=()
       while IFS= read -r rel; do
         [[ -n "$rel" && "$rel" != "$candidate_manifest_rel" ]] || continue
-        if [[ "$rel" != extensions/openclaw-plugin/* ]]; then
+        # Reflect every declared source file into the checkout; plugin sync
+        # flags control only the installed plugin, not source reflection.
+        if [[ "$candidate_root" != "$project_path" ]]; then
           src="$candidate_root/$rel"
           dst="$project_path/$rel"
           assert_no_symlink_components "$candidate_root" "$rel"
@@ -108,7 +110,6 @@ case "$mode" in
           fi
           mkdir -p "$(dirname "$dst")"
           cp -p "$src" "$dst"
-          continue
         fi
         [[ "$rel" == extensions/openclaw-plugin/* ]] || continue
         [[ "$skip_plugin_sync" != "1" ]] || continue

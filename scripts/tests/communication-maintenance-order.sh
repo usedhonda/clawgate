@@ -11,6 +11,8 @@ printf 'old\n' > "$project/ClawGate.app/Contents/marker"
 printf 'new\n' > "$stage/ClawGate.app/Contents/marker"
 printf 'new\n' > "$stage/extensions/openclaw-plugin/src/client.js"
 printf 'old\n' > "$plugin/src/client.js"
+printf 'old\n' > "$project/source.fixture"
+printf 'new\n' > "$stage/source.fixture"
 export ORDER_EVENTS="$tmp/events" ORDER_PROJECT="$project" ORDER_PLUGIN="$plugin"
 cat > "$tmp/bin/pkill" <<'EOF'
 #!/usr/bin/env bash
@@ -37,6 +39,7 @@ cat > "$project/scripts/restart-local-clawgate.sh" <<'EOF'
 set -euo pipefail
 [[ "$(cat "$ORDER_PROJECT/ClawGate.app/Contents/marker")" == "$ORDER_EXPECTED" ]]
 [[ "$(cat "$ORDER_PLUGIN/src/client.js")" == "$ORDER_EXPECTED" ]]
+[[ "$(cat "$ORDER_PROJECT/source.fixture")" == "$ORDER_EXPECTED" ]]
 echo restart >> "$ORDER_EVENTS"
 EOF
 chmod 755 "$tmp/bin/"* "$project/scripts/restart-local-clawgate.sh"
@@ -45,7 +48,8 @@ export CLAWGATE_COMMUNICATION_PROJECT_PATH="$project"
 export CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state"
 export CLAWGATE_COMMUNICATION_PLUGIN_SOURCE="$stage/extensions/openclaw-plugin"
 export CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin" CLAWGATE_COMMUNICATION_TEST_MODE=1
-export CLAWGATE_COMMUNICATION_CANDIDATE_FILES="extensions/openclaw-plugin/src/client.js"
+export CLAWGATE_COMMUNICATION_CANDIDATE_ROOT="$stage"
+export CLAWGATE_COMMUNICATION_CANDIDATE_FILES=$'source.fixture\nextensions/openclaw-plugin/src/client.js'
 export CLAWGATE_COMMUNICATION_STAGED_APP="$stage/ClawGate.app"
 ORDER_STILL_RUNNING=1 ORDER_EXPECTED=new bash "$ROOT/scripts/communication-maintenance.sh" apply >/dev/null 2>&1 && exit 99
 [[ "$(cat "$project/ClawGate.app/Contents/marker")" == old ]]

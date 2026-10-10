@@ -46,14 +46,15 @@ import hashlib, json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 path = root / "scripts/lib-communication-restart.sh"
 manifest = {
-    "version": 1,
-    "base_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+    "version": 2,
+    "source_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+    "target_base_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
     "files": [{"path": "scripts/lib-communication-restart.sh", "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}],
 }
 pathlib.Path(sys.argv[2]).write_text(json.dumps(manifest))
 PY
 python3 "$ROOT/scripts/communication-candidate.py" --manifest "$candidate" >/dev/null
-sed 's/"base_revision": "[^"]*"/"base_revision": "invalid"/' "$candidate" > "$tmp/candidate-invalid.json"
+sed 's/"source_revision": "[^"]*"/"source_revision": "invalid"/' "$candidate" > "$tmp/candidate-invalid.json"
 if python3 "$ROOT/scripts/communication-candidate.py" --manifest "$tmp/candidate-invalid.json" >/dev/null 2>&1; then
   echo "FAIL: basehash mismatch was accepted" >&2
   exit 1
@@ -67,8 +68,9 @@ import hashlib, json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
 path = pathlib.Path(sys.argv[3])
 manifest = {
-    "version": 1,
-    "base_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+    "version": 2,
+    "source_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+    "target_base_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
     "files": [{"path": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}],
 }
 pathlib.Path(sys.argv[2]).write_text(json.dumps(manifest))

@@ -19,14 +19,20 @@ def main():
         fail("usage")
     root_override = pathlib.Path(sys.argv[4]).resolve() if len(sys.argv) == 5 else pathlib.Path.cwd().resolve()
     manifest = json.loads(manifest_path.read_text())
-    if set(manifest) != {"version", "base_revision", "files"} or manifest["version"] != 1:
+    if set(manifest) != {"version", "source_revision", "target_base_revision", "files"} or manifest["version"] != 2:
         fail("schema")
     try:
         head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     except (OSError, subprocess.CalledProcessError):
         fail("git_head_unavailable")
-    if manifest["base_revision"] != head:
-        fail("base_revision_mismatch")
+    # Local preparation pins the candidate checkout; remote validation pins
+    # the independently observed live checkout before any source apply.
+    local_preparation = root_override == pathlib.Path.cwd().resolve()
+    revision_field = "source_revision" if local_preparation else "target_base_revision"
+    if not all(isinstance(manifest[k], str) and manifest[k] for k in ("source_revision", "target_base_revision")):
+        fail("revision_schema")
+    if manifest[revision_field] != head:
+        fail(f"{revision_field}_mismatch")
     files = manifest["files"]
     if not isinstance(files, list) or not files:
         fail("files_missing")

@@ -56,7 +56,7 @@ if [[ -z "$KEYCHAIN_PASSWORD" ]]; then
 fi
 
 cd "$PROJECT_PATH"
-source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
+source "$SCRIPT_DIR/lib-communication-restart.sh"
 communication_preflight
 if communication_admission_requested && [[ -n "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}" ]]; then
   communication_validate_candidate
