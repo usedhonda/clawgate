@@ -91,6 +91,14 @@ if [[ "$SIGNED_BUNDLE" == "true" && "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
 fi
 
 cd "$PROJECT_PATH"
+source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
+communication_preflight
+if communication_admission_requested; then
+  export CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH"
+  export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY="$([[ "$PLUGIN_CLIENT_ONLY" == "true" ]] && echo 1 || echo 0)"
+  export CLAWGATE_COMMUNICATION_MAINTENANCE_HOOK="$PROJECT_PATH/scripts/communication-maintenance-apply.sh"
+  export CLAWGATE_COMMUNICATION_ROLLBACK_HOOK="$PROJECT_PATH/scripts/communication-maintenance-rollback.sh"
+fi
 
 ambient_status_json() {
   curl -fsS -m 5 http://127.0.0.1:8765/v1/ambient/status 2>/dev/null || true
@@ -218,10 +226,18 @@ fi
 if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   # Capture before local restart; this is a read-only defaults(1) read.
   AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
-  echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
-  ./scripts/restart-local-clawgate.sh --skip-plugin-sync
+  if communication_admission_requested; then
+    echo "[local] Defer Host B app/Gateway restart to admitted maintenance"
+  else
+    echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
+    ./scripts/restart-local-clawgate.sh --skip-plugin-sync
+  fi
   echo "[hostA] Deploy locally signed bundle (no remote build/sign)"
   ./scripts/deploy-signed-bundle.sh --remote-host "$REMOTE_HOST"
+  if communication_admission_requested; then
+    echo "[local] Restart Host B app/Gateway through admitted maintenance"
+    communication_gateway_restart
+  fi
 elif [[ "$SKIP_SYNC" != "true" ]]; then
   ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
 fi
@@ -244,7 +260,9 @@ elif [[ "$BUILD_HOSTA" == "true" ]]; then
   if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
     REMOTE_PLUGIN_SYNC_ARG=" --skip-plugin-sync"
   fi
-  if ! ssh "$REMOTE_HOST" "KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
+  printf -v REMOTE_MANIFEST_Q '%q' "${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}"
+  printf -v REMOTE_CURRENT_Q '%q' "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}"
+  if ! ssh "$REMOTE_HOST" "GATEWAY_RESTART_COMMUNICATION_MANIFEST=$REMOTE_MANIFEST_Q GATEWAY_RESTART_COMMUNICATION_CURRENT=$REMOTE_CURRENT_Q KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
     echo
     echo "[fallback] Host A build/sign over SSH failed. Run on macmini local desktop session:"
     echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"
@@ -273,14 +291,18 @@ fi
 # Host B restart (canonical local path).
 if [[ "$SIGNED_BUNDLE" != "true" ]]; then
   echo "[local] Restart Host B ClawGate.app"
-  LOCAL_RESTART_ARGS=(./scripts/restart-local-clawgate.sh)
-  if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
-    LOCAL_RESTART_ARGS+=(--skip-plugin-sync)
+  if communication_admission_requested; then
+    communication_gateway_restart
+  else
+    LOCAL_RESTART_ARGS=(./scripts/restart-local-clawgate.sh)
+    if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+      LOCAL_RESTART_ARGS+=(--skip-plugin-sync)
+    fi
+    if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
+      LOCAL_RESTART_ARGS+=(--plugin-client-only)
+    fi
+    "${LOCAL_RESTART_ARGS[@]}"
   fi
-  if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
-    LOCAL_RESTART_ARGS+=(--plugin-client-only)
-  fi
-  "${LOCAL_RESTART_ARGS[@]}"
 fi
 
 echo

@@ -58,6 +58,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 source "$PROJECT_PATH/scripts/lib-ops-log.sh"
+source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
+communication_preflight
 ops_log info "remote_restart_begin" "server restart requested (remote_host=$REMOTE_HOST stop_relay=$STOP_RELAY restart_only)"
 trap 'ops_log error "remote_restart_failed" "server restart failed (line=$LINENO exit=$?)"' ERR
 
@@ -81,15 +83,22 @@ if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
 fi
 
 printf -v REMOTE_PROJECT_PATH_Q '%q' "$PROJECT_PATH"
+printf -v COMMUNICATION_MANIFEST_Q '%q' "${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}"
+printf -v COMMUNICATION_CURRENT_Q '%q' "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}"
+printf -v COMMUNICATION_MAINTENANCE_Q '%q' "$PROJECT_PATH/scripts/communication-maintenance-apply.sh"
+printf -v COMMUNICATION_ROLLBACK_Q '%q' "$PROJECT_PATH/scripts/communication-maintenance-rollback.sh"
 PLUGIN_CLIENT_ONLY_FLAG="0"
 if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
   PLUGIN_CLIENT_ONLY_FLAG="1"
 fi
-ssh "$REMOTE_HOST" "PROJECT_PATH=$REMOTE_PROJECT_PATH_Q STOP_RELAY_FLAG=$STOP_RELAY_FLAG SKIP_PLUGIN_SYNC_FLAG=$SKIP_PLUGIN_SYNC_FLAG PLUGIN_CLIENT_ONLY_FLAG=$PLUGIN_CLIENT_ONLY_FLAG /bin/zsh -s" <<'REMOTE_SCRIPT'
+printf -v COMMUNICATION_CLIENT_ONLY_Q '%q' "$PLUGIN_CLIENT_ONLY_FLAG"
+ssh "$REMOTE_HOST" "PROJECT_PATH=$REMOTE_PROJECT_PATH_Q STOP_RELAY_FLAG=$STOP_RELAY_FLAG SKIP_PLUGIN_SYNC_FLAG=$SKIP_PLUGIN_SYNC_FLAG PLUGIN_CLIENT_ONLY_FLAG=$PLUGIN_CLIENT_ONLY_FLAG GATEWAY_RESTART_COMMUNICATION_MANIFEST=$COMMUNICATION_MANIFEST_Q GATEWAY_RESTART_COMMUNICATION_CURRENT=$COMMUNICATION_CURRENT_Q CLAWGATE_COMMUNICATION_MAINTENANCE_HOOK=$COMMUNICATION_MAINTENANCE_Q CLAWGATE_COMMUNICATION_ROLLBACK_HOOK=$COMMUNICATION_ROLLBACK_Q CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY=$COMMUNICATION_CLIENT_ONLY_Q /bin/zsh -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 CLAWGATE_ROLE="host_a_server"
 OPS_SCRIPT_NAME="restart-macmini-openclaw.remote"
 source "$PROJECT_PATH/scripts/lib-ops-log.sh"
+source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
+communication_require_admission
 ops_log info "remote_begin" "remote restart started (restart_only stop_relay=$STOP_RELAY_FLAG)"
 trap 'ops_log error "remote_failed" "remote restart failed (line=$LINENO exit=$?)"' ERR
 cd "$PROJECT_PATH"
@@ -128,10 +137,17 @@ fi
 if [[ "$PLUGIN_CLIENT_ONLY_FLAG" == "1" ]]; then
   LOCAL_RESTART_ARGS+=(--plugin-client-only)
 fi
-./scripts/restart-local-clawgate.sh "${LOCAL_RESTART_ARGS[@]}"
-sleep 1
+if communication_admission_requested; then
+  echo "[remote] Defer app restart to admitted Gateway maintenance"
+else
+  ./scripts/restart-local-clawgate.sh "${LOCAL_RESTART_ARGS[@]}"
+  sleep 1
+fi
 
-if [[ "$PLUGIN_CLIENT_ONLY_FLAG" != "1" ]]; then
+if communication_admission_requested; then
+  echo "[remote] Restart Gateway through canonical communication admission"
+  CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH" communication_gateway_restart
+elif [[ "$PLUGIN_CLIENT_ONLY_FLAG" != "1" ]]; then
   launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
   sleep 2
   launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true

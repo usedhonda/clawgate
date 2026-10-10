@@ -56,6 +56,8 @@ if [[ -z "$KEYCHAIN_PASSWORD" ]]; then
 fi
 
 cd "$PROJECT_PATH"
+source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
+communication_preflight
 
 echo "[1/6] Locate signing keychain"
 SIGNING_KEYCHAIN=""
@@ -135,16 +137,22 @@ codesign --force --deep --options runtime \
   --sign "$RESOLVED_SIGNING_ID" ClawGate.app
 
 echo "[6/6] Restart ClawGate + OpenClaw gateway"
-RESTART_ARGS=(--skip-build --skip-sync --skip-sign)
-if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
-  RESTART_ARGS+=(--skip-plugin-sync)
+if communication_admission_requested; then
+  export CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH"
+  export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY=0
+  CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH" communication_gateway_restart
+else
+  RESTART_ARGS=(--skip-build --skip-sync --skip-sign)
+  if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then
+    RESTART_ARGS+=(--skip-plugin-sync)
+  fi
+  ./scripts/restart-local-clawgate.sh "${RESTART_ARGS[@]}"
+  sleep 2
+  launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
+  sleep 1
+  launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true
+  sleep 2
 fi
-./scripts/restart-local-clawgate.sh "${RESTART_ARGS[@]}"
-sleep 2
-launchctl stop ai.openclaw.gateway >/dev/null 2>&1 || true
-sleep 1
-launchctl start ai.openclaw.gateway >/dev/null 2>&1 || true
-sleep 2
 
 mkdir -p "$PROJECT_PATH/.runtime"
 STAMP_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
