@@ -61,18 +61,21 @@ communication_preflight
 if communication_admission_requested && [[ -n "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}" ]]; then
   communication_validate_candidate
 fi
-COMMUNICATION_MAINTENANCE="${CLAWGATE_COMMUNICATION_MAINTENANCE:-0}"
-if communication_admission_requested && [[ "$COMMUNICATION_MAINTENANCE" != "1" ]]; then
+COMMUNICATION_STAGED_BUILD="${CLAWGATE_COMMUNICATION_STAGED_BUILD:-0}"
+if communication_admission_requested && [[ "$COMMUNICATION_STAGED_BUILD" != "1" ]]; then
   echo "Communication admission requires the explicit stopped-maintenance build context." >&2
   exit 1
 fi
-if [[ "$COMMUNICATION_MAINTENANCE" == "1" ]]; then
+if [[ "$COMMUNICATION_STAGED_BUILD" == "1" ]]; then
+  SOURCE_PROJECT_PATH="${CLAWGATE_COMMUNICATION_SOURCE_STAGE:-}"
+  [[ -n "$SOURCE_PROJECT_PATH" && -d "$SOURCE_PROJECT_PATH" ]] || { echo "Inert source stage is required for maintenance build." >&2; exit 1; }
   mkdir -p "$PROJECT_PATH/.runtime"
   STAGE_DIR="$(mktemp -d "$PROJECT_PATH/.runtime/communication-stage.XXXXXX")"
   APP_TARGET="$STAGE_DIR/ClawGate.app"
   [[ -d "$PROJECT_PATH/ClawGate.app" && ! -L "$PROJECT_PATH/ClawGate.app" ]] || { echo "Existing app bundle is required as a staged template." >&2; exit 1; }
   cp -R "$PROJECT_PATH/ClawGate.app" "$APP_TARGET"
 else
+  SOURCE_PROJECT_PATH="$PROJECT_PATH"
   APP_TARGET="$PROJECT_PATH/ClawGate.app"
 fi
 
@@ -126,39 +129,44 @@ echo "[3/6] Configure key partition list on signing keychain"
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$SIGNING_KEYCHAIN" >/dev/null
 
 echo "[4/6] Build"
+cd "$SOURCE_PROJECT_PATH"
 swift build
 cp .build/debug/ClawGate "$APP_TARGET/Contents/MacOS/ClawGate"
 # Copy app icon
-if [[ -f "$PROJECT_PATH/resources/AppIcon.icns" ]]; then
-  cp "$PROJECT_PATH/resources/AppIcon.icns" "$APP_TARGET/Contents/Resources/AppIcon.icns"
+  if [[ -f "$SOURCE_PROJECT_PATH/resources/AppIcon.icns" ]]; then
+  cp "$SOURCE_PROJECT_PATH/resources/AppIcon.icns" "$APP_TARGET/Contents/Resources/AppIcon.icns"
 fi
 # Copy SwiftPM resource bundle (Characters, menubar-claw.png, etc.)
 # memory/MEMORY.md L155: "deploy 時は .build/debug/ClawGate_ClawGate.bundle を
 # ClawGate.app/Contents/Resources/ にコピー必須"
-BUILD_BUNDLE="$PROJECT_PATH/.build/debug/ClawGate_ClawGate.bundle"
+BUILD_BUNDLE="$SOURCE_PROJECT_PATH/.build/debug/ClawGate_ClawGate.bundle"
 if [[ -d "$BUILD_BUNDLE" ]]; then
   DEST_BUNDLE="$APP_TARGET/Contents/Resources/ClawGate_ClawGate.bundle"
   rm -rf "$DEST_BUNDLE"
   cp -R "$BUILD_BUNDLE" "$DEST_BUNDLE"
 fi
 # Copy Chrome extension
-if [[ -d "$PROJECT_PATH/extensions/clawgate-chrome" ]]; then
-  rsync -a --delete "$PROJECT_PATH/extensions/clawgate-chrome/" "$APP_TARGET/Contents/Resources/clawgate-chrome/"
+if [[ -d "$SOURCE_PROJECT_PATH/extensions/clawgate-chrome" ]]; then
+  rsync -a --delete "$SOURCE_PROJECT_PATH/extensions/clawgate-chrome/" "$APP_TARGET/Contents/Resources/clawgate-chrome/"
 fi
 
 echo "[5/6] Sign with $RESOLVED_SIGNING_ID (keychain: $SIGNING_KEYCHAIN)"
 codesign --force --deep --options runtime \
   --identifier com.clawgate.app \
-  --entitlements ClawGate.entitlements \
+  --entitlements "$SOURCE_PROJECT_PATH/ClawGate.entitlements" \
   --keychain "$SIGNING_KEYCHAIN" \
   --sign "$RESOLVED_SIGNING_ID" "$APP_TARGET"
 
 echo "[6/6] Restart ClawGate + OpenClaw gateway"
-if [[ "$COMMUNICATION_MAINTENANCE" == "1" ]]; then
+if [[ "$COMMUNICATION_STAGED_BUILD" == "1" ]]; then
   export CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH"
   export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY=0
   export CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC="$([[ "$SKIP_PLUGIN_SYNC" == "true" ]] && echo 1 || echo 0)"
   export CLAWGATE_COMMUNICATION_STAGED_APP="$APP_TARGET"
+  export CLAWGATE_COMMUNICATION_PLUGIN_SOURCE="$SOURCE_PROJECT_PATH/extensions/openclaw-plugin"
+  export CLAWGATE_COMMUNICATION_SCRIPT_ROOT="$SOURCE_PROJECT_PATH/scripts"
+  export CLAWGATE_COMMUNICATION_MAINTENANCE_HOOK="$SOURCE_PROJECT_PATH/scripts/communication-maintenance-apply.sh"
+  export CLAWGATE_COMMUNICATION_ROLLBACK_HOOK="$SOURCE_PROJECT_PATH/scripts/communication-maintenance-rollback.sh"
   CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH" communication_gateway_restart
 else
   RESTART_ARGS=(--skip-build --skip-sync --skip-sign)

@@ -250,6 +250,16 @@ if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
   ./scripts/restart-local-clawgate.sh --skip-plugin-sync --skip-sign
   if communication_admission_requested; then
+    export CLAWGATE_COMMUNICATION_SOURCE_STAGE="$(./scripts/stage-communication-candidate.sh \
+      --remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" \
+      --manifest "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST")"
+    candidate_manifest_rel="$(python3 - "$PROJECT_PATH" "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST" <<'PY'
+import pathlib, sys
+print(pathlib.Path(sys.argv[2]).resolve().relative_to(pathlib.Path(sys.argv[1]).resolve()))
+PY
+)"
+    export CLAWGATE_COMMUNICATION_CANDIDATE_ROOT="$CLAWGATE_COMMUNICATION_SOURCE_STAGE"
+    export CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST="$CLAWGATE_COMMUNICATION_SOURCE_STAGE/$candidate_manifest_rel"
     echo "[hostA] Stage locally signed bundle for admitted maintenance"
     ./scripts/deploy-signed-bundle.sh --communication-stage --remote-host "$REMOTE_HOST"
     STAGED_APP_REMOTE="$(ssh "$REMOTE_HOST" "cat '$PROJECT_PATH/.runtime/communication-staged-app.path'")"
@@ -266,10 +276,16 @@ if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   fi
 elif [[ "$SKIP_SYNC" != "true" ]]; then
   if communication_admission_requested; then
-    candidate_files_from="$(mktemp)"
-    printf '%s\n' "$CLAWGATE_COMMUNICATION_CANDIDATE_FILES" > "$candidate_files_from"
-    ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST" --files-from "$candidate_files_from"
-    rm -f "$candidate_files_from"
+    export CLAWGATE_COMMUNICATION_SOURCE_STAGE="$(./scripts/stage-communication-candidate.sh \
+      --remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" \
+      --manifest "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST")"
+    candidate_manifest_rel="$(python3 - "$PROJECT_PATH" "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST" <<'PY'
+import pathlib, sys
+print(pathlib.Path(sys.argv[2]).resolve().relative_to(pathlib.Path(sys.argv[1]).resolve()))
+PY
+)"
+    export CLAWGATE_COMMUNICATION_CANDIDATE_ROOT="$CLAWGATE_COMMUNICATION_SOURCE_STAGE"
+    export CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST="$CLAWGATE_COMMUNICATION_SOURCE_STAGE/$candidate_manifest_rel"
   else
     ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
   fi
@@ -297,7 +313,9 @@ elif [[ "$BUILD_HOSTA" == "true" ]]; then
   printf -v REMOTE_CURRENT_Q '%q' "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}"
   printf -v REMOTE_CANDIDATE_FILES_Q '%q' "${CLAWGATE_COMMUNICATION_CANDIDATE_FILES:-}"
   printf -v REMOTE_CANDIDATE_MANIFEST_Q '%q' "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
-  if ! ssh "$REMOTE_HOST" "GATEWAY_RESTART_COMMUNICATION_MANIFEST=$REMOTE_MANIFEST_Q GATEWAY_RESTART_COMMUNICATION_CURRENT=$REMOTE_CURRENT_Q CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST=$REMOTE_CANDIDATE_MANIFEST_Q CLAWGATE_COMMUNICATION_CANDIDATE_FILES=$REMOTE_CANDIDATE_FILES_Q CLAWGATE_COMMUNICATION_MAINTENANCE=1 KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
+  printf -v REMOTE_CANDIDATE_ROOT_Q '%q' "${CLAWGATE_COMMUNICATION_CANDIDATE_ROOT:-}"
+  printf -v REMOTE_SOURCE_STAGE_Q '%q' "${CLAWGATE_COMMUNICATION_SOURCE_STAGE:-}"
+  if ! ssh "$REMOTE_HOST" "GATEWAY_RESTART_COMMUNICATION_MANIFEST=$REMOTE_MANIFEST_Q GATEWAY_RESTART_COMMUNICATION_CURRENT=$REMOTE_CURRENT_Q CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST=$REMOTE_CANDIDATE_MANIFEST_Q CLAWGATE_COMMUNICATION_CANDIDATE_ROOT=$REMOTE_CANDIDATE_ROOT_Q CLAWGATE_COMMUNICATION_CANDIDATE_FILES=$REMOTE_CANDIDATE_FILES_Q CLAWGATE_COMMUNICATION_SOURCE_STAGE=$REMOTE_SOURCE_STAGE_Q CLAWGATE_COMMUNICATION_STAGED_BUILD=1 KEYCHAIN_PASSWORD=\"\$(cat \"\$HOME/.local/secrets/keychain-password\")\" \"$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh\" --project-path \"$PROJECT_PATH\"$REMOTE_PLUGIN_SYNC_ARG"; then
     echo
     echo "[fallback] Host A build/sign over SSH failed. Run on macmini local desktop session:"
     echo "  KEYCHAIN_PASSWORD='***' ./scripts/macmini-local-sign-and-restart.sh --project-path $PROJECT_PATH"

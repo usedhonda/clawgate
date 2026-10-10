@@ -18,19 +18,21 @@ communication_validate_candidate() {
     echo "Communication candidate manifest is missing or symlinked: $communication_candidate_manifest" >&2
     return 1
   }
-  python3 - "$PWD" "$communication_candidate_manifest" <<'PY'
+  python3 - "${CLAWGATE_COMMUNICATION_CANDIDATE_ROOT:-$PWD}" "$communication_candidate_manifest" <<'PY'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1]).resolve()
 path = pathlib.Path(sys.argv[2]).resolve()
 if not path.is_relative_to(root):
     raise SystemExit("candidate manifest must be inside the project")
 PY
-  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/communication-candidate.py" --manifest "$communication_candidate_manifest" >/dev/null
+  local candidate_root="${CLAWGATE_COMMUNICATION_CANDIDATE_ROOT:-$PWD}"
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/communication-candidate.py" --manifest "$communication_candidate_manifest" --root "$candidate_root" >/dev/null
 }
 
 communication_candidate_files_from() {
   communication_validate_candidate
-  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/communication-candidate.py" --manifest "$communication_candidate_manifest"
+  local candidate_root="${CLAWGATE_COMMUNICATION_CANDIDATE_ROOT:-$PWD}"
+  python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/communication-candidate.py" --manifest "$communication_candidate_manifest" --root "$candidate_root"
   python3 - "$PWD" "$communication_candidate_manifest" <<'PY'
 import pathlib, sys
 root = pathlib.Path(sys.argv[1]).resolve()

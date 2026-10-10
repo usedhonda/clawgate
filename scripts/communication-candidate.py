@@ -12,14 +12,13 @@ def fail(message):
 
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] not in {"--manifest", "--files-from"}:
-        fail("usage: communication-candidate.py --manifest PATH|--files-from PATH")
+    if len(sys.argv) not in {3, 5} or sys.argv[1] not in {"--manifest", "--files-from"}:
+        fail("usage: communication-candidate.py --manifest PATH [--root PATH]")
     manifest_path = pathlib.Path(sys.argv[2]).resolve()
-    if sys.argv[1] == "--files-from":
-        manifest_path = pathlib.Path(sys.argv[2]).resolve()
-        manifest = json.loads(manifest_path.read_text())
-    else:
-        manifest = json.loads(manifest_path.read_text())
+    if len(sys.argv) == 5 and sys.argv[3] != "--root":
+        fail("usage")
+    root_override = pathlib.Path(sys.argv[4]).resolve() if len(sys.argv) == 5 else pathlib.Path.cwd().resolve()
+    manifest = json.loads(manifest_path.read_text())
     if set(manifest) != {"version", "base_revision", "files"} or manifest["version"] != 1:
         fail("schema")
     try:
@@ -31,7 +30,7 @@ def main():
     files = manifest["files"]
     if not isinstance(files, list) or not files:
         fail("files_missing")
-    root = pathlib.Path.cwd().resolve()
+    root = root_override
     out = []
     for item in files:
         if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
@@ -44,6 +43,18 @@ def main():
         path = (root / rel).resolve()
         if not path.is_relative_to(root) or not path.is_file() or path.is_symlink():
             fail("file_missing_or_symlink")
+        # A local candidate may only name tracked repository payloads. The
+        # remote inert stage intentionally has no .git checkout, so its
+        # already-admitted files are validated by hash/path there.
+        if (root / ".git").exists():
+            try:
+                subprocess.check_call(
+                    ["git", "-C", str(root), "ls-files", "--error-unmatch", "--", rel],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except (OSError, subprocess.CalledProcessError):
+                fail("file_not_tracked")
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest != item["sha256"]:
             fail("file_hash_mismatch")

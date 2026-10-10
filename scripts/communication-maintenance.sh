@@ -6,7 +6,9 @@ set -euo pipefail
 
 mode="${1:-apply}"
 project_path="${CLAWGATE_COMMUNICATION_PROJECT_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+script_root="${CLAWGATE_COMMUNICATION_SCRIPT_ROOT:-$project_path/scripts}"
 plugin_src="$project_path/extensions/openclaw-plugin"
+plugin_src="${CLAWGATE_COMMUNICATION_PLUGIN_SOURCE:-$plugin_src}"
 plugin_dst="${CLAWGATE_COMMUNICATION_PLUGIN_DEST:-${HOME}/.openclaw/extensions/clawgate}"
 plugin_client_only="${CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY:-0}"
 skip_plugin_sync="${CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC:-0}"
@@ -47,6 +49,15 @@ case "$mode" in
       [[ -d "$staged_app" && ! -L "$staged_app" ]] || { echo "Staged app is missing or symlinked: $staged_app" >&2; exit 1; }
       [[ ! -L "$app_target" ]] || { echo "Live app bundle is symlinked: $app_target" >&2; exit 1; }
       [[ -d "$app_target" ]] || { echo "Live app bundle is missing: $app_target" >&2; exit 1; }
+      pkill -f "$app_target/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
+      for ((wait=1; wait<=10; wait++)); do
+        pgrep -f "$app_target/Contents/MacOS/ClawGate" >/dev/null 2>&1 || break
+        sleep 1
+      done
+      if pgrep -f "$app_target/Contents/MacOS/ClawGate" >/dev/null 2>&1; then
+        echo "ClawGate.app did not stop before staged swap." >&2
+        exit 1
+      fi
       mv "$app_target" "$app_backup"
       : > "$app_marker"
       cp -R "$staged_app" "$app_target"
@@ -83,7 +94,7 @@ case "$mode" in
     fi
     restart_args=(--project-path "$project_path" --skip-build --skip-sync --skip-plugin-sync)
     restart_args+=(--skip-sign)
-    "$project_path/scripts/restart-local-clawgate.sh" "${restart_args[@]}"
+    "$script_root/restart-local-clawgate.sh" "${restart_args[@]}"
     ;;
   rollback)
     [[ -f "$state_file" ]] || { echo "No communication maintenance backup found." >&2; exit 1; }
@@ -98,6 +109,7 @@ case "$mode" in
       [[ -d "$backup_path/ClawGate.app.previous" ]] || { echo "App rollback backup is missing." >&2; exit 1; }
       mv "$app_target" "$backup_path/ClawGate.app.failed" 2>/dev/null || true
       mv "$backup_path/ClawGate.app.previous" "$app_target"
+      open -na "$app_target" >/dev/null 2>&1 || true
     fi
     while IFS=$'\t' read -r action rel; do
       [[ -n "$rel" ]] || continue

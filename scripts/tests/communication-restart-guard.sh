@@ -59,6 +59,26 @@ if python3 "$ROOT/scripts/communication-candidate.py" --manifest "$tmp/candidate
   exit 1
 fi
 
+ignored_key="$ROOT/.runtime/communication-test-ignored-key"
+mkdir -p "$ROOT/.runtime"
+printf 'test-key\n' > "$ignored_key"
+python3 - "$ROOT" "$tmp/candidate-ignored.json" "$ignored_key" <<'PY'
+import hashlib, json, pathlib, subprocess, sys
+root = pathlib.Path(sys.argv[1])
+path = pathlib.Path(sys.argv[3])
+manifest = {
+    "version": 1,
+    "base_revision": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
+    "files": [{"path": str(path.relative_to(root)), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}],
+}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(manifest))
+PY
+if python3 "$ROOT/scripts/communication-candidate.py" --manifest "$tmp/candidate-ignored.json" >/dev/null 2>&1; then
+  echo "FAIL: ignored/untracked candidate was accepted" >&2
+  exit 1
+fi
+unlink "$ignored_key"
+
 if GATEWAY_RESTART_COMMUNICATION_MANIFEST="$tmp/manifest" \
    GATEWAY_RESTART_COMMUNICATION_CURRENT="" \
    communication_require_admission 2>/dev/null; then
