@@ -125,6 +125,25 @@ if PATH="$spy_bin:$PATH" \
 fi
 [[ "$(<"$events")" == "$expected" ]] || { echo "FAIL: rejected wrapper reached an external effect" >&2; exit 1; }
 
+# Signed-bundle communication admission performs the remote canonical check
+# before local restart/build/deploy side effects.
+signed_candidate="$ROOT/.runtime/communication-test-candidate.json"
+mkdir -p "$ROOT/.runtime"
+cp "$candidate" "$signed_candidate"
+if PATH="$spy_bin:$PATH" \
+   GATEWAY_RESTART_COMMUNICATION_MANIFEST="$tmp/manifest" \
+   GATEWAY_RESTART_COMMUNICATION_CURRENT="$tmp/current" \
+   CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST="$signed_candidate" \
+   CLAWGATE_COMMUNICATION_REMOTE_CHECK_SCRIPT="$check" \
+   COMMUNICATION_TEST_EVENTS="$events" \
+   "$ROOT/scripts/post-task-restart.sh" --remote-host fake --signed-bundle --skip-sync --skip-plugin-sync >/dev/null 2>&1; then
+  echo "FAIL: signed-bundle remote preflight rejection was accepted" >&2
+  exit 1
+fi
+[[ "$(<"$events")" == "$expected
+ssh" ]] || { printf 'FAIL: signed-bundle rejection reached local effects (%q)\n' "$(<"$events")" >&2; exit 1; }
+unlink "$signed_candidate"
+
 # Exact-file apply/rollback: preserve unrelated installed helpers and restore
 # only files touched by this operation.
 maintenance_project="$tmp/project"

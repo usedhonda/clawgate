@@ -93,6 +93,19 @@ fi
 cd "$PROJECT_PATH"
 source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
 communication_require_admission
+communication_remote_preflight() {
+  local manifest="${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}"
+  local current="${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}"
+  local remote_check="${CLAWGATE_COMMUNICATION_REMOTE_CHECK_SCRIPT:-$HOME/projects/openclaw/oc-general/scripts/check-communication-change}"
+  [[ -n "$manifest" && -n "$current" ]] || {
+    echo "Remote communication preflight requires both manifest and current paths." >&2
+    return 1
+  }
+  printf -v manifest_q '%q' "$manifest"
+  printf -v current_q '%q' "$current"
+  printf -v check_q '%q' "$remote_check"
+  ssh "$REMOTE_HOST" "test -f $check_q && python3 $check_q --manifest $manifest_q --current $current_q"
+}
 if communication_admission_requested; then
   if [[ "$BUILD_HOSTA" == "true" && "$SKIP_SYNC" == "true" ]]; then
     echo "build-hosta communication staging requires source sync; do not use --skip-sync." >&2
@@ -119,6 +132,9 @@ if communication_admission_requested; then
   export CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC="$([[ "$SKIP_PLUGIN_SYNC" == "true" ]] && echo 1 || echo 0)"
   export CLAWGATE_COMMUNICATION_MAINTENANCE_HOOK="$PROJECT_PATH/scripts/communication-maintenance-apply.sh"
   export CLAWGATE_COMMUNICATION_ROLLBACK_HOOK="$PROJECT_PATH/scripts/communication-maintenance-rollback.sh"
+  # Observe remote canonical admission before any local restart/build/deploy
+  # side effect. The manifest/current pair is supplied by the caller.
+  communication_remote_preflight
 fi
 
 ambient_status_json() {
