@@ -37,6 +37,11 @@ struct BridgeAdmission: Codable, Equatable {
 final class BridgeAdmissionIssuer {
     private struct PersistedRecord: Codable { let admission: BridgeAdmission }
     private struct Generation: Codable { let value: String; let issuerKeyId: String }
+    private struct Limits: Decodable {
+        let maxRecords: Int
+        let maxBytes: Int
+        enum CodingKeys: String, CodingKey { case maxRecords = "max_records", maxBytes = "max_bytes" }
+    }
     private let lock = NSLock()
     private let recordsURL: URL
     private let keyURL: URL
@@ -54,9 +59,14 @@ final class BridgeAdmissionIssuer {
         let limits = directory.appendingPathComponent("limits.json")
         do {
             try Self.validatePath(limits, directory: false, create: false)
+            let size = (try FileManager.default.attributesOfItem(atPath: limits.path)[.size] as? NSNumber)?.intValue ?? -1
+            guard size > 0, size <= 4096 else { return nil }
             let data = try Data(contentsOf: limits)
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], let maxRecords = object["max_records"] as? Int, let maxBytes = object["max_bytes"] as? Int else { return nil }
-            self.init(directory: directory, maxRecords: maxRecords, maxBytes: maxBytes)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Set(object.keys) == Set(["max_records", "max_bytes"]) else { return nil }
+            let decoded = try JSONDecoder().decode(Limits.self, from: data)
+            guard decoded.maxRecords > 0, decoded.maxBytes > 0 else { return nil }
+            self.init(directory: directory, maxRecords: decoded.maxRecords, maxBytes: decoded.maxBytes)
         } catch { return nil }
     }
 

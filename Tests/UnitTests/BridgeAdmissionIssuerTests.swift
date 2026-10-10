@@ -61,6 +61,19 @@ final class BridgeAdmissionIssuerTests: XCTestCase {
         XCTAssertNotEqual(debug.admission?.admissionId, "unknown")
     }
 
+    func testProvisionedLimitsRejectBooleanAndUnknownFields() throws {
+        let (_, root) = try makeIssuer()
+        defer { cleanup(root) }
+        let limits = root.appendingPathComponent("limits.json")
+        for value in ["{\"max_records\":true,\"max_bytes\":4096}", "{\"max_records\":4,\"max_bytes\":4096,\"unknown\":1}"] {
+            try Data(value.utf8).write(to: limits)
+            chmod(limits.path, 0o600)
+            XCTAssertNil(BridgeAdmissionIssuer(provisionedDirectory: root))
+        }
+        try Data("{\"max_records\":4,\"max_bytes\":4096}".utf8).write(to: limits)
+        XCTAssertNotNil(BridgeAdmissionIssuer(provisionedDirectory: root))
+    }
+
     func testMissingPairByteCapAndSymlinkStayUnknown() throws {
         let (issuer, root) = try makeIssuer(maxBytes: 2)
         defer { cleanup(root) }
