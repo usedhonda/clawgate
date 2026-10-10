@@ -48,6 +48,11 @@ those original objects; copied or merged objects return `null`. This is source
 carry for a future receiver, not host authority or a new RPC, and it makes no
 watcher claim for events without an admission envelope.
 
+Inbound processing mutates a separate top-level/payload projection, never the
+authenticated original object. Burst coalescing carries the ordered original
+references separately from merged dispatch text. The projection itself gains
+no verified binding; retaining originals does not invoke a host receiver.
+
 `Tests/Fixtures/bridge-poll-signing-v1.json` is an intentionally synthetic
 Swift/Node exact-byte vector, not a deployment key. Source tests and an unsigned
 compatibility poll do not prove caller activation or phone playback.

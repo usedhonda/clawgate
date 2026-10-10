@@ -1670,6 +1670,20 @@ export function normalizeCompactLine(text) {
   return `${text || ""}`.replace(/\s+/g, " ").trim();
 }
 
+// Keep authenticated poll objects untouched while the gateway prepares its
+// mutable dispatch projection. The original reference is carried separately
+// for a future receiver; no provenance or authority is added to the copy.
+export function prepareInboundEventProjection(originalEvent, eventText) {
+  const projectedEvent = {
+    ...originalEvent,
+    payload: {
+      ...(originalEvent?.payload || {}),
+      text: eventText,
+    },
+  };
+  return { event: projectedEvent, originalEvents: [originalEvent] };
+}
+
 export function containsJapaneseText(text) {
   return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(`${text || ""}`);
 }
@@ -2891,7 +2905,7 @@ export function buildMsgContext(event, accountId, defaultConversation) {
  * @param {string} [params.defaultConversation]
  * @param {object} [params.log]
  */
-async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConversation, log, sendTmuxMessage }) {
+async function handleInboundMessage({ event, originalEvents = [], accountId, apiUrl, cfg, defaultConversation, log, sendTmuxMessage }) {
   const runtime = getRuntime();
   const traceId = makeTraceId("line", event);
   if (!event.payload) event.payload = {};
@@ -4687,8 +4701,10 @@ export async function startAccount(ctx) {
     if ((baseEvent.adapter || "line") === "line") recordLineDispatch(mergedText);
 
     try {
+      const originalEvents = entries.flatMap((entry) => entry.originalEvents || []);
       await handleInboundMessage({
         event: baseEvent,
+        originalEvents,
         accountId,
         apiUrl,
         cfg,
@@ -4710,6 +4726,7 @@ export async function startAccount(ctx) {
 
   const enqueueLineBurstEvent = ({
     event,
+    originalEvents,
     eventText,
     traceId,
     conversation,
@@ -4741,6 +4758,7 @@ export async function startAccount(ctx) {
     buffer.lastAt = now;
     buffer.entries.push({
       event: clonedEvent,
+      originalEvents: originalEvents || [],
       eventText,
       traceId,
       upstreamEventId,
@@ -4797,7 +4815,10 @@ export async function startAccount(ctx) {
       }
 
       if (poll.ok && poll.events?.length > 0) {
-        for (const event of poll.events) {
+        for (const originalEvent of poll.events) {
+          const projection = prepareInboundEventProjection(originalEvent, originalEvent?.payload?.text);
+          const event = projection.event;
+          const originalEvents = projection.originalEvents;
           if (abortSignal?.aborted) break;
 
           // Only process inbound_message events (skip echo_message, heartbeat, etc.)
@@ -5073,6 +5094,7 @@ export async function startAccount(ctx) {
 
           if (enqueueLineBurstEvent({
             event,
+            originalEvents,
             eventText,
             traceId,
             conversation,
@@ -5086,6 +5108,7 @@ export async function startAccount(ctx) {
           try {
             await handleInboundMessage({
               event,
+              originalEvents,
               accountId,
               apiUrl,
               cfg,
