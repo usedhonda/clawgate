@@ -8,6 +8,7 @@
  */
 
 import { execSync } from "node:child_process";
+import { createPollChallenge, verifyPollResponse } from "./bridge-admission.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const SEND_TIMEOUT_MS = 30_000;
@@ -128,9 +129,22 @@ export async function clawgateConfig(apiUrl) {
  * @param {number} [since=0]
  * @returns {Promise<{ok: boolean, events: Array, next_cursor: number}>}
  */
-export async function clawgatePoll(apiUrl, since = 0) {
+export async function clawgatePoll(apiUrl, since = 0, { issuerPublicKeyHex } = {}) {
   const path = since > 0 ? `/v1/poll?since=${since}` : "/v1/poll";
-  return request(apiUrl, path);
+  if (issuerPublicKeyHex === undefined) return request(apiUrl, path);
+  const challenge = createPollChallenge();
+  const headers = { "X-ClawGate-Challenge": challenge };
+  if (clawgateAuthToken) headers.Authorization = `Bearer ${clawgateAuthToken}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${apiUrl}${path}`, {
+      method: "GET", headers, redirect: "error", signal: controller.signal,
+    });
+    const body = Buffer.from(await res.arrayBuffer());
+    return verifyPollResponse({ publicKeyHex: issuerPublicKeyHex, challenge, uri: path,
+      status: res.status, headers: res.headers, body });
+  } finally { clearTimeout(timer); }
 }
 
 /**

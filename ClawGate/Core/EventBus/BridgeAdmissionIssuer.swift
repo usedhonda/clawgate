@@ -48,6 +48,7 @@ final class BridgeAdmissionIssuer {
     private let issuerKeyId: String?
     private var records: [PersistedRecord] = []
     private var unavailableReason: String?
+    private var journalBytes = 0
 
     convenience init?(provisionedDirectory directory: URL) {
         let limits = directory.appendingPathComponent("limits.json")
@@ -59,7 +60,7 @@ final class BridgeAdmissionIssuer {
         } catch { return nil }
     }
 
-    init(directory: URL, maxRecords: Int, maxBytes: Int) {
+    init(directory: URL, maxRecords: Int, maxBytes: Int, initializeForTesting: Bool = false) {
         self.recordsURL = directory.appendingPathComponent("admissions.jsonl")
         self.keyURL = directory.appendingPathComponent("issuer.key")
         self.generationURL = directory.appendingPathComponent("generation.json")
@@ -92,12 +93,19 @@ final class BridgeAdmissionIssuer {
             } else if generationExist || recordsExist {
                 throw NSError(domain: "issuer", code: 13)
             } else {
+                // Production provisioning must establish the pair explicitly. A lost
+                // pair under an existing key must never mint a fresh generation.
+                guard initializeForTesting else { throw NSError(domain: "issuer", code: 18) }
                 loadedGeneration = UUID().uuidString.lowercased()
                 let data = try JSONEncoder().encode(Generation(value: loadedGeneration, issuerKeyId: Self.keyId(for: loadedKey!.publicKey.rawRepresentation)))
                 try Self.atomicWrite(data, to: generationURL)
                 try Self.atomicWrite(Data(), to: recordsURL)
             }
-            guard let data = try? Data(contentsOf: recordsURL) else { throw NSError(domain: "issuer", code: 16) }
+            let size = (try FileManager.default.attributesOfItem(atPath: recordsURL.path)[.size] as? NSNumber)?.intValue ?? -1
+            guard size >= 0, size <= maxBytes else { throw NSError(domain: "issuer", code: 16) }
+            let data = try Data(contentsOf: recordsURL)
+            guard data.count == size, data.isEmpty || data.last == 10 else { throw NSError(domain: "issuer", code: 16) }
+            journalBytes = size
             records = try data.split(separator: 10).map { try JSONDecoder().decode(PersistedRecord.self, from: Data($0)) }
             let keyID = Self.keyId(for: loadedKey!.publicKey.rawRepresentation)
             guard records.count <= maxRecords, data.count <= maxBytes, Set(records.map { $0.admission.admissionId }).count == records.count,
@@ -139,14 +147,14 @@ final class BridgeAdmissionIssuer {
             return BridgeAdmission(admissionId: admission.admissionId, generation: generation, eventId: eventId, eventType: type, adapter: adapter, observedAt: observedAt, provenance: .unknown, issuerKeyId: issuerKeyId, failureReason: unavailableReason)
         }
         let line = recordData + Data([10])
-        let currentBytes = ((try? FileManager.default.attributesOfItem(atPath: recordsURL.path)[.size]) as? NSNumber)?.intValue ?? 0
-        guard currentBytes + line.count <= maxBytes else {
+        guard line.count <= maxBytes - journalBytes else {
             return BridgeAdmission(admissionId: admission.admissionId, generation: generation, eventId: eventId, eventType: type, adapter: adapter, observedAt: observedAt, provenance: .unknown, issuerKeyId: issuerKeyId, failureReason: "issuer_capacity")
         }
-        guard Self.appendDurably(line, to: recordsURL) else {
+        guard Self.appendDurably(line, to: recordsURL, expectedBytes: journalBytes) else {
             unavailableReason = "issuer_store_write_failed"
             return BridgeAdmission(admissionId: admission.admissionId, generation: generation, eventId: eventId, eventType: type, adapter: adapter, observedAt: observedAt, provenance: .unknown, issuerKeyId: issuerKeyId, failureReason: unavailableReason)
         }
+        journalBytes += line.count
         records.append(PersistedRecord(admission: admission))
         return admission
     }
@@ -194,10 +202,16 @@ final class BridgeAdmissionIssuer {
         guard directoryFD >= 0, fsync(directoryFD) == 0, close(directoryFD) == 0 else { throw NSError(domain: "issuer", code: 34) }
     }
 
-    private static func appendDurably(_ data: Data, to url: URL) -> Bool {
+    private static func appendDurably(_ data: Data, to url: URL, expectedBytes: Int) -> Bool {
         let fd = open(url.path, O_WRONLY | O_APPEND | O_NOFOLLOW)
         guard fd >= 0 else { return false }
         defer { close(fd) }
+        guard flock(fd, LOCK_EX) == 0 else { return false }
+        defer { flock(fd, LOCK_UN) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == getuid(), info.st_mode & 0o077 == 0,
+              info.st_size == expectedBytes else { return false }
         do {
             try data.withUnsafeBytes { raw in
                 var offset = 0

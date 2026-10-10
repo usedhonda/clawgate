@@ -11,7 +11,7 @@ final class BridgeAdmissionIssuerTests: XCTestCase {
         let keyURL = root.appendingPathComponent("issuer.key")
         try key.rawRepresentation.write(to: keyURL)
         chmod(keyURL.path, 0o600)
-        return (BridgeAdmissionIssuer(directory: root, maxRecords: maxRecords, maxBytes: maxBytes), root)
+        return (BridgeAdmissionIssuer(directory: root, maxRecords: maxRecords, maxBytes: maxBytes, initializeForTesting: true), root)
     }
 
     private func cleanup(_ root: URL) { try? FileManager.default.removeItem(at: root) }
@@ -26,7 +26,7 @@ final class BridgeAdmissionIssuerTests: XCTestCase {
         chmod(keyURL.path, 0o600)
         defer { try? FileManager.default.removeItem(at: root) }
 
-        let issuer = BridgeAdmissionIssuer(directory: root, maxRecords: 2, maxBytes: 4096)
+        let issuer = BridgeAdmissionIssuer(directory: root, maxRecords: 2, maxBytes: 4096, initializeForTesting: true)
         let first = issuer.admission(eventId: 1, type: "inbound_message", adapter: "line", observedAt: "2026-01-01T00:00:00Z", provenance: .watcherAccepted)
         XCTAssertEqual(first.provenance, .watcherAccepted)
         XCTAssertNil(first.failureReason)
@@ -59,6 +59,27 @@ final class BridgeAdmissionIssuerTests: XCTestCase {
         let debug = bus.appendDebugInjected(type: "inbound_message", adapter: "line", payload: ["admission": "watcher_accepted"])
         XCTAssertEqual(debug.admission?.provenance, .unknown)
         XCTAssertNotEqual(debug.admission?.admissionId, "unknown")
+    }
+
+    func testMissingPairByteCapAndSymlinkStayUnknown() throws {
+        let (issuer, root) = try makeIssuer(maxBytes: 2)
+        defer { cleanup(root) }
+        let bus = EventBus(admissionIssuer: issuer)
+        let event = bus.appendWatcherAccepted(type: "inbound_message", adapter: "line", payload: ["text": "synthetic-body"])
+        XCTAssertEqual(event.payload["text"], "synthetic-body")
+        XCTAssertEqual(event.admission?.failureReason, "issuer_capacity")
+        XCTAssertEqual(event.admission?.provenance, .unknown)
+        try FileManager.default.removeItem(at: root.appendingPathComponent("generation.json"))
+        try FileManager.default.removeItem(at: root.appendingPathComponent("admissions.jsonl"))
+        let missing = BridgeAdmissionIssuer(directory: root, maxRecords: 4, maxBytes: 4096)
+        XCTAssertEqual(missing.admission(eventId: 2, type: "inbound_message", adapter: "line", observedAt: "synthetic", provenance: .watcherAccepted).provenance, .unknown)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("generation.json").path))
+        let target = root.appendingPathComponent("target")
+        try Data("untouched".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("admissions.jsonl"), withDestinationURL: target)
+        let symlinked = BridgeAdmissionIssuer(directory: root, maxRecords: 4, maxBytes: 4096)
+        XCTAssertEqual(symlinked.admission(eventId: 3, type: "inbound_message", adapter: "line", observedAt: "synthetic", provenance: .watcherAccepted).provenance, .unknown)
+        XCTAssertEqual(try String(contentsOf: target), "untouched")
     }
 
     func testReopenCorruptionAndDirectoryReplacementStayUnknown() throws {
