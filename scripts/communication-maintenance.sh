@@ -13,9 +13,33 @@ plugin_dst="${CLAWGATE_COMMUNICATION_PLUGIN_DEST:-${HOME}/.openclaw/extensions/c
 plugin_client_only="${CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY:-0}"
 skip_plugin_sync="${CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC:-0}"
 candidate_files="${CLAWGATE_COMMUNICATION_CANDIDATE_FILES:-}"
+candidate_root="${CLAWGATE_COMMUNICATION_CANDIDATE_ROOT:-$project_path}"
+candidate_manifest="${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
 staged_app="${CLAWGATE_COMMUNICATION_STAGED_APP:-}"
 state_dir="${CLAWGATE_COMMUNICATION_BACKUP_DIR:-$project_path/.runtime/communication-maintenance}"
 state_file="$state_dir/current-op"
+
+assert_no_symlink_components() {
+  local base="$1" rel="$2" cursor component
+  cursor="$base"
+  IFS='/' read -r -a components <<< "$rel"
+  for component in "${components[@]}"; do
+    [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || continue
+    cursor="$cursor/$component"
+    [[ ! -L "$cursor" ]] || { echo "Refusing symlink path component: $cursor" >&2; return 1; }
+  done
+}
+
+candidate_manifest_rel=""
+if [[ -n "$candidate_manifest" ]]; then
+  candidate_manifest_rel="$(python3 - "$candidate_root" "$candidate_manifest" <<'PY'
+import pathlib, sys
+root = pathlib.Path(sys.argv[1]).resolve()
+path = pathlib.Path(sys.argv[2]).resolve()
+print(path.relative_to(root))
+PY
+)"
+fi
 
 [[ "$plugin_dst" == /* && "$plugin_dst" != */.. && "$plugin_dst" != */../* ]] || {
   echo "Refusing unexpected plugin destination: $plugin_dst" >&2
@@ -62,11 +86,32 @@ case "$mode" in
       : > "$app_marker"
       cp -R "$staged_app" "$app_target"
     fi
-    if [[ "$skip_plugin_sync" != "1" ]]; then
-      [[ -n "$candidate_files" ]] || { echo "Declared candidate file list is required for plugin apply." >&2; exit 1; }
+    if [[ -n "$candidate_files" ]]; then
       rels=()
       while IFS= read -r rel; do
+        [[ -n "$rel" && "$rel" != "$candidate_manifest_rel" ]] || continue
+        if [[ "$rel" != extensions/openclaw-plugin/* ]]; then
+          src="$candidate_root/$rel"
+          dst="$project_path/$rel"
+          assert_no_symlink_components "$candidate_root" "$rel"
+          assert_no_symlink_components "$project_path" "$rel"
+          [[ -f "$src" && ! -L "$src" ]] || { echo "Missing source candidate: $src" >&2; exit 1; }
+          [[ ! -d "$dst" ]] || { echo "Refusing directory source destination: $dst" >&2; exit 1; }
+          backup="$backup_path/source/$rel"
+          if [[ -e "$dst" || -L "$dst" ]]; then
+            [[ ! -L "$dst" ]] || { echo "Refusing symlink source destination: $dst" >&2; exit 1; }
+            mkdir -p "$(dirname "$backup")"
+            cp -p "$dst" "$backup"
+            printf 'restore-source\t%s\n' "$rel" >> "$files_file"
+          else
+            printf 'remove-source\t%s\n' "$rel" >> "$files_file"
+          fi
+          mkdir -p "$(dirname "$dst")"
+          cp -p "$src" "$dst"
+          continue
+        fi
         [[ "$rel" == extensions/openclaw-plugin/* ]] || continue
+        [[ "$skip_plugin_sync" != "1" ]] || continue
         rel="${rel#extensions/openclaw-plugin/}"
         [[ "$plugin_client_only" != "1" || "$rel" == src/client.js ]] || continue
         rels+=("$rel")
@@ -77,6 +122,7 @@ case "$mode" in
         src="$plugin_src/$rel"
         dst="$plugin_dst/$rel"
         backup="$backup_path/$rel"
+        assert_no_symlink_components "$plugin_dst" "$rel"
         if [[ -L "$dst" ]]; then
           echo "Refusing symlinked plugin file: $dst" >&2
           exit 1
@@ -107,9 +153,17 @@ case "$mode" in
       app_target="$project_path/ClawGate.app"
       [[ ! -L "$app_target" ]] || { echo "Live app bundle is symlinked: $app_target" >&2; exit 1; }
       [[ -d "$backup_path/ClawGate.app.previous" ]] || { echo "App rollback backup is missing." >&2; exit 1; }
+      pkill -f "$app_target/Contents/MacOS/ClawGate" >/dev/null 2>&1 || true
+      for ((wait=1; wait<=10; wait++)); do
+        pgrep -f "$app_target/Contents/MacOS/ClawGate" >/dev/null 2>&1 || break
+        sleep 1
+      done
+      if pgrep -f "$app_target/Contents/MacOS/ClawGate" >/dev/null 2>&1; then
+        echo "ClawGate.app did not stop before rollback." >&2
+        exit 1
+      fi
       mv "$app_target" "$backup_path/ClawGate.app.failed" 2>/dev/null || true
       mv "$backup_path/ClawGate.app.previous" "$app_target"
-      open -na "$app_target" >/dev/null 2>&1 || true
     fi
     while IFS=$'\t' read -r action rel; do
       [[ -n "$rel" ]] || continue
@@ -117,16 +171,32 @@ case "$mode" in
       dst="$plugin_dst/$rel"
       case "$action" in
         restore)
+          assert_no_symlink_components "$plugin_dst" "$rel"
           mkdir -p "$(dirname "$dst")"
           cp -p "$backup_path/$rel" "$dst"
           ;;
         remove)
+          assert_no_symlink_components "$plugin_dst" "$rel"
           [[ ! -L "$dst" ]] || { echo "Refusing symlinked rollback file: $dst" >&2; exit 1; }
+          rm -f "$dst"
+          ;;
+        restore-source)
+          dst="$project_path/$rel"
+          assert_no_symlink_components "$project_path" "$rel"
+          mkdir -p "$(dirname "$dst")"
+          cp -p "$backup_path/source/$rel" "$dst"
+          ;;
+        remove-source)
+          dst="$project_path/$rel"
+          assert_no_symlink_components "$project_path" "$rel"
+          [[ ! -L "$dst" ]] || { echo "Refusing symlink rollback file: $dst" >&2; exit 1; }
           rm -f "$dst"
           ;;
         *) echo "Unknown changed-file action: $action" >&2; exit 1 ;;
       esac
     done < "$files_file"
+    restart_args=(--project-path "$project_path" --skip-build --skip-sync --skip-plugin-sync --skip-sign)
+    "$script_root/restart-local-clawgate.sh" "${restart_args[@]}"
     ;;
   *)
     echo "Usage: $0 [apply|rollback]" >&2

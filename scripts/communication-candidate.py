@@ -43,6 +43,11 @@ def main():
         path = (root / rel).resolve()
         if not path.is_relative_to(root) or not path.is_file() or path.is_symlink():
             fail("file_missing_or_symlink")
+        cursor = root
+        for component in pathlib.PurePosixPath(rel).parts:
+            cursor /= component
+            if cursor.is_symlink():
+                fail("symlink_component")
         # A local candidate may only name tracked repository payloads. The
         # remote inert stage intentionally has no .git checkout, so its
         # already-admitted files are validated by hash/path there.
