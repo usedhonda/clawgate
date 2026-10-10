@@ -2,6 +2,7 @@ import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 
 // Public pin verification establishes bridge origin, not message author or RPC authority.
 const admittedEvents = new WeakMap();
+const pollEvidence = new WeakMap();
 const hex64 = /^[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 function freezeJson(value) {
@@ -26,31 +27,53 @@ export function verifyPollResponse({ publicKeyHex, challenge, uri, status, heade
   if (!hex64.test(publicKeyHex || "") || !hex64.test(challenge || "")) {
     throw new Error("bridge_poll_invalid_pin_or_challenge");
   }
+  // Snapshot all signed inputs before reading or parsing them. The caller may
+  // reuse and mutate its Buffer/Headers after this function returns.
+  const rawBody = Buffer.from(body);
+  const requestUri = String(uri);
+  const requestChallenge = String(challenge);
+  const responseStatus = status;
+  const issuerVersion = headers.get("x-clawgate-issuer-version") || "";
+  const issuerKeyId = headers.get("x-clawgate-issuer-key-id") || "";
+  const issuerSignature = headers.get("x-clawgate-issuer-signature") || "";
   const raw = Buffer.from(publicKeyHex, "hex");
   const keyId = createHash("sha256").update(raw).digest("hex");
-  const signatureText = headers.get("x-clawgate-issuer-signature") || "";
-  const signature = Buffer.from(signatureText, "base64");
-  if (status !== 200 || headers.get("x-clawgate-issuer-version") !== "1"
-      || headers.get("x-clawgate-issuer-key-id") !== keyId
-      || signature.length !== 64 || signature.toString("base64") !== signatureText) {
+  const signature = Buffer.from(issuerSignature, "base64");
+  if (responseStatus !== 200 || issuerVersion !== "1"
+      || issuerKeyId !== keyId
+      || signature.length !== 64 || signature.toString("base64") !== issuerSignature) {
     throw new Error("bridge_poll_invalid_envelope");
   }
   // RFC8410 Ed25519 SubjectPublicKeyInfo prefix followed by exactly32 raw bytes.
   const key = createPublicKey({ key: Buffer.concat([
     Buffer.from("302a300506032b6570032100", "hex"), raw,
   ]), type: "spki", format: "der" });
-  if (!verify(null, pollSigningBytes({ method: "GET", uri, challenge, status, keyId, body }), key, signature)) {
+  if (!verify(null, pollSigningBytes({ method: "GET", uri: requestUri,
+    challenge: requestChallenge, status: responseStatus, keyId, body: rawBody }), key, signature)) {
     throw new Error("bridge_poll_signature_rejected");
   }
-  const response = JSON.parse(body.toString("utf8"));
+  const response = JSON.parse(rawBody.toString("utf8"));
   if (response.ok !== true || !Array.isArray(response.events)
       || !Number.isSafeInteger(response.next_cursor) || response.next_cursor < 0) {
     throw new Error("bridge_poll_invalid_response");
   }
+  const envelope = Object.freeze({
+    bodyBase64: rawBody.toString("base64"),
+    method: "GET",
+    uri: requestUri,
+    challenge: requestChallenge,
+    status: responseStatus,
+    responseHeaders: Object.freeze({
+      issuerVersion,
+      issuerKeyId,
+      issuerSignature,
+    }),
+  });
   const seen = new Set();
-  for (const event of response.events) {
+  response.events.forEach((event, eventIndex) => {
+    pollEvidence.set(event, Object.freeze({ envelope, eventIndex }));
     const a = event.admission;
-    if (!a) continue; // No protected identity is still unknown, never inferred from adapter.
+    if (!a) return; // No protected identity is still unknown, never inferred from adapter.
     const expected = ["admission_id", "generation", "event_id", "event_type", "adapter", "observed_at", "provenance"];
     const allowed = new Set([...expected, "issuer_key_id", "failure_reason"]);
     if (typeof a !== "object" || Array.isArray(a) || Object.keys(a).some(k => !allowed.has(k))
@@ -67,7 +90,7 @@ export function verifyPollResponse({ publicKeyHex, challenge, uri, status, heade
     if (a.provenance !== "unknown") seen.add(a.admission_id);
     const proof = Object.freeze({ ...a, responseKeyId: keyId });
     admittedEvents.set(event, proof);
-  }
+  });
   // Retain the exact signed projection: a verified object must not later carry
   // different content while retaining its WeakMap admission capability.
   return freezeJson(response);
@@ -76,4 +99,10 @@ export function verifyPollResponse({ publicKeyHex, challenge, uri, status, heade
 // WeakMap binding cannot be minted by ReplyPayload, event.extra or a copied JSON object.
 export function verifiedBridgeAdmission(event) {
   return event && typeof event === "object" ? admittedEvents.get(event) ?? null : null;
+}
+
+// Exact signed poll evidence is available only for original response event
+// objects. Copies and merged payloads cannot mint this source binding.
+export function verifiedBridgePollEvidence(event) {
+  return event && typeof event === "object" ? pollEvidence.get(event) ?? null : null;
 }

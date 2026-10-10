@@ -39,6 +39,15 @@ admission is used. Copied payloads cannot mint the local verified-event binding.
 The signed debug provenance remains debug. Missing proof is unknown, not a
 LINE-origin assertion, author authentication or command permission.
 
+After verification, the plugin privately binds each original event object to one
+shared immutable evidence envelope. The envelope contains the exact response
+body as base64, `GET`, request URI, challenge, status, and the validated issuer
+version/key-id/signature strings, plus the event's original array index. The
+`verifiedBridgePollEvidence` getter returns `{ envelope, eventIndex }` only for
+those original objects; copied or merged objects return `null`. This is source
+carry for a future receiver, not host authority or a new RPC, and it makes no
+watcher claim for events without an admission envelope.
+
 `Tests/Fixtures/bridge-poll-signing-v1.json` is an intentionally synthetic
 Swift/Node exact-byte vector, not a deployment key. Source tests and an unsigned
 compatibility poll do not prove caller activation or phone playback.
