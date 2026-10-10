@@ -96,14 +96,18 @@ communication_require_admission
 communication_remote_preflight() {
   local manifest="${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}"
   local current="${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}"
-  local remote_check="${CLAWGATE_COMMUNICATION_REMOTE_CHECK_SCRIPT:-$HOME/projects/openclaw/oc-general/scripts/check-communication-change}"
+  local remote_check="${CLAWGATE_COMMUNICATION_REMOTE_CHECK_SCRIPT:-}"
   [[ -n "$manifest" && -n "$current" ]] || {
     echo "Remote communication preflight requires both manifest and current paths." >&2
     return 1
   }
   printf -v manifest_q '%q' "$manifest"
   printf -v current_q '%q' "$current"
-  printf -v check_q '%q' "$remote_check"
+  if [[ -n "$remote_check" ]]; then
+    printf -v check_q '%q' "$remote_check"
+  else
+    check_q='$HOME/projects/openclaw/oc-general/scripts/check-communication-change'
+  fi
   ssh "$REMOTE_HOST" "test -f $check_q && python3 $check_q --manifest $manifest_q --current $current_q"
 }
 if communication_admission_requested; then
