@@ -56,6 +56,7 @@ import {
   capText,
 } from "./context-cache.js";
 import { createProjectViewReader } from "./project-view.js";
+import { setLineReplyTtsRuntime, queueConfirmedLineReplyTts, createLineReplyExpectation, observeLineReplyExpectation, confirmLineReplyExpectation } from "./line-reply-tts.js";
 
 /** @type {import("openclaw/plugin-sdk").PluginRuntime | null} */
 let _runtime = null;
@@ -65,6 +66,7 @@ let _activeMessenger = "line";
 
 export function setGatewayRuntime(runtime) {
   _runtime = runtime;
+  setLineReplyTtsRuntime(runtime);
 }
 
 function getRuntime() {
@@ -3002,6 +3004,13 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
   const deliver = async (payload) => {
     let text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
+    // Semantic finalization precedes routing/suppression. The dispatcher does
+    // not yet carry admitted origin or effective policy; do not infer either.
+    const replyExpectation = createLineReplyExpectation({
+      text, sourceReplySessionKey: ctx.SessionKey,
+      admittedOrigin: undefined, policySessionKey: undefined,
+    });
+    observeLineReplyExpectation(replyExpectation);
 
     // Extract <send_telegram> blocks — send those parts to Telegram, continue with remainder
     const telegramExtract = extractSendTelegramBlocks(text);
@@ -3269,7 +3278,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
     const lineText = normalizeLineReplyText(text, { project: event.payload?.project || "" });
     log?.debug?.(`clawgate: [${accountId}] collected reply block[${collectedLineBlocks.length + 1}] for "${conversation}": "${lineText.slice(0, 80)}"`);
-    collectedLineBlocks.push(lineText);
+    collectedLineBlocks.push({ text: lineText, replyExpectation });
   };
 
   try {
@@ -3287,7 +3296,7 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
 
       // Send each collected reply block as a separate LINE message.
       for (let bi = 0; bi < collectedLineBlocks.length; bi++) {
-        const blockText = collectedLineBlocks[bi];
+        const { text: blockText, replyExpectation } = collectedLineBlocks[bi];
         if (isRecentOutboundDuplicate(blockText)) {
           log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (reply block ${bi + 1}/${collectedLineBlocks.length}): "${blockText.slice(0, 60)}"`);
           continue;
@@ -3305,7 +3314,18 @@ async function handleInboundMessage({ event, accountId, apiUrl, cfg, defaultConv
         const outBlock = (tprojHeader && replyChannel !== "line") ? `[${tprojHeader.sender}] ${blockText}` : blockText;
         const outAction = replyChannel === "telegram" ? "telegram_send" : "line_send";
         try {
-          await sendTmuxMessage(conversation, outBlock, traceId, { channel: replyChannel });
+          const sendResult = await sendTmuxMessage(conversation, outBlock, traceId, { channel: replyChannel });
+          if (!sendResult?.ok) throw new Error("ClawGate reply send returned ok=false");
+          const textConfirmedAtMs = Date.now();
+          if (replyChannel === "line" && sendResult.deliveredChannel !== "telegram") {
+            const confirmedMessageId = sendResult.result?.message_id || sendResult.result?.messageId;
+            confirmLineReplyExpectation(replyExpectation, {
+              messageId: confirmedMessageId, deliveredChannel: "line", textConfirmedAtMs,
+            });
+            // Preserve installed legacy owner. Fallback is NOT confirmation evidence.
+            const messageId = String(confirmedMessageId || `${traceId}:block:${bi + 1}`);
+            queueConfirmedLineReplyTts({ text: blockText, traceId, messageId, log });
+          }
           traceLog(log, "info", {
             trace_id: traceId,
             stage: "gateway_forward_ok",

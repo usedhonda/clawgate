@@ -2,6 +2,7 @@
  * Outbound adapter — sends AI replies to LINE via ClawGate.
  */
 
+import { isLineConversationSession, queueConfirmedLineReplyTts, createLineReplyExpectation, observeLineReplyExpectation, confirmLineReplyExpectation } from "./line-reply-tts.js";
 import { resolveAccount } from "./config.js";
 import { clawgateSend, clawgateTmuxSend, setClawgateAuthToken } from "./client.js";
 import { getSessionMode, enqueueDevLaneText, lookupTprojOrigin } from "./shared-state.js";
@@ -118,11 +119,17 @@ export const outbound = {
    * @param {object} params.cfg
    * @returns {Promise<{channel: string, messageId: string, chatId: string, timestamp: number}>}
    */
-  sendMedia: async ({ to, text, mediaUrl, accountId, cfg, sessionKey }) => {
+  sendMedia: async ({ to, text, mediaUrl, accountId, cfg, sessionKey, replyAudioContext }) => {
     // LINE via ClawGate does not support media — send text fallback
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
     const caption = text || (mediaUrl ? `[media: ${mediaUrl}]` : "[media]");
+    const replyExpectation = createLineReplyExpectation({
+      text: caption, admittedOrigin: replyAudioContext?.admittedOrigin,
+      sourceReplySessionKey: replyAudioContext?.sourceReplySessionKey,
+      policySessionKey: replyAudioContext?.policySessionKey,
+    });
+    observeLineReplyExpectation(replyExpectation);
     // Dev-lane (autonomous/auto tmux): redirect the caption to the CC session
     // pane, not the user's LINE. observe stays on LINE (SPEC-messaging.md §6).
     const paneProject = devLanePaneProject(sessionKey);
@@ -145,6 +152,16 @@ export const outbound = {
       throw new Error(`clawgate send failed: ${result.error?.message ?? JSON.stringify(result)}`);
     }
 
+    const textConfirmedAtMs = Date.now();
+    confirmLineReplyExpectation(replyExpectation, {
+      messageId: result.result?.message_id, deliveredChannel: "line", textConfirmedAtMs,
+    });
+    if (isLineConversationSession(sessionKey)) {
+      queueConfirmedLineReplyTts({
+        text: caption, messageId: String(result.result?.message_id || `line-session:${sessionKey}:${Date.now()}`), emitText: true, log: null,
+      });
+    }
+
     return {
       channel: "clawgate",
       messageId: result.result?.message_id ?? `cg-${Date.now()}`,
@@ -153,9 +170,15 @@ export const outbound = {
     };
   },
 
-  sendText: async ({ to, text, accountId, cfg, sessionKey }) => {
+  sendText: async ({ to, text, accountId, cfg, sessionKey, replyAudioContext }) => {
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
+    const replyExpectation = createLineReplyExpectation({
+      text, admittedOrigin: replyAudioContext?.admittedOrigin,
+      sourceReplySessionKey: replyAudioContext?.sourceReplySessionKey,
+      policySessionKey: replyAudioContext?.policySessionKey,
+    });
+    observeLineReplyExpectation(replyExpectation);
     // Dev-lane (autonomous/auto tmux): route the reply back to the originating CC
     // session pane via adapter=tmux, NOT the user's LINE. The mode lives in the
     // plugin (sessionModes via shared-state); core only propagates sessionKey.
@@ -180,6 +203,16 @@ export const outbound = {
 
     if (!result.ok) {
       throw new Error(`clawgate send failed: ${result.error?.message ?? JSON.stringify(result)}`);
+    }
+
+    const textConfirmedAtMs = Date.now();
+    confirmLineReplyExpectation(replyExpectation, {
+      messageId: result.result?.message_id, deliveredChannel: "line", textConfirmedAtMs,
+    });
+    if (isLineConversationSession(sessionKey)) {
+      queueConfirmedLineReplyTts({
+        text: text, messageId: String(result.result?.message_id || `line-session:${sessionKey}:${Date.now()}`), log: null,
+      });
     }
 
     return {

@@ -58,6 +58,18 @@ mock.module("../shared-state.js", {
   },
 });
 
+// Capture the semantic boundary without enabling any observation RPC.
+let audioCalls = [];
+mock.module("../line-reply-tts.js", {
+  namedExports: {
+    isLineConversationSession: () => false,
+    queueConfirmedLineReplyTts: () => {},
+    createLineReplyExpectation: (fields) => { audioCalls.push(["create", fields]); return Object.freeze({ replyCorrelationId: "test-correlation" }); },
+    observeLineReplyExpectation: (handle) => { audioCalls.push(["expect", handle]); return { enabled: false }; },
+    confirmLineReplyExpectation: (handle, confirmation) => { audioCalls.push(["confirmed", handle, confirmation]); return { enabled: false }; },
+  },
+});
+
 // Import after mocks are installed
 const { outbound } = await import("../outbound.js");
 
@@ -325,5 +337,29 @@ describe("outbound conversation_hint mapping", () => {
       assert.equal(lastSendArgs, null);
       assert.equal(lastTmuxArgs, null);
     });
+  });
+});
+
+describe("disabled semantic audio caller boundary", () => {
+  it("retains unknown provenance and binds the actual successful message ID", async () => {
+    audioCalls = [];
+    stubAccount = makeAccount(); stubSessionMode = "ignore"; stubTprojOrigin = null;
+    await outbound.sendText({ ...baseSendParams, to: "default", sessionKey: "agent:main:main" });
+    assert.deepEqual(audioCalls.map(c => c[0]), ["create", "expect", "confirmed"]);
+    assert.equal(audioCalls[0][1].admittedOrigin, undefined);
+    assert.equal(audioCalls[0][1].policySessionKey, undefined);
+    assert.equal(audioCalls[2][1], audioCalls[1][1]);
+    assert.equal(audioCalls[2][2].messageId, "test-1");
+    assert.equal(audioCalls[2][2].deliveredChannel, "line");
+    assert.ok(Number.isSafeInteger(audioCalls[2][2].textConfirmedAtMs));
+  });
+  it("observes semantic media before pane redirect without a LINE confirmation", async () => {
+    audioCalls = [];
+    stubAccount = makeAccount(); stubSessionMode = "auto"; stubTprojOrigin = null; stubTmuxResult = null;
+    const replyAudioContext = { admittedOrigin: "unresolved-test-origin", sourceReplySessionKey: "source", policySessionKey: "policy" };
+    await outbound.sendMedia({ ...baseSendParams, to: "default", sessionKey: "agent:main:clawgate:default:tmux:example", replyAudioContext });
+    assert.deepEqual(audioCalls.map(c => c[0]), ["create", "expect"]);
+    assert.equal(audioCalls[0][1].sourceReplySessionKey, "source");
+    assert.equal(audioCalls[0][1].policySessionKey, "policy");
   });
 });

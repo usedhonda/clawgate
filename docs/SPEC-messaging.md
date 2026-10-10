@@ -1051,3 +1051,28 @@ host, sync that file explicitly, then run the canonical restart with
 source and destination files, copies atomically, and never deletes or
 overwrites other plugin files. It cannot be combined with a full plugin sync
 or Host A build/sign flow.
+
+### LINE reply audio expectation boundary (source-only, disabled)
+
+The canonical companion helper preserves the installed legacy audio handoff.
+The buffered reply dispatcher and outbound text/media callers allocate one
+immutable, body-free correlation handle at semantic finalization, before
+redirect, suppression or dedup decisions. Its fingerprint is SHA256 over the
+exact UTF8 semantic text, limited to 16384 UTF16 units. The correlation ID is
+not the post-send message ID. Confirmation uses only an actual successful
+LINE send's returned message ID and a clock captured at that success; legacy
+fallback IDs are never promoted into confirmation evidence.
+
+Observation helpers currently return `disabled` and cannot issue expect,
+confirmed or status RPCs. The existing private `line.reply-tts` version1 closed
+phase contract is normative in the ecosystem audio-fanout contract. Deployment
+and owner handoff acceptance are prerequisites for future activation; source
+reconciliation is not runtime acceptance. No new synthesis owner, retry,
+fallback, durable database or routing policy is introduced here.
+
+Admitted origin, source reply session and policy session are separate facts.
+The outbound caller's optional `replyAudioContext` is a preparation surface,
+not an accepted upstream wire. Missing provenance remains unknown. The buffered
+dispatcher currently supplies its ingress context session only; effective
+policy and admitted-origin propagation remain unresolved. Neither a LINE sink,
+a legacy session matcher nor a canonical main session fills those gaps.
