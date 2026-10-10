@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   setLineReplyTtsRuntime, isLineConversationSession, queueConfirmedLineReplyTts,
   createLineReplyExpectation, observeLineReplyExpectation, confirmLineReplyExpectation,
+  serializeLineReplyExpectation,
 } from "../line-reply-tts.js";
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
@@ -42,6 +43,27 @@ describe("installed LINE companion behavior", () => {
 });
 
 describe("disabled LINE semantic observation", () => {
+  it("prepares closed expect wire with unknown origin and separate bounded sessions without RPC", () => {
+    let rpcCount = 0;
+    setLineReplyTtsRuntime({ gateway: { request() { rpcCount++; } } });
+    const handle = createLineReplyExpectation({ text: "reply", sourceReplySessionKey: "source",
+      policySessionKey: "agent:main:clawgate:line:room" });
+    const packet = serializeLineReplyExpectation(handle);
+    assert.deepEqual(packet, { version: 1, phase: "expect", replyCorrelationId: handle.replyCorrelationId,
+      admittedOrigin: "unknown", sourceReplySessionKey: "source", policySessionKey: handle.policySessionKey,
+      semanticReplyFingerprint: handle.semanticReplyFingerprint });
+    assert.ok(Object.isFrozen(packet));
+    assert.equal(serializeLineReplyExpectation({ ...handle }), null);
+    assert.equal(serializeLineReplyExpectation(null), null);
+    for (const admittedOrigin of [null, "line", "unresolved"]) {
+      assert.equal(serializeLineReplyExpectation(createLineReplyExpectation({ text: "reply", admittedOrigin })).admittedOrigin, "unknown");
+    }
+    for (const field of ["sourceReplySessionKey", "policySessionKey"]) {
+      assert.ok(serializeLineReplyExpectation(createLineReplyExpectation({ text: "reply", [field]: "s".repeat(512) })));
+      assert.equal(serializeLineReplyExpectation(createLineReplyExpectation({ text: "reply", [field]: "s".repeat(513) })), null);
+    }
+    assert.equal(rpcCount, 0);
+  });
   it("mints one stable immutable body-free UUID handle per expectation", () => {
     const handle = createLineReplyExpectation({ text: "private-body", admittedOrigin: "unresolved", sourceReplySessionKey: "source", policySessionKey: "policy" });
     assert.equal(Object.isFrozen(handle), true);

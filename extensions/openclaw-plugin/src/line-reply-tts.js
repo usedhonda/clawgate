@@ -33,9 +33,10 @@ export function queueConfirmedLineReplyTts({ text, messageId, traceId, emitText 
   });
 }
 
-// Local semantic handles only. The Gateway admission enum is not yet pinned,
-// so these functions never serialize a wire request or call the runtime.
+// Local semantic handles only. Wire preparation does not establish admission
+// provenance or activate the new caller; observe/confirm never call runtime.
 const expectations = new WeakSet();
+const wireOrigins = new Set(["line_conversation", "typed_chat", "proactive", "recall", "cron", "tproj", "unknown"]);
 const disabledResult = Object.freeze({ enabled: false, status: "disabled" });
 const invalidHandleResult = Object.freeze({ enabled: false, status: "invalid_handle" });
 const invalidConfirmationResult = Object.freeze({ enabled: false, status: "invalid_confirmation" });
@@ -63,6 +64,24 @@ export function createLineReplyExpectation({ text, admittedOrigin, sourceReplySe
 export function observeLineReplyExpectation(handle) {
   if (handle == null) return disabledResult;
   return expectations.has(handle) ? disabledResult : invalidHandleResult;
+}
+
+// Closed Gateway expect shape, prepared but never sent here. Host-owned
+// verified admission carry must supply origin before caller activation.
+export function serializeLineReplyExpectation(handle) {
+  if (!handle || !expectations.has(handle)) return null;
+  const sessions = [handle.sourceReplySessionKey, handle.policySessionKey];
+  if (sessions.some(value => value !== null &&
+      (typeof value !== "string" || value.length === 0 || value.length > 512))) return null;
+  return Object.freeze({
+    version: 1,
+    phase: "expect",
+    replyCorrelationId: handle.replyCorrelationId,
+    admittedOrigin: wireOrigins.has(handle.admittedOrigin) ? handle.admittedOrigin : "unknown",
+    sourceReplySessionKey: handle.sourceReplySessionKey,
+    policySessionKey: handle.policySessionKey,
+    semanticReplyFingerprint: handle.semanticReplyFingerprint,
+  });
 }
 
 export function confirmLineReplyExpectation(handle, confirmation = {}) {

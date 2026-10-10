@@ -42,3 +42,13 @@ LINE-origin assertion, author authentication or command permission.
 `Tests/Fixtures/bridge-poll-signing-v1.json` is an intentionally synthetic
 Swift/Node exact-byte vector, not a deployment key. Source tests and an unsigned
 compatibility poll do not prove caller activation or phone playback.
+
+## Prepared reply expectation wire
+
+The plugin can prepare a closed version-1 `expect` object from its own semantic
+handle. Missing or non-enum origin becomes explicit `unknown`; source and policy
+sessions remain independent nullable strings, each bounded to 512 UTF-16 units.
+Destination or policy is never used to infer LINE origin. Copied handles fail.
+This serializer sends no RPC and does not establish host admission authority.
+The new observation/confirmation caller remains inactive pending host-owned
+verified admission carry and the complete exclusive-owner acceptance.
