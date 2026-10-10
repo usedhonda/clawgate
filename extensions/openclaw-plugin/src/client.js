@@ -8,7 +8,6 @@
  */
 
 import { execSync } from "node:child_process";
-import { createPollChallenge, verifyPollResponse } from "./bridge-admission.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const SEND_TIMEOUT_MS = 30_000;
@@ -132,6 +131,9 @@ export async function clawgateConfig(apiUrl) {
 export async function clawgatePoll(apiUrl, since = 0, { issuerPublicKeyHex } = {}) {
   const path = since > 0 ? `/v1/poll?since=${since}` : "/v1/poll";
   if (issuerPublicKeyHex === undefined) return request(apiUrl, path);
+  // Client-only legacy installs do not include the protected-poll module.
+  // A configured pin requires it; absence must fail rather than downgrade.
+  const { createPollChallenge, verifyPollResponse } = await import("./bridge-admission.js");
   const challenge = createPollChallenge();
   const headers = { "X-ClawGate-Challenge": challenge };
   if (clawgateAuthToken) headers.Authorization = `Bearer ${clawgateAuthToken}`;
