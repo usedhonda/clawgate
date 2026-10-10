@@ -4,6 +4,13 @@ import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 const admittedEvents = new WeakMap();
 const hex64 = /^[a-f0-9]{64}$/;
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+function freezeJson(value) {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) freezeJson(child);
+    Object.freeze(value);
+  }
+  return value;
+}
 export const createPollChallenge = () => randomBytes(32).toString("hex");
 export function pollSigningBytes({ method, uri, challenge, status, keyId, body }) {
   const values = [method, uri, challenge, String(status), keyId,
@@ -61,7 +68,9 @@ export function verifyPollResponse({ publicKeyHex, challenge, uri, status, heade
     const proof = Object.freeze({ ...a, responseKeyId: keyId });
     admittedEvents.set(event, proof);
   }
-  return response;
+  // Retain the exact signed projection: a verified object must not later carry
+  // different content while retaining its WeakMap admission capability.
+  return freezeJson(response);
 }
 
 // WeakMap binding cannot be minted by ReplyPayload, event.extra or a copied JSON object.

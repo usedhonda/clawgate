@@ -24,6 +24,16 @@ test("verified bridge bytes bind event identity; JSON copies cannot mint capabil
   assert.equal(verifiedBridgeAdmission(response.events[0]).provenance, "watcher_accepted");
   assert.equal(verifiedBridgeAdmission(structuredClone(response.events[0])), null);
 });
+test("verified events cannot retain admission while their signed content is mutated", () => {
+  const response = verifyPollResponse(envelope());
+  const verified = response.events[0];
+  assert.throws(() => { verified.payload.text = "changed"; }, TypeError);
+  assert.throws(() => { verified.adapter = "debug"; }, TypeError);
+  assert.throws(() => { verified.admission.provenance = "unknown"; }, TypeError);
+  assert.throws(() => { response.events.push(event); }, TypeError);
+  assert.equal(verified.payload.text, "fixture");
+  assert.equal(verifiedBridgeAdmission(verified).provenance, "watcher_accepted");
+});
 test("changed body, challenge, URI, status or pin is rejected", () => {
   const env = envelope();
   for (const patch of [{ body: Buffer.from(env.body.toString().replace("fixture", "changed")) },
