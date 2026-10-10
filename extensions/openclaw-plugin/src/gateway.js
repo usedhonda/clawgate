@@ -4607,8 +4607,11 @@ export async function startAccount(ctx) {
 
   const sendViaLine = async (conv, text, traceId = "") => {
     if (!lineAvailable) {
-      // LINE unavailable — fall back to Telegram
-      if (hasTelegram) return sendViaTelegram(text, traceId);
+      // Preserve the actual sink for LINE-only companion effects.
+      if (hasTelegram) {
+        const fallback = await sendViaTelegram(text, traceId);
+        return { ...fallback, deliveredChannel: "telegram" };
+      }
       log?.debug?.(`clawgate: [${accountId}] LINE skip`);
       return { ok: false };
     }
