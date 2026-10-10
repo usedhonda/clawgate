@@ -62,3 +62,57 @@ expected=$'check\nstop\napply\nstart'
 actual="$(<"$events")"
 [[ "$actual" == "$expected" ]] || { printf 'FAIL: order was:\n%s\n' "$actual" >&2; exit 1; }
 echo "communication restart guard: PASS (reject-before-effects, check-stop-apply-start)"
+
+# Wrapper rejection: unsupported preguard branches must not reach ssh/sync/deploy.
+spy_bin="$tmp/bin"
+mkdir -p "$spy_bin"
+for spy in ssh rsync scp defaults curl open swift codesign; do
+  cat > "$spy_bin/$spy" <<EOF
+#!/usr/bin/env bash
+echo $spy >> "\$COMMUNICATION_TEST_EVENTS"
+exit 99
+EOF
+  chmod 755 "$spy_bin/$spy"
+done
+if PATH="$spy_bin:$PATH" \
+   GATEWAY_RESTART_COMMUNICATION_MANIFEST="$tmp/manifest" \
+   GATEWAY_RESTART_COMMUNICATION_CURRENT="$tmp/current" \
+   COMMUNICATION_TEST_EVENTS="$events" \
+   "$ROOT/scripts/post-task-restart.sh" --remote-host fake --skip-plugin-sync >/dev/null 2>&1; then
+  echo "FAIL: preguard sync branch was accepted" >&2
+  exit 1
+fi
+[[ "$(<"$events")" == "$expected" ]] || { echo "FAIL: rejected wrapper reached an external effect" >&2; exit 1; }
+
+# Exact-file apply/rollback: preserve unrelated installed helpers and restore
+# only files touched by this operation.
+maintenance_project="$tmp/project"
+mkdir -p "$maintenance_project/extensions/openclaw-plugin/src" "$maintenance_project/scripts"
+cp "$ROOT/scripts/communication-maintenance.sh" "$maintenance_project/scripts/communication-maintenance.sh"
+cat > "$maintenance_project/scripts/restart-local-clawgate.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 755 "$maintenance_project/scripts/restart-local-clawgate.sh"
+printf 'new\n' > "$maintenance_project/extensions/openclaw-plugin/src/client.js"
+printf 'old\n' > "$tmp/home-client.js"
+export HOME="$tmp/home"
+mkdir -p "$HOME/.openclaw/extensions/clawgate/src"
+cp "$tmp/home-client.js" "$HOME/.openclaw/extensions/clawgate/src/client.js"
+printf 'keep\n' > "$HOME/.openclaw/extensions/clawgate/third-party-helper.js"
+CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state" \
+  "$ROOT/scripts/communication-maintenance.sh" apply
+[[ "$(<"$HOME/.openclaw/extensions/clawgate/src/client.js")" == "new" ]] || { echo "FAIL: apply did not update owned file" >&2; exit 1; }
+[[ -f "$HOME/.openclaw/extensions/clawgate/third-party-helper.js" ]] || { echo "FAIL: apply removed unrelated helper" >&2; exit 1; }
+CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state" \
+  "$ROOT/scripts/communication-maintenance.sh" rollback
+[[ "$(<"$HOME/.openclaw/extensions/clawgate/src/client.js")" == "old" ]] || { echo "FAIL: rollback did not restore owned file" >&2; exit 1; }
+[[ -f "$HOME/.openclaw/extensions/clawgate/third-party-helper.js" ]] || { echo "FAIL: rollback removed unrelated helper" >&2; exit 1; }
+CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state-skip" \
+CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC=1 \
+  "$ROOT/scripts/communication-maintenance.sh" apply
+[[ "$(<"$HOME/.openclaw/extensions/clawgate/src/client.js")" == "old" ]] || { echo "FAIL: skip-plugin-sync was ignored" >&2; exit 1; }
+echo "maintenance exact-file apply/rollback: PASS"

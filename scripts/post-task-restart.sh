@@ -92,10 +92,19 @@ fi
 
 cd "$PROJECT_PATH"
 source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
-communication_preflight
+communication_require_admission
 if communication_admission_requested; then
+  if [[ "$SKIP_SYNC" != "true" || "$BUILD_HOSTA" == "true" || "$SIGNED_BUNDLE" == "true" ]]; then
+    echo "Communication admission currently supports only --skip-sync restart-only flow; build-hosta, signed-bundle, and preguard sync are rejected before effects." >&2
+    exit 1
+  fi
+  if [[ -n "${FEDERATION_TOKEN:-}" ]]; then
+    echo "FEDERATION_TOKEN cannot be written before communication admission; unset it and retry the admitted flow." >&2
+    exit 1
+  fi
   export CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH"
   export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY="$([[ "$PLUGIN_CLIENT_ONLY" == "true" ]] && echo 1 || echo 0)"
+  export CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC="$([[ "$SKIP_PLUGIN_SYNC" == "true" ]] && echo 1 || echo 0)"
   export CLAWGATE_COMMUNICATION_MAINTENANCE_HOOK="$PROJECT_PATH/scripts/communication-maintenance-apply.sh"
   export CLAWGATE_COMMUNICATION_ROLLBACK_HOOK="$PROJECT_PATH/scripts/communication-maintenance-rollback.sh"
 fi
@@ -226,24 +235,10 @@ fi
 if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   # Capture before local restart; this is a read-only defaults(1) read.
   AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
-  if communication_admission_requested; then
-    echo "[local] Defer Host B app/Gateway restart to admitted maintenance"
-  else
-    echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
-    ./scripts/restart-local-clawgate.sh --skip-plugin-sync
-  fi
+  echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
+  ./scripts/restart-local-clawgate.sh --skip-plugin-sync
   echo "[hostA] Deploy locally signed bundle (no remote build/sign)"
   ./scripts/deploy-signed-bundle.sh --remote-host "$REMOTE_HOST"
-  if communication_admission_requested; then
-    echo "[hostA] Restart Gateway through admitted maintenance"
-    ./scripts/restart-macmini-openclaw \
-      --remote-host "$REMOTE_HOST" \
-      --project-path "$PROJECT_PATH" \
-      --skip-build \
-      --skip-plugin-sync
-    echo "[local] Restart Host B app/Gateway through admitted maintenance"
-    communication_gateway_restart
-  fi
 elif [[ "$SKIP_SYNC" != "true" ]]; then
   ./scripts/sync-same-path-to-macmini.sh --remote-host "$REMOTE_HOST"
 fi
@@ -298,7 +293,7 @@ fi
 if [[ "$SIGNED_BUNDLE" != "true" ]]; then
   echo "[local] Restart Host B ClawGate.app"
   if communication_admission_requested; then
-    communication_gateway_restart
+    ./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-plugin-sync --skip-sign
   else
     LOCAL_RESTART_ARGS=(./scripts/restart-local-clawgate.sh)
     if [[ "$SKIP_PLUGIN_SYNC" == "true" ]]; then

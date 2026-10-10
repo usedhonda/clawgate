@@ -58,6 +58,10 @@ fi
 cd "$PROJECT_PATH"
 source "$PROJECT_PATH/scripts/lib-communication-restart.sh"
 communication_preflight
+if communication_admission_requested; then
+  echo "Communication admission does not support build/sign in this wrapper; use the admitted restart-only route after staged deployment." >&2
+  exit 1
+fi
 
 echo "[1/6] Locate signing keychain"
 SIGNING_KEYCHAIN=""
@@ -140,6 +144,7 @@ echo "[6/6] Restart ClawGate + OpenClaw gateway"
 if communication_admission_requested; then
   export CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH"
   export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY=0
+  export CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC="$([[ "$SKIP_PLUGIN_SYNC" == "true" ]] && echo 1 || echo 0)"
   CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH" communication_gateway_restart
 else
   RESTART_ARGS=(--skip-build --skip-sync --skip-sign)
