@@ -24,16 +24,22 @@ case "$authority" in
   *) echo "Refusing to deploy bundle without Developer ID signature" >&2; exit 1 ;;
 esac
 expected_hash="$(shasum -a 256 "$app/Contents/MacOS/ClawGate" | awk '{print $1}')"
+base_hash="$(ssh "$remote_host" "shasum -a 256 '$project_path/ClawGate.app/Contents/MacOS/ClawGate' 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true)"
+if [[ "$COMMUNICATION_STAGE" == "true" && ! "$base_hash" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "Unable to read remote base app hash for staged deployment." >&2
+  exit 1
+fi
 archive=".local/clawgate-signed-$$.tgz"
 remote_archive="/tmp/clawgate-signed-$$.tgz"
 tar -czf "$archive" "$app"
 scp -q "$archive" "$remote_host:$remote_archive"
 
-ssh "$remote_host" /bin/bash -s -- "$remote_archive" "$expected_hash" "$COMMUNICATION_STAGE" <<'REMOTE'
+ssh "$remote_host" /bin/bash -s -- "$remote_archive" "$expected_hash" "$COMMUNICATION_STAGE" "$base_hash" <<'REMOTE'
 set -euo pipefail
 archive="$1"
 expected_hash="$2"
 stage_only="$3"
+base_hash="$4"
 project="$HOME/projects/ios/clawgate"
 stage="$project/.runtime/deploy-stage-$$"
 backup="$project/.runtime/ClawGate.app.pre-$(date +%Y%m%d-%H%M%S)"
@@ -49,6 +55,8 @@ actual_hash="$(shasum -a 256 "$stage/ClawGate.app/Contents/MacOS/ClawGate" | awk
 [[ "$actual_hash" == "$expected_hash" ]] || { echo "Transferred binary hash mismatch" >&2; exit 1; }
 
 if [[ "$stage_only" == "true" ]]; then
+  current_hash="$(shasum -a 256 "$project/ClawGate.app/Contents/MacOS/ClawGate" 2>/dev/null | awk '{print $1}')"
+  [[ "$current_hash" == "$base_hash" ]] || { echo "Remote base app hash changed during staging." >&2; exit 1; }
   printf '%s\n' "$stage/ClawGate.app" > "$project/.runtime/communication-staged-app.path"
   echo "STAGED_APP_PATH=$stage/ClawGate.app"
   exit 0
