@@ -24,6 +24,12 @@ byte limits are coherent. Production never recreates a missing pair under an
 existing key. Generic events carry only the closed unknown sentinel; they do
 not consume admission capacity. The append-only journal contains no event body.
 Storage/key failures remain `unknown` and do not suppress normal events.
+Debug or watcher events with reload-incompatible admission metadata (including
+an empty type, adapter, or observation timestamp, or a non-positive event ID)
+are also classified as `unknown` and are never appended to the journal. The
+event itself remains visible to the normal event path; after reopening the
+issuer, a later valid admission can be recorded normally. This validation does
+not promote debug provenance or establish any host authority.
 
 
 ## Explicit provisioning and verification

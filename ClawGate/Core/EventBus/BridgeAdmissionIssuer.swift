@@ -147,6 +147,13 @@ final class BridgeAdmissionIssuer {
     func admission(eventId: Int64, type: String, adapter: String, observedAt: String, provenance: BridgeAdmissionProvenance) -> BridgeAdmission {
         lock.lock(); defer { lock.unlock() }
         let admissionID = UUID().uuidString.lowercased()
+        // Invalid metadata cannot survive a reload: the journal loader rejects
+        // empty fields (and non-positive event IDs) for every durable record.
+        // Keep the event visible to callers, but never append a record that
+        // would poison the whole journal.
+        guard eventId > 0, !type.isEmpty, !adapter.isEmpty, !observedAt.isEmpty else {
+            return BridgeAdmission(admissionId: admissionID, generation: generation, eventId: eventId, eventType: type, adapter: adapter, observedAt: observedAt, provenance: .unknown, issuerKeyId: issuerKeyId, failureReason: "invalid_metadata")
+        }
         let failure = unavailableReason ?? (records.count >= maxRecords ? "issuer_capacity" : nil)
         guard failure == nil else {
             return BridgeAdmission(admissionId: admissionID, generation: generation, eventId: eventId, eventType: type, adapter: adapter, observedAt: observedAt, provenance: .unknown, issuerKeyId: issuerKeyId, failureReason: failure)

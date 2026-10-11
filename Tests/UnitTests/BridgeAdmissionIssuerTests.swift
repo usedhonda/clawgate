@@ -121,4 +121,20 @@ final class BridgeAdmissionIssuerTests: XCTestCase {
         XCTAssertEqual(replaceIssuer.admission(eventId: 2, type: "inbound_message", adapter: "line", observedAt: "2026-01-01T00:00:01Z", provenance: .watcherAccepted).provenance, .unknown)
         cleanup(replaceRoot)
     }
+
+    func testInvalidMetadataDoesNotPoisonJournalAndValidAdmissionWorksAfterReopen() throws {
+        let (issuer, root) = try makeIssuer()
+        defer { cleanup(root) }
+
+        let invalid = issuer.admission(eventId: 1, type: "", adapter: "line", observedAt: "2026-01-01T00:00:00Z", provenance: .debugInjected)
+        XCTAssertEqual(invalid.provenance, .unknown)
+        XCTAssertEqual(invalid.failureReason, "invalid_metadata")
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("admissions.jsonl")).count, 0)
+
+        let reopened = BridgeAdmissionIssuer(directory: root, maxRecords: 4, maxBytes: 16_384)
+        let valid = reopened.admission(eventId: 2, type: "inbound_message", adapter: "line", observedAt: "2026-01-01T00:00:01Z", provenance: .debugInjected)
+        XCTAssertEqual(valid.provenance, .debugInjected)
+        XCTAssertNil(valid.failureReason)
+        XCTAssertEqual(reopened.admission(eventId: 3, type: "inbound_message", adapter: "line", observedAt: "2026-01-01T00:00:02Z", provenance: .watcherAccepted).provenance, .watcherAccepted)
+    }
 }
