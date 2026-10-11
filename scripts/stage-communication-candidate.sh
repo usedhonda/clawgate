@@ -61,6 +61,26 @@ if stage.resolve() != stage:
     raise SystemExit(f"stage destination resolved unexpectedly: {stage}")
 PY
 REMOTE_STAGE_GUARD
+path_guard_command="bash -s -- $remote_stage_q"
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  printf -v rel_q '%q' "$rel"
+  path_guard_command+=" $rel_q"
+done < "$files_from"
+ssh "$REMOTE_HOST" "$path_guard_command" <<'REMOTE_STAGE_PATH_GUARD'
+set -euo pipefail
+stage="$1"
+shift
+for rel in "$@"; do
+  cursor="$stage"
+  IFS='/' read -r -a components <<< "$rel"
+  for component in "${components[@]}"; do
+    [[ -n "$component" && "$component" != "." && "$component" != ".." ]] || continue
+    cursor="$cursor/$component"
+    [[ ! -L "$cursor" ]] || { echo "refusing symlink stage component: $cursor" >&2; exit 1; }
+  done
+done
+REMOTE_STAGE_PATH_GUARD
 printf -v remote_stage_rsync_q '%q' "$remote_stage"
 rsync -az --files-from="$files_from" --exclude .git/ --exclude .local/secrets/ "$PROJECT_PATH/" "$REMOTE_HOST:$remote_stage_rsync_q/"
 printf -v remote_stage_q '%q' "$remote_stage"

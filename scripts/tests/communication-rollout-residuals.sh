@@ -65,6 +65,14 @@ if PATH="$tmp/bin:$PATH" COMMUNICATION_RESIDUAL_EVENTS="$tmp/events" ROOT="$ROOT
 fi
 [[ ! -e "$tmp/events" ]]
 rm "$RESIDUAL_STAGE"
+mkdir -p "$RESIDUAL_STAGE"
+ln -s "$tmp/redirect" "$RESIDUAL_STAGE/scripts"
+if PATH="$tmp/bin:$PATH" COMMUNICATION_RESIDUAL_EVENTS="$tmp/events" ROOT="$ROOT" \
+   "$ROOT/scripts/stage-communication-candidate.sh" --remote-host fake --manifest "$manifest" >/dev/null 2>&1; then
+  echo 'nested symlink stage component was accepted' >&2; exit 1
+fi
+[[ ! -e "$tmp/events" ]]
+rm -rf "$RESIDUAL_STAGE"
 PATH="$tmp/bin:$PATH" COMMUNICATION_RESIDUAL_EVENTS="$tmp/events" ROOT="$ROOT" \
   CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST="$stale" \
   "$ROOT/scripts/stage-communication-candidate.sh" --remote-host fake --manifest "$manifest" >/dev/null
