@@ -8,4 +8,9 @@ final class AXActionsWaitPolicyTests: XCTestCase {
         XCTAssertGreaterThan(AXActions.reopenFallbackTimeout, 0)
         XCTAssertLessThanOrEqual(AXActions.reopenFallbackTimeout, AXActions.mainCallbackTimeout)
     }
+
+    func testExpiredMainCallbackIsFencedBeforeItsEffect() {
+        XCTAssertTrue(AXActions.callbackFenceAllowsEffectForTesting(cancelBeforeRun: false))
+        XCTAssertFalse(AXActions.callbackFenceAllowsEffectForTesting(cancelBeforeRun: true))
+    }
 }
