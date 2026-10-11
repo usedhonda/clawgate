@@ -7,11 +7,11 @@ final class AXActionsWaitPolicyTests: XCTestCase {
         let release = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
             entered.signal()
-            release.wait()
+            _ = release.wait(timeout: .now() + 1)
         }
         let enteredExpectation = expectation(description: "main callback entered")
         DispatchQueue.global().async {
-            entered.wait()
+            _ = entered.wait(timeout: .now() + 1)
             enteredExpectation.fulfill()
         }
         await fulfillment(of: [enteredExpectation], timeout: 1)

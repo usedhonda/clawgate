@@ -944,23 +944,28 @@ final class PetModel: NSObject, ObservableObject {
             let remaining = remainingProbeBudget()
             guard remaining > 0.001 else { break }
             AXUIElementSetMessagingTimeout(candidate, Float(min(AXActions.mainCallbackTimeout, remaining)))
-            if let axFrame = AXQuery.copyFrameAttribute(candidate), PetGeometry.roughlySameFrame(axFrame, cgBounds) {
-                let subrole = AXQuery.copyStringAttribute(candidate, attribute: kAXSubroleAttribute as String)
+            guard let axFrame = AXQuery.copyFrameAttribute(candidate), PetGeometry.roughlySameFrame(axFrame, cgBounds) else { continue }
+            let afterFrame = remainingProbeBudget()
+            guard afterFrame > 0.001 else { break }
+            AXUIElementSetMessagingTimeout(candidate, Float(min(AXActions.mainCallbackTimeout, afterFrame)))
+            let subrole = AXQuery.copyStringAttribute(candidate, attribute: kAXSubroleAttribute as String)
                 let rejectedSubroles: Set<String> = [
                     kAXFloatingWindowSubrole as String,
                     kAXSystemFloatingWindowSubrole as String,
                     kAXDialogSubrole as String,
                     kAXSystemDialogSubrole as String,
                 ]
-                if (subrole.map(rejectedSubroles.contains) ?? false)
+            let afterSubrole = remainingProbeBudget()
+            guard afterSubrole > 0.001 else { break }
+            AXUIElementSetMessagingTimeout(candidate, Float(min(AXActions.mainCallbackTimeout, afterSubrole)))
+            if (subrole.map(rejectedSubroles.contains) ?? false)
                     || AXQuery.copyBoolAttribute(candidate, attribute: kAXModalAttribute as String) == true {
                     return .ignored
-                }
-                if let screen = screenForTrackedFrame(axFrame) {
-                    return .accepted(element: candidate, frame: axFrame, appKitFrame: appKitRectForTrackedFrame(axFrame), screen: screen)
-                }
-                return .accepted(element: candidate, frame: axFrame, appKitFrame: appKitRectForTrackedFrame(axFrame), screen: NSScreen.main ?? NSScreen.screens.first!)
             }
+            if let screen = screenForTrackedFrame(axFrame) {
+                return .accepted(element: candidate, frame: axFrame, appKitFrame: appKitRectForTrackedFrame(axFrame), screen: screen)
+            }
+            return .accepted(element: candidate, frame: axFrame, appKitFrame: appKitRectForTrackedFrame(axFrame), screen: NSScreen.main ?? NSScreen.screens.first!)
         }
 
         if let screen = screenForTrackedFrame(cgBounds) {
