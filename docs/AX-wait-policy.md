@@ -18,7 +18,9 @@ main queue. These crossings are bounded:
   has a 250ms aggregate budget and examines at most eight candidates; if the
   budget expires, placement falls back to the already-collected CG window
   frame, preventing a wedged target app from blocking a tracking tick
-  indefinitely.
+  indefinitely. The two-message frame read (position then size) checks the
+  remaining budget before each AX message, so size is not issued after the
+  position read consumes the deadline.
 
 After a timeout, `ensureWindow` returns failure and its caller may retry through
 the normal tracking/recovery path. The existing AX polling deadlines remain
