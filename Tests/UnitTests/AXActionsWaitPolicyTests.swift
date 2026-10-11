@@ -44,4 +44,26 @@ final class AXActionsWaitPolicyTests: XCTestCase {
         XCTAssertTrue(completed)
         XCTAssertTrue(performed)
     }
+
+    func testFrameReadDoesNotIssueSizeMessageAfterBudgetExpires() {
+        var prepareCalls = 0
+        var sizeRead = false
+        var point = CGPoint(x: 10, y: 20)
+        let position = AXValueCreate(.cgPoint, &point)! as CFTypeRef
+        let frame = AXQuery.copyFrameFromReads(
+            prepareNextRead: {
+                prepareCalls += 1
+                return prepareCalls == 1
+            },
+            readPosition: { position },
+            readSize: {
+                sizeRead = true
+                var size = CGSize(width: 640, height: 480)
+                return AXValueCreate(.cgSize, &size)
+            }
+        )
+        XCTAssertNil(frame)
+        XCTAssertFalse(sizeRead)
+        XCTAssertEqual(prepareCalls, 2)
+    }
 }

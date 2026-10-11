@@ -167,17 +167,38 @@ enum AXQuery {
         return nil
     }
 
-    static func copyFrameAttribute(_ element: AXUIElement) -> CGRect? {
-        var posValue: CFTypeRef?
-        var sizeValue: CFTypeRef?
-        let posStatus = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &posValue)
-        let sizeStatus = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
-        guard posStatus == .success, sizeStatus == .success else { return nil }
+    static func copyFrameAttribute(_ element: AXUIElement, beforeEachMessage: (() -> Bool)? = nil) -> CGRect? {
+        copyFrameFromReads(
+            prepareNextRead: { beforeEachMessage?() ?? true },
+            readPosition: {
+                var value: CFTypeRef?
+                let status = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &value)
+                return status == .success ? value : nil
+            },
+            readSize: {
+                var value: CFTypeRef?
+                let status = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &value)
+                return status == .success ? value : nil
+            }
+        )
+    }
 
+    /// Compose a frame from two AX messages while giving the caller a chance
+    /// to stop before each message's deadline. The second read is never issued
+    /// after the first read exhausts the caller's budget.
+    static func copyFrameFromReads(
+        prepareNextRead: () -> Bool,
+        readPosition: () -> CFTypeRef?,
+        readSize: () -> CFTypeRef?
+    ) -> CGRect? {
+        guard prepareNextRead(), let posValue = readPosition() else { return nil }
+        guard prepareNextRead(), let sizeValue = readSize() else { return nil }
         var point = CGPoint.zero
         var size = CGSize.zero
-        guard AXValueGetValue(posValue as! AXValue, .cgPoint, &point),
-              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else {
+        guard let posAXValue = posValue as? AXValue,
+              let sizeAXValue = sizeValue as? AXValue,
+              AXValueGetValue(posAXValue, .cgPoint, &point),
+              AXValueGetValue(sizeAXValue, .cgSize, &size) else {
             return nil
         }
         return CGRect(origin: point, size: size)
