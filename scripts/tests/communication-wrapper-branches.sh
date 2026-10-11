@@ -69,6 +69,7 @@ echo 'communication wrapper normal branch: PASS'
 # Admitted path: run the real post-task staging entry with fake SSH/rsync and
 # capture the remote sign command. The canonical preflight checker is a stub;
 # no host command or build is executed.
+mkdir -p "$ROOT/.runtime"
 manifest="$(mktemp "$ROOT/.runtime/communication-wrapper-candidate.XXXXXX")"
 python3 - "$ROOT" "$manifest" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
