@@ -79,17 +79,23 @@ communication_gateway_restart() {
     echo "Communication maintenance requires a paired rollback hook." >&2
     return 1
   fi
-  local operation_id="${CLAWGATE_COMMUNICATION_OPERATION_ID:-}"
-  if [[ -z "$operation_id" ]]; then
-    operation_id="$(printf '%s\n' "${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}" "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}" "$$" "$(date +%s%N 2>/dev/null || date +%s)" | shasum -a 256 | awk '{print substr($1,1,24)}')"
-  fi
-  [[ "$operation_id" =~ ^[A-Za-z0-9._-]+$ ]] || {
-    echo "Invalid communication operation id: $operation_id" >&2
+  # Always mint a fresh invocation identity. Caller-provided state roots are
+  # intentionally not trusted: reusing one could make rollback consume an
+  # earlier successful operation.
+  local operation_id
+  operation_id="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+  [[ "$operation_id" =~ ^[0-9a-f]{32}$ ]] || {
+    echo "Invalid communication operation id." >&2
     return 1
   }
-  local backup_dir="${CLAWGATE_COMMUNICATION_BACKUP_DIR:-$project_path/.runtime/communication-maintenance/$operation_id}"
+  local backup_dir="$project_path/.runtime/communication-maintenance/$operation_id"
+  if [[ -e "$backup_dir" || -L "$backup_dir" ]]; then
+    echo "Communication operation state already exists; refusing reuse." >&2
+    return 1
+  fi
   GATEWAY_RESTART_COMMUNICATION_MANIFEST="${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}" \
   GATEWAY_RESTART_COMMUNICATION_CURRENT="${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}" \
+  CLAWGATE_COMMUNICATION_PROJECT_PATH="$project_path" \
   CLAWGATE_COMMUNICATION_OPERATION_ID="$operation_id" \
   CLAWGATE_COMMUNICATION_BACKUP_DIR="$backup_dir" \
   GATEWAY_RESTART_MAINTENANCE_HOOK="$maintenance_hook" \

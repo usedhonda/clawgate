@@ -16,8 +16,22 @@ candidate_files="${CLAWGATE_COMMUNICATION_CANDIDATE_FILES:-}"
 candidate_root="${CLAWGATE_COMMUNICATION_CANDIDATE_ROOT:-$project_path}"
 candidate_manifest="${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
 staged_app="${CLAWGATE_COMMUNICATION_STAGED_APP:-}"
-state_dir="${CLAWGATE_COMMUNICATION_BACKUP_DIR:-$project_path/.runtime/communication-maintenance}"
+operation_id="${CLAWGATE_COMMUNICATION_OPERATION_ID:-}"
+[[ "$operation_id" =~ ^[0-9a-f]{32}$ ]] || { echo "Missing or invalid communication invocation identity." >&2; exit 1; }
+expected_state_dir="$project_path/.runtime/communication-maintenance/$operation_id"
+state_dir="${CLAWGATE_COMMUNICATION_BACKUP_DIR:-$expected_state_dir}"
+[[ "$state_dir" == "$expected_state_dir" ]] || { echo "Communication state does not match this invocation." >&2; exit 1; }
 state_file="$state_dir/current-op"
+case "$mode" in apply|rollback) ;; *) echo "Invalid communication maintenance mode." >&2; exit 2 ;; esac
+for state_component in "$project_path/.runtime" "$project_path/.runtime/communication-maintenance" "$state_dir" "$state_file"; do
+  [[ ! -L "$state_component" ]] || { echo "Symlinked communication invocation state." >&2; exit 1; }
+done
+# This invocation has not started any apply work. In particular, do not inspect
+# a prior invocation's current-op when validation failed before state creation.
+if [[ "$mode" == "rollback" && ! -e "$state_file" ]]; then
+  echo "No apply state for this invocation; rollback is a no-op." >&2
+  exit 0
+fi
 
 assert_no_symlink_components() {
   local base="$1" rel="$2" cursor component
@@ -56,7 +70,8 @@ case "$mode" in
       [[ -d "$plugin_src" && ! -L "$plugin_src" ]] || { echo "Missing plugin source: $plugin_src" >&2; exit 1; }
     fi
     [[ ! -L "$state_dir" ]] || { echo "Communication maintenance state directory is symlinked: $state_dir" >&2; exit 1; }
-    mkdir -p "$state_dir"
+    mkdir -p "$(dirname "$state_dir")"
+    mkdir "$state_dir" || { echo "Communication invocation state already exists; refusing reuse." >&2; exit 1; }
     [[ ! -L "$state_file" ]] || { echo "Communication maintenance state file is symlinked: $state_file" >&2; exit 1; }
     # Mark this invocation before path/source validation so a canonical
     # rollback cannot consume a previous successful current-op after apply
@@ -165,13 +180,17 @@ case "$mode" in
     "$script_root/restart-local-clawgate.sh" "${restart_args[@]}"
     ;;
   rollback)
-    [[ -f "$state_file" ]] || { echo "No communication maintenance backup found." >&2; exit 1; }
+    [[ -f "$state_file" ]] || { echo "No communication maintenance backup for this invocation; rollback is a no-op." >&2; exit 0; }
     [[ ! -L "$state_file" ]] || { echo "Communication maintenance state file is symlinked: $state_file" >&2; exit 1; }
     backup_path="$(<"$state_file")"
     if [[ "$backup_path" == "in-progress" ]]; then
       echo "No completed communication maintenance operation to roll back." >&2
       exit 0
     fi
+    [[ "$backup_path" == "$state_dir"/op.* && "${backup_path#"$state_dir"/}" != */* && ! -L "$backup_path" ]] || {
+      echo "Rollback backup is not owned by this invocation." >&2
+      exit 1
+    }
     files_file="$backup_path/changed-files"
     [[ -d "$backup_path" ]] || { echo "Communication maintenance backup is missing: $backup_path" >&2; exit 1; }
     [[ -f "$files_file" ]] || { echo "Communication maintenance changed-file manifest is missing." >&2; exit 1; }
