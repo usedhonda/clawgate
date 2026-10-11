@@ -83,6 +83,43 @@ final class InboundBubbleOCRTests: XCTestCase {
         XCTAssertEqual(cachedBox.minY, box.minY, accuracy: 0.0001)
     }
 
+    func testVisionDiagnosticMetadataIsBoundedAndBodyFree() throws {
+        var nested: NSError = NSError(domain: "vision.0", code: 0, userInfo: [
+            "payload": "private OCR text",
+            "image": Data(repeating: 0xAB, count: 32)
+        ])
+        for index in 1...6 {
+            nested = NSError(domain: "vision.\(index)", code: index, userInfo: [
+                NSLocalizedDescriptionKey: "private description \(index)",
+                NSUnderlyingErrorKey: nested
+            ])
+        }
+
+        let metadata = InboundBubbleOCR.diagnosticUnderlyingErrorMetadata(nested)
+        XCTAssertEqual(metadata.count, 4)
+        XCTAssertTrue(metadata.allSatisfy { $0.keys.sorted() == ["code", "domain"] })
+        let data = try JSONSerialization.data(withJSONObject: metadata)
+        let serialized = String(decoding: data, as: UTF8.self)
+        XCTAssertFalse(serialized.contains("private"))
+        XCTAssertFalse(serialized.contains("payload"))
+        XCTAssertFalse(serialized.contains("image"))
+    }
+
+    func testVisionDiagnosticArtifactCreatesDirectoryAndReportsWriteFailure() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("clawgate-vision-diagnostic-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let artifactURL = root.appendingPathComponent("nested/latest-vision-error.json")
+        let data = Data("{\"domain\":\"test\"}".utf8)
+        XCTAssertNoThrow(try InboundBubbleOCR.writeVisionDiagnosticArtifact(data, to: artifactURL))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: artifactURL.path))
+
+        let directoryURL = root.appendingPathComponent("directory", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        XCTAssertThrowsError(try InboundBubbleOCR.writeVisionDiagnosticArtifact(data, to: directoryURL))
+    }
+
     /// Private captured conversations never become repository fixtures.
     func testPrivateCapturedFrameWhenProvided() throws {
         guard let path = ProcessInfo.processInfo.environment["INBOUND_BUBBLE_FIXTURE"] else {
