@@ -42,6 +42,28 @@ enum InboundBubbleOCR {
     private static let maxVisionDiagnosticKeys = 64
     private static let visionDiagnosticArtifactURL = URL(fileURLWithPath: "/tmp/clawgate-ocr-debug/latest-vision-error.json")
 
+    /// Keep only a bounded, body-free summary of nested Vision errors. Some
+    /// NSError userInfo values contain image/text payloads, so never serialize
+    /// anything other than the domain/code pair from NSUnderlyingErrorKey.
+    private static func underlyingErrorMetadata(_ error: NSError) -> [[String: Any]] {
+        var metadata: [[String: Any]] = []
+        var current: NSError? = error
+        var seenKeys: Set<String> = []
+        var inspected = 0
+        while let item = current, inspected < 32, metadata.count < 4 {
+            inspected += 1
+            let key = "\(item.domain)|\(item.code)"
+            if seenKeys.insert(key).inserted {
+                if item !== error {
+                    metadata.append(["domain": item.domain, "code": item.code])
+                }
+            }
+            let nested = item.userInfo[NSUnderlyingErrorKey]
+            current = (nested as? NSError) ?? (nested as? Error).map { $0 as NSError }
+        }
+        return metadata
+    }
+
     static func clearCache() {
         lock.lock()
         entries.removeAll()
@@ -69,10 +91,16 @@ enum InboundBubbleOCR {
             "width": image.width,
             "height": image.height,
             "actualRevision": revision,
-            "timestamp": ISO8601DateFormatter().string(from: now)
+            "timestamp": ISO8601DateFormatter().string(from: now),
+            "underlyingErrors": underlyingErrorMetadata(nsError)
         ]
         if let data = try? JSONSerialization.data(withJSONObject: artifact, options: [.sortedKeys]) {
-            try? data.write(to: visionDiagnosticArtifactURL, options: [.atomic])
+            do {
+                try data.write(to: visionDiagnosticArtifactURL, options: [.atomic])
+            } catch {
+                let writeError = error as NSError
+                NSLog("[InboundBubbleOCR] vision diagnostic artifact write failed domain=\(writeError.domain) code=\(writeError.code)")
+            }
         }
         NSLog("[InboundBubbleOCR] vision request failed domain=\(nsError.domain) code=\(nsError.code) atlas=\(image.width)x\(image.height) revision=\(revision)")
     }
