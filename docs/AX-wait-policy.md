@@ -8,10 +8,14 @@ main queue. These crossings are bounded:
   (2.5 seconds).
 - A callback that is still queued when its wait expires is fenced and performs
   no AX/AppKit side effect. A callback already executing is allowed to finish
-  its own bounded operation.
+  its own bounded operation; the fence cannot revoke an in-flight callback.
 - The `osascript` fallback created by `sendReopenEvent` waits at most
   `AXActions.reopenFallbackTimeout` (2 seconds). On expiry only that child is
-  terminated; no unrelated process is touched.
+  asked to terminate; this bounds ClawGate's wait but does not claim that the
+  child has exited synchronously.
+- Pet window tracking applies the same AX messaging timeout to its application
+  and candidate window elements before synchronous reads, preventing a wedged
+  target app from blocking a tracking tick indefinitely.
 
 After a timeout, `ensureWindow` returns failure and its caller may retry through
 the normal tracking/recovery path. The existing AX polling deadlines remain
