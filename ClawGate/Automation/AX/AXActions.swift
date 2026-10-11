@@ -61,6 +61,12 @@ enum AXActions {
         return true
     }
 
+    #if DEBUG
+    static func runOnMainWithTimeoutForTesting(timeout: TimeInterval, _ action: @escaping () -> Void) -> Bool {
+        runOnMainWithTimeout(timeout: timeout, action)
+    }
+    #endif
+
     /// Wait for only the helper process created by this call.  On timeout the
     /// child is terminated and no global process is touched.
     @discardableResult
@@ -427,6 +433,9 @@ enum AXActions {
         bundleID: String
     ) -> AXUIElement? {
         let pid = app.processIdentifier
+        // Bound every AX message issued through this recovery path, including
+        // attribute reads that precede the explicit polling deadlines.
+        AXUIElementSetMessagingTimeout(appElement, Float(mainCallbackTimeout))
 
         // 0. Unhide if hidden
         let isHidden = AXQuery.copyBoolAttribute(appElement, attribute: kAXHiddenAttribute as String) ?? false
@@ -438,12 +447,14 @@ enum AXActions {
 
         // 1. Already have a focused window?
         if let w = AXQuery.focusedWindow(appElement: appElement) {
+            AXUIElementSetMessagingTimeout(w, Float(mainCallbackTimeout))
             surface(app: appElement, window: w)
             return w
         }
 
         // 2. Have any window (maybe minimized)?
         if let w = AXQuery.windows(appElement: appElement).first {
+            AXUIElementSetMessagingTimeout(w, Float(mainCallbackTimeout))
             NSLog("[AXActions] ensureWindow: surfacing existing window")
             surface(app: appElement, window: w)
             var focused: AXUIElement?

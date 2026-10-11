@@ -9,8 +9,31 @@ final class AXActionsWaitPolicyTests: XCTestCase {
         XCTAssertLessThanOrEqual(AXActions.reopenFallbackTimeout, AXActions.mainCallbackTimeout)
     }
 
-    func testExpiredMainCallbackIsFencedBeforeItsEffect() {
-        XCTAssertTrue(AXActions.callbackFenceAllowsEffectForTesting(cancelBeforeRun: false))
-        XCTAssertFalse(AXActions.callbackFenceAllowsEffectForTesting(cancelBeforeRun: true))
+    func testExpiredQueuedMainCallbackIsFencedBeforeItsEffect() {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            entered.signal()
+            release.wait()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 1), .success)
+
+        var performed = false
+        let completed = DispatchQueue.global().sync {
+            AXActions.runOnMainWithTimeoutForTesting(timeout: 0.01) { performed = true }
+        }
+        XCTAssertFalse(completed)
+        release.signal()
+        DispatchQueue.main.sync { }
+        XCTAssertFalse(performed)
+    }
+
+    func testMainCallbackCompletesWhenMainQueueAvailable() {
+        var performed = false
+        let completed = DispatchQueue.global().sync {
+            AXActions.runOnMainWithTimeoutForTesting(timeout: 1) { performed = true }
+        }
+        XCTAssertTrue(completed)
+        XCTAssertTrue(performed)
     }
 }

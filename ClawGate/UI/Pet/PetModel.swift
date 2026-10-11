@@ -910,6 +910,11 @@ final class PetModel: NSObject, ObservableObject {
         }
 
         let appElement = AXQuery.applicationElement(pid: app.processIdentifier)
+        // AX reads are synchronous at this call site (the tracking timer is
+        // main-queue owned), so cap each cross-process message. This keeps a
+        // wedged target app from turning one tracking tick into an unbounded
+        // UI stall while preserving the existing placement decisions.
+        AXUIElementSetMessagingTimeout(appElement, Float(AXActions.mainCallbackTimeout))
         let windows = AXQuery.windows(appElement: appElement)
         let focused = AXQuery.focusedWindow(appElement: appElement)
 
@@ -919,6 +924,7 @@ final class PetModel: NSObject, ObservableObject {
             candidates.append(window)
         }
         for candidate in candidates {
+            AXUIElementSetMessagingTimeout(candidate, Float(AXActions.mainCallbackTimeout))
             if let axFrame = AXQuery.copyFrameAttribute(candidate), PetGeometry.roughlySameFrame(axFrame, cgBounds) {
                 let subrole = AXQuery.copyStringAttribute(candidate, attribute: kAXSubroleAttribute as String)
                 let rejectedSubroles: Set<String> = [
