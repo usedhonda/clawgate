@@ -17,7 +17,7 @@ cat > "$tmp/project/scripts/deploy-signed-bundle.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "$DEPLOY_CALL"
 EOF
-chmod 755 "$tmp/project/scripts/"*.sh
+chmod 755 "$tmp/project/scripts/restart-local-clawgate.sh" "$tmp/project/scripts/deploy-signed-bundle.sh"
 cat > "$tmp/bin/defaults" <<'EOF'
 #!/usr/bin/env bash
 printf '0\n'
@@ -43,13 +43,15 @@ echo 'signed-bundle caller flags: PASS'
 # Execute the actual restart helper against a prepared app. Build, sync,
 # signing, and plugin paths are fake-command guarded and must remain untouched.
 app="$tmp/prepared"
-mkdir -p "$app/scripts" "$app/ClawGate.app/Contents/MacOS" "$app/ClawGate.app/Contents/Resources" "$app/extensions/openclaw-plugin"
+mkdir -p "$app/scripts" "$app/ClawGate.app/Contents/MacOS" "$app/ClawGate.app/Contents/Resources/ClawGate_ClawGate.bundle" "$app/extensions/openclaw-plugin" "$app/.build/debug/ClawGate_ClawGate.bundle"
 ln -s "$ROOT/scripts/lib-ops-log.sh" "$app/scripts/lib-ops-log.sh"
 cp "$ROOT/scripts/restart-local-clawgate.sh" "$app/scripts/restart-local-clawgate.sh"
 chmod 755 "$app/scripts/restart-local-clawgate.sh"
 printf 'prepared-binary\n' > "$app/ClawGate.app/Contents/MacOS/ClawGate"
 printf 'prepared-resource\n' > "$app/ClawGate.app/Contents/Resources/marker"
-printf 'different-build\n' > "$app/.build-debug-marker"
+printf 'prepared-bundle\n' > "$app/ClawGate.app/Contents/Resources/ClawGate_ClawGate.bundle/marker"
+printf 'different-build\n' > "$app/.build/debug/ClawGate"
+printf 'different-bundle\n' > "$app/.build/debug/ClawGate_ClawGate.bundle/marker"
 cat > "$tmp/bin/pkill" <<'EOF'
 #!/usr/bin/env bash
 printf 'pkill\n' >> "$FORBIDDEN_CALLS"
@@ -93,10 +95,12 @@ EOF
 chmod 755 "$tmp/bin/"*
 before_bin="$(shasum -a 256 "$app/ClawGate.app/Contents/MacOS/ClawGate")"
 before_resource="$(shasum -a 256 "$app/ClawGate.app/Contents/Resources/marker")"
+before_bundle="$(shasum -a 256 "$app/ClawGate.app/Contents/Resources/ClawGate_ClawGate.bundle/marker")"
 PATH="$tmp/bin:$PATH" FORBIDDEN_CALLS="$tmp/forbidden" \
   "$app/scripts/restart-local-clawgate.sh" --project-path "$app" --skip-build --skip-sync --skip-plugin-sync --skip-sign --wait-seconds 1 >/dev/null
 [[ "$before_bin" == "$(shasum -a 256 "$app/ClawGate.app/Contents/MacOS/ClawGate")" ]]
 [[ "$before_resource" == "$(shasum -a 256 "$app/ClawGate.app/Contents/Resources/marker")" ]]
+[[ "$before_bundle" == "$(shasum -a 256 "$app/ClawGate.app/Contents/Resources/ClawGate_ClawGate.bundle/marker")" ]]
 if [[ -e "$tmp/forbidden" ]]; then
   ! grep -Eq 'swift|codesign' "$tmp/forbidden"
 fi
