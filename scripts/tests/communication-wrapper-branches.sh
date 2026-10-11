@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d)"
 candidate_stage=""
-trap 'rm -rf "$tmp"; [[ -z "${candidate_stage:-}" ]] || rm -rf "$candidate_stage"; rm -f "$ROOT/.runtime/communication-wrapper-candidate.json"' EXIT
+manifest=""
+candidate_stage=""
+trap 'rm -rf "$tmp"; [[ -z "${candidate_stage:-}" ]] || rm -rf "$candidate_stage"; [[ -z "${manifest:-}" ]] || rm -f "$manifest"' EXIT
 project="$tmp/project"
 mkdir -p "$project/scripts" "$project/.runtime"
 for file in lib-communication-restart.sh lib-ops-log.sh; do ln -s "$ROOT/scripts/$file" "$project/scripts/$file"; done
@@ -67,7 +69,7 @@ echo 'communication wrapper normal branch: PASS'
 # Admitted path: run the real post-task staging entry with fake SSH/rsync and
 # capture the remote sign command. The canonical preflight checker is a stub;
 # no host command or build is executed.
-manifest="$ROOT/.runtime/communication-wrapper-candidate.json"
+manifest="$(mktemp "$ROOT/.runtime/communication-wrapper-candidate.XXXXXX")"
 python3 - "$ROOT" "$manifest" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
 root = pathlib.Path(sys.argv[1])
@@ -77,8 +79,9 @@ data = {"version": 2, "source_revision": head, "target_base_revision": head, "fi
 pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
 PY
 candidate_id="$(shasum -a 256 "$manifest" | awk '{print substr($1,1,16)}')"
-candidate_stage="$ROOT/.runtime/communication-candidate-$candidate_id"
-[[ ! -e "$candidate_stage" && ! -L "$candidate_stage" ]] || { echo 'candidate stage already exists' >&2; exit 1; }
+candidate_path="$ROOT/.runtime/communication-candidate-$candidate_id"
+[[ ! -e "$candidate_path" && ! -L "$candidate_path" ]] || { echo 'candidate stage already exists' >&2; exit 1; }
+candidate_stage="$candidate_path"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/check"
 chmod 755 "$tmp/check"
 mkdir -p "$tmp/scripts"
@@ -100,7 +103,6 @@ touch "$tmp/manifest" "$tmp/current"
 ) >/dev/null 2>&1
 grep -Fq "CLAWGATE_COMMUNICATION_STAGED_BUILD=1" "$tmp/admitted-commands"
 grep -Fq "$candidate_stage/scripts/macmini-local-sign-and-restart.sh" "$tmp/admitted-commands"
-rm -f "$manifest"
 echo 'communication wrapper admitted branch: PASS'
 
 # Staged signing preference: release.env is read from the selected live
