@@ -340,7 +340,7 @@ elif [[ "$BUILD_HOSTA" == "true" ]]; then
     staged_build=1
   fi
   remote_sign_script="$PROJECT_PATH/scripts/macmini-local-sign-and-restart.sh"
-  if [[ -n "${CLAWGATE_COMMUNICATION_SOURCE_STAGE:-}" ]]; then
+  if communication_admission_requested && [[ -n "${CLAWGATE_COMMUNICATION_SOURCE_STAGE:-}" ]]; then
     remote_sign_script="$CLAWGATE_COMMUNICATION_SOURCE_STAGE/scripts/macmini-local-sign-and-restart.sh"
   fi
   printf -v REMOTE_SIGN_SCRIPT_Q '%q' "$remote_sign_script"

@@ -61,7 +61,8 @@ if stage.resolve() != stage:
     raise SystemExit(f"stage destination resolved unexpectedly: {stage}")
 PY
 REMOTE_STAGE_GUARD
-rsync -azs --files-from="$files_from" --exclude .git/ --exclude .local/secrets/ "$PROJECT_PATH/" "$REMOTE_HOST:$remote_stage/"
+printf -v remote_stage_rsync_q '%q' "$remote_stage"
+rsync -az --files-from="$files_from" --exclude .git/ --exclude .local/secrets/ "$PROJECT_PATH/" "$REMOTE_HOST:$remote_stage_rsync_q/"
 printf -v remote_stage_q '%q' "$remote_stage"
 verify_command="bash -s -- $remote_stage_q"
 for required in "${required_scripts[@]}"; do
