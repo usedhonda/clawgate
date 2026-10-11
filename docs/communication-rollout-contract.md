@@ -21,6 +21,10 @@ entry point admits it. The following invariants are required:
   operation.
 - `CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC=1` permits a scripts-only operation;
   plugin source validation is not required in that mode.
+- The signed-bundle branch treats the prepared app as immutable: its local
+  restart invokes `restart-local-clawgate.sh` with `--skip-build --skip-sync
+  --skip-plugin-sync --skip-sign`, so no build, resource copy, plugin sync, or
+  signing can overwrite the prepared bundle.
 
 `scripts/tests/communication-rollout-residuals.sh` is the bounded fake-tool
 regression for these invariants. It does not SSH, build, sign, restart, or

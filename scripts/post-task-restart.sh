@@ -268,7 +268,7 @@ if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   # Capture before local restart; this is a read-only defaults(1) read.
   AMBIENT_WAS_STREAMING="$(defaults read com.clawgate.app clawgate.ambient.wasStreaming 2>/dev/null || echo 0)"
   echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
-  ./scripts/restart-local-clawgate.sh --skip-plugin-sync --skip-sign
+  ./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-plugin-sync --skip-sign
   if communication_admission_requested; then
     export CLAWGATE_COMMUNICATION_SOURCE_STAGE="$(./scripts/stage-communication-candidate.sh \
       --remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" \
