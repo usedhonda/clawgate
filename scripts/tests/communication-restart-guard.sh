@@ -163,8 +163,11 @@ plugin_dest="$tmp/home/.openclaw/extensions/clawgate"
 mkdir -p "$plugin_dest/src"
 cp "$tmp/home-client.js" "$plugin_dest/src/client.js"
 printf 'keep\n' > "$plugin_dest/third-party-helper.js"
+maintenance_id=44444444444444444444444444444444
+maintenance_state="$maintenance_project/.runtime/communication-maintenance/$maintenance_id"
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
-CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state" \
+CLAWGATE_COMMUNICATION_OPERATION_ID="$maintenance_id" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$maintenance_state" \
 CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin_dest" \
 CLAWGATE_COMMUNICATION_TEST_MODE=1 \
 CLAWGATE_COMMUNICATION_CANDIDATE_FILES="extensions/openclaw-plugin/src/client.js" \
@@ -174,7 +177,8 @@ CLAWGATE_COMMUNICATION_STAGED_APP="$maintenance_project/.runtime/staged-app" \
 [[ -f "$plugin_dest/third-party-helper.js" ]] || { echo "FAIL: apply removed unrelated helper" >&2; exit 1; }
 [[ "$(<"$maintenance_project/ClawGate.app/Contents/marker")" == "new-app" ]] || { echo "FAIL: staged app was not applied" >&2; exit 1; }
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
-CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state" \
+CLAWGATE_COMMUNICATION_OPERATION_ID="$maintenance_id" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$maintenance_state" \
 CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin_dest" \
 CLAWGATE_COMMUNICATION_TEST_MODE=1 \
 CLAWGATE_COMMUNICATION_CANDIDATE_FILES="extensions/openclaw-plugin/src/client.js" \
@@ -183,8 +187,10 @@ CLAWGATE_COMMUNICATION_STAGED_APP="$maintenance_project/.runtime/staged-app" \
 [[ "$(<"$plugin_dest/src/client.js")" == "old" ]] || { echo "FAIL: rollback did not restore owned file" >&2; exit 1; }
 [[ -f "$plugin_dest/third-party-helper.js" ]] || { echo "FAIL: rollback removed unrelated helper" >&2; exit 1; }
 [[ "$(<"$maintenance_project/ClawGate.app/Contents/marker")" == "old-app" ]] || { echo "FAIL: rollback did not restore app" >&2; exit 1; }
+skip_id=55555555555555555555555555555555
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$maintenance_project" \
-CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state-skip" \
+CLAWGATE_COMMUNICATION_OPERATION_ID="$skip_id" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$maintenance_project/.runtime/communication-maintenance/$skip_id" \
 CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin_dest" \
 CLAWGATE_COMMUNICATION_TEST_MODE=1 \
 CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC=1 \
