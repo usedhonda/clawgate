@@ -74,11 +74,14 @@ project="$tmp/project"
 mkdir -p "$project/scripts" "$project/extensions/openclaw-plugin" "$project/.runtime"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$project/scripts/restart-local-clawgate.sh"
 chmod 755 "$project/scripts/restart-local-clawgate.sh"
-state="$tmp/state"
+success_id=22222222222222222222222222222222
+failed_id=33333333333333333333333333333333
+state="$project/.runtime/communication-maintenance/$failed_id"
 
 # A scripts-only admitted operation works without a plugin source.
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$project" \
-CLAWGATE_COMMUNICATION_BACKUP_DIR="$state/one" \
+CLAWGATE_COMMUNICATION_OPERATION_ID="$success_id" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$project/.runtime/communication-maintenance/$success_id" \
 CLAWGATE_COMMUNICATION_PLUGIN_SOURCE="$tmp/missing-plugin" \
 CLAWGATE_COMMUNICATION_PLUGIN_DEST="$tmp/plugin" \
 CLAWGATE_COMMUNICATION_TEST_MODE=1 \
@@ -87,10 +90,12 @@ CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC=1 \
 
 # A failed preflight cannot consume an earlier successful operation.
 prior="$state/prior"
+prior="$project/.runtime/communication-maintenance/$success_id"
 mkdir -p "$prior/op.old"
 printf '%s\n' "$prior/op.old" > "$prior/current-op"
 if CLAWGATE_COMMUNICATION_PROJECT_PATH="$project" \
-   CLAWGATE_COMMUNICATION_BACKUP_DIR="$prior" \
+   CLAWGATE_COMMUNICATION_OPERATION_ID="$failed_id" \
+   CLAWGATE_COMMUNICATION_BACKUP_DIR="$state" \
    CLAWGATE_COMMUNICATION_PLUGIN_SOURCE="$tmp/missing-plugin" \
    CLAWGATE_COMMUNICATION_PLUGIN_DEST="$tmp/plugin" \
    CLAWGATE_COMMUNICATION_TEST_MODE=1 \
@@ -100,7 +105,8 @@ if CLAWGATE_COMMUNICATION_PROJECT_PATH="$project" \
 fi
 [[ "$(<"$prior/current-op")" == "$prior/op.old" ]]
 CLAWGATE_COMMUNICATION_PROJECT_PATH="$project" \
-CLAWGATE_COMMUNICATION_BACKUP_DIR="$prior/fresh" \
+CLAWGATE_COMMUNICATION_OPERATION_ID="$failed_id" \
+CLAWGATE_COMMUNICATION_BACKUP_DIR="$state" \
   "$ROOT/scripts/communication-maintenance.sh" rollback >/dev/null
 [[ "$(<"$prior/current-op")" == "$prior/op.old" ]]
 

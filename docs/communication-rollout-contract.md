@@ -13,9 +13,12 @@ entry point admits it. The following invariants are required:
   it to `1`.
 - Signing preferences are read from the selected `--project-path` after
   argument parsing. Private release credentials never enter a candidate stage.
-- Each canonical communication restart receives a unique operation backup
-  root. An apply failure before its operation starts must not make rollback
-  consume an earlier successful operation.
+- Each canonical communication restart receives a fresh lowercase 32-hex
+  operation identity and the exact state root
+  `.runtime/communication-maintenance/<id>`. Caller-supplied old IDs or backup
+  roots are not trusted or reused. An apply failure before its operation starts
+  must make rollback a no-op rather than consume an earlier successful
+  operation.
 - `CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC=1` permits a scripts-only operation;
   plugin source validation is not required in that mode.
 

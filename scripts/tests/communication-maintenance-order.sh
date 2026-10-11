@@ -45,7 +45,8 @@ EOF
 chmod 755 "$tmp/bin/"* "$project/scripts/restart-local-clawgate.sh"
 export PATH="$tmp/bin:$PATH"
 export CLAWGATE_COMMUNICATION_PROJECT_PATH="$project"
-export CLAWGATE_COMMUNICATION_BACKUP_DIR="$tmp/state"
+export CLAWGATE_COMMUNICATION_OPERATION_ID=11111111111111111111111111111111
+export CLAWGATE_COMMUNICATION_BACKUP_DIR="$project/.runtime/communication-maintenance/$CLAWGATE_COMMUNICATION_OPERATION_ID"
 export CLAWGATE_COMMUNICATION_PLUGIN_SOURCE="$stage/extensions/openclaw-plugin"
 export CLAWGATE_COMMUNICATION_PLUGIN_DEST="$plugin" CLAWGATE_COMMUNICATION_TEST_MODE=1
 export CLAWGATE_COMMUNICATION_CANDIDATE_ROOT="$stage"
@@ -56,6 +57,8 @@ ORDER_STILL_RUNNING=1 ORDER_EXPECTED=new bash "$ROOT/scripts/communication-maint
 [[ "$(cat "$plugin/src/client.js")" == old ]]
 [[ "$(cat "$ORDER_EVENTS")" == stop ]]
 : > "$ORDER_EVENTS"
+export CLAWGATE_COMMUNICATION_OPERATION_ID=22222222222222222222222222222222
+export CLAWGATE_COMMUNICATION_BACKUP_DIR="$project/.runtime/communication-maintenance/$CLAWGATE_COMMUNICATION_OPERATION_ID"
 ORDER_EXPECTED=new bash "$ROOT/scripts/communication-maintenance.sh" apply
 ORDER_EXPECTED=old bash "$ROOT/scripts/communication-maintenance.sh" rollback
 [[ "$(cat "$ORDER_EVENTS")" == $'stop\nswap\nrestart\nstop\nswap\nrestart' ]]
