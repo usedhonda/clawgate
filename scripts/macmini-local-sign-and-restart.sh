@@ -13,20 +13,6 @@ PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 KEYCHAIN_PASSWORD="${KEYCHAIN_PASSWORD:-}"
 SKIP_PLUGIN_SYNC=false
 
-# Pull in SIGNING_ID from release.env if present. Preferred signing identity
-# is Developer ID Application (stable TCC binding across rebuilds via Team ID).
-# Legacy self-signed "ClawGate Dev" is kept as a fallback for older macmini
-# setups that were never migrated.
-if [[ -f "$PROJECT_PATH/.local/secrets/release.env" ]]; then
-  # shellcheck disable=SC1091
-  set -a; source "$PROJECT_PATH/.local/secrets/release.env"; set +a
-fi
-# Keep the real signing identity out of the public source tree: set SIGNING_ID
-# (preferred) or CLAWGATE_DEFAULT_DEVID in .local/secrets/release.env.
-DEFAULT_DEVID="${CLAWGATE_DEFAULT_DEVID:-}"
-PREFERRED_SIGNING_ID="${SIGNING_ID:-$DEFAULT_DEVID}"
-LEGACY_CERT_NAME="ClawGate Dev"
-
 # Candidate keychains that may hold a usable signing identity. Order matters:
 # the primary login keychain is preferred (Developer ID lives there after the
 # 2026-04-10 migration); login_renamed_1 is kept as a fallback because the
@@ -49,6 +35,19 @@ while [[ $# -gt 0 ]]; do
       exit 2 ;;
   esac
 done
+
+# Resolve the project first, then read its private signing preference. This is
+# intentionally after argument parsing so --project-path cannot use the live
+# checkout's credentials accidentally.
+if [[ -f "$PROJECT_PATH/.local/secrets/release.env" ]]; then
+  # shellcheck disable=SC1091
+  set -a; source "$PROJECT_PATH/.local/secrets/release.env"; set +a
+fi
+# Keep the real signing identity out of the public source tree: set SIGNING_ID
+# (preferred) or CLAWGATE_DEFAULT_DEVID in .local/secrets/release.env.
+DEFAULT_DEVID="${CLAWGATE_DEFAULT_DEVID:-}"
+PREFERRED_SIGNING_ID="${SIGNING_ID:-$DEFAULT_DEVID}"
+LEGACY_CERT_NAME="ClawGate Dev"
 
 if [[ -z "$KEYCHAIN_PASSWORD" ]]; then
   echo "KEYCHAIN_PASSWORD is required." >&2

@@ -7,9 +7,8 @@ communication_admission_requested() {
   [[ -n "${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}" || -n "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}" ]]
 }
 
-communication_candidate_manifest="${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
-
 communication_validate_candidate() {
+  local communication_candidate_manifest="${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
   [[ -n "$communication_candidate_manifest" ]] || {
     echo "Communication candidate manifest is required for staged apply." >&2
     return 1
@@ -30,6 +29,7 @@ PY
 }
 
 communication_candidate_files_from() {
+  local communication_candidate_manifest="${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}"
   communication_validate_candidate
   local candidate_root="${CLAWGATE_COMMUNICATION_CANDIDATE_ROOT:-$PWD}"
   python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/communication-candidate.py" --manifest "$communication_candidate_manifest" --root "$candidate_root"

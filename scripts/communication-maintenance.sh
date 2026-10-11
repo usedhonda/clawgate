@@ -52,20 +52,41 @@ fi
 
 case "$mode" in
   apply)
-    [[ -d "$plugin_src" && ! -L "$plugin_src" ]] || { echo "Missing plugin source: $plugin_src" >&2; exit 1; }
+    if [[ "$skip_plugin_sync" != "1" ]]; then
+      [[ -d "$plugin_src" && ! -L "$plugin_src" ]] || { echo "Missing plugin source: $plugin_src" >&2; exit 1; }
+    fi
     [[ ! -L "$state_dir" ]] || { echo "Communication maintenance state directory is symlinked: $state_dir" >&2; exit 1; }
     mkdir -p "$state_dir"
     [[ ! -L "$state_file" ]] || { echo "Communication maintenance state file is symlinked: $state_file" >&2; exit 1; }
+    # Mark this invocation before path/source validation so a canonical
+    # rollback cannot consume a previous successful current-op after apply
+    # fails. The marker is replaced with the new backup path once preflight is
+    # complete.
+    printf 'in-progress\n' > "$state_file"
     backup_path="$(mktemp -d "$state_dir/op.XXXXXX")"
     files_file="$backup_path/changed-files"
     app_backup="$backup_path/ClawGate.app.previous"
     app_marker="$backup_path/app-changed"
-    printf '%s\n' "$backup_path" > "$state_file"
     [[ ! -L "$plugin_dst" ]] || { echo "Plugin destination is symlinked: $plugin_dst" >&2; exit 1; }
     if [[ -d "$plugin_dst" ]] && find "$plugin_dst" -type l -print -quit | grep -q .; then
       echo "Refusing plugin destination containing symlinks: $plugin_dst" >&2
       exit 1
     fi
+    if [[ -n "$candidate_files" && "$candidate_root" != "$project_path" ]]; then
+      while IFS= read -r rel; do
+        [[ -n "$rel" && "$rel" != "$candidate_manifest_rel" ]] || continue
+        src="$candidate_root/$rel"
+        dst="$project_path/$rel"
+        assert_no_symlink_components "$candidate_root" "$rel"
+        assert_no_symlink_components "$project_path" "$rel"
+        [[ -f "$src" && ! -L "$src" ]] || { echo "Missing source candidate: $src" >&2; exit 1; }
+        [[ ! -d "$dst" ]] || { echo "Refusing directory source destination: $dst" >&2; exit 1; }
+        [[ ! -L "$dst" ]] || { echo "Refusing symlink source destination: $dst" >&2; exit 1; }
+      done <<< "$candidate_files"
+    fi
+    # Publish current-op only after all admission/path checks pass. A failed
+    # preflight must not leave rollback pointing at an older successful op.
+    printf '%s\n' "$backup_path" > "$state_file"
     : > "$files_file"
     if [[ -n "$staged_app" ]]; then
       app_target="$project_path/ClawGate.app"
@@ -147,6 +168,10 @@ case "$mode" in
     [[ -f "$state_file" ]] || { echo "No communication maintenance backup found." >&2; exit 1; }
     [[ ! -L "$state_file" ]] || { echo "Communication maintenance state file is symlinked: $state_file" >&2; exit 1; }
     backup_path="$(<"$state_file")"
+    if [[ "$backup_path" == "in-progress" ]]; then
+      echo "No completed communication maintenance operation to roll back." >&2
+      exit 0
+    fi
     files_file="$backup_path/changed-files"
     [[ -d "$backup_path" ]] || { echo "Communication maintenance backup is missing: $backup_path" >&2; exit 1; }
     [[ -f "$files_file" ]] || { echo "Communication maintenance changed-file manifest is missing." >&2; exit 1; }
