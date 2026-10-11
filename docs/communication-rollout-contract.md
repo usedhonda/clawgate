@@ -1,0 +1,24 @@
+# Communication rollout safety contract
+
+The communication candidate flow is source-only until the canonical restart
+entry point admits it. The following invariants are required:
+
+- A staged destination and every existing parent component must be a real
+  directory inside the target project. `rsync` uses protected arguments so a
+  path containing spaces cannot be re-parsed by the remote shell.
+- The admitted remote script is executed by Bash because the shared helpers
+  use Bash arrays and `BASH_SOURCE`.
+- A normal Host A build uses the live project script and passes
+  `CLAWGATE_COMMUNICATION_STAGED_BUILD=0`; only an admitted staged source sets
+  it to `1`.
+- Signing preferences are read from the selected `--project-path` after
+  argument parsing. Private release credentials never enter a candidate stage.
+- Each canonical communication restart receives a unique operation backup
+  root. An apply failure before its operation starts must not make rollback
+  consume an earlier successful operation.
+- `CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC=1` permits a scripts-only operation;
+  plugin source validation is not required in that mode.
+
+`scripts/tests/communication-rollout-residuals.sh` is the bounded fake-tool
+regression for these invariants. It does not SSH, build, sign, restart, or
+deploy a host.

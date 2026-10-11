@@ -33,7 +33,9 @@ required_scripts=(
 for required in "${required_scripts[@]}"; do
   grep -Fxq "$required" "$files_from" || { echo "candidate manifest must declare $required" >&2; exit 1; }
 done
-ssh "$REMOTE_HOST" bash -s -- "$PROJECT_PATH" "$remote_stage" <<'REMOTE_STAGE_GUARD'
+printf -v project_path_q '%q' "$PROJECT_PATH"
+printf -v remote_stage_q '%q' "$remote_stage"
+ssh "$REMOTE_HOST" "bash -s -- $project_path_q $remote_stage_q" <<'REMOTE_STAGE_GUARD'
 set -euo pipefail
 project_path="$1"
 remote_stage="$2"
@@ -49,6 +51,8 @@ if parent.is_symlink():
 parent_resolved = parent.resolve()
 if not parent_resolved.is_relative_to(project):
     raise SystemExit(f"stage destination escapes project: {stage}")
+if parent_resolved != parent:
+    raise SystemExit(f"refusing symlink stage component: {parent}")
 parent.mkdir(parents=True, exist_ok=True)
 if stage.exists() and not stage.is_dir():
     raise SystemExit(f"stage destination is not a directory: {stage}")
@@ -57,8 +61,14 @@ if stage.resolve() != stage:
     raise SystemExit(f"stage destination resolved unexpectedly: {stage}")
 PY
 REMOTE_STAGE_GUARD
-rsync -az --files-from="$files_from" --exclude .git/ --exclude .local/secrets/ "$PROJECT_PATH/" "$REMOTE_HOST:$remote_stage/"
-ssh "$REMOTE_HOST" bash -s -- "$remote_stage" "${required_scripts[@]}" <<'REMOTE_STAGE_VERIFY'
+rsync -azs --files-from="$files_from" --exclude .git/ --exclude .local/secrets/ "$PROJECT_PATH/" "$REMOTE_HOST:$remote_stage/"
+printf -v remote_stage_q '%q' "$remote_stage"
+verify_command="bash -s -- $remote_stage_q"
+for required in "${required_scripts[@]}"; do
+  printf -v required_q '%q' "$required"
+  verify_command+=" $required_q"
+done
+ssh "$REMOTE_HOST" "$verify_command" <<'REMOTE_STAGE_VERIFY'
 set -euo pipefail
 stage="$1"
 shift

@@ -79,8 +79,19 @@ communication_gateway_restart() {
     echo "Communication maintenance requires a paired rollback hook." >&2
     return 1
   fi
+  local operation_id="${CLAWGATE_COMMUNICATION_OPERATION_ID:-}"
+  if [[ -z "$operation_id" ]]; then
+    operation_id="$(printf '%s\n' "${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}" "${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}" "$$" "$(date +%s%N 2>/dev/null || date +%s)" | shasum -a 256 | awk '{print substr($1,1,24)}')"
+  fi
+  [[ "$operation_id" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    echo "Invalid communication operation id: $operation_id" >&2
+    return 1
+  }
+  local backup_dir="${CLAWGATE_COMMUNICATION_BACKUP_DIR:-$project_path/.runtime/communication-maintenance/$operation_id}"
   GATEWAY_RESTART_COMMUNICATION_MANIFEST="${GATEWAY_RESTART_COMMUNICATION_MANIFEST:-}" \
   GATEWAY_RESTART_COMMUNICATION_CURRENT="${GATEWAY_RESTART_COMMUNICATION_CURRENT:-}" \
+  CLAWGATE_COMMUNICATION_OPERATION_ID="$operation_id" \
+  CLAWGATE_COMMUNICATION_BACKUP_DIR="$backup_dir" \
   GATEWAY_RESTART_MAINTENANCE_HOOK="$maintenance_hook" \
   GATEWAY_RESTART_MAINTENANCE_ROLLBACK_HOOK="$rollback_hook" \
     "$gateway_restart"
