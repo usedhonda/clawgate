@@ -926,7 +926,14 @@ final class PetModel: NSObject, ObservableObject {
         }
         AXUIElementSetMessagingTimeout(appElement, Float(min(AXActions.mainCallbackTimeout, initialRemaining)))
         let windows = AXQuery.windows(appElement: appElement)
-        let focused = AXQuery.focusedWindow(appElement: appElement)
+        let focused: AXUIElement?
+        let afterWindows = remainingProbeBudget()
+        if afterWindows > 0.001 {
+            AXUIElementSetMessagingTimeout(appElement, Float(min(AXActions.mainCallbackTimeout, afterWindows)))
+            focused = AXQuery.focusedWindow(appElement: appElement)
+        } else {
+            focused = nil
+        }
 
         var candidates: [AXUIElement] = []
         for window in [focused].compactMap({ $0 }) + windows {
