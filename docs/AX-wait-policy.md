@@ -19,8 +19,9 @@ main queue. These crossings are bounded:
   budget expires, placement falls back to the already-collected CG window
   frame, preventing a wedged target app from blocking a tracking tick
   indefinitely. The two-message frame read (position then size) checks the
-  remaining budget before each AX message, so size is not issued after the
-  position read consumes the deadline.
+  remaining budget before each AX message, then checks it again before the
+  subrole/modal reads, so later messages are not issued after an earlier read
+  consumes the deadline.
 
 After a timeout, `ensureWindow` returns failure and its caller may retry through
 the normal tracking/recovery path. The existing AX polling deadlines remain

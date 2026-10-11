@@ -1,3 +1,4 @@
+import ApplicationServices
 import XCTest
 @testable import ClawGate
 

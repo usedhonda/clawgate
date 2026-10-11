@@ -195,8 +195,13 @@ enum AXQuery {
         guard prepareNextRead(), let sizeValue = readSize() else { return nil }
         var point = CGPoint.zero
         var size = CGSize.zero
-        guard let posAXValue = posValue as? AXValue,
-              let sizeAXValue = sizeValue as? AXValue,
+        guard CFGetTypeID(posValue) == AXValueGetTypeID(),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+        let posAXValue = posValue as! AXValue
+        let sizeAXValue = sizeValue as! AXValue
+        guard
               AXValueGetValue(posAXValue, .cgPoint, &point),
               AXValueGetValue(sizeAXValue, .cgSize, &size) else {
             return nil

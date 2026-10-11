@@ -950,6 +950,9 @@ final class PetModel: NSObject, ObservableObject {
                 return true
             })
             guard let axFrame, PetGeometry.roughlySameFrame(axFrame, cgBounds) else { continue }
+            let afterFrame = remainingProbeBudget()
+            guard afterFrame > 0.001 else { break }
+            AXUIElementSetMessagingTimeout(candidate, Float(min(AXActions.mainCallbackTimeout, afterFrame)))
             let subrole = AXQuery.copyStringAttribute(candidate, attribute: kAXSubroleAttribute as String)
                 let rejectedSubroles: Set<String> = [
                     kAXFloatingWindowSubrole as String,
