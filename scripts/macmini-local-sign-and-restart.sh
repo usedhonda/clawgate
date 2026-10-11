@@ -37,8 +37,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Resolve the project first, then read its private signing preference. This is
-# intentionally after argument parsing so --project-path cannot use the live
-# checkout's credentials accidentally.
+# intentionally after argument parsing so staged execution reads the explicitly
+# selected live checkout preference, not stage-local settings.
 if [[ -f "$PROJECT_PATH/.local/secrets/release.env" ]]; then
   # shellcheck disable=SC1091
   set -a; source "$PROJECT_PATH/.local/secrets/release.env"; set +a
