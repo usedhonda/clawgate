@@ -5,6 +5,82 @@ import CoreGraphics
 import Foundation
 
 enum AXActions {
+    /// AX/AppKit work is allowed to cross queues, but callers must never wait
+    /// forever for the main queue (or a helper process) to drain.  Keep these
+    /// values centralized so the policy is reviewable and testable.
+    static let mainCallbackTimeout: TimeInterval = 2.5
+    static let reopenFallbackTimeout: TimeInterval = 2.0
+
+    private final class CallbackFence {
+        private let lock = NSLock()
+        private var active = true
+
+        func cancel() {
+            lock.lock()
+            active = false
+            lock.unlock()
+        }
+
+        func runIfActive(_ action: () -> Void) {
+            lock.lock()
+            guard active else {
+                lock.unlock()
+                return
+            }
+            lock.unlock()
+            // Once claimed, this callback owns its bounded side effect. A
+            // timeout can fence callbacks still queued, but cannot revoke an
+            // action that has already started.
+            action()
+        }
+    }
+
+    /// Schedule a main-thread side effect with a finite wait.  If the caller
+    /// times out first, the queued callback is fenced before it can mutate AX
+    /// state; a callback already in flight is allowed to finish its own action.
+    @discardableResult
+    private static func runOnMainWithTimeout(
+        timeout: TimeInterval = mainCallbackTimeout,
+        _ action: @escaping () -> Void
+    ) -> Bool {
+        if Thread.isMainThread {
+            action()
+            return true
+        }
+        let fence = CallbackFence()
+        let completed = DispatchSemaphore(value: 0)
+        DispatchQueue.main.async {
+            fence.runIfActive(action)
+            completed.signal()
+        }
+        guard completed.wait(timeout: .now() + timeout) == .success else {
+            fence.cancel()
+            NSLog("[AXActions] main callback timed out after %.2fs", timeout)
+            return false
+        }
+        return true
+    }
+
+    /// Wait for only the helper process created by this call.  On timeout the
+    /// child is terminated and no global process is touched.
+    @discardableResult
+    private static func runOwnedProcess(_ process: Process, timeout: TimeInterval) -> Bool {
+        let completed = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in completed.signal() }
+        do {
+            try process.run()
+        } catch {
+            NSLog("[AXActions] owned helper launch failed (%@)", "\(error)")
+            return false
+        }
+        guard completed.wait(timeout: .now() + timeout) == .success else {
+            if process.isRunning { process.terminate() }
+            NSLog("[AXActions] owned helper timed out after %.2fs", timeout)
+            return false
+        }
+        return true
+    }
+
     static func setValue(_ text: String, on element: AXUIElement) -> Bool {
         AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef) == .success
     }
@@ -329,8 +405,7 @@ enum AXActions {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
             task.arguments = ["-e", "tell application id \"\(bundleID)\" to activate"]
-            try? task.run()
-            task.waitUntilExit()
+            _ = runOwnedProcess(task, timeout: reopenFallbackTimeout)
         }
     }
 
@@ -371,12 +446,12 @@ enum AXActions {
 
         // 3. No windows — send kAEReopenApplication from Main Thread
         NSLog("[AXActions] ensureWindow: no windows, sending reopen event")
-        let semaphore = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
+        guard runOnMainWithTimeout({
             sendReopenEvent(bundleID: bundleID)
-            semaphore.signal()
+        }) else {
+            NSLog("[AXActions] ensureWindow: reopen dispatch timed out")
+            return nil
         }
-        semaphore.wait()
 
         // Poll for window to appear
         var foundWindow: AXUIElement?
@@ -399,12 +474,12 @@ enum AXActions {
 
         // 4. Reopen didn't work — activate on Main Thread as last resort
         NSLog("[AXActions] ensureWindow: reopen failed, trying activate on main thread")
-        let sem2 = DispatchSemaphore(value: 0)
-        DispatchQueue.main.async {
+        guard runOnMainWithTimeout({
             app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            sem2.signal()
+        }) else {
+            NSLog("[AXActions] ensureWindow: activate dispatch timed out")
+            return nil
         }
-        sem2.wait()
 
         let ok2 = poll(intervalMs: 100, timeoutMs: 3000) {
             if let w = AXQuery.focusedWindow(appElement: appElement) {
