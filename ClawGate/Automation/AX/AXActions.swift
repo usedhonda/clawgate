@@ -10,6 +10,7 @@ enum AXActions {
     /// values centralized so the policy is reviewable and testable.
     static let mainCallbackTimeout: TimeInterval = 2.5
     static let reopenFallbackTimeout: TimeInterval = 2.0
+    static let petTrackingAXBudget: TimeInterval = 0.25
 
     private final class CallbackFence {
         private let lock = NSLock()
@@ -86,16 +87,6 @@ enum AXActions {
         }
         return true
     }
-
-    #if DEBUG
-    static func callbackFenceAllowsEffectForTesting(cancelBeforeRun: Bool) -> Bool {
-        let fence = CallbackFence()
-        var performed = false
-        if cancelBeforeRun { fence.cancel() }
-        fence.runIfActive { performed = true }
-        return performed
-    }
-    #endif
 
     static func setValue(_ text: String, on element: AXUIElement) -> Bool {
         AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef) == .success

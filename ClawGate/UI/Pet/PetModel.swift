@@ -914,7 +914,17 @@ final class PetModel: NSObject, ObservableObject {
         // main-queue owned), so cap each cross-process message. This keeps a
         // wedged target app from turning one tracking tick into an unbounded
         // UI stall while preserving the existing placement decisions.
-        AXUIElementSetMessagingTimeout(appElement, Float(AXActions.mainCallbackTimeout))
+        let probeStart = DispatchTime.now().uptimeNanoseconds
+        func remainingProbeBudget() -> TimeInterval {
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - probeStart) / 1_000_000_000
+            return max(0, AXActions.petTrackingAXBudget - elapsed)
+        }
+        let initialRemaining = remainingProbeBudget()
+        guard initialRemaining > 0.001 else {
+            let screen = screenForTrackedFrame(cgBounds)
+            return .accepted(element: nil, frame: cgBounds, appKitFrame: appKitRectForTrackedFrame(cgBounds), screen: screen ?? NSScreen.main ?? NSScreen.screens.first!)
+        }
+        AXUIElementSetMessagingTimeout(appElement, Float(min(AXActions.mainCallbackTimeout, initialRemaining)))
         let windows = AXQuery.windows(appElement: appElement)
         let focused = AXQuery.focusedWindow(appElement: appElement)
 
@@ -923,8 +933,10 @@ final class PetModel: NSObject, ObservableObject {
             if candidates.contains(where: { CFEqual($0, window) }) { continue }
             candidates.append(window)
         }
-        for candidate in candidates {
-            AXUIElementSetMessagingTimeout(candidate, Float(AXActions.mainCallbackTimeout))
+        for candidate in candidates.prefix(8) {
+            let remaining = remainingProbeBudget()
+            guard remaining > 0.001 else { break }
+            AXUIElementSetMessagingTimeout(candidate, Float(min(AXActions.mainCallbackTimeout, remaining)))
             if let axFrame = AXQuery.copyFrameAttribute(candidate), PetGeometry.roughlySameFrame(axFrame, cgBounds) {
                 let subrole = AXQuery.copyStringAttribute(candidate, attribute: kAXSubroleAttribute as String)
                 let rejectedSubroles: Set<String> = [

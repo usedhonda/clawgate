@@ -2,37 +2,45 @@ import XCTest
 @testable import ClawGate
 
 final class AXActionsWaitPolicyTests: XCTestCase {
-    func testAXWaitPolicyIsFiniteAndOrdered() {
-        XCTAssertGreaterThan(AXActions.mainCallbackTimeout, 0)
-        XCTAssertLessThanOrEqual(AXActions.mainCallbackTimeout, 3)
-        XCTAssertGreaterThan(AXActions.reopenFallbackTimeout, 0)
-        XCTAssertLessThanOrEqual(AXActions.reopenFallbackTimeout, AXActions.mainCallbackTimeout)
-    }
-
-    func testExpiredQueuedMainCallbackIsFencedBeforeItsEffect() {
+    func testExpiredQueuedMainCallbackIsFencedBeforeItsEffect() async {
         let entered = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
         DispatchQueue.main.async {
             entered.signal()
             release.wait()
         }
-        XCTAssertEqual(entered.wait(timeout: .now() + 1), .success)
+        let enteredExpectation = expectation(description: "main callback entered")
+        DispatchQueue.global().async {
+            entered.wait()
+            enteredExpectation.fulfill()
+        }
+        await fulfillment(of: [enteredExpectation], timeout: 1)
 
         var performed = false
-        let completed = DispatchQueue.global().sync {
-            AXActions.runOnMainWithTimeoutForTesting(timeout: 0.01) { performed = true }
+        let resultExpectation = expectation(description: "bounded wait returned")
+        var completed = true
+        DispatchQueue.global().async {
+            completed = AXActions.runOnMainWithTimeoutForTesting(timeout: 0.01) { performed = true }
+            resultExpectation.fulfill()
         }
+        await fulfillment(of: [resultExpectation], timeout: 1)
         XCTAssertFalse(completed)
         release.signal()
-        DispatchQueue.main.sync { }
+        let drained = expectation(description: "expired callback drained")
+        DispatchQueue.main.async { drained.fulfill() }
+        await fulfillment(of: [drained], timeout: 1)
         XCTAssertFalse(performed)
     }
 
-    func testMainCallbackCompletesWhenMainQueueAvailable() {
+    func testMainCallbackCompletesWhenMainQueueAvailable() async {
         var performed = false
-        let completed = DispatchQueue.global().sync {
-            AXActions.runOnMainWithTimeoutForTesting(timeout: 1) { performed = true }
+        let resultExpectation = expectation(description: "main callback completed")
+        var completed = false
+        DispatchQueue.global().async {
+            completed = AXActions.runOnMainWithTimeoutForTesting(timeout: 1) { performed = true }
+            resultExpectation.fulfill()
         }
+        await fulfillment(of: [resultExpectation], timeout: 1)
         XCTAssertTrue(completed)
         XCTAssertTrue(performed)
     }

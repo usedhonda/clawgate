@@ -14,8 +14,11 @@ main queue. These crossings are bounded:
   asked to terminate; this bounds ClawGate's wait but does not claim that the
   child has exited synchronously.
 - Pet window tracking applies the same AX messaging timeout to its application
-  and candidate window elements before synchronous reads, preventing a wedged
-  target app from blocking a tracking tick indefinitely.
+  and candidate window elements before synchronous reads. Each tracking probe
+  has a 250ms aggregate budget and examines at most eight candidates; if the
+  budget expires, placement falls back to the already-collected CG window
+  frame, preventing a wedged target app from blocking a tracking tick
+  indefinitely.
 
 After a timeout, `ensureWindow` returns failure and its caller may retry through
 the normal tracking/recovery path. The existing AX polling deadlines remain
