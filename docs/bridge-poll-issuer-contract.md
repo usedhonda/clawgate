@@ -49,6 +49,13 @@ those original objects; copied or merged objects return `null`. This is source
 carry for a future receiver, not host authority or a new RPC, and it makes no
 watcher claim for events without an admission envelope.
 
+`prepareBridgeAdmissionPolls` is a pure source-selection adapter for that future
+receiver: it accepts only original events with verified evidence, groups
+consecutive members by the exact shared envelope, and preserves strictly
+increasing original indexes. Copies, unverified events, duplicates, reverse
+indexes, or a noncontiguous return to an earlier envelope are rejected with
+`null`. The result is frozen and invokes no receiver or host API.
+
 Inbound processing mutates a separate top-level/payload projection, never the
 authenticated original object. Burst coalescing carries the ordered original
 references separately from merged dispatch text. The projection itself gains
