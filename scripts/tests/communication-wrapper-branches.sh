@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+candidate_stage=""
+trap 'rm -rf "$tmp"; [[ -z "${candidate_stage:-}" ]] || rm -rf "$candidate_stage"; rm -f "$ROOT/.runtime/communication-wrapper-candidate.json"' EXIT
 project="$tmp/project"
 mkdir -p "$project/scripts" "$project/.runtime"
 for file in lib-communication-restart.sh lib-ops-log.sh; do ln -s "$ROOT/scripts/$file" "$project/scripts/$file"; done
@@ -75,6 +76,9 @@ head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], te
 data = {"version": 2, "source_revision": head, "target_base_revision": head, "files": [{"path": p, "sha256": hashlib.sha256((root / p).read_bytes()).hexdigest()} for p in files]}
 pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
 PY
+candidate_id="$(shasum -a 256 "$manifest" | awk '{print substr($1,1,16)}')"
+candidate_stage="$ROOT/.runtime/communication-candidate-$candidate_id"
+[[ ! -e "$candidate_stage" && ! -L "$candidate_stage" ]] || { echo 'candidate stage already exists' >&2; exit 1; }
 printf '#!/usr/bin/env bash\nexit 0\n' > "$tmp/check"
 chmod 755 "$tmp/check"
 mkdir -p "$tmp/scripts"
@@ -95,7 +99,7 @@ touch "$tmp/manifest" "$tmp/current"
     "$ROOT/scripts/post-task-restart.sh" --remote-host fake --project-path "$ROOT" --build-hosta
 ) >/dev/null 2>&1
 grep -Fq "CLAWGATE_COMMUNICATION_STAGED_BUILD=1" "$tmp/admitted-commands"
-grep -Fq "communication-candidate-" "$tmp/admitted-commands"
+grep -Fq "$candidate_stage/scripts/macmini-local-sign-and-restart.sh" "$tmp/admitted-commands"
 rm -f "$manifest"
 echo 'communication wrapper admitted branch: PASS'
 
@@ -104,11 +108,12 @@ echo 'communication wrapper admitted branch: PASS'
 # Swift, codesign, Gateway, and curl tools stop before any real operation.
 live="$tmp/sign-live"
 stage="$tmp/sign-stage"
-mkdir -p "$live/.local/secrets" "$live/ClawGate.app/Contents/MacOS" "$stage" "$tmp/home/Library/Keychains"
+keychain_fixture="$tmp/keychains"
+mkdir -p "$live/.local/secrets" "$live/ClawGate.app/Contents/MacOS" "$stage/scripts" "$keychain_fixture"
 printf 'SIGNING_ID=LiveSynthetic\n' > "$live/.local/secrets/release.env"
 printf 'entitlements\n' > "$stage/ClawGate.entitlements"
 printf 'binary\n' > "$live/ClawGate.app/Contents/MacOS/ClawGate"
-touch "$tmp/home/Library/Keychains/login.keychain-db" "$tmp/home/Library/Keychains/login_renamed_1.keychain-db"
+touch "$keychain_fixture/login.keychain-db" "$keychain_fixture/login_renamed_1.keychain-db"
 cat > "$tmp/bin/security" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -135,13 +140,16 @@ cat > "$tmp/bin/gateway" <<'EOF'
 exit 0
 EOF
 chmod 755 "$tmp/bin/security" "$tmp/bin/swift" "$tmp/bin/codesign" "$tmp/bin/curl" "$tmp/bin/gateway"
+ln -sf "$ROOT/scripts/lib-communication-restart.sh" "$stage/scripts/lib-communication-restart.sh"
+sed "s|\"\$HOME/Library/Keychains/|\"\$KEYCHAIN_FIXTURE/|g" "$ROOT/scripts/macmini-local-sign-and-restart.sh" > "$stage/scripts/macmini-local-sign-and-restart.sh"
+chmod 755 "$stage/scripts/macmini-local-sign-and-restart.sh"
 (
-  export HOME="$tmp/home" PATH="$tmp/bin:$PATH" SIGNING_COMMANDS="$tmp/signing-commands"
+  export PATH="$tmp/bin:$PATH" SIGNING_COMMANDS="$tmp/signing-commands" KEYCHAIN_FIXTURE="$keychain_fixture"
   export KEYCHAIN_PASSWORD=synthetic CLAWGATE_COMMUNICATION_STAGED_BUILD=1
   export CLAWGATE_COMMUNICATION_SOURCE_STAGE="$stage" CLAWGATE_COMMUNICATION_PROJECT_PATH="$live"
   export CLAWGATE_GATEWAY_RESTART_SCRIPT="$tmp/bin/gateway"
   cd "$live"
-  "$ROOT/scripts/macmini-local-sign-and-restart.sh" --project-path "$live"
+  "$stage/scripts/macmini-local-sign-and-restart.sh" --project-path "$live"
 ) >/dev/null 2>&1
 grep -Fq -- '--sign LiveSynthetic' "$tmp/signing-commands"
 echo 'communication staged signing preference: PASS'
