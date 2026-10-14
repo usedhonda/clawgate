@@ -7,9 +7,11 @@ import UniformTypeIdentifiers
 /// the difference is room — a full window instead of a 360pt bubble — and a
 /// status banner that says how far generation got and what happens next.
 struct MeetingWorkspaceView: View {
-    @ObservedObject var model: PetModel
+    let model: PetModel
 
     @State private var meetings: [MeetingRecord] = []
+    @State private var rowStatuses: [String: MeetingWorkspaceStatus] = [:]
+    @State private var rowLabels: [String: String] = [:]
     @State private var selectedID: String?
     @State private var searchText = ""
     @State private var tab: Tab = .minutes
@@ -50,7 +52,7 @@ struct MeetingWorkspaceView: View {
             }
         }
         .onAppear { reload() }
-        .onChange(of: model.meetingsRevision) { _ in reload() }
+        .onReceive(model.$meetingsRevision.dropFirst()) { _ in reload() }
         .onChange(of: searchText) { _ in reload() }
         .onChange(of: selectedID) { _ in copied = false }
         .onChange(of: tab) { _ in copied = false }
@@ -91,7 +93,7 @@ struct MeetingWorkspaceView: View {
     }
 
     private func meetingRow(_ meeting: MeetingRecord) -> some View {
-        let status = MeetingWorkspaceStatus(meeting: meeting, held: model.minutesHoldReason(for: meeting) != nil)
+        let status = rowStatuses[meeting.id] ?? MeetingWorkspaceStatus(meeting: meeting)
         let active = meeting.id == selectedID
         return Button {
             selectedID = meeting.id
@@ -110,7 +112,7 @@ struct MeetingWorkspaceView: View {
                 }
                 HStack(spacing: 6) {
                     Circle().fill(status.color).frame(width: 8, height: 8)
-                    Text(status.shortLabel)
+                    Text(rowLabels[meeting.id] ?? "")
                         .font(.system(size: 12))
                         .foregroundColor(status.isProblem ? WorkspaceTheme.warningText : WorkspaceTheme.secondary)
                 }
@@ -145,6 +147,10 @@ struct MeetingWorkspaceView: View {
                 let haystack = ([meeting.title ?? ""] + meeting.participants).joined(separator: " ").lowercased()
                 return haystack.contains(query)
             }
+        rowStatuses = Dictionary(uniqueKeysWithValues: meetings.map { meeting in
+            (meeting.id, MeetingWorkspaceStatus(meeting: meeting, held: model.minutesHoldReason(for: meeting) != nil))
+        })
+        rowLabels = rowStatuses.mapValues { $0.shortLabel }
         if selectedID == nil || !meetings.contains(where: { $0.id == selectedID }) {
             selectedID = meetings.first?.id
         }
@@ -172,27 +178,76 @@ private struct MeetingWorkspaceDetail: View {
     @State private var editingNote = ""
     @State private var confirmFullRegeneration = false
 
-    private var accepted: MeetingAcceptedMinutes? { MeetingStore().loadAcceptedMinutes(id: meeting.id) }
-    private var job: MeetingMinutesJob? { MeetingMinutesJob.load(store: MeetingStore(), id: meeting.id) }
+    // Document reads and citation preparation belong to refresh, never to a
+    // SwiftUI body evaluation (PetModel publishes unrelated state frequently).
+    @State private var accepted: MeetingAcceptedMinutes?
+    @State private var job: MeetingMinutesJob?
+    @State private var shown: (minutes: MeetingMinutes, partial: Bool)?
+    @State private var transcriptRows: [TranscriptRow] = []
+    @State private var citedText: [String: AttributedString] = [:]
+    @State private var indexedProgress: MeetingMinutesExecutionProgress?
+    @State private var holdReason: String?
+    @State private var activity: (label: String, elapsedSeconds: Int?)?
+    @State private var activityCapturedAt = Date()
 
-    /// The accepted minutes, or — while a generation is under way and nothing
-    /// was ever accepted — the parts written so far, so the owner can read what
-    /// exists instead of an empty page.
-    private var shown: (minutes: MeetingMinutes, partial: Bool)? {
-        if let minutes = model.minutes(for: meeting.id) { return (minutes, false) }
-        if let job, let partial = MeetingMinutes.combining(job.completed.compactMap { $0 }) {
-            return (partial, true)
+    private func refreshDocument() {
+        let store = MeetingStore()
+        let nextAccepted = store.loadAcceptedMinutes(id: meeting.id)
+        let nextJob = MeetingMinutesJob.load(store: store, id: meeting.id)
+        let minutes = nextAccepted?.minutes ?? store.loadMinutes(id: meeting.id)
+        let nextShown = minutes.map { (minutes: $0, partial: false) }
+            ?? nextJob.flatMap { job in
+                MeetingMinutes.combining(job.completed.compactMap { $0 }).map { (minutes: $0, partial: true) }
+            }
+        let zone = TimeZone(identifier: meeting.timeZone) ?? .current
+        let rows: [TranscriptRow]
+        if let nextAccepted {
+            rows = nextAccepted.segments.map {
+                TranscriptRow(id: $0.id, time: WorkspaceFormat.clock($0.capturedAt, zone: zone),
+                              speaker: $0.speakerName ?? "話者未確認", text: $0.text)
+            }
+        } else {
+            rows = model.meetingTranscript(for: meeting).enumerated().map { index, seg in
+                TranscriptRow(id: "seg-\(index + 1)", time: WorkspaceFormat.clock(seg.capturedAt, zone: zone),
+                              speaker: seg.speakerName ?? (seg.stream == "system" ? "PC音声" : "マイク"), text: seg.text)
+            }
         }
-        return nil
+        var rendered: [String: AttributedString] = [:]
+        if let minutes = nextShown?.minutes {
+            let evidence = minutes.evidence ?? []
+            let allowed = Set(evidence.flatMap(\.segmentIds))
+            var texts = [minutes.summary]
+            texts += minutes.topics.flatMap(\.points)
+            texts += minutes.decisions
+            texts += minutes.actionItems.map(\.what)
+            texts += WorkspaceFormat.collapseNearDuplicates(minutes.openQuestions + (nextAccepted?.unresolvedNotes ?? []))
+            for text in Set(texts) {
+                rendered[text] = WorkspaceFormat.cited(text, allowed: allowed, evidence: evidence)
+            }
+        }
+        accepted = nextAccepted
+        job = nextJob
+        shown = nextShown
+        transcriptRows = rows
+        citedText = rendered
+        indexedProgress = model.minutesIndexedProgress(for: meeting, job: nextJob)
+        holdReason = model.minutesHoldReason(for: meeting)
+        activityCapturedAt = Date()
+        activity = model.minutesActivity(for: meeting, now: activityCapturedAt)
+    }
+
+    private func renderedCitation(_ text: String) -> AttributedString {
+        citedText[text] ?? AttributedString(text)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             workflowBar
-            MeetingSourcesRow(model: model, meeting: meeting, accepted: accepted)
-            MeetingStatusBanner(model: model, meeting: meeting, job: job,
-                                hasReadableMinutes: shown != nil)
+            MeetingSourcesRow(model: model, meeting: meeting, accepted: accepted, transcriptCount: transcriptRows.count)
+            MeetingStatusBanner(meeting: meeting, job: job, indexed: indexedProgress,
+                                holdReason: holdReason, activity: activity, activityCapturedAt: activityCapturedAt,
+                                hasTranscript: !transcriptRows.isEmpty)
             tabBar
             GeometryReader { geometry in
                 ScrollViewReader { proxy in
@@ -237,7 +292,10 @@ private struct MeetingWorkspaceDetail: View {
             })
         }
         .foregroundColor(WorkspaceTheme.ink)
-        .onAppear { reloadSupplemental() }
+        .onAppear { refreshDocument(); reloadSupplemental() }
+        .onChange(of: meeting) { _ in refreshDocument() }
+        .onReceive(model.$meetingsRevision.dropFirst()) { _ in refreshDocument() }
+        .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in refreshDocument() }
         .alert("全パートを作り直しますか？", isPresented: $confirmFullRegeneration) {
             Button("全パートを作り直す") { model.regenerateMinutes(for: meeting, forceFull: true) }
             Button("キャンセル", role: .cancel) {}
@@ -271,7 +329,7 @@ private struct MeetingWorkspaceDetail: View {
         let changed = accepted != nil && model.minutesInputsChanged(for: meeting)
         let pending = meeting.minutesState == "pending"
         let disabled = pending || materialBusy || model.googleMaterialBusy(for: meeting)
-            || model.minutesActivity(for: meeting) != nil
+            || activity != nil
         let checkpoint = meeting.minutesState == "failed"
             && (job?.completed.count ?? 0) > 0
             && (job?.completed.count ?? 0) < (job?.envelopes.count ?? 0)
@@ -473,9 +531,9 @@ private struct MeetingWorkspaceDetail: View {
             // Side by side when there is room; the side column drops below the
             // main one on a narrow window instead of crushing it.
             AdaptiveColumns(width: width, sideWidth: 300, minimumMainWidth: 460) {
-                VStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: 18) {
                     WorkspaceCard(title: shown.partial ? "概要（完成したパートの範囲）" : "概要") {
-                        Text(WorkspaceFormat.cited(minutes.summary, allowed: citations, evidence: evidence))
+                        Text(renderedCitation(minutes.summary))
                             .font(.system(size: 15)).lineSpacing(5).textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -487,7 +545,7 @@ private struct MeetingWorkspaceDetail: View {
                                 ForEach(Array(topic.points.enumerated()), id: \.offset) { _, point in
                                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                                         Text("•").foregroundColor(WorkspaceTheme.muted)
-                                        Text(WorkspaceFormat.cited(point, allowed: citations, evidence: evidence))
+                                        Text(renderedCitation(point))
                                             .font(.system(size: 14)).lineSpacing(4).textSelection(.enabled)
                                             .fixedSize(horizontal: false, vertical: true)
                                     }
@@ -498,7 +556,7 @@ private struct MeetingWorkspaceDetail: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             } side: {
-                VStack(alignment: .leading, spacing: 18) {
+                LazyVStack(alignment: .leading, spacing: 18) {
                     listCard("決まったこと", minutes.decisions, citations, empty: "記録なし", evidence: evidence)
                     WorkspaceCard(title: "宿題") {
                         if minutes.actionItems.isEmpty {
@@ -509,7 +567,7 @@ private struct MeetingWorkspaceDetail: View {
                                 Text(item.mine == true ? "あなた" : (item.owner ?? "担当未定"))
                                     .font(.system(size: 12, weight: .bold))
                                     .foregroundColor(item.mine == true ? WorkspaceTheme.chipText : WorkspaceTheme.secondary)
-                                Text(WorkspaceFormat.cited(item.what, allowed: citations, evidence: evidence))
+                                Text(renderedCitation(item.what))
                                     .font(.system(size: 14)).lineSpacing(3).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                                 Text(item.due.map { "期限 \($0)" } ?? "期限なし")
@@ -541,7 +599,7 @@ private struct MeetingWorkspaceDetail: View {
                 Text(empty).font(.system(size: 14)).foregroundColor(WorkspaceTheme.muted)
             }
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                Text(WorkspaceFormat.cited(item, allowed: citations, evidence: evidence))
+                Text(renderedCitation(item))
                     .font(.system(size: 14)).lineSpacing(3).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -558,7 +616,7 @@ private struct MeetingWorkspaceDetail: View {
         case "pending": return "議事録を作っています。完成したパートから、ここに表示します。"
         case "failed": return "議事録はまだできていません。上の帯から続きを作れます。"
         default:
-            return model.meetingTranscript(for: meeting).isEmpty
+            return transcriptRows.isEmpty
                 ? "この会議には文字起こしがありません。"
                 : "まだ議事録はありません。上の「議事録を作る」を押してください。"
         }
@@ -572,7 +630,7 @@ private struct MeetingWorkspaceDetail: View {
         if rows.isEmpty {
             Text("この会議の文字起こしは残っていません。").foregroundColor(WorkspaceTheme.secondary)
         } else {
-            VStack(alignment: .leading, spacing: 0) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 if let evidence = meeting.boundaryEvidence, !evidence.isEmpty {
                     Text("録音区間について: \(evidence)")
                         .font(.system(size: 13)).foregroundColor(WorkspaceTheme.warningText)
@@ -600,23 +658,6 @@ private struct MeetingWorkspaceDetail: View {
     }
 
     private struct TranscriptRow { let id: String; let time: String; let speaker: String; let text: String }
-
-    /// The generation-time source when minutes exist, so a citation always
-    /// lands on the line it was written from; the live transcript otherwise.
-    private var transcriptRows: [TranscriptRow] {
-        let zone = TimeZone(identifier: meeting.timeZone) ?? .current
-        if let accepted {
-            return accepted.segments.map {
-                TranscriptRow(id: $0.id, time: WorkspaceFormat.clock($0.capturedAt, zone: zone),
-                              speaker: $0.speakerName ?? "話者未確認", text: $0.text)
-            }
-        }
-        return model.meetingTranscript(for: meeting).enumerated().map { index, seg in
-            TranscriptRow(id: "seg-\(index + 1)", time: WorkspaceFormat.clock(seg.capturedAt, zone: zone),
-                          speaker: seg.speakerName ?? (seg.stream == "system" ? "PC音声" : "マイク"),
-                          text: seg.text)
-        }
-    }
 
     // MARK: Materials tab
 
@@ -800,11 +841,12 @@ private struct MeetingSourcesRow: View {
     @ObservedObject var model: PetModel
     let meeting: MeetingRecord
     let accepted: MeetingAcceptedMinutes?
+    let transcriptCount: Int
     @State private var explain = false
 
     var body: some View {
         let sources = accepted?.segments.map(\.source)
-        let local = sources?.filter { $0 == "local" }.count ?? model.meetingTranscript(for: meeting).count
+        let local = sources?.filter { $0 == "local" }.count ?? transcriptCount
         let recheck = sources?.filter { $0 == "audio-recheck" }.count ?? 0
         let external = sources?.filter { $0 != "local" && $0 != "audio-recheck" }.count ?? 0
         let material = model.googleMaterial(for: meeting)
@@ -868,26 +910,29 @@ private struct MeetingSourcesRow: View {
 /// One place that says what state the minutes are in, how many parts are
 /// written, why it stopped, and what the owner can do about it.
 private struct MeetingStatusBanner: View {
-    @ObservedObject var model: PetModel
     let meeting: MeetingRecord
     let job: MeetingMinutesJob?
-    let hasReadableMinutes: Bool
+    let indexed: MeetingMinutesExecutionProgress?
+    let holdReason: String?
+    let activity: (label: String, elapsedSeconds: Int?)?
+    let activityCapturedAt: Date
+    let hasTranscript: Bool
 
     var body: some View {
         let status = MeetingWorkspaceStatus(meeting: meeting)
         let total = job?.envelopes.count ?? 0
-        let indexed = model.minutesIndexedProgress(for: meeting, job: job)
         let done = indexed?.completedIndices.count ?? min(job?.completed.count ?? 0, total)
         if let title = bannerTitle(status: status, done: done, total: total) {
             HStack(alignment: .center, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(title).font(.system(size: 15, weight: .bold))
-                    if model.minutesActivity(for: meeting) != nil {
+                    if let activity {
                         TimelineView(.periodic(from: .now, by: 1)) { context in
-                            if let activity = model.minutesActivity(for: meeting, now: context.date) {
-                                let elapsed = activity.elapsedSeconds.map { "（\($0 / 60)分\($0 % 60)秒経過）" } ?? ""
-                                Text(activity.label + elapsed).font(.system(size: 13, weight: .semibold))
+                            let seconds = activity.elapsedSeconds.map {
+                                $0 + max(0, Int(context.date.timeIntervalSince(activityCapturedAt)))
                             }
+                            let elapsed = seconds.map { "（\($0 / 60)分\($0 % 60)秒経過）" } ?? ""
+                            Text(activity.label + elapsed).font(.system(size: 13, weight: .semibold))
                         }
                     }
                     if let detail = bannerDetail(done: done, total: total) {
@@ -925,7 +970,7 @@ private struct MeetingStatusBanner: View {
     }
 
     private func bannerTitle(status: MeetingWorkspaceStatus, done: Int, total: Int) -> String? {
-        if model.minutesHoldReason(for: meeting) != nil {
+        if holdReason != nil {
             return total > 1 ? "保留中です（\(total) パート中 \(done) パート完成）" : "保留中です"
         }
         switch meeting.minutesState {
@@ -934,14 +979,14 @@ private struct MeetingStatusBanner: View {
         case "failed":
             return total > 1 && done > 0 ? "途中で止まりました（\(total) パート中 \(done) パート完成）" : "議事録を作れませんでした"
         case "ready":
-            return model.minutesActivity(for: meeting) == nil ? nil : "議事録の概要を仕上げています"
+            return activity == nil ? nil : "議事録の概要を仕上げています"
         default:
-            return model.meetingTranscript(for: meeting).isEmpty ? nil : "議事録はまだありません"
+            return !hasTranscript ? nil : "議事録はまだありません"
         }
     }
 
     private func bannerDetail(done: Int, total: Int) -> MeetingMinutesFailurePresentation? {
-        if let hold = model.minutesHoldReason(for: meeting) {
+        if let hold = holdReason {
             return MeetingMinutesFailurePresentation(summary: hold, technicalDetails: nil)
         }
         return MeetingMinutesFailurePresentation.make(error: meeting.minutesError,
