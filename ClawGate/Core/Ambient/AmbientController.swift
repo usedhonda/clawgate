@@ -147,6 +147,10 @@ final class AmbientController {
         var jevLastError: String? = nil
         var audioHubConfigured: Bool = false
         var audioHubLastError: String? = nil
+        var audioHubRecoverFailure: String? = nil
+        var audioHubScanFailure: String? = nil
+        var audioHubScanFailedSessions: Int = 0
+        var audioHubScannerCount: Int = 0
     }
 
     /// One participant's speaking span from Meet's tile indicator (unix seconds).
@@ -764,7 +768,11 @@ final class AmbientController {
                 jevLastLatencyMs: jevLastLatencyMs,
                 jevLastError: jevLastError,
                 audioHubConfigured: audioHubRuntime != nil,
-                audioHubLastError: audioHubRuntime?.lastFailure
+                audioHubLastError: audioHubRuntime?.lastFailure,
+                audioHubRecoverFailure: audioHubRuntime?.diagnostics.recoverFailure,
+                audioHubScanFailure: audioHubRuntime?.diagnostics.scanFailure,
+                audioHubScanFailedSessions: audioHubRuntime?.diagnostics.scanFailedSessions ?? 0,
+                audioHubScannerCount: audioHubRuntime?.diagnostics.scannerCount ?? 0
             )
         }
     }

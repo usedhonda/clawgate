@@ -224,6 +224,12 @@ selected-original recovery still run. The first source error is rethrown after
 the loop so `source_admission_failed` remains visible. Unreadable control state
 still fails the whole recovery.
 
+`/v1/ambient/status` keeps `audioHubLastError` (last stage to write wins) and
+adds body-free fields that stay separate: `audioHubRecoverFailure`,
+`audioHubScanFailure` (fixed codes such as `stale_cursor`, `truncated_cursor`,
+`unsafe_path`, `runtime_state`, `other`), `audioHubScanFailedSessions` and
+`audioHubScannerCount`. Counts and codes never carry paths, session IDs or text.
+
 The approved budgets are one metadata state of 128 MiB and one control state of
 16 MiB. Activation bytes are deducted from control capacity. Future registration,
 frozen index bytes, scanner state and existing upload/control journals share that

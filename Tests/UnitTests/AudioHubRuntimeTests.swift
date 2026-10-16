@@ -133,6 +133,12 @@ final class AudioHubRuntimeTests: XCTestCase {
         XCTAssertEqual(runtime.lastFailure, "source_admission_failed")
         _ = try runtime.scanAvailable()
         XCTAssertEqual(try runtime.pendingCount(), 1)
+        // recover and scan outcomes stay separate even though lastFailure is overwritten.
+        let diagnostics = runtime.diagnostics
+        XCTAssertNotNil(diagnostics.recoverFailure)
+        XCTAssertNil(diagnostics.scanFailure)
+        XCTAssertEqual(diagnostics.scanFailedSessions, 0)
+        XCTAssertEqual(diagnostics.scannerCount, 1)
     }
 
     func testSelectedCoverageIsNotReuploadedAndPrecommitIntentRecovers() throws {

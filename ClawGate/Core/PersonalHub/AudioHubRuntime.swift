@@ -75,6 +75,39 @@ final class AudioHubRuntime {
     private var registrationFailure: String?
     var lastFailure: String? { schedulingLock.lock(); defer { schedulingLock.unlock() }; return registrationFailure ?? failureCode }
 
+    /// Body-free, additive diagnostics. `lastFailure` is overwritten by whichever
+    /// stage ran last; these keep the recover and scan outcomes apart.
+    struct Diagnostics: Equatable {
+        var recoverFailure: String?
+        var scanFailure: String?
+        var scanFailedSessions = 0
+        var scannerCount = 0
+    }
+    private var diagnosticsState = Diagnostics()
+    var diagnostics: Diagnostics { schedulingLock.lock(); defer { schedulingLock.unlock() }; return diagnosticsState }
+
+    /// Fixed reason codes only; never the error text.
+    static func reasonCode(_ error: Swift.Error) -> String {
+        switch error {
+        case let e as AudioHubRawTranscriptReader.Error:
+            switch e {
+            case .invalidBounds: return "invalid_bounds"
+            case .invalidSessionID: return "invalid_session_id"
+            case .unsafePath: return "unsafe_path"
+            case .staleCursor: return "stale_cursor"
+            case .truncatedCursor: return "truncated_cursor"
+            case .readLimitExceeded, .lineLimitExceeded: return "read_limit"
+            case .readFailed: return "read_failed"
+            }
+        case is Failure: return "runtime_state"
+        default: return "other"
+        }
+    }
+
+    private func recordRecover(_ error: Swift.Error?) {
+        schedulingLock.lock(); diagnosticsState.recoverFailure = error.map(Self.reasonCode); schedulingLock.unlock()
+    }
+
     /// Returns nil when the owner has not installed an activation manifest.
     init?(manifestURL: URL, sessionsRoot: URL, meetingsRoot: URL,
           runtimeRoot: URL,
@@ -200,8 +233,10 @@ final class AudioHubRuntime {
             if let sourceFailure { throw sourceFailure }
             if let selectedFailure { throw selectedFailure }
             recordFailure(nil)
+            recordRecover(nil)
         } catch {
             recordFailure("source_admission_failed")
+            recordRecover(error)
             throw error
         }
     }
@@ -359,14 +394,20 @@ final class AudioHubRuntime {
         lock.lock(); let ids = Array(scanners.keys).sorted(); lock.unlock()
         var more = false
         var firstError: Error?
+        var failedSessions = 0
         for id in ids {
             do {
                 for index in 0..<limitPerSession {
                     guard case .admitted = try scanOnce(sessionID: id) else { break }
                     if index == limitPerSession - 1 { more = true }
                 }
-            } catch { if firstError == nil { firstError = error } }
+            } catch { failedSessions += 1; if firstError == nil { firstError = error } }
         }
+        schedulingLock.lock()
+        diagnosticsState.scanFailure = firstError.map(Self.reasonCode)
+        diagnosticsState.scanFailedSessions = failedSessions
+        diagnosticsState.scannerCount = ids.count
+        schedulingLock.unlock()
         if let firstError { throw firstError }
         return more
     }
