@@ -160,7 +160,8 @@ struct MeetingWorkspaceView: View {
 // MARK: - Detail
 
 private struct MeetingWorkspaceDetail: View {
-    @ObservedObject var model: PetModel
+    // Refresh through meetingsRevision below, not unrelated chat/pet publications.
+    let model: PetModel
     let meeting: MeetingRecord
     @Binding var tab: MeetingWorkspaceView.Tab
     @Binding var scrollTarget: String?
@@ -838,7 +839,8 @@ private struct MeetingWorkspaceDetail: View {
 /// request — how they are combined. Without this the owner cannot tell a
 /// ClawGate-only generation from one cross-checked against Meet.
 private struct MeetingSourcesRow: View {
-    @ObservedObject var model: PetModel
+    // The parent refreshes this row together with its meeting document.
+    let model: PetModel
     let meeting: MeetingRecord
     let accepted: MeetingAcceptedMinutes?
     let transcriptCount: Int

@@ -634,3 +634,12 @@ does not issue health, history, or session-subscription RPCs. Parent disconnect,
 cleanup, or dedicated stream loss tears it down; a lost ACK, notFound, expired,
 or previously rejected run is never regenerated or sent through the ordinary
 socket.
+
+### Workspace update isolation
+
+The minutes detail and source summary do not subscribe to the complete chat/pet
+model publisher. Meeting-specific `meetingsRevision` notifications, selection
+changes, and the existing periodic refresh update the cached document and its
+source row. Material refresh increments that revision on both start and finish.
+Unrelated chat token and pet state updates must not invalidate the document
+layout. This avoids redundant redraws; it is not a measured scroll-frame guarantee.
