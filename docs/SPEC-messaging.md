@@ -292,6 +292,12 @@ Protected media handoff retains `emitText:true`; text handoff remains audio-only
 Pane redirects create no LINE expectation. A LINE-like session can select fail-closed
 handling when admission is missing, but cannot establish provenance or permit audio.
 
+If protected context binding fails before the normal inbound log, the gateway
+emits a body-free `gateway_dispatch_failed` trace with `adapter=line` and
+`reason=bridge_admission_unavailable`. The existing owner-reply monitor counts
+that trace as the failed input, rather than reporting a quiet channel. It does
+not dispatch, replay, infer a sender, or use an unrelated successful send as recovery.
+
 Query: `?since=<Int64>` (cursor; omit for all buffered)
 
 Response:

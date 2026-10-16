@@ -2929,7 +2929,16 @@ export async function handleInboundMessage({ event, originalEvents = [], account
 
   const bridgePollSession = bridgePollSessions.get(accountId);
   if (bridgePollSession && event.adapter === "line") {
-    await bridgePollSession.bind(ctx, originalEvents);
+    try {
+      await bridgePollSession.bind(ctx, originalEvents);
+    } catch (error) {
+      traceLog(log, "error", {
+        trace_id: traceId, stage: "gateway_dispatch_failed", action: "dispatch_inbound_message",
+        status: "failed", adapter: "line", reason: "bridge_admission_unavailable",
+        error: "Error: BRIDGE_ADMISSION_UNAVAILABLE: input not dispatched",
+      });
+      throw error;
+    }
   }
   // Parse tproj-msg reverse channel header (if present)
   const { header: tprojHeader, body: strippedBody } = parseTprojMsgHeader(ctx.Body);
