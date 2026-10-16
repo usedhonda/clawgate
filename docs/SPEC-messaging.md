@@ -3,6 +3,18 @@
 > Last updated: 2026-02-19
 > Source of truth: Swift source under `ClawGate/` + JS plugin under `extensions/openclaw-plugin/src/`
 
+## Reply callback settlement
+
+Plain inbound conversation replies are sent inside the runtime dispatcher `deliver`
+callback, including callbacks invoked after the initial dispatch returns a deferred
+admission. The callback awaits the existing selected transport and requires its
+positive `ok` result. A rejected or unconfirmed send rejects the callback; collecting
+a block in memory is not delivery. Deferred dispatch is recorded as accepted, not
+as a delivered reply. Existing ingress-channel routing and special control replies
+remain unchanged. No automatic replay is introduced.
+
+Guard: `extensions/openclaw-plugin/src/__tests__/reply-delivery-settlement.test.js`.
+
 ## LINE caretaker foreground safety
 
 Periodic LINE health repair is a background maintenance operation. It may probe

@@ -2905,7 +2905,7 @@ export function buildMsgContext(event, accountId, defaultConversation) {
  * @param {string} [params.defaultConversation]
  * @param {object} [params.log]
  */
-async function handleInboundMessage({ event, originalEvents = [], accountId, apiUrl, cfg, defaultConversation, log, sendTmuxMessage }) {
+export async function handleInboundMessage({ event, originalEvents = [], accountId, apiUrl, cfg, defaultConversation, log, sendTmuxMessage }) {
   const runtime = getRuntime();
   const traceId = makeTraceId("line", event);
   if (!event.payload) event.payload = {};
@@ -3022,7 +3022,7 @@ async function handleInboundMessage({ event, originalEvents = [], accountId, api
   }
 
   // Collect plain reply blocks so multi-block AI responses are sent as a single LINE message.
-  const collectedLineBlocks = [];
+  let replyBlockCount = 0;
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
   const deliver = async (payload) => {
@@ -3303,14 +3303,55 @@ async function handleInboundMessage({ event, originalEvents = [], accountId, api
     }
 
     const lineText = replyProjection.text;
-    log?.debug?.(`clawgate: [${accountId}] collected reply block[${collectedLineBlocks.length + 1}] for "${conversation}": "${lineText.slice(0, 80)}"`);
-    collectedLineBlocks.push({ text: lineText, replyExpectation });
+    if (isRecentOutboundDuplicate(lineText)) return;
+    const block = ++replyBlockCount;
+    const outBlock = (tprojHeader && replyChannel !== "line") ? `[${tprojHeader.sender}] ${lineText}` : lineText;
+    const outAction = replyChannel === "telegram" ? "telegram_send" : "line_send";
+    traceLog(log, "info", {
+      trace_id: traceId,
+      stage: "gateway_forward_start",
+      action: outAction,
+      status: "start",
+      channel: replyChannel,
+      block,
+    });
+    try {
+      const sendResult = await sendTmuxMessage(conversation, outBlock, traceId, { channel: replyChannel });
+      if (!sendResult?.ok) throw new Error("clawgate reply transport did not confirm success");
+      const textConfirmedAtMs = Date.now();
+      if (replyChannel === "line" && sendResult.deliveredChannel !== "telegram") {
+        const confirmedMessageId = sendResult.result?.message_id || sendResult.result?.messageId;
+        confirmLineReplyExpectation(replyExpectation, {
+          messageId: confirmedMessageId, deliveredChannel: "line", textConfirmedAtMs,
+        });
+        const messageId = String(confirmedMessageId || `${traceId}:block:${block}`);
+        queueConfirmedLineReplyTts({ text: lineText, traceId, messageId, log });
+      }
+      traceLog(log, "info", {
+        trace_id: traceId,
+        stage: "gateway_forward_ok",
+        action: outAction,
+        status: "ok",
+        channel: replyChannel,
+        block,
+      });
+    } catch (err) {
+      traceLog(log, "error", {
+        trace_id: traceId,
+        stage: "gateway_forward_failed",
+        action: outAction,
+        status: "failed",
+        channel: replyChannel,
+        block,
+      });
+      throw err;
+    }
   };
 
   try {
     const dispatch = runtime.channel?.reply?.dispatchReplyWithBufferedBlockDispatcher;
     if (dispatch) {
-      await dispatch({
+      const dispatched = await dispatch({
         ctx,
         cfg,
         dispatcherOptions: {
@@ -3320,68 +3361,11 @@ async function handleInboundMessage({ event, originalEvents = [], accountId, api
         },
       });
 
-      // Send each collected reply block as a separate LINE message.
-      for (let bi = 0; bi < collectedLineBlocks.length; bi++) {
-        const { text: blockText, replyExpectation } = collectedLineBlocks[bi];
-        if (isRecentOutboundDuplicate(blockText)) {
-          log?.info?.(`clawgate: [${accountId}] outbound dedup suppressed (reply block ${bi + 1}/${collectedLineBlocks.length}): "${blockText.slice(0, 60)}"`);
-          continue;
-        }
-        log?.info?.(`clawgate: [${accountId}] sending reply block ${bi + 1}/${collectedLineBlocks.length} to "${conversation}": "${blockText.slice(0, 80)}"`);
-        traceLog(log, "info", {
-          trace_id: traceId,
-          stage: "gateway_forward_start",
-          action: "line_send",
-          status: "start",
-          conversation,
-          block: bi + 1,
-          blocks: collectedLineBlocks.length,
-        });
-        const outBlock = (tprojHeader && replyChannel !== "line") ? `[${tprojHeader.sender}] ${blockText}` : blockText;
-        const outAction = replyChannel === "telegram" ? "telegram_send" : "line_send";
-        try {
-          const sendResult = await sendTmuxMessage(conversation, outBlock, traceId, { channel: replyChannel });
-          if (!sendResult?.ok) throw new Error("ClawGate reply send returned ok=false");
-          const textConfirmedAtMs = Date.now();
-          if (replyChannel === "line" && sendResult.deliveredChannel !== "telegram") {
-            const confirmedMessageId = sendResult.result?.message_id || sendResult.result?.messageId;
-            confirmLineReplyExpectation(replyExpectation, {
-              messageId: confirmedMessageId, deliveredChannel: "line", textConfirmedAtMs,
-            });
-            // Preserve installed legacy owner. Fallback is NOT confirmation evidence.
-            const messageId = String(confirmedMessageId || `${traceId}:block:${bi + 1}`);
-            queueConfirmedLineReplyTts({ text: blockText, traceId, messageId, log });
-          }
-          traceLog(log, "info", {
-            trace_id: traceId,
-            stage: "gateway_forward_ok",
-            action: outAction,
-            status: "ok",
-            conversation,
-            channel: replyChannel,
-            block: bi + 1,
-            blocks: collectedLineBlocks.length,
-          });
-        } catch (err) {
-          log?.error?.(`clawgate: [${accountId}] send reply block ${bi + 1} (${replyChannel}) failed: ${err}`);
-          traceLog(log, "error", {
-            trace_id: traceId,
-            stage: "gateway_forward_failed",
-            action: outAction,
-            status: "failed",
-            conversation,
-            channel: replyChannel,
-            block: bi + 1,
-            error: String(err),
-          });
-        }
-      }
-
       traceLog(log, "info", {
         trace_id: traceId,
         stage: "gateway_dispatch_done",
         action: "dispatch_inbound_message",
-        status: "ok",
+        status: dispatched?.deferredToActiveRun ? "accepted" : "ok",
       });
     } else {
       log?.error?.("clawgate: dispatchReplyWithBufferedBlockDispatcher not found on runtime");
