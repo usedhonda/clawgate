@@ -398,6 +398,10 @@ private func installMainMenu() {
 
     let appMenuItem = NSMenuItem()
     let appMenu = NSMenu(title: "ClawGate")
+    let openPanel = NSMenuItem(title: "Open Main Panel…", action: #selector(MenuBarAppDelegate.openMainPanelFromMenu), keyEquivalent: ",")
+    openPanel.target = NSApp.delegate
+    appMenu.addItem(openPanel)
+    appMenu.addItem(NSMenuItem.separator())
     appMenu.addItem(withTitle: "Quit ClawGate", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     appMenuItem.submenu = appMenu
     mainMenu.addItem(appMenuItem)

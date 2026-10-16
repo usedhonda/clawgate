@@ -88,7 +88,18 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let defaults = UserDefaults.standard
+        let savedPosition = (defaults.object(forKey: MenuBarStatusItemPlacement.positionKey) as? NSNumber)
+            ?? (defaults.object(forKey: MenuBarStatusItemPlacement.savedPositionKey) as? NSNumber)
+            ?? (defaults.object(forKey: "NSStatusItem Preferred Position Item-0") as? NSNumber)
+        let screen = NSScreen.screens.first
+        let rightSideWidth = screen?.auxiliaryTopRightArea?.width ?? (screen?.frame.width ?? 0) / 2
+        defaults.set(MenuBarStatusItemPlacement.preferredPosition(
+            savedPosition: savedPosition?.doubleValue,
+            rightSideWidth: Double(rightSideWidth)
+        ), forKey: MenuBarStatusItemPlacement.positionKey)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem?.autosaveName = MenuBarStatusItemPlacement.autosaveName
         updateStatusIcon()
         configureStatusButton()
         configureMainPanel()
@@ -299,8 +310,13 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         meetingWindow?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func openMainPanelFromMenu() {
-        toggleMainPanel(nil)
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainPanel(nil)
+        return false
+    }
+
+    @objc func openMainPanelFromMenu() {
+        showMainPanel(nil)
     }
 
     @objc private func ambientStartStream() {
@@ -473,8 +489,14 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return
         }
 
+        showMainPanel(sender)
+    }
+
+    private func showMainPanel(_ sender: Any?) {
+        guard let panel = mainPanel else { return }
+        NSApp.activate(ignoringOtherApps: true)
+
         if panel.isVisible {
-            NSApp.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(sender)
             petWindowController?.bringChatToFrontIfVisible()
             return
@@ -1403,6 +1425,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         runtime.stopServer()
         if let statusItem {
+            if let position = UserDefaults.standard.object(forKey: MenuBarStatusItemPlacement.positionKey) {
+                UserDefaults.standard.set(position, forKey: MenuBarStatusItemPlacement.savedPositionKey)
+            }
             NSStatusBar.system.removeStatusItem(statusItem)
             self.statusItem = nil
         }
