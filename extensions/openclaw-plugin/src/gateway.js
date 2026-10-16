@@ -63,6 +63,7 @@ let _runtime = null;
 
 /** @type {"line"|"telegram"} Active messenger for tmux outbound — set by startAccount() */
 let _activeMessenger = "line";
+const bridgePollSessions = new Map();
 
 export function setGatewayRuntime(runtime) {
   _runtime = runtime;
@@ -2926,6 +2927,10 @@ export async function handleInboundMessage({ event, originalEvents = [], account
     return;
   }
 
+  const bridgePollSession = bridgePollSessions.get(accountId);
+  if (bridgePollSession && event.adapter === "line") {
+    await bridgePollSession.bind(ctx, originalEvents);
+  }
   // Parse tproj-msg reverse channel header (if present)
   const { header: tprojHeader, body: strippedBody } = parseTprojMsgHeader(ctx.Body);
   if (tprojHeader) {
@@ -4496,6 +4501,18 @@ export async function startAccount(ctx) {
   setClawgateAuthToken(account.token || "");
   let pollIntervalMs = account.pollIntervalMs || 3000;
   let defaultConversation = account.defaultConversation || "";
+  const issuerPublicKeyHex = account.config?.bridgeIssuerPublicKeyHex;
+  bridgePollSessions.delete(accountId);
+  let pollAccount = clawgatePoll;
+  if (issuerPublicKeyHex !== undefined) {
+    const { createHostBridgePollSession } = await import("./bridge-admission-selection.js");
+    const session = createHostBridgePollSession({
+      runtime: getRuntime().channel?.inbound?.bridgeAdmission,
+      accountId, issuerPublicKeyHex, poll: clawgatePoll,
+    });
+    bridgePollSessions.set(accountId, session);
+    pollAccount = session.poll;
+  }
 
   // Load prompt profiles (core + optional overlays) once
   const promptOptions = resolvePromptOptions(account.config);
@@ -4578,7 +4595,7 @@ export async function startAccount(ctx) {
   // Get initial cursor
   let cursor = 0;
   try {
-    const initial = await clawgatePoll(apiUrl, 0);
+    const initial = await pollAccount(apiUrl, 0);
     if (initial.ok) {
       cursor = initial.next_cursor ?? 0;
       log?.info?.(`clawgate: [${accountId}] initial cursor=${cursor}, skipping ${initial.events?.length ?? 0} existing events`);
@@ -4785,7 +4802,7 @@ export async function startAccount(ctx) {
     }
 
     try {
-      const poll = await clawgatePoll(apiUrl, cursor);
+      const poll = await pollAccount(apiUrl, cursor);
 
       // Self-heal: detect upstream ClawGate restart (eventBus rebuild).
       // If the server's next_cursor regressed below our local cursor, the upstream
@@ -5151,7 +5168,7 @@ export async function startAccount(ctx) {
 
   // === Shutdown drain: forward unprocessed inbound events to Telegram ===
   try {
-    const drainPoll = await clawgatePoll(apiUrl, cursor);
+    const drainPoll = await pollAccount(apiUrl, cursor);
     if (drainPoll.ok && drainPoll.events?.length > 0) {
       for (const event of drainPoll.events) {
         if (event.type !== "inbound_message") continue;

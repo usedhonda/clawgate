@@ -265,6 +265,17 @@ Pin-only callers retain the existing client-generated challenge. This transport
 binding does not itself prepare a host capability, consume the outstanding request,
 or authorize group execution; those remain host-owned operations.
 
+For an account explicitly configured with `bridgeIssuerPublicKeyHex`, the gateway
+uses its host `channel.inbound.bridgeAdmission` runtime for every poll. It obtains
+the request before fetching and prepares one capability for each nonempty verified
+poll before projecting or buffering events. Ordered original event references select
+dispatch groups from those capabilities; each LINE context is bound before message
+processing. Capability lifetime is tied to the original envelope, not completion of
+the first group, so another conversation from the same poll can still be admitted.
+Host rejection or unknown never falls back to unsigned or unbound LINE dispatch.
+Accounts without a pin retain their existing polling path. This source connection
+does not provision an issuer, adopt a pin, or establish live deployment acceptance.
+
 Query: `?since=<Int64>` (cursor; omit for all buffered)
 
 Response:
