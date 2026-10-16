@@ -217,6 +217,13 @@ Committed originals are compared by exact source chunk/hash/length and are not
 re-admitted under native IDs. There is no automatic directory discovery or
 backfill of unlisted historical sources.
 
+`recover()` isolates each baseline and registered-scanner failure: a baseline
+that fails verification (for example a device or prefix mismatch) stays
+unadmitted and is never rebound, while independent registered sources and
+selected-original recovery still run. The first source error is rethrown after
+the loop so `source_admission_failed` remains visible. Unreadable control state
+still fails the whole recovery.
+
 The approved budgets are one metadata state of 128 MiB and one control state of
 16 MiB. Activation bytes are deducted from control capacity. Future registration,
 frozen index bytes, scanner state and existing upload/control journals share that

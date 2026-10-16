@@ -115,6 +115,26 @@ final class AudioHubRuntimeTests: XCTestCase {
         XCTAssertEqual(try runtime.pendingCount(), 0)
     }
 
+    func testInvalidBaselineDoesNotBlockIndependentRegisteredSourceRecovery() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var runtime = try fixture.open()
+        let future = fixture.root.appendingPathComponent("sessions/future/transcripts/raw.jsonl")
+        try FileManager.default.createDirectory(at: future.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var segment = TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "fixture")
+        segment.capturedAt = 1_700_000_000
+        try AmbientRawTranscriptAppender.append([segment], to: future) { snapshot in
+            try? runtime.registerRawWriter(sessionID: "future", snapshot: snapshot)
+        }
+        let listed = fixture.root.appendingPathComponent("sessions/listed/transcripts/raw.jsonl")
+        try Data("changed\n".utf8).write(to: listed)
+        runtime = try fixture.open()
+        XCTAssertThrowsError(try runtime.recover())
+        XCTAssertEqual(runtime.lastFailure, "source_admission_failed")
+        _ = try runtime.scanAvailable()
+        XCTAssertEqual(try runtime.pendingCount(), 1)
+    }
+
     func testSelectedCoverageIsNotReuploadedAndPrecommitIntentRecovers() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

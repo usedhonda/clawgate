@@ -151,12 +151,16 @@ final class AudioHubRuntime {
     func recover() throws {
         lock.lock(); defer { lock.unlock() }
         do {
+            // A baseline that fails verification stays unadmitted and its error is
+            // rethrown at the end, but must not block independent sources below.
+            var sourceFailure: Error?
             for entry in manifest.sessions {
                 if scanners[entry.sessionID] != nil { continue }
-                try installBaseline(entry)
+                do { try installBaseline(entry) } catch { if sourceFailure == nil { sourceFailure = error } }
             }
             for (id, scan) in try control.registeredScans() where scanners[id] == nil {
-                scanners[id] = try makeScanner(id, initial: scan.initial)
+                do { scanners[id] = try makeScanner(id, initial: scan.initial) }
+                catch { if sourceFailure == nil { sourceFailure = error } }
             }
             // Committed originals are coverage only, never delivery work.
             // Only explicit writer-registered future commits enter this loop.
@@ -193,6 +197,7 @@ final class AudioHubRuntime {
                     if selectedFailure == nil { selectedFailure = error }
                 }
             }
+            if let sourceFailure { throw sourceFailure }
             if let selectedFailure { throw selectedFailure }
             recordFailure(nil)
         } catch {
