@@ -10,6 +10,47 @@ import {
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 afterEach(() => setLineReplyTtsRuntime(null));
 
+it("protected semantic reply uses one durable owner and never replays unknown confirmation", async () => {
+  const calls = [];
+  const origins = new Map();
+  let rejectObservation = false;
+  setLineReplyTtsRuntime({ gateway: { request: async (method, params) => {
+    assert.equal(method, "line.reply-tts");
+    calls.push(params);
+    if (params.phase === "expect") {
+      if (rejectObservation) throw new Error("fixture unavailable");
+      assert.equal(Object.hasOwn(params, "text"), false);
+      origins.set(params.replyCorrelationId, params.admittedOrigin);
+      return { status: "accepted" };
+    }
+    if (params.phase === "confirmed") return { status: "accepted",
+      expectedAudio: origins.get(params.replyCorrelationId) === "line_conversation" ? "required" : "unknown" };
+    assert.equal(params.phase, "handoff");
+    assert.equal(params.text, "fixture reply");
+    assert.equal(params.emitText, false);
+    return { status: "completed", result: { audioStatus: "sent" } };
+  } } });
+  const handle = createLineReplyExpectation({ text: "fixture reply", enabled: true,
+    admittedOrigin: "line_conversation", sourceReplySessionKey: "agent:fixture:clawgate:line:room" });
+  const observed = observeLineReplyExpectation(handle);
+  assert.strictEqual(observeLineReplyExpectation(handle), observed);
+  const confirmation = { messageId: "actual-fixture-1", deliveredChannel: "line", textConfirmedAtMs: 1 };
+  const completed = confirmLineReplyExpectation(handle, confirmation);
+  assert.strictEqual(confirmLineReplyExpectation(handle, confirmation), completed);
+  assert.equal((await completed).status, "completed");
+  assert.deepEqual(calls.map(call => call.phase), ["expect", "confirmed", "handoff"]);
+  assert.equal(confirmLineReplyExpectation(handle, { ...confirmation, messageId: "other" }).status, "invalid_confirmation");
+  const unknown = createLineReplyExpectation({ text: "fixture reply", enabled: true });
+  assert.equal((await confirmLineReplyExpectation(unknown, confirmation)).status, "ineligible");
+  assert.equal(calls.filter(call => call.phase === "handoff").length, 1);
+  rejectObservation = true;
+  const unavailable = createLineReplyExpectation({ text: "fixture reply", enabled: true });
+  assert.equal((await confirmLineReplyExpectation(unavailable, confirmation)).status, "unknown");
+  assert.equal(calls.filter(call => call.phase === "confirmed").length, 2);
+  assert.equal(calls.filter(call => call.phase === "handoff").length, 1);
+  assert.equal(JSON.stringify(handle).includes("fixture reply"), false);
+});
+
 describe("installed LINE companion behavior", () => {
   it("recognizes LINE ingress session keys only", () => {
     assert.equal(isLineConversationSession("agent:main:clawgate:line:room"), true);

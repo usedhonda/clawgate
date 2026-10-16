@@ -276,6 +276,22 @@ Host rejection or unknown never falls back to unsigned or unbound LINE dispatch.
 Accounts without a pin retain their existing polling path. This source connection
 does not provision an issuer, adopt a pin, or establish live deployment acceptance.
 
+On that protected path, final ordinary LINE reply blocks derive semantic expectation
+provenance only from the host dispatcher's `bridgeReplyAdmission` metadata, after
+reply transformations and duplicate suppression. Expectation records are body-free.
+Only a successful LINE send with its actual result message ID confirms the same
+expectation; confirmation then hands the exact projected text to the durable
+`line.reply-tts` owner. Duplicate callbacks share the same request result. Unknown
+observation, confirmation or provenance must not fall back to the legacy synthesizer.
+The legacy companion remains unchanged for accounts without protected polling.
+Audio requests are asynchronous after LINE text success; server emission is not
+proof of device playback. No previously sent reply is replayed by this source change.
+The outbound `sendText` and caption-only `sendMedia` paths consume the host's
+`bridgeReplyAdmission` field, not the dormant legacy `replyAudioContext` projection.
+Protected media handoff retains `emitText:true`; text handoff remains audio-only.
+Pane redirects create no LINE expectation. A LINE-like session can select fail-closed
+handling when admission is missing, but cannot establish provenance or permit audio.
+
 Query: `?since=<Int64>` (cursor; omit for all buffered)
 
 Response:

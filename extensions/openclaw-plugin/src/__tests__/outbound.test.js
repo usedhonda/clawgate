@@ -353,13 +353,28 @@ describe("disabled semantic audio caller boundary", () => {
     assert.equal(audioCalls[2][2].deliveredChannel, "line");
     assert.ok(Number.isSafeInteger(audioCalls[2][2].textConfirmedAtMs));
   });
-  it("observes semantic media before pane redirect without a LINE confirmation", async () => {
+  it("does not create a LINE semantic obligation for a pane redirect", async () => {
     audioCalls = [];
     stubAccount = makeAccount(); stubSessionMode = "auto"; stubTprojOrigin = null; stubTmuxResult = null;
     const replyAudioContext = { admittedOrigin: "unresolved-test-origin", sourceReplySessionKey: "source", policySessionKey: "policy" };
     await outbound.sendMedia({ ...baseSendParams, to: "default", sessionKey: "agent:main:clawgate:default:tmux:example", replyAudioContext });
-    assert.deepEqual(audioCalls.map(c => c[0]), ["create", "expect"]);
-    assert.equal(audioCalls[0][1].sourceReplySessionKey, "source");
-    assert.equal(audioCalls[0][1].policySessionKey, "policy");
+    assert.deepEqual(audioCalls, []);
+  });
+  it("uses host admission for protected text and media without legacy companion", async () => {
+    stubAccount = makeAccount({ config: { bridgeIssuerPublicKeyHex: "a".repeat(64) } });
+    stubSessionMode = "ignore"; stubTprojOrigin = null;
+    const bridgeReplyAdmission = { admittedOrigin: "line_conversation",
+      sourceReplySessionKey: "agent:fixture:clawgate:line:room", policySessionKey: "agent:fixture:main" };
+    for (const method of ["sendText", "sendMedia"]) {
+      audioCalls = [];
+      await outbound[method]({ ...baseSendParams, to: "default", sessionKey: "agent:fixture:main",
+        bridgeReplyAdmission, replyAudioContext: { admittedOrigin: "forged-legacy" } });
+      assert.deepEqual(audioCalls.map(call => call[0]), ["create", "expect", "confirmed"]);
+      assert.equal(audioCalls[0][1].admittedOrigin, "line_conversation");
+      assert.equal(audioCalls[0][1].sourceReplySessionKey, bridgeReplyAdmission.sourceReplySessionKey);
+      assert.equal(audioCalls[0][1].enabled, true);
+      assert.equal(audioCalls[0][1].emitText === true, method === "sendMedia");
+      assert.equal(audioCalls[2][2].messageId, "test-1");
+    }
   });
 });

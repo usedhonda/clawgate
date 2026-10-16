@@ -3030,18 +3030,12 @@ export async function handleInboundMessage({ event, originalEvents = [], account
   let replyBlockCount = 0;
 
   // Dispatch to AI using runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher
-  const deliver = async (payload) => {
+  const deliver = async (payload, deliveryInfo) => {
     let text = extractReplyText(payload, log, "line_inbound_dispatch");
     if (!text.trim()) return;
     // Fix the exact companion text through pure projection before any routing,
     // suppression or await. The same bytes are hashed and buffered below.
     const replyProjection = prepareBufferedLineReply(text, { project: event.payload?.project || "" });
-    // The dispatcher does not carry admitted origin/effective policy yet.
-    const replyExpectation = createLineReplyExpectation({
-      text: replyProjection.text, sourceReplySessionKey: ctx.SessionKey,
-      admittedOrigin: undefined, policySessionKey: undefined,
-    });
-    observeLineReplyExpectation(replyExpectation);
 
     // Extract <send_telegram> blocks — send those parts to Telegram, continue with remainder
     const telegramExtract = replyProjection.telegramExtract;
@@ -3312,6 +3306,15 @@ export async function handleInboundMessage({ event, originalEvents = [], account
     const block = ++replyBlockCount;
     const outBlock = (tprojHeader && replyChannel !== "line") ? `[${tprojHeader.sender}] ${lineText}` : lineText;
     const outAction = replyChannel === "telegram" ? "telegram_send" : "line_send";
+    const admission = deliveryInfo?.bridgeReplyAdmission;
+    const replyExpectation = createLineReplyExpectation({
+      text: outBlock,
+      sourceReplySessionKey: admission?.sourceReplySessionKey,
+      admittedOrigin: admission?.admittedOrigin,
+      policySessionKey: admission?.policySessionKey,
+      enabled: !!bridgePollSession && replyChannel === "line",
+    });
+    observeLineReplyExpectation(replyExpectation);
     traceLog(log, "info", {
       trace_id: traceId,
       stage: "gateway_forward_start",
@@ -3326,11 +3329,20 @@ export async function handleInboundMessage({ event, originalEvents = [], account
       const textConfirmedAtMs = Date.now();
       if (replyChannel === "line" && sendResult.deliveredChannel !== "telegram") {
         const confirmedMessageId = sendResult.result?.message_id || sendResult.result?.messageId;
-        confirmLineReplyExpectation(replyExpectation, {
+        const confirmation = confirmLineReplyExpectation(replyExpectation, {
           messageId: confirmedMessageId, deliveredChannel: "line", textConfirmedAtMs,
         });
-        const messageId = String(confirmedMessageId || `${traceId}:block:${block}`);
-        queueConfirmedLineReplyTts({ text: lineText, traceId, messageId, log });
+        if (bridgePollSession) {
+          void Promise.resolve(confirmation).then((result) => {
+            if (!(result?.status === "ineligible" && result.expectedAudio === "not_required")
+                && (!["completed", "duplicate"].includes(result?.status) || result.result?.audioStatus !== "sent")) {
+              log?.warn?.("clawgate: protected LINE companion outcome unconfirmed; no legacy replay");
+            }
+          });
+        } else {
+          const messageId = String(confirmedMessageId || `${traceId}:block:${block}`);
+          queueConfirmedLineReplyTts({ text: lineText, traceId, messageId, log });
+        }
       }
       traceLog(log, "info", {
         trace_id: traceId,

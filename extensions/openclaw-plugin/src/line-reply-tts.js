@@ -33,9 +33,10 @@ export function queueConfirmedLineReplyTts({ text, messageId, traceId, emitText 
   });
 }
 
-// Local semantic handles only. Wire preparation does not establish admission
-// provenance or activate the new caller; observe/confirm never call runtime.
+// Wire preparation alone does not establish admission provenance. Protected
+// callers explicitly enable the durable owner; legacy handles remain inert.
 const expectations = new WeakSet();
+const semanticCalls = new WeakMap();
 const wireOrigins = new Set(["line_conversation", "typed_chat", "proactive", "recall", "cron", "tproj", "unknown"]);
 const disabledResult = Object.freeze({ enabled: false, status: "disabled" });
 const invalidHandleResult = Object.freeze({ enabled: false, status: "invalid_handle" });
@@ -45,7 +46,7 @@ function provenance(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-export function createLineReplyExpectation({ text, admittedOrigin, sourceReplySessionKey, policySessionKey }) {
+export function createLineReplyExpectation({ text, admittedOrigin, sourceReplySessionKey, policySessionKey, enabled = false, emitText = false }) {
   if (typeof text !== "string" || text.length > 16384) {
     return null;
   }
@@ -58,16 +59,25 @@ export function createLineReplyExpectation({ text, admittedOrigin, sourceReplySe
     policySessionKey: provenance(policySessionKey),
   });
   expectations.add(handle);
+  if (enabled === true) semanticCalls.set(handle, { text, request: requestGateway, emitText: emitText === true });
   return handle;
 }
 
 export function observeLineReplyExpectation(handle) {
   if (handle == null) return disabledResult;
-  return expectations.has(handle) ? disabledResult : invalidHandleResult;
+  if (!expectations.has(handle)) return invalidHandleResult;
+  const call = semanticCalls.get(handle);
+  if (!call) return disabledResult;
+  call.observation ??= Promise.resolve().then(async () => {
+    const packet = serializeLineReplyExpectation(handle);
+    if (!call.request || !packet) return { status: "unavailable" };
+    return await call.request("line.reply-tts", packet);
+  }).catch(() => ({ status: "unavailable" }));
+  return call.observation;
 }
 
-// Closed Gateway expect shape, prepared but never sent here. Host-owned
-// verified admission carry must supply origin before caller activation.
+// Closed Gateway expect shape. Host-owned verified admission carry supplies
+// provenance; event payloads and destination heuristics must not replace it.
 export function serializeLineReplyExpectation(handle) {
   if (!handle || !expectations.has(handle)) return null;
   const sessions = [handle.sourceReplySessionKey, handle.policySessionKey];
@@ -94,5 +104,26 @@ export function confirmLineReplyExpectation(handle, confirmation = {}) {
       || !Number.isSafeInteger(textConfirmedAtMs) || textConfirmedAtMs <= 0) {
     return invalidConfirmationResult;
   }
-  return disabledResult;
+  const call = semanticCalls.get(handle);
+  if (!call) return disabledResult;
+  if (call.messageId !== undefined && (call.messageId !== messageId || call.confirmedAt !== textConfirmedAtMs)) {
+    return invalidConfirmationResult;
+  }
+  call.messageId = messageId;
+  call.confirmedAt = textConfirmedAtMs;
+  call.confirmation ??= Promise.resolve().then(async () => {
+    const observed = await observeLineReplyExpectation(handle);
+    if (!["accepted", "duplicate"].includes(observed?.status)) return { status: "unknown" };
+    const confirmed = await call.request("line.reply-tts", {
+      version: 1, phase: "confirmed", replyCorrelationId: handle.replyCorrelationId,
+      confirmedMessageId: messageId, deliveredChannel: "line", textConfirmedAtMs,
+    });
+    if (!["accepted", "duplicate"].includes(confirmed?.status)) return { status: "unknown" };
+    if (confirmed.expectedAudio !== "required") return { status: "ineligible", expectedAudio: confirmed.expectedAudio };
+    return await call.request("line.reply-tts", {
+      version: 1, phase: "handoff", replyCorrelationId: handle.replyCorrelationId,
+      text: call.text, emitText: call.emitText,
+    });
+  }).catch(() => ({ status: "unknown" }));
+  return call.confirmation;
 }

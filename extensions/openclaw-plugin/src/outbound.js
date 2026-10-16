@@ -119,17 +119,11 @@ export const outbound = {
    * @param {object} params.cfg
    * @returns {Promise<{channel: string, messageId: string, chatId: string, timestamp: number}>}
    */
-  sendMedia: async ({ to, text, mediaUrl, accountId, cfg, sessionKey, replyAudioContext }) => {
+  sendMedia: async ({ to, text, mediaUrl, accountId, cfg, sessionKey, replyAudioContext, bridgeReplyAdmission }) => {
     // LINE via ClawGate does not support media — send text fallback
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
     const caption = text || (mediaUrl ? `[media: ${mediaUrl}]` : "[media]");
-    const replyExpectation = createLineReplyExpectation({
-      text: caption, admittedOrigin: replyAudioContext?.admittedOrigin,
-      sourceReplySessionKey: replyAudioContext?.sourceReplySessionKey,
-      policySessionKey: replyAudioContext?.policySessionKey,
-    });
-    observeLineReplyExpectation(replyExpectation);
     // Dev-lane (autonomous/auto tmux): redirect the caption to the CC session
     // pane, not the user's LINE. observe stays on LINE (SPEC-messaging.md §6).
     const paneProject = devLanePaneProject(sessionKey);
@@ -146,6 +140,15 @@ export const outbound = {
     const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
       ? (account.defaultConversation || to)
       : to;
+    const protectedReply = account.config?.bridgeIssuerPublicKeyHex !== undefined
+      && (!!bridgeReplyAdmission || isLineConversationSession(sessionKey));
+    const admission = protectedReply ? bridgeReplyAdmission : replyAudioContext;
+    const replyExpectation = createLineReplyExpectation({
+      text: caption, admittedOrigin: admission?.admittedOrigin,
+      sourceReplySessionKey: admission?.sourceReplySessionKey,
+      policySessionKey: admission?.policySessionKey, enabled: protectedReply, emitText: true,
+    });
+    observeLineReplyExpectation(replyExpectation);
     const result = await clawgateSend(account.apiUrl, conversationHint, caption);
 
     if (!result.ok) {
@@ -156,7 +159,7 @@ export const outbound = {
     confirmLineReplyExpectation(replyExpectation, {
       messageId: result.result?.message_id, deliveredChannel: "line", textConfirmedAtMs,
     });
-    if (isLineConversationSession(sessionKey)) {
+    if (!protectedReply && isLineConversationSession(sessionKey)) {
       queueConfirmedLineReplyTts({
         text: caption, messageId: String(result.result?.message_id || `line-session:${sessionKey}:${Date.now()}`), emitText: true, log: null,
       });
@@ -170,15 +173,9 @@ export const outbound = {
     };
   },
 
-  sendText: async ({ to, text, accountId, cfg, sessionKey, replyAudioContext }) => {
+  sendText: async ({ to, text, accountId, cfg, sessionKey, replyAudioContext, bridgeReplyAdmission }) => {
     const account = resolveAccount(cfg, accountId);
     setClawgateAuthToken(account.token || "");
-    const replyExpectation = createLineReplyExpectation({
-      text, admittedOrigin: replyAudioContext?.admittedOrigin,
-      sourceReplySessionKey: replyAudioContext?.sourceReplySessionKey,
-      policySessionKey: replyAudioContext?.policySessionKey,
-    });
-    observeLineReplyExpectation(replyExpectation);
     // Dev-lane (autonomous/auto tmux): route the reply back to the originating CC
     // session pane via adapter=tmux, NOT the user's LINE. The mode lives in the
     // plugin (sessionModes via shared-state); core only propagates sessionKey.
@@ -199,6 +196,15 @@ export const outbound = {
     const conversationHint = (to === "default" || to === "LINE" || to.includes(":"))
       ? (account.defaultConversation || to)
       : to;
+    const protectedReply = account.config?.bridgeIssuerPublicKeyHex !== undefined
+      && (!!bridgeReplyAdmission || isLineConversationSession(sessionKey));
+    const admission = protectedReply ? bridgeReplyAdmission : replyAudioContext;
+    const replyExpectation = createLineReplyExpectation({
+      text, admittedOrigin: admission?.admittedOrigin,
+      sourceReplySessionKey: admission?.sourceReplySessionKey,
+      policySessionKey: admission?.policySessionKey, enabled: protectedReply,
+    });
+    observeLineReplyExpectation(replyExpectation);
     const result = await clawgateSend(account.apiUrl, conversationHint, text);
 
     if (!result.ok) {
@@ -209,7 +215,7 @@ export const outbound = {
     confirmLineReplyExpectation(replyExpectation, {
       messageId: result.result?.message_id, deliveredChannel: "line", textConfirmedAtMs,
     });
-    if (isLineConversationSession(sessionKey)) {
+    if (!protectedReply && isLineConversationSession(sessionKey)) {
       queueConfirmedLineReplyTts({
         text: text, messageId: String(result.result?.message_id || `line-session:${sessionKey}:${Date.now()}`), log: null,
       });
