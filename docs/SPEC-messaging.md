@@ -255,6 +255,16 @@ Failure remains wire-compatible:
 
 #### GET /v1/poll
 
+Protected plugin polling may pass the host-issued `pollRequest` together with
+the configured `issuerPublicKeyHex` to `clawgatePoll`. Its exact URI must match
+the requested cursor and its challenge must be 64 lowercase hexadecimal characters.
+The client sends that challenge in `X-ClawGate-Challenge` and verifies the exact
+response bytes against it; it must neither replace the challenge nor downgrade
+to unsigned polling. Missing pin or invalid request fails before network access.
+Pin-only callers retain the existing client-generated challenge. This transport
+binding does not itself prepare a host capability, consume the outstanding request,
+or authorize group execution; those remain host-owned operations.
+
 Query: `?since=<Int64>` (cursor; omit for all buffered)
 
 Response:

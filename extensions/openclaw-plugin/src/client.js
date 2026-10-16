@@ -128,13 +128,18 @@ export async function clawgateConfig(apiUrl) {
  * @param {number} [since=0]
  * @returns {Promise<{ok: boolean, events: Array, next_cursor: number}>}
  */
-export async function clawgatePoll(apiUrl, since = 0, { issuerPublicKeyHex } = {}) {
+export async function clawgatePoll(apiUrl, since = 0, { issuerPublicKeyHex, pollRequest } = {}) {
   const path = since > 0 ? `/v1/poll?since=${since}` : "/v1/poll";
+  if (pollRequest !== undefined && (issuerPublicKeyHex === undefined
+      || pollRequest?.uri !== path || typeof pollRequest?.challenge !== "string"
+      || !/^[a-f0-9]{64}$/.test(pollRequest.challenge))) {
+    throw new Error("bridge_poll_invalid_host_request");
+  }
   if (issuerPublicKeyHex === undefined) return request(apiUrl, path);
   // Client-only legacy installs do not include the protected-poll module.
   // A configured pin requires it; absence must fail rather than downgrade.
   const { createPollChallenge, verifyPollResponse } = await import("./bridge-admission.js");
-  const challenge = createPollChallenge();
+  const challenge = pollRequest === undefined ? createPollChallenge() : pollRequest.challenge;
   const headers = { "X-ClawGate-Challenge": challenge };
   if (clawgateAuthToken) headers.Authorization = `Bearer ${clawgateAuthToken}`;
   const controller = new AbortController();
