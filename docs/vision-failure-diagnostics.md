@@ -24,7 +24,8 @@ deduplication, LINE routing, or delivery state.
 Recognition uses native-scale verified bubble crops unless one crop is narrower
 than 64 pixels and shorter than 48 pixels. Such a tiny glyph triggers a twofold
 atlas scale on the initial, single request, with unchanged revision, languages
-and confidence thresholds. Larger and Retina-size crops keep native scale.
+and confidence thresholds. Atlases without a tiny crop keep native scale;
+when one is present, the entire atlas is scaled together, including larger crops.
 The expanded RGBA atlas must fit 16 MiB (the existing recognition-cache byte
 budget); otherwise recognition keeps native scale rather than allocating it.
 Coordinates are mapped through the scaled placement back to the original crop.
