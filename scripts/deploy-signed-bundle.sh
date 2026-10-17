@@ -34,7 +34,9 @@ remote_archive="/tmp/clawgate-signed-$$.tgz"
 tar -czf "$archive" "$app"
 scp -q "$archive" "$remote_host:$remote_archive"
 
-ssh "$remote_host" /bin/bash -s -- "$remote_archive" "$expected_hash" "$COMMUNICATION_STAGE" "$base_hash" <<'REMOTE'
+# ssh joins arguments into one string, so an empty base hash would vanish and
+# shift the remote positional parameters; send a placeholder instead.
+ssh "$remote_host" /bin/bash -s -- "$remote_archive" "$expected_hash" "$COMMUNICATION_STAGE" "${base_hash:-unknown}" <<'REMOTE'
 set -euo pipefail
 archive="$1"
 expected_hash="$2"
