@@ -36,6 +36,23 @@ enum InboundBubbleOCR {
 
     private static let lock = NSLock()
     private static var entries: [Entry] = []
+    /// Set once the default device path has failed and a GPU retry worked.
+    /// On a memory-pressured host the Neural Engine program can fail to load
+    /// (E5RT code 13, surfaced as CRImageReaderError 1) and keep failing for the
+    /// life of the process, while GPU requests in the same process succeed.
+    /// CPU-only is not a fallback: it fails with the same error on that host.
+    /// Guarded by `lock`.
+    private static var prefersGPU = false
+
+    private static func pinToGPU(_ request: VNRequest) {
+        guard #available(macOS 14, *),
+              let stages = try? request.supportedComputeStageDevices else { return }
+        for (stage, devices) in stages {
+            if let gpu = devices.first(where: { if case .gpu = $0 { return true } else { return false } }) {
+                request.setComputeDevice(gpu, for: stage)
+            }
+        }
+    }
     private static let visionDiagnosticLock = NSLock()
     private static var recentVisionDiagnostics: [String: Date] = [:]
     private static let visionDiagnosticInterval: TimeInterval = 60
@@ -230,22 +247,41 @@ enum InboundBubbleOCR {
             guard let prepared = atlas(pending.map { crops[$0] }) else { failure?.pointee = .atlasFailed; return nil }
             recognizedPixels = prepared.image.width * prepared.image.height
             var recognized = [[Observation]](repeating: [], count: pending.count)
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["ja-JP", "en-US"]
-            request.usesLanguageCorrection = config.usesLanguageCorrection
-            // A long atlas must not silently raise the minimum message font size.
-            request.minimumTextHeight = 0
-            if #available(macOS 14, *), config.revision >= 3 {
-                request.revision = VNRecognizeTextRequestRevision3
-            } else if #available(macOS 13, *), config.revision >= 2 {
-                request.revision = VNRecognizeTextRequestRevision2
+            func makeRequest(onGPU: Bool) -> VNRecognizeTextRequest {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.recognitionLanguages = ["ja-JP", "en-US"]
+                request.usesLanguageCorrection = config.usesLanguageCorrection
+                // A long atlas must not silently raise the minimum message font size.
+                request.minimumTextHeight = 0
+                if #available(macOS 14, *), config.revision >= 3 {
+                    request.revision = VNRecognizeTextRequestRevision3
+                } else if #available(macOS 13, *), config.revision >= 2 {
+                    request.revision = VNRecognizeTextRequestRevision2
+                }
+                if onGPU { pinToGPU(request) }
+                return request
             }
+            lock.lock()
+            let startOnGPU = prefersGPU
+            lock.unlock()
+            var request = makeRequest(onGPU: startOnGPU)
             do { try VNImageRequestHandler(cgImage: prepared.image, options: [:]).perform([request]) }
             catch {
                 logVisionFailure(error, image: prepared.image, revision: request.revision)
-                failure?.pointee = .visionError
-                return nil
+                guard !startOnGPU else { failure?.pointee = .visionError; return nil }
+                // One GPU retry; see `prefersGPU`.
+                request = makeRequest(onGPU: true)
+                do { try VNImageRequestHandler(cgImage: prepared.image, options: [:]).perform([request]) }
+                catch {
+                    logVisionFailure(error, image: prepared.image, revision: request.revision)
+                    failure?.pointee = .visionError
+                    return nil
+                }
+                lock.lock()
+                prefersGPU = true
+                lock.unlock()
+                NSLog("[InboundBubbleOCR] default Vision device failed; GPU retry succeeded, using GPU for this process")
             }
             guard let observations = request.results else { failure?.pointee = .visionNoResults; return nil }
             for observation in observations {
