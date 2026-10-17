@@ -177,7 +177,7 @@ final class PetModel: NSObject, ObservableObject {
     private(set) var lastTrackedApp: NSRunningApplication?
     /// The AX window element Chi is currently following (for context capture)
     private var lastTrackedWindow: AXUIElement?
-    private var lastTrackedWindowFrame: CGRect?
+    private(set) var lastTrackedWindowFrame: CGRect?
     enum PlacementSide { case left, right }
     private(set) var lastPlacementSide: PlacementSide = .right
     private var lockedPlacementSide: PlacementSide?

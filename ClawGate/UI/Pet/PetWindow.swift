@@ -162,6 +162,44 @@ enum PetDesktopOcclusionPolicy {
     }
 }
 
+/// Decides whether a window stacked above the pet's host window covers the pet.
+/// The pet window floats above everything, so without this a window that comes
+/// in front of the host (e.g. a small LINE chat window over the main window)
+/// would show the pet sitting on top of it.
+enum PetHostOcclusionPolicy {
+    struct CGWindow: Equatable {
+        let ownerPID: pid_t
+        let frame: CGRect
+    }
+
+    private static let minimumCoveredFraction: CGFloat = 0.2
+
+    /// `windows` are layer-0 on-screen windows in front-to-back order, in CG
+    /// (top-left origin) coordinates like `hostFrame` and `petFrame`.
+    static func isPetOccluded(
+        windows: [CGWindow],
+        ownPID: pid_t,
+        hostPID: pid_t,
+        hostFrame: CGRect,
+        petFrame: CGRect
+    ) -> Bool {
+        let petArea = petFrame.width * petFrame.height
+        guard petArea > 0 else { return false }
+        var coveringAbove = false
+        for window in windows where window.ownerPID != ownPID {
+            if window.ownerPID == hostPID && PetGeometry.roughlySameFrame(window.frame, hostFrame) {
+                return coveringAbove
+            }
+            let overlap = window.frame.intersection(petFrame)
+            if !overlap.isNull, overlap.width * overlap.height >= petArea * minimumCoveredFraction {
+                coveringAbove = true
+            }
+        }
+        // Host not on screen: leave visibility to the tracking logic.
+        return false
+    }
+}
+
 /// Transparent always-on-top window for the pet character
 final class PetWindowController {
     private var window: NSWindow?
@@ -172,9 +210,15 @@ final class PetWindowController {
     private var stateObservation: AnyCancellable?
     private var sizeObservation: AnyCancellable?
     private var isSuppressedByMaximizedWindow = false
+    private var occlusionTimer: Timer?
 
     init(model: PetModel) {
         self.model = model
+        // Windows of the same app can stack above the host without an app
+        // activation, so the app's 2s refresh alone reacts too slowly.
+        occlusionTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshMaximizedWindowSuppression()
+        }
     }
 
     func show() {
@@ -328,8 +372,31 @@ final class PetWindowController {
             targetScreenFrame: targetScreen.frame,
             targetVisibleFrame: targetScreen.visibleFrame,
             normalWindowFrames: normalWindowFrames
-        )
+        ) || isPetCoveredAboveHost(windowInfo: windowInfo, globalTop: globalTop)
         setMaximizedWindowSuppression(shouldSuppress)
+    }
+
+    private func isPetCoveredAboveHost(windowInfo: [[String: Any]], globalTop: CGFloat) -> Bool {
+        guard let petFrame = window?.frame,
+              let hostPID = model.lastTrackedApp?.processIdentifier,
+              let hostFrame = model.lastTrackedWindowFrame else { return false }
+        let windows = windowInfo.compactMap { info -> PetHostOcclusionPolicy.CGWindow? in
+            guard (info[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+                  ((info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds) else { return nil }
+            return PetHostOcclusionPolicy.CGWindow(ownerPID: pid, frame: frame)
+        }
+        // Same desktop-wide flip PetModel uses to place the pet on the host.
+        let petCGFrame = PetGeometry.appKitRect(forTrackedFrame: petFrame, desktopMaxY: globalTop)
+        return PetHostOcclusionPolicy.isPetOccluded(
+            windows: windows,
+            ownPID: ProcessInfo.processInfo.processIdentifier,
+            hostPID: hostPID,
+            hostFrame: hostFrame,
+            petFrame: petCGFrame
+        )
     }
 
     private func occlusionTargetScreen() -> NSScreen? {
@@ -372,6 +439,8 @@ final class PetWindowController {
     /// intentionally idempotent so application termination can converge with
     /// an earlier hide/deallocation path without double-detaching children.
     func teardown() {
+        occlusionTimer?.invalidate()
+        occlusionTimer = nil
         (window?.contentView as? PetContentView)?.detachForLifecycle(preserveChatState: true)
         model.moveController.stop()
         window?.orderOut(nil)

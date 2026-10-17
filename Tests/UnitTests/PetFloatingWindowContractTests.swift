@@ -86,6 +86,24 @@ final class PetFloatingWindowContractTests: XCTestCase {
         ))
     }
 
+    func testPetHidesOnlyWhenAWindowAboveItsHostCoversIt() {
+        let host = CGRect(x: 0, y: 0, width: 1200, height: 900)
+        let pet = CGRect(x: 100, y: 700, width: 120, height: 120)
+        let chatOverPet = PetHostOcclusionPolicy.CGWindow(ownerPID: 20, frame: CGRect(x: 50, y: 100, width: 555, height: 1000))
+        let chatAwayFromPet = PetHostOcclusionPolicy.CGWindow(ownerPID: 20, frame: CGRect(x: 600, y: 100, width: 555, height: 1000))
+        let hostWindow = PetHostOcclusionPolicy.CGWindow(ownerPID: 20, frame: host)
+        let ownChat = PetHostOcclusionPolicy.CGWindow(ownerPID: 1, frame: pet)
+
+        func occluded(_ windows: [PetHostOcclusionPolicy.CGWindow]) -> Bool {
+            PetHostOcclusionPolicy.isPetOccluded(windows: windows, ownPID: 1, hostPID: 20, hostFrame: host, petFrame: pet)
+        }
+        XCTAssertTrue(occluded([chatOverPet, hostWindow]))
+        XCTAssertFalse(occluded([chatAwayFromPet, hostWindow]))
+        XCTAssertFalse(occluded([hostWindow, chatOverPet]), "windows behind the host never hide the pet")
+        XCTAssertFalse(occluded([ownChat, hostWindow]), "ClawGate's own windows are ignored")
+        XCTAssertFalse(occluded([chatOverPet]), "unknown host leaves visibility to tracking")
+    }
+
     func testDesktopPetOcclusionUsesTemporarySuppressionInsteadOfVisibilityPreference() throws {
         let petSource = try source("ClawGate/UI/Pet/PetWindow.swift")
         let menuSource = try source("ClawGate/UI/MenuBarApp.swift")

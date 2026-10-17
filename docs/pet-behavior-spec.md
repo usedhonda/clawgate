@@ -292,6 +292,18 @@ This preserves both attachment and facing correctness.
 - Small editors may be excluded by the shared threshold; this is intentional
   and avoids attachment to short utility panels, popups, or dialog scraps.
 
+### Window stacked above the host
+
+- If any other app's or the host app's normal window sits above the tracked
+  host window in Z-order and covers at least 20% of Chi's window, Chi is
+  temporarily ordered out (same suppression as a maximized window; the user's
+  visibility preference is unchanged).
+- This covers the held position from the size rule above, e.g. a narrow LINE
+  chat window opened over the LINE main window.
+- Chi reappears once nothing above the host covers it. ClawGate's own windows
+  never count. If the host is not on screen, tracking decides instead.
+- Re-evaluated every 0.5s and on app activation.
+
 ### No valid candidate side
 
 - Visible mode: stop movement and preserve the current position
