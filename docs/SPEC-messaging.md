@@ -372,6 +372,14 @@ The `source` payload field for tmux `inbound_message` events:
 
 #### LINE inbound_message / echo_message
 
+Verified incoming bubble bodies retain single-character messages. Recognition
+must complete every detected bubble before committing recognition cache or
+advancing the watcher's baseline, frame hash, text, seen positions or cursor.
+Incomplete recognition is a retryable failure, not an empty successful frame;
+successful recovery still passes through the existing position-aware dedup.
+Tiny-glyph atlas scaling and diagnostic boundaries are defined in
+[`vision-failure-diagnostics.md`](vision-failure-diagnostics.md#partial-recognition).
+
 | Field | Description |
 |-------|-------------|
 | `text` | Sanitized message text |

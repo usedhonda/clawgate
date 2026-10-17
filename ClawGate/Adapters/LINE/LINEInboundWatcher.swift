@@ -1195,7 +1195,7 @@ final class LINEInboundWatcher {
         var fragments: [LineObservedFragment] = []
         for part in parts {
             let normalized = normalizeForDuplicateFingerprint(part)
-            guard normalized.count >= 2 else { continue }
+            guard normalized.count >= 2 || (source == "pixel_ocr" && !normalized.isEmpty) else { continue }
             fragments.append(
                 LineObservedFragment(
                     normalizedLine: normalized,

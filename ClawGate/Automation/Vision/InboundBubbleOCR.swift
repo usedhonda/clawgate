@@ -140,14 +140,16 @@ enum InboundBubbleOCR {
         return result
     }
 
-    /// Each crop keeps its native scale. White gutters prevent cross-bubble lines.
+    /// White gutters prevent cross-bubble lines; normalized boxes preserve source mapping.
     private static func atlas(_ crops: [Crop]) -> (image: CGImage, placements: [CGRect])? {
         guard !crops.isEmpty else { return nil }
         let gutter = 12
-        // Keep source pixels at native scale while giving Vision a useful
-        // minimum reader canvas for tiny single-bubble atlases.
-        let width = max(128, (crops.map { $0.image.width }.max() ?? 0) + gutter * 2)
-        let height = max(128, crops.reduce(gutter) { $0 + $1.image.height + gutter })
+        let expandedWidth = max(128, (crops.map { $0.image.width * 2 }.max() ?? 0) + gutter * 2)
+        let expandedHeight = max(128, crops.reduce(gutter) { $0 + $1.image.height * 2 + gutter })
+        let expansionFits = expandedWidth <= (16 * 1024 * 1024 / 4) / expandedHeight
+        let scale = expansionFits && crops.contains { $0.image.width < 64 && $0.image.height < 48 } ? 2 : 1
+        let width = max(128, (crops.map { $0.image.width * scale }.max() ?? 0) + gutter * 2)
+        let height = max(128, crops.reduce(gutter) { $0 + $1.image.height * scale + gutter })
         guard let context = CGContext(data: nil, width: width, height: height,
             bitsPerComponent: 8, bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(),
@@ -157,11 +159,11 @@ enum InboundBubbleOCR {
         var placements: [CGRect] = []
         var top = gutter
         for crop in crops {
-            let rect = CGRect(x: gutter, y: top, width: crop.image.width, height: crop.image.height)
+            let rect = CGRect(x: gutter, y: top, width: crop.image.width * scale, height: crop.image.height * scale)
             placements.append(rect)
             context.draw(crop.image, in: CGRect(x: rect.minX, y: CGFloat(height) - rect.maxY,
                 width: rect.width, height: rect.height))
-            top += crop.image.height + gutter
+            top += crop.image.height * scale + gutter
         }
         guard let output = context.makeImage() else { return nil }
         return (output, placements)
@@ -227,6 +229,7 @@ enum InboundBubbleOCR {
         if !pending.isEmpty {
             guard let prepared = atlas(pending.map { crops[$0] }) else { failure?.pointee = .atlasFailed; return nil }
             recognizedPixels = prepared.image.width * prepared.image.height
+            var recognized = [[Observation]](repeating: [], count: pending.count)
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["ja-JP", "en-US"]
@@ -245,7 +248,6 @@ enum InboundBubbleOCR {
                 return nil
             }
             guard let observations = request.results else { failure?.pointee = .visionNoResults; return nil }
-            var recognized = [[Observation]](repeating: [], count: pending.count)
             for observation in observations {
                 let candidates = observation.topCandidates(config.candidateCount)
                 guard let text = candidates.first(where: { $0.confidence >= config.confidenceAccept })

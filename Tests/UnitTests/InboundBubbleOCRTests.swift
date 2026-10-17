@@ -41,6 +41,39 @@ final class InboundBubbleOCRTests: XCTestCase {
         return context.makeImage()!
     }
 
+    private func tinyLetterImage(letter: String) -> CGImage {
+        let context = CGContext(data: nil, width: 585, height: 300, bitsPerComponent: 8,
+            bytesPerRow: 585 * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: 585, height: 300))
+        for (index, body) in [letter, "Confirmed.", "Read correctly."].enumerated() {
+            let rect = CGRect(x: 50, y: 230 - index * 70, width: index == 0 ? 31 : 144, height: 32)
+            context.setFillColor(CGColor(gray: 239.0 / 255, alpha: 1))
+            context.addPath(CGPath(roundedRect: rect, cornerWidth: 16, cornerHeight: 16, transform: nil))
+            context.fillPath()
+            context.textPosition = CGPoint(x: rect.minX + 10, y: rect.minY + 9)
+            CTLineDraw(CTLineCreateWithAttributedString(NSAttributedString(string: body,
+                attributes: [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.black])), context)
+        }
+        return context.makeImage()!
+    }
+
+    func testMissingTinyLetterCannotDiscardFollowingBubblesOrCachePartialSuccess() throws {
+        var failure: InboundBubbleOCR.RecognizeFailure?
+        XCTAssertNil(InboundBubbleOCR.recognize(tinyLetterImage(letter: ""), scope: "tiny-letter",
+            config: .default, failure: &failure))
+        XCTAssertEqual(failure, .incompleteRecognition)
+        let source = tinyLetterImage(letter: "L")
+        let recovered = try XCTUnwrap(InboundBubbleOCR.recognize(source, scope: "tiny-letter", config: .default))
+        XCTAssertEqual(recovered.cacheHits, 0)
+        XCTAssertEqual(recovered.observations.map(\.text), ["L", "Confirmed.", "Read correctly."])
+        let repeated = try XCTUnwrap(InboundBubbleOCR.recognize(source, scope: "tiny-letter", config: .default))
+        XCTAssertEqual(repeated.cacheHits, 3)
+        XCTAssertEqual(repeated.recognizedPixels, 0)
+        XCTAssertEqual(repeated.observations.map(\.text), recovered.observations.map(\.text))
+    }
+
     func testVerifiedTimeOnlyBodySurvivesAndCacheKeepsSeparateOccurrences() throws {
         let first = try XCTUnwrap(InboundBubbleOCR.recognize(image(), scope: "test", config: .default))
         XCTAssertEqual(first.bubbleCount, 1)

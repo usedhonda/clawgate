@@ -2,6 +2,22 @@ import XCTest
 @testable import ClawGate
 
 final class LineInboundWatcherDedupTests: XCTestCase {
+    func testRecoveredTinyLetterAndFollowingCorrectionsEmitOnce() {
+        let bodies = ["L", "Correction.", "Read correctly."]
+        let fragments = bodies.enumerated().map { index, body in
+            fragment(body.lowercased(), display: body, y: 500 + index * 50, order: index)
+        }
+        let freshness = LineInboundFreshnessEvidence(incomingRows: 0, bottomChanged: false,
+            newestSliceUsed: false, cursorStatus: .notFound, postCursorNovelLineCount: 0, pixelTextChanged: true)
+        let now = Date(timeIntervalSince1970: 1_000)
+        let recovered = LineInboundDedupDecisionEngine.decide(fingerprintHit: false, fragments: fragments,
+            tracker: [:], freshness: freshness, now: now)
+        XCTAssertEqual(recovered.evaluation.emittedText, bodies.joined(separator: "\n"))
+        let repeated = LineInboundDedupDecisionEngine.decide(fingerprintHit: false, fragments: fragments,
+            tracker: recovered.updatedTracker, freshness: freshness, now: now.addingTimeInterval(30))
+        XCTAssertTrue(repeated.evaluation.shouldSuppress)
+    }
+
     func testMissingCursorRecoversOnlyNewTailWithObservedContinuity() {
         XCTAssertEqual(
             LinePixelContinuity.appendedTail(previous: "Older message\nVisible anchor", current: "Visible anchor\nNew question"),
