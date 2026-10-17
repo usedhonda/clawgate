@@ -18,6 +18,7 @@ SKIP_SYNC=false
 SKIP_PLUGIN_SYNC=false
 PLUGIN_CLIENT_ONLY=false
 SKIP_SIGN=false
+STAGE_ONLY=false
 WAIT_SECONDS=8
 export CLAWGATE_ROLE="host_b_client"
 export OPS_SCRIPT_NAME="restart-local-clawgate.sh"
@@ -36,6 +37,8 @@ while [[ $# -gt 0 ]]; do
       PLUGIN_CLIENT_ONLY=true; shift ;;
     --skip-sign)
       SKIP_SIGN=true; shift ;;
+    --stage-only)
+      STAGE_ONLY=true; shift ;;
     --wait-seconds)
       WAIT_SECONDS="$2"; shift 2 ;;
     *)
@@ -46,6 +49,14 @@ done
 
 if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_PLUGIN_SYNC" == "true" ]]; then
   echo "--plugin-client-only cannot be combined with --skip-plugin-sync" >&2
+  exit 2
+fi
+
+if [[ "$STAGE_ONLY" == "true" ]] && {
+  [[ "$SKIP_BUILD" != "true" || "$SKIP_SYNC" != "true" || "$SKIP_PLUGIN_SYNC" != "true" ]] ||
+  [[ "$SKIP_SIGN" == "true" || "$PLUGIN_CLIENT_ONLY" == "true" ]];
+}; then
+  echo "--stage-only requires --skip-build --skip-sync --skip-plugin-sync and signing." >&2
   exit 2
 fi
 
@@ -94,6 +105,7 @@ fi
 # Stop before replacing or signing mapped executable pages. Modifying a live
 # bundle can terminate the old process with CODESIGNING Invalid Page.
 APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
+if [[ "$STAGE_ONLY" != "true" ]]; then
 pkill -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
 
 # Wait for old process to fully exit (up to 5s, then SIGKILL)
@@ -108,6 +120,21 @@ for ((w=1; w<=5; w++)); do
   fi
   sleep 1
 done
+fi
+
+STAGE_TEAM=""
+if [[ "$STAGE_ONLY" == "true" ]]; then
+  [[ -f "$APP_BIN" && ! -L "$APP_BIN" ]] || { echo "Missing staged executable." >&2; exit 1; }
+  if pgrep -f "$APP_BIN" >/dev/null 2>&1; then
+    echo "Refusing to sign a running staged app." >&2
+    exit 1
+  fi
+  STAGE_TEMPLATE="$PROJECT_PATH/ClawGate.template.app"
+  [[ -d "$STAGE_TEMPLATE" && ! -L "$STAGE_TEMPLATE" ]] || { echo "Missing original signed template." >&2; exit 1; }
+  codesign --verify --deep --strict "$STAGE_TEMPLATE"
+  STAGE_TEAM="$(codesign -dv --verbose=4 "$STAGE_TEMPLATE" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  [[ -n "$STAGE_TEAM" && "$STAGE_TEAM" != "not set" ]] || { echo "Missing original signing team." >&2; exit 1; }
+fi
 
 
 if [[ "$SKIP_SYNC" != "true" ]]; then
@@ -199,6 +226,13 @@ if [[ "$SKIP_SIGN" != "true" ]]; then
   elif /usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -q "ClawGate Dev"; then
     RESOLVED_SIGNING_ID="ClawGate Dev"
   fi
+  if [[ "$STAGE_ONLY" == "true" ]]; then
+    [[ -n "$RESOLVED_SIGNING_ID" ]] || { echo "Staging requires the existing Developer ID identity." >&2; exit 1; }
+    STAGE_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null | grep -F "$RESOLVED_SIGNING_ID" | head -n 1)"
+    [[ "$STAGE_IDENTITY" == *"Developer ID Application:"* && "$STAGE_IDENTITY" == *"($STAGE_TEAM)"* ]] || {
+      echo "Staging requires a Developer ID identity from the original team." >&2; exit 1;
+    }
+  fi
   if [[ -n "$RESOLVED_SIGNING_ID" ]]; then
     echo "[4/5] Codesign ($RESOLVED_SIGNING_ID)"
     codesign --force --deep --options runtime \
@@ -213,6 +247,14 @@ if [[ "$SKIP_SIGN" != "true" ]]; then
   fi
 else
   echo "[4/5] Skip codesign (by option)"
+fi
+
+if [[ "$STAGE_ONLY" == "true" ]]; then
+  codesign --verify --deep --strict "$APP_PATH"
+  VERIFIED_TEAM="$(codesign -dv --verbose=4 "$APP_PATH" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  [[ "$VERIFIED_TEAM" == "$STAGE_TEAM" ]] || { echo "Staged signing team changed." >&2; exit 1; }
+  echo "Staged app signed and verified; no process or Gateway operation performed."
+  exit 0
 fi
 
 echo "[5/5] Restart app + local gateway"

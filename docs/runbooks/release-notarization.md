@@ -2,6 +2,23 @@
 
 This runbook defines when to wait, when to re-check, and when to re-submit.
 
+## Local signed stage
+
+For an app-only repair, an isolated copy of the existing signed bundle may be
+prepared with the new executable and matching SwiftPM resource bundle first.
+Keep the unchanged, verified original as `ClawGate.template.app` in the stage;
+the helper reads its signing team instead of trusting the replacement executable.
+Run `restart-local-clawgate.sh --stage-only --skip-build --skip-sync
+--skip-plugin-sync --project-path <isolated-stage>` to sign and verify that copy
+with the existing Developer ID and original team. This mode neither stops nor
+launches a process, synchronizes a plugin, nor operates the Gateway. It rejects
+unsigned signing identities and cannot skip signing. It does not unlock or
+change keychain access. Preserve the old bundle and unresolved incoming evidence.
+
+The signed stage is not a notarized or published release. Use the existing
+`deploy-signed-bundle.sh` app-only deployment and rollback flow for reflection;
+keep app source/build/binary correspondence in a private deployment receipt.
+
 ## Inputs
 
 - DMG path (from release output)
