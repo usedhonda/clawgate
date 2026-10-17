@@ -116,6 +116,28 @@ final class InboundBubbleOCRTests: XCTestCase {
         XCTAssertEqual(cachedBox.minY, box.minY, accuracy: 0.0001)
     }
 
+    func testHelperObservationsMapToTheirBubbleWithConfidenceGate() {
+        typealias Raw = InboundBubbleOCR.RawObservation
+        // 200x200 atlas, one bubble at pixels (20,20)-(120,60), top-left origin.
+        let placements = [CGRect(x: 20, y: 20, width: 100, height: 40)]
+        // Vision box (bottom-left origin) for pixels (30,30)-(80,50): y = 1 - 50/200.
+        let inside = Raw(x: 0.15, y: 0.75, width: 0.25, height: 0.1,
+                         candidates: [.init(text: "テスト送信", confidence: 1)])
+        let weak = Raw(x: 0.15, y: 0.75, width: 0.25, height: 0.1,
+                       candidates: [.init(text: "noise", confidence: 0.1)])
+        let outside = Raw(x: 0.8, y: 0.1, width: 0.1, height: 0.05,
+                          candidates: [.init(text: "elsewhere", confidence: 1)])
+        let mapped = InboundBubbleOCR.assign([inside, weak, outside], placements: placements,
+                                             imageSize: CGSize(width: 200, height: 200), config: .default)
+        XCTAssertEqual(mapped.count, 1)
+        XCTAssertEqual(mapped[0].map(\.text), ["テスト送信"])
+        let box = mapped[0][0].boundingBox
+        XCTAssertEqual(box.minX, 0.1, accuracy: 0.001)
+        XCTAssertEqual(box.width, 0.5, accuracy: 0.001)
+        XCTAssertEqual(box.minY, 0.25, accuracy: 0.001)
+        XCTAssertEqual(box.height, 0.5, accuracy: 0.001)
+    }
+
     func testVisionDiagnosticMetadataIsBoundedAndBodyFree() throws {
         var nested: NSError = NSError(domain: "vision.0", code: 0, userInfo: [
             "payload": "private OCR text",

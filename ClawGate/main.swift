@@ -1,6 +1,11 @@
 import AppKit
 import Foundation
 
+// Out-of-process OCR helper: must run before the singleton lock and app setup.
+if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == OutOfProcessOCR.helperFlag {
+    exit(OutOfProcessOCR.runHelper(arguments: Array(CommandLine.arguments.dropFirst(2))))
+}
+
 final class AppRuntime {
     let configStore = ConfigStore()
     lazy var statsCollector = StatsCollector()

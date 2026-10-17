@@ -199,6 +199,93 @@ enum InboundBubbleOCR {
         case incompleteRecognition = "incomplete_recognition"
     }
 
+    /// One Vision text observation, detached from VNRecognizedTextObservation so
+    /// the out-of-process helper can hand it back as JSON.
+    struct RawObservation: Codable {
+        struct Candidate: Codable {
+            let text: String
+            let confidence: Float
+        }
+        /// Vision-normalized box in the recognized image.
+        let x: Double
+        let y: Double
+        let width: Double
+        let height: Double
+        let candidates: [Candidate]
+    }
+
+    enum RawVisionError: Error {
+        case noResults
+    }
+
+    private static func makeRequest(_ config: VisionOCR.OCRConfig) -> VNRecognizeTextRequest {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["ja-JP", "en-US"]
+        request.usesLanguageCorrection = config.usesLanguageCorrection
+        // A long atlas must not silently raise the minimum message font size.
+        request.minimumTextHeight = 0
+        if #available(macOS 14, *), config.revision >= 3 {
+            request.revision = VNRecognizeTextRequestRevision3
+        } else if #available(macOS 13, *), config.revision >= 2 {
+            request.revision = VNRecognizeTextRequestRevision2
+        }
+        return request
+    }
+
+    private static func requestedRevision(_ config: VisionOCR.OCRConfig) -> Int {
+        makeRequest(config).revision
+    }
+
+    static func performVision(on image: CGImage, config: VisionOCR.OCRConfig) throws -> [RawObservation] {
+        let request = makeRequest(config)
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        guard let results = request.results else { throw RawVisionError.noResults }
+        return results.map { observation in
+            let box = observation.boundingBox
+            return RawObservation(x: box.minX, y: box.minY, width: box.width, height: box.height,
+                candidates: observation.topCandidates(config.candidateCount).map {
+                    RawObservation.Candidate(text: $0.string, confidence: $0.confidence)
+                })
+        }
+    }
+
+    /// Maps atlas observations back to their bubbles, sorted top to bottom.
+    static func assign(_ raw: [RawObservation], placements: [CGRect], imageSize: CGSize,
+                       config: VisionOCR.OCRConfig) -> [[Observation]] {
+        var recognized = [[Observation]](repeating: [], count: placements.count)
+        for observation in raw {
+            let candidates = observation.candidates
+            guard let text = candidates.first(where: { $0.confidence >= config.confidenceAccept })
+                ?? candidates.first.flatMap({ $0.confidence >= config.confidenceFallback ? $0 : nil }) else { continue }
+            let pixels = CGRect(x: observation.x * imageSize.width,
+                y: (1 - observation.y - observation.height) * imageSize.height,
+                width: observation.width * imageSize.width, height: observation.height * imageSize.height)
+            guard let index = placements.firstIndex(where: { $0.contains(pixels) }) else { continue }
+            let placement = placements[index]
+            let normalized = CGRect(x: (pixels.minX - placement.minX) / placement.width,
+                y: 1 - (pixels.maxY - placement.minY) / placement.height,
+                width: pixels.width / placement.width, height: pixels.height / placement.height)
+            recognized[index].append(Observation(text: text.text, boundingBox: normalized))
+        }
+        return recognized.map { $0.sorted { $0.boundingBox.maxY > $1.boundingBox.maxY } }
+    }
+
+    /// Caller holds `lock`.
+    private static func store(_ recognized: [[Observation]], crops: [Crop], scope: String, configuration: String) {
+        if !scope.isEmpty {
+            for (slot, crop) in crops.enumerated() {
+                entries.append(Entry(scope: scope, configuration: configuration,
+                    width: crop.image.width, height: crop.image.height, pixels: crop.pixels,
+                    hash: crop.hash, observations: recognized[slot]))
+            }
+        }
+        // Memory only, bounded; a miss costs OCR, never changes delivery semantics.
+        while entries.count > 64 || entries.reduce(0, { $0 + $1.pixels.count }) > 16 * 1024 * 1024 {
+            entries.removeFirst()
+        }
+    }
+
     static func recognize(_ image: CGImage, scope: String, config: VisionOCR.OCRConfig,
                           failure: UnsafeMutablePointer<RecognizeFailure?>? = nil) -> Result? {
         let detection = InboundBubbleDetector.detect(in: image)
@@ -229,57 +316,34 @@ enum InboundBubbleOCR {
         if !pending.isEmpty {
             guard let prepared = atlas(pending.map { crops[$0] }) else { failure?.pointee = .atlasFailed; return nil }
             recognizedPixels = prepared.image.width * prepared.image.height
-            var recognized = [[Observation]](repeating: [], count: pending.count)
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["ja-JP", "en-US"]
-            request.usesLanguageCorrection = config.usesLanguageCorrection
-            // A long atlas must not silently raise the minimum message font size.
-            request.minimumTextHeight = 0
-            if #available(macOS 14, *), config.revision >= 3 {
-                request.revision = VNRecognizeTextRequestRevision3
-            } else if #available(macOS 13, *), config.revision >= 2 {
-                request.revision = VNRecognizeTextRequestRevision2
-            }
-            do { try VNImageRequestHandler(cgImage: prepared.image, options: [:]).perform([request]) }
+            let raw: [RawObservation]
+            do { raw = try performVision(on: prepared.image, config: config) }
+            catch RawVisionError.noResults { failure?.pointee = .visionNoResults; return nil }
             catch {
-                logVisionFailure(error, image: prepared.image, revision: request.revision)
+                logVisionFailure(error, image: prepared.image, revision: requestedRevision(config))
+                // Fill the cache from a fresh process; a later poll then hits it.
+                OutOfProcessOCR.recognizeInBackground(prepared.image, config: config) { raw in
+                    let recognized = assign(raw, placements: prepared.placements,
+                                            imageSize: CGSize(width: prepared.image.width, height: prepared.image.height),
+                                            config: config)
+                    guard recognized.allSatisfy({ !$0.isEmpty }) else { return }
+                    lock.lock()
+                    store(recognized, crops: pending.map { crops[$0] }, scope: scope, configuration: configuration)
+                    lock.unlock()
+                }
                 failure?.pointee = .visionError
                 return nil
             }
-            guard let observations = request.results else { failure?.pointee = .visionNoResults; return nil }
-            for observation in observations {
-                let candidates = observation.topCandidates(config.candidateCount)
-                guard let text = candidates.first(where: { $0.confidence >= config.confidenceAccept })
-                    ?? candidates.first.flatMap({ $0.confidence >= config.confidenceFallback ? $0 : nil }) else { continue }
-                let box = observation.boundingBox
-                let pixels = CGRect(x: box.minX * CGFloat(prepared.image.width),
-                    y: (1 - box.maxY) * CGFloat(prepared.image.height),
-                    width: box.width * CGFloat(prepared.image.width), height: box.height * CGFloat(prepared.image.height))
-                guard let index = prepared.placements.firstIndex(where: { $0.contains(pixels) }) else { continue }
-                let placement = prepared.placements[index]
-                let normalized = CGRect(x: (pixels.minX - placement.minX) / placement.width,
-                    y: 1 - (pixels.maxY - placement.minY) / placement.height,
-                    width: pixels.width / placement.width, height: pixels.height / placement.height)
-                recognized[index].append(Observation(text: text.string, boundingBox: normalized))
-            }
+            let recognized = assign(raw, placements: prepared.placements,
+                                    imageSize: CGSize(width: prepared.image.width, height: prepared.image.height),
+                                    config: config)
             // A partial OCR failure must not advance the watcher's previous frame.
             guard recognized.allSatisfy({ !$0.isEmpty }) else { failure?.pointee = .incompleteRecognition; return nil }
             lock.lock()
             for (slot, index) in pending.enumerated() {
-                let sorted = recognized[slot].sorted { $0.boundingBox.maxY > $1.boundingBox.maxY }
-                local[index] = sorted
-                if !scope.isEmpty {
-                    let crop = crops[index]
-                    entries.append(Entry(scope: scope, configuration: configuration,
-                        width: crop.image.width, height: crop.image.height, pixels: crop.pixels,
-                        hash: crop.hash, observations: sorted))
-                }
+                local[index] = recognized[slot]
             }
-            // Memory only, bounded; a miss costs OCR, never changes delivery semantics.
-            while entries.count > 64 || entries.reduce(0, { $0 + $1.pixels.count }) > 16 * 1024 * 1024 {
-                entries.removeFirst()
-            }
+            store(recognized, crops: pending.map { crops[$0] }, scope: scope, configuration: configuration)
             lock.unlock()
         }
         var output: [Observation] = []

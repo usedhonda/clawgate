@@ -39,3 +39,18 @@ subsequent attempts; a successful read clears the streak. Read
 `latest-pipeline.json` together with `line-health`: a zero streak
 alone is not evidence of successful recognition. Clean canvases remain normal,
 and uncertain detection without recognition evidence remains neutral.
+
+## Out-of-process recognition fallback
+
+On some hosts the Vision text recognizer succeeds for the first request of a
+process and then fails every later one with `CRImageReaderError` code 1; the
+unified log shows `E5RT Error ... create_precompiled_compute_operation ...
+(Code: 13)`. Pinning the request to GPU or CPU does not help, and restarting
+ClawGate only helps until the next failure. When an in-process request fails,
+the atlas is recognized in a short-lived copy of the ClawGate executable
+(`--inbound-ocr-helper`), one at a time, and the result fills the recognition
+cache. The failing poll still records `vision_error`; the next poll for the
+same pixels hits the cache. Delivery, dedup and baseline rules are unchanged.
+A helper run can take tens of seconds on such a host; look for
+`[OutOfProcessOCR]` lines in the unified log. The temporary atlas is removed
+after each run.
