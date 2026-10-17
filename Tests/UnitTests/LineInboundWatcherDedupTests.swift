@@ -4,9 +4,14 @@ import XCTest
 final class LineInboundWatcherDedupTests: XCTestCase {
     func testRecoveredTinyLetterAndFollowingCorrectionsEmitOnce() {
         let bodies = ["L", "Correction.", "Read correctly."]
-        let fragments = bodies.enumerated().map { index, body in
-            fragment(body.lowercased(), display: body, y: 500 + index * 50, order: index)
-        }
+        var order = 0
+        let fragments = LineInboundDedupDecisionEngine.observedFragments(from: bodies.joined(separator: "\n"),
+            observedY: 500, source: "pixel_ocr", normalize: { $0.lowercased() }, nextOrder: &order)
+        XCTAssertEqual(fragments.map(\.displayText), bodies)
+        var otherOrder = 0
+        let otherSource = LineInboundDedupDecisionEngine.observedFragments(from: bodies.joined(separator: "\n"),
+            observedY: 500, source: "ax_row_ocr", normalize: { $0.lowercased() }, nextOrder: &otherOrder)
+        XCTAssertEqual(otherSource.map(\.displayText), Array(bodies.dropFirst()))
         let freshness = LineInboundFreshnessEvidence(incomingRows: 0, bottomChanged: false,
             newestSliceUsed: false, cursorStatus: .notFound, postCursorNovelLineCount: 0, pixelTextChanged: true)
         let now = Date(timeIntervalSince1970: 1_000)

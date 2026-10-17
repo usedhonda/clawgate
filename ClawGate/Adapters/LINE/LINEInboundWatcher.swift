@@ -97,6 +97,26 @@ struct LineInboundDedupEvaluation {
 struct LineInboundDedupDecisionEngine {
     private static let collapseYBucketPx = 50
 
+    static func observedFragments(from text: String, observedY: Int, source: String,
+                                  normalize: (String) -> String, nextOrder: inout Int) -> [LineObservedFragment] {
+        let sanitized = source == "ax_row_text" || source == "ax_fallback"
+            ? LineTextSanitizer.sanitize(text) : LineTextSanitizer.bubbleBody(text)
+        guard !sanitized.isEmpty else { return [] }
+        let parts = sanitized
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var fragments: [LineObservedFragment] = []
+        for part in parts {
+            let normalized = normalize(part)
+            guard normalized.count >= 2 || (source == "pixel_ocr" && !normalized.isEmpty) else { continue }
+            fragments.append(LineObservedFragment(normalizedLine: normalized, displayText: part,
+                observedY: observedY, source: source, order: nextOrder))
+            nextOrder += 1
+        }
+        return fragments
+    }
+
     static func prune(entries: [String: LineSeenPositionEntry], now: Date, ttl: TimeInterval) -> [String: LineSeenPositionEntry] {
         let cutoff = now.addingTimeInterval(-ttl)
         return entries.filter { $0.value.lastSeenAt >= cutoff }
@@ -1183,31 +1203,8 @@ final class LINEInboundWatcher {
     }
 
     private func observedFragments(from text: String, observedY: Int, source: String, nextOrder: inout Int) -> [LineObservedFragment] {
-        let sanitized = source == "ax_row_text" || source == "ax_fallback"
-            ? LineTextSanitizer.sanitize(text) : LineTextSanitizer.bubbleBody(text)
-        guard !sanitized.isEmpty else { return [] }
-
-        let parts = sanitized
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        var fragments: [LineObservedFragment] = []
-        for part in parts {
-            let normalized = normalizeForDuplicateFingerprint(part)
-            guard normalized.count >= 2 || (source == "pixel_ocr" && !normalized.isEmpty) else { continue }
-            fragments.append(
-                LineObservedFragment(
-                    normalizedLine: normalized,
-                    displayText: part,
-                    observedY: observedY,
-                    source: source,
-                    order: nextOrder
-                )
-            )
-            nextOrder += 1
-        }
-        return fragments
+        LineInboundDedupDecisionEngine.observedFragments(from: text, observedY: observedY, source: source,
+            normalize: normalizeForDuplicateFingerprint, nextOrder: &nextOrder)
     }
 
     private func encodeObservedFragments(_ fragments: [LineObservedFragment]) -> String? {
