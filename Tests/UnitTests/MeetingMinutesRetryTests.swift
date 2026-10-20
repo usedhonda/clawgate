@@ -291,8 +291,39 @@ final class MeetingMinutesRetryTests: XCTestCase {
         var record = meeting()
         record.endedAt = Date().addingTimeInterval(-3600).timeIntervalSince1970
         store.save(record)
+        let finished = expectation(description: "automatic candidate prepared")
+        model.missingMinutesScanDidFinishForTesting = { finished.fulfill() }
         model.requestMissingMinutesForTesting()
+        wait(for: [finished], timeout: 5)
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
+    }
+
+    func testCandidateScanCoalescesAndRejectsMeetingChangedDuringPreparation() throws {
+        var record = meeting()
+        record.endedAt = Date().addingTimeInterval(-3600).timeIntervalSince1970
+        store.save(record)
+        let started = expectation(description: "candidate read off main")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        model.meetingTranscriptProvider = { _ in
+            XCTAssertFalse(Thread.isMainThread)
+            started.fulfill()
+            _ = release.wait(timeout: .now() + 5)
+            return (0..<10).map { TranscriptSegment(startSeconds: Double($0), endSeconds: Double($0 + 1), text: "fixture") }
+        }
+        let finished = expectation(description: "running and latest pending scan")
+        finished.expectedFulfillmentCount = 2
+        model.missingMinutesScanDidFinishForTesting = { finished.fulfill() }
+        model.requestMissingMinutesForTesting()
+        wait(for: [started], timeout: 3)
+        for _ in 0..<20 { model.requestMissingMinutesForTesting() }
+        record.minutesState = "pending"
+        store.save(record)
+        release.signal()
+        wait(for: [finished], timeout: 5)
+        XCTAssertNil(model.pendingMinutesMeetingIDForTesting)
+        XCTAssertNil(MeetingMinutesJob.load(store: store, id: record.id))
+        XCTAssertEqual(store.load(id: record.id)?.minutesState, "pending")
     }
 }
 

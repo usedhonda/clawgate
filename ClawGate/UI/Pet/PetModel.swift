@@ -2132,6 +2132,7 @@ final class PetModel: NSObject, ObservableObject {
         (minutesActivityStartedAt, minutesGenerationStartedAt)
     }
     var minutesAttemptsForTesting: [String: Int] { minutesAttempts }
+    var missingMinutesScanDidFinishForTesting: (() -> Void)?
     func requestMissingMinutesForTesting() { requestMissingMinutes() }
     func completeMinutesReplyForTesting(_ text: String) {
         appendSummonEntry(text: text, source: Self.minutesSource)
@@ -2905,6 +2906,9 @@ final class PetModel: NSObject, ObservableObject {
     @Published private(set) var meetingSourcesBusy = false
     @Published private(set) var meetingSourcesError: String?
     private var meetingSourcesTimer: Timer?
+    private let missingMinutesQueue = DispatchQueue(label: "com.clawgate.minutes.candidates", qos: .utility)
+    private var missingMinutesScanInFlight = false
+    private var missingMinutesScanPending = false
     private var meetingMaterials: [String: MeetingGoogleMaterials.Snapshot] = [:]
     @Published private var refreshingMaterialIDs: Set<String> = []
 
@@ -2928,12 +2932,34 @@ final class PetModel: NSObject, ObservableObject {
     /// usable transcript and no request yet are queued here; parked meetings
     /// and merged fragments are skipped by `requestMinutes` and the filter.
     func requestMissingMinutes() {
+        guard !didCleanup else { return }
+        missingMinutesScanPending = true
+        guard !missingMinutesScanInFlight else { return }
+        missingMinutesScanPending = false
+        missingMinutesScanInFlight = true
+        let store = minutesStore()
+        let provider = meetingTranscriptProvider
         let cutoff = Date().addingTimeInterval(-600)
-        for record in minutesStore().all()
-        where record.minutesState == "none" && record.mergedIntoMeetingID == nil && record.source != "calendar" {
-            guard let end = record.endedAt, Date(timeIntervalSince1970: end) < cutoff,
-                  meetingTranscript(for: record).count >= 10 else { continue }
-            requestMinutes(for: record)
+        missingMinutesQueue.async { [weak self] in
+            let candidates = store.all().filter { record in
+                guard record.minutesState == "none", record.mergedIntoMeetingID == nil,
+                      record.source != "calendar", let end = record.endedAt,
+                      Date(timeIntervalSince1970: end) < cutoff else { return false }
+                return (provider?(record) ?? []).count >= 10
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.missingMinutesScanInFlight = false
+                guard !self.didCleanup else { return }
+                for record in candidates {
+                    guard store.load(id: record.id) == record else { continue }
+                    self.requestMinutes(for: record, markUserRequested: false)
+                }
+                #if DEBUG
+                self.missingMinutesScanDidFinishForTesting?()
+                #endif
+                if self.missingMinutesScanPending { self.requestMissingMinutes() }
+            }
         }
     }
 
