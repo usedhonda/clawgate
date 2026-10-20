@@ -132,4 +132,119 @@ final class AmbientLogCacheAndTimerTests: XCTestCase {
         XCTAssertEqual(model.loadCallCountForTesting, 2, "start after stop loads once for the new lifecycle")
         model.stop()
     }
+
+    func testDisplayRejectsOldSelectionAndCoalescesBeforeReusingTodaysSource() throws {
+        let root = makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let day = startOfDayJST(Date())
+        let start = day.timeIntervalSince1970
+        let first = seg("first scene", at: start + 10)
+        let second = seg("second scene", at: start + 2000)
+        try writeSession("ctx-display-fixture", [first, second], under: root)
+        let model = AmbientLogModel(zoneProvider: { self.jst })
+        model.sessionsRootOverrideForTesting = root
+        defer { model.stop() }
+        let firstID = String(Int(start + 10))
+        let secondID = String(Int(start + 2000))
+        let built = expectation(description: "old snapshot built before selection changes")
+        let released = DispatchSemaphore(value: 0)
+        defer { released.signal() }
+        let finished = expectation(description: "old and latest snapshots finish")
+        finished.expectedFulfillmentCount = 2
+        let readsLock = NSLock()
+        var reads = 0
+        var applied: [Bool] = []
+        model.displaySourceReadForTesting = {
+            readsLock.lock()
+            reads += 1
+            readsLock.unlock()
+        }
+        model.displaySnapshotDidBuildForTesting = {
+            built.fulfill()
+            _ = released.wait(timeout: .now() + 5)
+        }
+        model.displayLoadDidFinishForTesting = { didApply in
+            applied.append(didApply)
+            XCTAssertEqual(model.selectedSceneIDs, [secondID])
+            finished.fulfill()
+        }
+        model.selectScene(firstID, toggling: false)
+        wait(for: [built], timeout: 3)
+        model.displaySnapshotDidBuildForTesting = nil
+        for _ in 0..<20 { model.selectScene(secondID, toggling: false) }
+        XCTAssertTrue(model.displayHasPendingLoadForTesting)
+        released.signal()
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(applied, [false, true])
+        XCTAssertEqual(model.blocks.map(\.text), ["second scene"])
+        XCTAssertFalse(model.displayHasPendingLoadForTesting)
+        readsLock.lock()
+        let readsBeforePoll = reads
+        readsLock.unlock()
+        let revision = model.transcriptRevision
+        let unchanged = expectation(description: "unchanged display reuses source")
+        model.displayLoadDidFinishForTesting = { didApply in
+            XCTAssertFalse(didApply)
+            unchanged.fulfill()
+        }
+        model.selectScene(secondID, toggling: false)
+        wait(for: [unchanged], timeout: 3)
+        readsLock.lock()
+        XCTAssertEqual(reads, readsBeforePoll)
+        readsLock.unlock()
+        XCTAssertEqual(model.transcriptRevision, revision)
+        model.displayLoadDidFinishForTesting = nil
+    }
+
+    func testDayRoundTripRejectsAnOldMatchingDisplayInput() throws {
+        try assertOldDisplayRejected { model in
+            model.moveDay(by: -1)
+            model.moveDay(by: 1)
+        }
+    }
+
+    func testFontRoundTripRejectsAnOldMatchingDisplayInput() throws {
+        try assertOldDisplayRejected { model in
+            let original = model.fontSize
+            model.setDisplayFontSizeForTesting(original > 15 ? original - 1 : original + 1)
+            model.setDisplayFontSizeForTesting(original)
+        }
+    }
+
+    func testStopRejectsAnInFlightDisplay() throws {
+        try assertOldDisplayRejected(stopped: true) { $0.stop() }
+    }
+
+    private func assertOldDisplayRejected(stopped: Bool = false, mutate: (AmbientLogModel) -> Void) throws {
+        let root = makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let day = startOfDayJST(Date())
+        try writeSession("ctx-generation-fixture", [seg("fixture", at: day.timeIntervalSince1970 + 10)], under: root)
+        let model = AmbientLogModel(zoneProvider: { self.jst })
+        model.sessionsRootOverrideForTesting = root
+        defer { model.stop() }
+        let built = expectation(description: "old display built")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+        model.displaySnapshotDidBuildForTesting = {
+            built.fulfill()
+            _ = release.wait(timeout: .now() + 5)
+        }
+        var applied: [Bool] = []
+        let finished = expectation(description: "display results returned")
+        finished.expectedFulfillmentCount = stopped ? 1 : 2
+        model.displayLoadDidFinishForTesting = { value in
+            applied.append(value)
+            finished.fulfill()
+        }
+        model.selectAllScenes()
+        wait(for: [built], timeout: 3)
+        model.displaySnapshotDidBuildForTesting = nil
+        mutate(model)
+        release.signal()
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(applied, stopped ? [false] : [false, true])
+        XCTAssertFalse(model.displayHasPendingLoadForTesting)
+        XCTAssertEqual(model.blocks.map(\.text), stopped ? [] : ["fixture"])
+    }
 }

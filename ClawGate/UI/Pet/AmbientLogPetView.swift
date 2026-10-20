@@ -288,7 +288,8 @@ enum AmbientLogGrouping {
 
     static func scenes(from segments: [TranscriptSegment],
                        gapSeconds: Double = 900,
-                       timeZone: TimeZone) -> [Scene] {
+                       timeZone: TimeZone,
+                       isCancelled: () -> Bool = { false }) -> [Scene] {
         var result: [Scene] = []
         var current: [TranscriptSegment] = []
         var firstEpoch: Double?
@@ -328,7 +329,8 @@ enum AmbientLogGrouping {
             lastZone = nil
         }
 
-        for seg in segments {
+        for (index, seg) in segments.enumerated() {
+            if index.isMultiple(of: 128), isCancelled() { return [] }
             if let t = seg.capturedAt {
                 if let last = lastEpoch, t - last > gapSeconds {
                     closeScene()
@@ -451,14 +453,50 @@ final class AmbientLogModel: ObservableObject {
         cal.timeZone = timeZone
         return cal
     }
-    // Past days cache uncapped scenes + raw segments so scene identity stays
-    // the SAME single source as the query path (D17). Blocks are re-derived
-    // from these per load (a display cap is applied then, not to identity).
-    // D38: the cache is keyed alongside the day's on-disk fingerprint so a late
-    // write to a past day invalidates it instead of being hidden.
-    private var cachedScenesByDay: [Date: [AmbientLogGrouping.Scene]] = [:]
-    private var cachedRawSegmentsByDay: [Date: [TranscriptSegment]] = [:]
-    private var cachedDayFingerprintByDay: [Date: String] = [:]
+    private struct DisplayInput: Equatable {
+        let day: Date
+        let selection: Set<String>
+        let font: CGFloat
+        let zone: TimeZone
+        let root: URL
+    }
+
+    private struct DisplaySource {
+        let fingerprint: String
+        let segments: [TranscriptSegment]
+        let scenes: [AmbientLogGrouping.Scene]
+    }
+
+    private struct DisplaySnapshot {
+        let source: DisplaySource
+        let selection: Set<String>
+        let blocks: [AmbientLogGrouping.Block]
+        let transcript: NSAttributedString
+        let fingerprint: String
+    }
+
+    private final class DisplayCancellation {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+    }
+
+    private var cachedDisplaySourceByDay: [Date: DisplaySource] = [:]
+    private var displayInput: DisplayInput?
+    private var displayGeneration = 0
+    private var displayLoadInFlight: DisplayCancellation?
+    private var pendingDisplayLoad = false
     private var lastPublishedDay: Date?
     private var cachedTranscriptFontSize: CGFloat
     private var cachedThreadSignature = ""
@@ -558,9 +596,7 @@ final class AmbientLogModel: ObservableObject {
                 selectedDay = sameDate
             }
         }
-        cachedScenesByDay.removeAll()
-        cachedRawSegmentsByDay.removeAll()
-        cachedDayFingerprintByDay.removeAll()
+        cachedDisplaySourceByDay.removeAll()
         lastLoadedFingerprint = nil
         lastPublishedDay = nil
         queryGeneration += 1
@@ -575,6 +611,10 @@ final class AmbientLogModel: ObservableObject {
         // from rebuilding — no dispatch happens after the view is gone.
         queryLifecycleActive = false
         queryGeneration += 1
+        displayGeneration += 1
+        displayLoadInFlight?.cancel()
+        pendingDisplayLoad = false
+        displayInput = nil
         isPreparingLogQuery = false
         if let timeZoneObserver {
             NotificationCenter.default.removeObserver(timeZoneObserver)
@@ -600,6 +640,14 @@ final class AmbientLogModel: ObservableObject {
     /// root, so a test that triggers `load()` (e.g. via selectAllScenes) never
     /// reads — or writes provenance sidecars into — the user's real ambient data.
     var sessionsRootOverrideForTesting: URL?
+    var displaySnapshotDidBuildForTesting: (() -> Void)?
+    var displaySourceReadForTesting: (() -> Void)?
+    var displayLoadDidFinishForTesting: ((Bool) -> Void)?
+    var displayHasPendingLoadForTesting: Bool { pendingDisplayLoad }
+    func setDisplayFontSizeForTesting(_ size: CGFloat) {
+        fontSize = clampedFontSize(size)
+        load()
+    }
     /// Test seam: the zone every label and the day boundary are read in, so a
     /// test can prove it follows the Mac instead of freezing at launch.
     var timeZoneForTesting: TimeZone { timeZone }
@@ -965,126 +1013,114 @@ final class AmbientLogModel: ObservableObject {
         #if DEBUG
         loadCallCountForTesting += 1
         #endif
+        guard queryLifecycleActive else { return }
         let day = clampedDay(selectedDay)
         if day != selectedDay { selectedDay = day }
-        // Snapshot the main-thread inputs (selection, font, per-day cache) so the
-        // background closure never touches published/instance state directly.
-        let selectionSnapshot = selectedSceneIDs
-        let font = fontSize
-        let isToday = (day == today)
-        let cachedScenes = isToday ? nil : cachedScenesByDay[day]
-        let cachedRaw = isToday ? nil : cachedRawSegmentsByDay[day]
-        let cachedDayFingerprint = isToday ? nil : cachedDayFingerprintByDay[day]
-        let previousFingerprint = lastLoadedFingerprint
-        let previousDay = lastPublishedDay
-        let tz = timeZone
         #if DEBUG
         let root = sessionsRootOverrideForTesting ?? AmbientStorage.sessionsRoot
         #else
         let root = AmbientStorage.sessionsRoot
         #endif
-
+        let input = DisplayInput(day: day, selection: selectedSceneIDs, font: fontSize,
+                                 zone: timeZone, root: root)
+        if displayInput != input {
+            if displayInput?.root != root || displayInput?.zone != input.zone {
+                cachedDisplaySourceByDay.removeAll()
+                lastLoadedFingerprint = nil
+            }
+            displayGeneration += 1
+            displayLoadInFlight?.cancel()
+            displayInput = input
+        }
+        pendingDisplayLoad = true
+        guard displayLoadInFlight == nil else { return }
+        pendingDisplayLoad = false
+        let cancellation = DisplayCancellation()
+        displayLoadInFlight = cancellation
+        let generation = displayGeneration
+        let cachedSource = cachedDisplaySourceByDay[day]
+        let previousFingerprint = lastLoadedFingerprint
+        #if DEBUG
+        let didBuild = displaySnapshotDidBuildForTesting
+        let sourceRead = displaySourceReadForTesting
+        #else
+        let didBuild: (() -> Void)? = nil
+        let sourceRead: (() -> Void)? = nil
+        #endif
         loadQueue.async { [weak self] in
-            guard let self else { return }
-            // D17: scene identity is generated from the UNCAPPED day segments —
-            // the same source the query path reads — off the main thread.
-            let daySegments: [TranscriptSegment]
-            let newScenes: [AmbientLogGrouping.Scene]
-            var dayFingerprintToStore: String?
-            // D38/D161: the day's on-disk fingerprint (full sub-second mtime +
-            // size) is folded into the input fingerprint below — for past days AND
-            // today (D161), so a same-count/same-endpoint rewrite (a text/speaker
-            // correction that doesn't change count or first/last capturedAt) still
-            // forces a republish instead of being hidden behind an unchanged input
-            // fingerprint.
-            let dayDiskFingerprint: String
-            if !isToday {
-                // D38: only trust the past-day cache while the day's on-disk
-                // fingerprint is unchanged; a late write invalidates it.
-                let preFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz, sessionsRoot: root)
-                if let cachedScenes, let cachedRaw, cachedDayFingerprint == preFingerprint {
-                    daySegments = cachedRaw
-                    newScenes = cachedScenes
-                    dayDiskFingerprint = preFingerprint
-                } else {
-                    daySegments = AmbientStorage.segments(forDay: day, timeZone: tz, sessionsRoot: root)
-                    newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
-                    // D38 two-phase: re-read the fingerprint AFTER the decode (still
-                    // off-main). The just-decoded content is published under the
-                    // post-decode fingerprint; the cache is only trusted (stored)
-                    // when the on-disk state was stable across the read, so a write
-                    // that raced the decode is not cached as authoritative and the
-                    // next poll re-reads it.
-                    let postFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz, sessionsRoot: root)
-                    dayDiskFingerprint = postFingerprint
-                    dayFingerprintToStore = (postFingerprint == preFingerprint) ? postFingerprint : nil
-                }
-            } else {
-                // D161: today is live and uncached, but a same-count rewrite of
-                // today's raw (text corrected without changing count/endpoints)
-                // must still republish. Read the fingerprint AFTER the decode and
-                // fold it into the input fingerprint (a mid-decode write just
-                // means the next poll re-reads — today has no cache to poison).
-                daySegments = AmbientStorage.segments(forDay: day, timeZone: tz, sessionsRoot: root)
-                newScenes = AmbientLogGrouping.scenes(from: daySegments, timeZone: tz)
-                dayDiskFingerprint = AmbientStorage.dayFingerprint(forDay: day, timeZone: tz, sessionsRoot: root)
-            }
-            // D45: reconcile a stale selection against the current scenes so the
-            // display and query paths agree (migrate or clear).
-            let resolved = AmbientLogGrouping.resolveScope(
-                selection: selectionSnapshot, scenes: newScenes, daySegments: daySegments)
-            // Cheap input fingerprint — ambient segments are append/backfill only,
-            // so count + first/last capturedAt + selection + font identifies the
-            // output; the day disk fingerprint (D38) closes the same-count rewrite
-            // hole. Unchanged fingerprint => skip the rebuild and publish.
-            let firstAt = daySegments.first?.capturedAt ?? 0
-            let lastAt = daySegments.last?.capturedAt ?? 0
-            let fingerprint = "\(Int(day.timeIntervalSince1970))|\(daySegments.count)|\(firstAt)|\(lastAt)|\(dayDiskFingerprint)|\(resolved.selection.sorted().joined(separator: ","))|\(font)"
-            if fingerprint == previousFingerprint {
-                return
-            }
-            // Display cap: render at most the newest 2000 in-scope segments. This
-            // never affects scene identity (generated uncapped above).
-            let scopeSegments = resolved.segments
-            let displaySegments = scopeSegments.count > 2000 ? Array(scopeSegments.suffix(2000)) : scopeSegments
-            let newBlocks = AmbientLogGrouping.blocks(from: displaySegments, timeZone: tz)
-            let attributed = AmbientLogPetView.nsAttributedTranscript(newBlocks, fontSize: font)
-
+            let snapshot = Self.buildDisplaySnapshot(input: input, cachedSource: cachedSource,
+                                                      previousFingerprint: previousFingerprint,
+                                                      cancellation: cancellation, sourceRead: sourceRead)
+            didBuild?()
             DispatchQueue.main.async {
-                // Discard if the day changed while this build was in flight — a
-                // newer load() for the current day will publish the right result.
-                guard self.clampedDay(self.selectedDay) == day else { return }
-                if !isToday {
-                    self.cachedRawSegmentsByDay[day] = daySegments
-                    self.cachedScenesByDay[day] = newScenes
-                    if let dayFingerprintToStore {
-                        self.cachedDayFingerprintByDay[day] = dayFingerprintToStore
+                guard let self else { return }
+                self.displayLoadInFlight = nil
+                var applied = false
+                if !cancellation.isCancelled, self.queryLifecycleActive,
+                   generation == self.displayGeneration, self.displayInput == input,
+                   self.clampedDay(self.selectedDay) == day,
+                   self.selectedSceneIDs == input.selection, self.fontSize == input.font,
+                   self.timeZone == input.zone, let snapshot {
+                    self.cachedDisplaySourceByDay[day] = snapshot.source
+                    self.lastLoadedFingerprint = snapshot.fingerprint
+                    if snapshot.selection != self.selectedSceneIDs { self.selectedSceneIDs = snapshot.selection }
+                    if snapshot.source.scenes != self.scenes { self.scenes = snapshot.source.scenes }
+                    let blocksChanged = snapshot.blocks != self.blocks
+                    let fontSizeChanged = self.cachedTranscriptFontSize != input.font
+                    let dayChanged = self.lastPublishedDay != day
+                    self.lastPublishedDay = day
+                    if blocksChanged {
+                        self.blocks = snapshot.blocks
+                        if day == self.today || dayChanged { self.transcriptScrollRevision += 1 }
                     }
-                }
-                self.lastLoadedFingerprint = fingerprint
-                if resolved.selection != self.selectedSceneIDs { self.selectedSceneIDs = resolved.selection }
-                if newScenes != self.scenes { self.scenes = newScenes }
-                let blocksChanged = newBlocks != self.blocks
-                let fontSizeChanged = self.cachedTranscriptFontSize != font
-                // D38: only auto-scroll to bottom for today (follow live capture)
-                // or when the day just changed (navigation). A past-day content
-                // update (late append while reading) refreshes without yanking
-                // the scroll position.
-                let dayChanged = (previousDay != day)
-                self.lastPublishedDay = day
-                if blocksChanged {
-                    self.blocks = newBlocks
-                    if isToday || dayChanged {
-                        self.transcriptScrollRevision += 1
+                    if blocksChanged || fontSizeChanged {
+                        self.cachedTranscript = snapshot.transcript
+                        self.cachedTranscriptFontSize = input.font
+                        self.transcriptRevision += 1
                     }
+                    applied = true
                 }
-                if blocksChanged || fontSizeChanged {
-                    self.cachedTranscript = attributed
-                    self.cachedTranscriptFontSize = font
-                    self.transcriptRevision += 1
-                }
+                #if DEBUG
+                self.displayLoadDidFinishForTesting?(applied)
+                #endif
+                if self.pendingDisplayLoad { self.load() }
             }
         }
+    }
+
+    private static func buildDisplaySnapshot(input: DisplayInput, cachedSource: DisplaySource?,
+                                              previousFingerprint: String?, cancellation: DisplayCancellation,
+                                              sourceRead: (() -> Void)?) -> DisplaySnapshot? {
+        guard !cancellation.isCancelled else { return nil }
+        let before = AmbientStorage.dayFingerprint(forDay: input.day, timeZone: input.zone,
+                                                   sessionsRoot: input.root)
+        guard !cancellation.isCancelled else { return nil }
+        let source: DisplaySource
+        if let cachedSource, cachedSource.fingerprint == before {
+            source = cachedSource
+        } else {
+            sourceRead?()
+            let segments = AmbientStorage.segments(forDay: input.day, timeZone: input.zone,
+                                                    sessionsRoot: input.root)
+            guard !cancellation.isCancelled else { return nil }
+            let scenes = AmbientLogGrouping.scenes(from: segments, timeZone: input.zone,
+                                                   isCancelled: { cancellation.isCancelled })
+            source = DisplaySource(fingerprint: before, segments: segments, scenes: scenes)
+        }
+        guard !cancellation.isCancelled else { return nil }
+        let resolved = AmbientLogGrouping.resolveScope(selection: input.selection, scenes: source.scenes,
+                                                       daySegments: source.segments)
+        let fingerprint = "\(input.day.timeIntervalSince1970)|\(input.zone.identifier)|\(before)|\(resolved.selection.sorted().joined(separator: ","))|\(input.font)"
+        guard fingerprint != previousFingerprint else { return nil }
+        let displaySegments = Array(resolved.segments.suffix(2000))
+        let blocks = AmbientLogGrouping.blocks(from: displaySegments, timeZone: input.zone)
+        guard !cancellation.isCancelled else { return nil }
+        let transcript = AmbientLogPetView.nsAttributedTranscript(blocks, fontSize: input.font)
+        guard !cancellation.isCancelled,
+              before == AmbientStorage.dayFingerprint(forDay: input.day, timeZone: input.zone,
+                                                      sessionsRoot: input.root) else { return nil }
+        return DisplaySnapshot(source: source, selection: resolved.selection, blocks: blocks,
+                               transcript: transcript, fingerprint: fingerprint)
     }
 
     private var today: Date {
