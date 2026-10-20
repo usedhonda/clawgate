@@ -22,10 +22,13 @@ final class OpsLogStore {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let logDirectory: URL
+    private var previousDisplayTail: Data?
+    private var previousDisplayFile: URL?
+    private var previousDisplayZone: TimeZone?
 
-    init() {
-        self.logDirectory = OpsLogStore.resolveLogDirectory()
-        try? fileManager.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+    init(logDirectory: URL? = nil) {
+        self.logDirectory = logDirectory ?? OpsLogStore.resolveLogDirectory()
+        try? fileManager.createDirectory(at: self.logDirectory, withIntermediateDirectories: true)
     }
 
     func append(
@@ -77,11 +80,31 @@ final class OpsLogStore {
         // Each JSON line is ~200 bytes; read enough to cover filters that may skip rows.
         let tailBytes = capped * 300 * 4  // generous buffer for filtered queries
         let tail = Self.readTail(url: fileURL, maxBytes: tailBytes)
+        return decodeRecent(tail, limit: capped, levelFilter: levelFilter, traceFilter: traceFilter)
+    }
+
+    func recentDisplayIfChanged(limit: Int) -> [OpsLogEntry]? {
+        let capped = max(1, min(limit, 200))
+        let fileURL = Self.currentLogFileURL(in: logDirectory)
+        let zone = TimeZone.current
+        let tail = Self.readTail(url: fileURL, maxBytes: capped * 300 * 4)
+        guard previousDisplayFile != fileURL || previousDisplayZone != zone || previousDisplayTail != tail else {
+            return nil
+        }
+        previousDisplayFile = fileURL
+        previousDisplayZone = zone
+        previousDisplayTail = tail
+        return decodeRecent(tail, limit: capped, levelFilter: nil, traceFilter: nil)
+    }
+
+    private func decodeRecent(_ tail: Data, limit: Int, levelFilter: String?, traceFilter: String?) -> [OpsLogEntry] {
+        lock.lock()
+        defer { lock.unlock() }
         guard !tail.isEmpty else { return [] }
 
         let rows = tail.split(separator: UInt8(ascii: "\n"))
         var entries: [OpsLogEntry] = []
-        entries.reserveCapacity(capped)
+        entries.reserveCapacity(limit)
 
         for row in rows.reversed() {
             guard let entry = try? decoder.decode(OpsLogEntry.self, from: Data(row)) else {
@@ -95,7 +118,7 @@ final class OpsLogStore {
                 continue
             }
             entries.append(entry)
-            if entries.count >= capped { break }
+            if entries.count >= limit { break }
         }
         return entries
     }

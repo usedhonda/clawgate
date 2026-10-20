@@ -61,6 +61,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var sigintSource: DispatchSourceSignal?
     private var lastAppliedPanelLevel: NSWindow.Level?
     private let mainPanelLogLimit = 30
+    private lazy var timelineLoader = MainPanelTimelineLoader(limit: mainPanelLogLimit, transform: Self.timelineLines)
     private let ghosttyBundleID = "com.mitchellh.ghostty"
 
     private let modeOrder: [String] = ["ignore", "observe", "auto", "autonomous"]
@@ -1313,37 +1314,34 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return "ignore"
     }
 
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        f.timeZone = .current
-        return f
-    }()
-
     func refreshStatsAndTimeline() {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let entries = self.opsLogStore.recent(limit: self.mainPanelLogLimit)
-            if entries.isEmpty {
-                let now = Self.timeFormatter.string(from: Date())
-                self.panelModel.logs = [
-                    MainPanelLogLine(text: "\(now) • No recent logs", color: .logDim, event: ""),
-                ]
-                return
+            guard let self, !self.didTeardown else { return }
+            self.timelineLoader.refresh { [weak self] lines in
+                self?.panelModel.logs = lines
             }
-
-            let rawLines = entries.map { entry in
-                let t = Self.timeFormatter.string(from: entry.date)
-                let style = self.compactLogStyle(for: entry)
-                return MainPanelLogLine(text: "\(t) \(style.text)", color: style.color, event: entry.event)
-            }
-            self.panelModel.logs = deduplicateRuns(rawLines)
         }
+    }
+
+    static func timelineLines(_ entries: [OpsLogEntry]) -> [MainPanelLogLine] {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        formatter.timeZone = .current
+        let iso = ISO8601DateFormatter()
+        if entries.isEmpty {
+            return [MainPanelLogLine(text: "\(formatter.string(from: Date())) • No recent logs", color: .logDim, event: "")]
+        }
+        let rawLines = entries.map { entry in
+            let time = formatter.string(from: iso.date(from: entry.ts) ?? .distantPast)
+            let style = compactLogStyle(for: entry)
+            return MainPanelLogLine(text: "\(time) \(style.text)", color: style.color, event: entry.event)
+        }
+        return deduplicateRuns(rawLines)
     }
 
     /// Collapse consecutive runs of the same `event` into one line with "×N" suffix.
     /// Input is newest-first (as returned by opsLogStore.recent).
-    private func deduplicateRuns(_ lines: [MainPanelLogLine]) -> [MainPanelLogLine] {
+    private static func deduplicateRuns(_ lines: [MainPanelLogLine]) -> [MainPanelLogLine] {
         var result: [MainPanelLogLine] = []
         var i = 0
         while i < lines.count {
@@ -1368,7 +1366,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return result
     }
 
-    private func compactLogStyle(for entry: OpsLogEntry) -> (text: String, color: NSColor) {
+    private static func compactLogStyle(for entry: OpsLogEntry) -> (text: String, color: NSColor) {
         let text = OpsLogSummarizer.humanReadableSummary(for: entry)
         switch entry.event {
         case "federation.connected":
@@ -1404,6 +1402,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func performTeardown() {
         guard !didTeardown else { return }
         didTeardown = true
+        timelineLoader.stop()
 
         saveCurrentFrame()
         mainPanel?.orderOut(nil)
