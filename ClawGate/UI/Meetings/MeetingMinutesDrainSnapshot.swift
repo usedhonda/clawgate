@@ -27,6 +27,7 @@ struct MeetingMinutesDrainSnapshot {
         guard let record = ordered.first(where: { record in
             guard !preparing.contains(record.id), (notBefore[record.id] ?? .distantPast) <= now else { return false }
             let job = MeetingMinutesJob.load(store: store, id: record.id)
+            guard job?.waitingForConnectivity != true else { return false }
             let pilotOwned = job.map { pilot?.matches(store: store, id: record.id, job: $0) == true } ?? false
             return !MeetingMinutesPreparation.hasIndexedOwner(store: store, id: record.id, job: job)
                 && !pilotOwned

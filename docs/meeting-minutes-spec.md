@@ -474,9 +474,24 @@ slot is released or the gateway reconnects, queued meetings drain one at a time
 with explicit owner requests first. Explicit requests are FIFO by their durable
 request timestamp; automatic refreshes and legacy jobs without that timestamp
 remain FIFO by meeting end time. An active part is never preempted, and each
-request is dispatched at most `PetModel.minutesMaxAttempts` times. A real send failure, parser rejection, or
-reply timeout remains a visible `failed` reason that the owner can act on by
-asking again; slot waits are never reported as generation failures.
+retry burst is dispatched at most `PetModel.minutesMaxAttempts` times. Known
+transient network/service failures then preserve a durable connectivity wait and
+cooldown in the job instead of failing the whole meeting. Network availability
+and Gateway reconnection resume the pending job automatically; one delayed service
+retry burst also allows recovery without requiring a physical network toggle.
+Another failure without progress waits for a real connection change or explicit
+resume rather than repeating generation indefinitely. A validated new part resets
+that recovery episode. Completed
+parts and frozen inputs survive both the wait and metadata refresh. Local network
+unavailability prevents dispatch and does not consume attempts. A parser rejection,
+unverified model or non-retryable execution remains a visible failure; uncertain
+indexed executions retain their existing reconciliation and no-resend rules.
+Slot waits are never reported as generation failures.
+
+With installed speech models, on-device STT may run while offline. Its persisted
+transcripts are independent of the online minutes-generation queue. Going online
+later resumes generation from stored inputs rather than requiring another capture
+or discarding already validated parts.
 A retry never removes the last accepted parsed minutes: until a replacement
 passes the same validation, the accepted output remains readable and is marked
 stale or partial with the retry reason. A failed Meet-material refresh likewise

@@ -129,7 +129,12 @@ enum MeetingMinutesPreparation {
             }
         }
         try ticket.check()
-        try updated.saveReplacing(store: store, id: record.id, expected: previousData) {
+        var prepared = updated
+        if ticket.requestedAt != nil {
+            prepared.waitingForConnectivity = nil
+            prepared.connectivityRetryAfter = nil
+        }
+        try prepared.saveReplacing(store: store, id: record.id, expected: previousData) {
             try validateInput()
             guard !hasIndexedOwner(store: store, id: record.id, job: previous) else { throw Failure.changed }
             if let previous, MeetingMinutesPilot.load()?.matches(store: store, id: record.id, job: previous) == true {
@@ -138,5 +143,23 @@ enum MeetingMinutesPreparation {
             try ticket.check()
         }
         return Output(owned: false, files: try MeetingMinutesSourceRevision.files(in: directory))
+    }
+
+    static func setConnectivityWait(_ waiting: Bool, record: MeetingRecord, store: MeetingStore,
+                                    retryAfter: Date? = nil, expectedFingerprint: String? = nil) throws -> Bool {
+        let url = store.directory(for: record.id).appendingPathComponent("minutes-job.json")
+        let data = try Data(contentsOf: url)
+        var job = try JSONDecoder().decode(MeetingMinutesJob.self, from: data)
+        guard record.minutesState == "pending",
+              expectedFingerprint == nil || job.fingerprint == expectedFingerprint else { throw Failure.changed }
+        guard job.next != nil, !hasIndexedOwner(store: store, id: record.id, job: job) else { return false }
+        job.waitingForConnectivity = waiting ? true : nil
+        job.connectivityRetryAfter = waiting && job.connectivityRetryAfter != nil ? .distantFuture : retryAfter
+        try job.saveReplacing(store: store, id: record.id, expected: data) {
+            guard store.load(id: record.id) == record,
+                  !hasIndexedOwner(store: store, id: record.id, job: job),
+                  MeetingMinutesPilot.load()?.matches(store: store, id: record.id, job: job) != true else { throw Failure.changed }
+        }
+        return true
     }
 }

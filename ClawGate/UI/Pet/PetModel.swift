@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CryptoKit
 import Foundation
+import Network
 import os
 
 /// ViewModel for the pet character system
@@ -413,6 +414,7 @@ final class PetModel: NSObject, ObservableObject {
                 self.hasEverConnected = true
                 // Pending minutes are durable meeting records, not a timer
                 // attempt. Reconnect is therefore a queue-drain trigger.
+                if !wasConnected { self.recoverMinutesAfterConnection(connectionRestored: true) }
                 self.drainPendingMinutes()
                 Task { [weak self] in
                     guard let self, let key = self.sessionKey else { return }
@@ -577,7 +579,8 @@ final class PetModel: NSObject, ObservableObject {
                     break
                 }
                 NSLog("[Pet] minutes run failed: %@", reason)
-                self.failMinutesPart(reason: "Chi が返事を書く前に処理を終えました（\(reason)）")
+                self.failMinutesPart(reason: "Chi が返事を書く前に処理を終えました（\(reason)）",
+                                     waitForConnection: Self.isRecoverableMinutesServiceFailure(reason))
 
             case .history(let msgs):
                 NSLog("[Pet] Loaded %d history messages", msgs.count)
@@ -626,6 +629,10 @@ final class PetModel: NSObject, ObservableObject {
                     // The durable record remains pending; only the in-flight
                     // transport ownership is discarded so reconnect can drain
                     // it again without treating the disconnect as a failure.
+                    if let id = self.pendingMinutesMeetingID {
+                        self.minutesAttempts[id] = 0
+                        self.minutesNotBefore[id] = nil
+                    }
                     self.pendingMinutesMeetingID = nil
                     self.pendingMinutesSegmentIDs = []
                 }
@@ -1422,6 +1429,7 @@ final class PetModel: NSObject, ObservableObject {
         characterManager.scan()
         _ = try? OpenClawDeviceIdentity.loadOrCreate()
         connect()
+        startMinutesNetworkMonitor()
         startIdleTimer()
         startReconnectTimer()
         startWindowTracking()
@@ -1490,6 +1498,8 @@ final class PetModel: NSObject, ObservableObject {
     func cleanup() {
         guard !didCleanup else { return }
         didCleanup = true
+        minutesNetworkMonitor?.cancel()
+        minutesNetworkMonitor = nil
         minutesPreparationTickets.values.forEach { $0.cancel() }
         minutesDrainTicket?.cancel()
         minutesPreparationTickets.removeAll()
@@ -2139,6 +2149,9 @@ final class PetModel: NSObject, ObservableObject {
         (minutesActivityStartedAt, minutesGenerationStartedAt)
     }
     var minutesAttemptsForTesting: [String: Int] { minutesAttempts }
+    func setMinutesAttemptsForTesting(_ attempts: Int, id: String) { minutesAttempts[id] = attempts }
+    func setMinutesNetworkAvailableForTesting(_ available: Bool) { updateMinutesNetworkAvailability(available) }
+    var minutesRecoveryDidFinishForTesting: (() -> Void)?
     var missingMinutesScanDidFinishForTesting: (() -> Void)?
     var minutesPreparationDidFinishForTesting: (() -> Void)?
     var minutesPreparationDidBuildForTesting: (() -> Void)?
@@ -2483,7 +2496,9 @@ final class PetModel: NSObject, ObservableObject {
                 drainPendingMinutes()
                 return
             }
-            failMinutesPart(reason: "送信に失敗しました: \(error)")
+            let networkError = error as? URLError
+            let recoverable = networkError.map { Self.isRecoverableMinutesNetworkError($0.code) } ?? false
+            failMinutesPart(reason: "送信に失敗しました: \(error)", waitForConnection: recoverable)
         } else {
             releaseSharedSummon(owner)
             addSummonResult(text: "Error: \(error)", source: source, owner: owner)
@@ -2927,6 +2942,8 @@ final class PetModel: NSObject, ObservableObject {
     private var missingMinutesScanInFlight = false
     private var missingMinutesScanPending = false
     private let minutesPreparationQueue = DispatchQueue(label: "com.clawgate.minutes.preparation", qos: .userInitiated)
+    private var minutesNetworkMonitor: NWPathMonitor?
+    private var minutesNetworkAvailable = true
     private var minutesPreparationTickets: [String: MeetingMinutesPreparation.Ticket] = [:]
     private var minutesDrainInFlight = false
     private var minutesDrainPending = false
@@ -3155,6 +3172,7 @@ final class PetModel: NSObject, ObservableObject {
     private var minutesPilotLabels: [String: String] = [:]
     private var minutesExplicitRetryTickets: [String: [MeetingMinutesExecutor.RetryTicket]] = [:]
     private var pendingMinutesMeetingID: String?
+    private var pendingMinutesJobFingerprint: String?
     private var pendingMinutesSegmentIDs: Set<String> = []
     /// Attempts per meeting, so a permanently busy slot gives up instead of
     /// retrying forever.
@@ -3192,6 +3210,7 @@ final class PetModel: NSObject, ObservableObject {
     /// reply ("Current-turn transcript admission is no longer a visible
     /// message"), while the main session was still settling the first turn.
     static var minutesPartGapSeconds: TimeInterval = 20
+    static let minutesServiceRecoverySeconds: TimeInterval = 300
     /// Minutes are a long read of a whole meeting; the shared 180s watchdog is
     /// sized for a one-line summon and would reclaim the slot mid-thought.
     static let minutesReplyTimeoutSeconds: TimeInterval = 600
@@ -3384,7 +3403,7 @@ final class PetModel: NSObject, ObservableObject {
         if preparingMinutesIDs.contains(record.id) { return ("議事録の入力を準備中", nil) }
         guard record.minutesState == "pending" || pendingSummaryPass?.id == record.id else { return nil }
         if let label = minutesPilotLabels[record.id] { return (label, nil) }
-        if connectionState != .connected { return ("接続の回復待ち", nil) }
+        if !minutesNetworkAvailable || connectionState != .connected { return ("接続の回復待ち（完成済みパートは保持しています）", nil) }
         if pendingSummaryPass?.id == record.id {
             let awaitingRunId = sharedSummonOwner?.phase == .awaitingRunId
             let startedAt = (awaitingRunId ? minutesActivityStartedAt :
@@ -3498,7 +3517,7 @@ final class PetModel: NSObject, ObservableObject {
     /// reconnect does not consume a generation attempt.
     private func drainPendingMinutes() {
         startMinutesPilotIfNeeded()
-        guard !didCleanup, pendingMinutesMeetingID == nil,
+        guard !didCleanup, minutesNetworkAvailable, pendingMinutesMeetingID == nil,
               connectionState == .connected,
               sessionKey != nil,
               !isSummonBusy else { return }
@@ -3652,6 +3671,7 @@ final class PetModel: NSObject, ObservableObject {
         }
         minutesAttempts[record.id] = attempts + 1
         pendingMinutesMeetingID = record.id
+        pendingMinutesJobFingerprint = snapshot.job.fingerprint
         pendingMinutesSegmentIDs = Set(envelope.segments.map(\.id))
         markMinutes(id: record.id, state: "pending", error: nil)
         minutesRunSawDelta = false
@@ -3716,8 +3736,9 @@ final class PetModel: NSObject, ObservableObject {
     /// One part did not come back. Parts already written stay in the job, so
     /// the retry sends only this part again, after a backoff. The meeting
     /// fails only when the attempts for this part run out.
-    private func failMinutesPart(reason: String) {
+    private func failMinutesPart(reason: String, waitForConnection: Bool = false) {
         guard let id = pendingMinutesMeetingID else { return }
+        let fingerprint = pendingMinutesJobFingerprint
         if let owner = sharedSummonOwner, owner.source == Self.minutesSource {
             releaseSharedSummon(owner)
         }
@@ -3725,6 +3746,10 @@ final class PetModel: NSObject, ObservableObject {
         pendingMinutesSegmentIDs = []
         let attempts = minutesAttempts[id, default: 0]
         guard attempts < Self.minutesMaxAttempts else {
+            if waitForConnection, let fingerprint {
+                deferMinutesUntilConnection(id: id, fingerprint: fingerprint)
+                return
+            }
             finishMinutes(id: id, state: "failed",
                           error: "\(reason)。\(Self.minutesMaxAttempts) 回試しました。書けた部分は保持しています。")
             drainPendingMinutes()
@@ -3735,6 +3760,97 @@ final class PetModel: NSObject, ObservableObject {
         markMinutes(id: id, state: "pending", error: "\(reason)。\(Int(delay)) 秒後に続きから再試行します")
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.drainPendingMinutes() }
         drainPendingMinutes()
+    }
+
+    static func isRecoverableMinutesNetworkError(_ code: URLError.Code) -> Bool {
+        [.notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
+         .cannotFindHost, .dnsLookupFailed, .timedOut, .dataNotAllowed].contains(code)
+    }
+
+    static func isRecoverableMinutesServiceFailure(_ reason: String) -> Bool {
+        let text = reason.lowercased()
+        return text.contains("openclaw couldn't finish this reply") || text.contains("network connection was lost")
+            || text.contains("not connected to the internet") || text.contains("econnreset")
+            || text.contains("econnrefused") || text.contains("network is unreachable")
+    }
+
+    private func startMinutesNetworkMonitor() {
+        guard minutesNetworkMonitor == nil else { return }
+        minutesNetworkAvailable = false
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let available = path.status == .satisfied
+            DispatchQueue.main.async { self?.updateMinutesNetworkAvailability(available) }
+        }
+        minutesNetworkMonitor = monitor
+        monitor.start(queue: DispatchQueue(label: "com.clawgate.minutes.network", qos: .utility))
+    }
+
+    private func updateMinutesNetworkAvailability(_ available: Bool) {
+        guard !didCleanup else { return }
+        let recovered = !minutesNetworkAvailable && available
+        minutesNetworkAvailable = available
+        meetingsRevision += 1
+        if recovered { recoverMinutesAfterConnection(connectionRestored: true) }
+        if available { drainPendingMinutes() }
+    }
+
+    private func deferMinutesUntilConnection(id: String, fingerprint: String) {
+        let store = minutesStore()
+        minutesNotBefore[id] = .distantFuture
+        markMinutes(id: id, state: "pending", error: "接続の回復待ちです。完成済みパートを保持し、接続復帰後に続きから再開します。")
+        minutesPreparationQueue.async { [weak self] in
+            let saved = Result {
+                guard let record = store.load(id: id) else { throw MeetingMinutesPreparation.Failure.changed }
+                guard try MeetingMinutesPreparation.setConnectivityWait(true, record: record, store: store,
+                    retryAfter: Date().addingTimeInterval(Self.minutesServiceRecoverySeconds),
+                    expectedFingerprint: fingerprint) else {
+                    throw MeetingMinutesPreparation.Failure.changed
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self, !self.didCleanup else { return }
+                if case .failure = saved {
+                    if MeetingMinutesJob.load(store: store, id: id)?.fingerprint == fingerprint {
+                        self.minutesPreparationErrors[id] = "接続待ち状態を保存できませんでした。完成済みパートは保持しています。"
+                        self.meetingsRevision += 1
+                    }
+                } else {
+                    self.meetingsRevision += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.minutesServiceRecoverySeconds) { [weak self] in
+                        self?.recoverMinutesAfterConnection()
+                    }
+                }
+                self.drainPendingMinutes()
+            }
+        }
+    }
+
+    private func recoverMinutesAfterConnection(connectionRestored: Bool = false) {
+        guard !didCleanup, minutesNetworkAvailable, connectionState == .connected else { return }
+        let store = minutesStore()
+        minutesPreparationQueue.async { [weak self] in
+            var recovered: [String] = []
+            for record in store.all() where record.minutesState == "pending" {
+                guard let job = MeetingMinutesJob.load(store: store, id: record.id), job.waitingForConnectivity == true,
+                      connectionRestored || (job.connectivityRetryAfter ?? .distantPast) <= Date(),
+                      (try? MeetingMinutesPreparation.setConnectivityWait(false, record: record, store: store,
+                        retryAfter: connectionRestored ? nil : job.connectivityRetryAfter)) == true else { continue }
+                recovered.append(record.id)
+            }
+            DispatchQueue.main.async {
+                guard let self, !self.didCleanup else { return }
+                for id in recovered {
+                    self.minutesAttempts[id] = 0
+                    self.minutesNotBefore[id] = nil
+                }
+                self.meetingsRevision += 1
+                self.drainPendingMinutes()
+                #if DEBUG
+                self.minutesRecoveryDidFinishForTesting?()
+                #endif
+            }
+        }
     }
 
     /// Continue a meeting's minutes from the parts already written, with a
@@ -3862,6 +3978,7 @@ final class PetModel: NSObject, ObservableObject {
             }
             // A silent/irrelevant part is a completed part, not a failed meeting.
             job.completed.append(minutes)
+            job.connectivityRetryAfter = nil
             try job.save(store: minutesStore(), id: id)
             if job.next != nil {
                 minutesAttempts[id] = 0

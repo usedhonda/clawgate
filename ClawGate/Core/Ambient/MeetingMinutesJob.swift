@@ -14,6 +14,8 @@ struct MeetingMinutesJob: Codable {
     var userRequestedAt: Date? = nil
     /// Number of validated prefix parts carried from the prior input revision.
     var reusedPartCount: Int? = nil
+    var waitingForConnectivity: Bool? = nil
+    var connectivityRetryAfter: Date? = nil
 
     var allSupplementalMaterials: [MeetingSupplementalMaterial]? { supplementalSnapshot ?? envelopes.first?.supplementalMaterials }
 
@@ -101,7 +103,8 @@ struct MeetingMinutesJob: Codable {
         guard fresh.count == envelopes.count else { return self }
         return MeetingMinutesJob(fingerprint: fingerprint, envelopes: fresh, completed: completed,
                                  supplementalSnapshot: supplementalSnapshot, userRequestedAt: userRequestedAt,
-                                 reusedPartCount: reusedPartCount)
+                                 reusedPartCount: reusedPartCount, waitingForConnectivity: waitingForConnectivity,
+                                 connectivityRetryAfter: connectivityRetryAfter)
     }
 
     static func load(store: MeetingStore, id: String) -> MeetingMinutesJob? {
