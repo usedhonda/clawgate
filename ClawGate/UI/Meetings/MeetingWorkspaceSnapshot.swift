@@ -9,9 +9,22 @@ struct MeetingWorkspaceContext {
     let pilotLabel: String?
     let connected: Bool
     let activity: (label: String, elapsedSeconds: Int?)?
+    let sourceRevision: Int
+
+    func hasSameDocumentInputs(as other: Self) -> Bool {
+        record == other.record && store.root == other.store.root && material == other.material
+    }
 }
 
 struct MeetingWorkspaceSnapshot {
+    struct SourceRevision {
+        let files: [String: String]
+        let ambient: String
+        let end: Double
+        let cutoff: Double
+        let sessionsRoot: URL
+    }
+    static let heldMessage = "専用の実行経路の対応待ちのため保留中です。この会議は再送しません。Chi 側の対応を確認してから再開します。"
     struct TranscriptRow { let id: String; let time: String; let speaker: String; let text: String }
     var record: MeetingRecord
     let accepted: MeetingAcceptedMinutes?
@@ -28,6 +41,25 @@ struct MeetingWorkspaceSnapshot {
     var holdReason: String?
     var activity: (label: String, elapsedSeconds: Int?)?
     var capturedAt: Date
+    var sourceRevision: SourceRevision?
+    var held = false
+    var progressUnavailable = false
+
+    mutating func updatePresentation(_ context: MeetingWorkspaceContext) {
+        holdReason = held ? (context.pilotLabel ?? Self.heldMessage) : nil
+        activity = context.activity
+        if record.minutesState == "pending", job?.waitingForConnectivity == true {
+            activity = ("接続の回復待ち（完成済みパートは保持しています）", nil)
+        }
+        if record.minutesState == "pending", context.pilotLabel == nil, job != nil {
+            if progressUnavailable {
+                activity = ("実行記録を確認できません。安全のため再送していません", nil)
+            } else if let indexedProgress {
+                activity = (context.connected ? indexedProgress.phaseLabel : "接続の回復待ち（保存済み実行の結果を確認します）", nil)
+            }
+        }
+        capturedAt = Date()
+    }
 }
 
 enum MeetingWorkspaceLoadError: Error { case changedDuringRead }
@@ -77,7 +109,18 @@ actor MeetingWorkspaceLoader {
             MeetingMinutesJob.load(store: store, id: record.id).map { pilot.matches(store: store, id: record.id, job: $0) }
         } ?? false
         guard indexed || pilot else { return nil }
-        return label ?? "専用の実行経路の対応待ちのため保留中です。この会議は再送しません。Chi 側の対応を確認してから再開します。"
+        return label ?? MeetingWorkspaceSnapshot.heldMessage
+    }
+
+    static func sourceIsCurrent(_ snapshot: MeetingWorkspaceSnapshot, context: MeetingWorkspaceContext) throws -> Bool {
+        guard let revision = snapshot.sourceRevision else { return false }
+        let record = context.record, store = context.store
+        guard store.load(id: record.id) == record,
+              try files(in: store.directory(for: record.id)) == revision.files else { return false }
+        let end = AmbientController.trimmedEnd(of: record, against: store.all(), now: revision.cutoff)
+        guard end == revision.end,
+              try ambientRevision(record: record, files: revision.files, end: end, sessionsRoot: revision.sessionsRoot) == revision.ambient else { return false }
+        return snapshot.material == (context.material ?? record.materialCandidateID.flatMap { MeetingGoogleMaterials.load(candidateID: $0) })
     }
 
     func load(_ context: MeetingWorkspaceContext, now: () -> Double = { Date().timeIntervalSince1970 }, checkingCancellation: () throws -> Void = { try Task.checkCancellation() }) throws -> MeetingWorkspaceSnapshot {
@@ -162,24 +205,17 @@ actor MeetingWorkspaceLoader {
             try Task.checkCancellation()
             let progress = Result { try snapshot.job.flatMap { try MeetingMinutesExecutionProgress.load(store: store, id: record.id, job: $0) } }
             snapshot.indexedProgress = try? progress.get()
-            snapshot.holdReason = Self.held(record: record, store: store, label: context.pilotLabel, files: before)
-            snapshot.activity = context.activity
-            if record.minutesState == "pending", snapshot.job?.waitingForConnectivity == true {
-                snapshot.activity = ("接続の回復待ち（完成済みパートは保持しています）", nil)
-            }
-            if record.minutesState == "pending", context.pilotLabel == nil, snapshot.job != nil {
-                do {
-                    if let indexed = try progress.get() {
-                        snapshot.activity = (context.connected ? indexed.phaseLabel : "接続の回復待ち（保存済み実行の結果を確認します）", nil)
-                    }
-                } catch { snapshot.activity = ("実行記録を確認できません。安全のため再送していません", nil) }
-            }
-            snapshot.capturedAt = Date()
+            if case .failure = progress { snapshot.progressUnavailable = true }
+            else { snapshot.progressUnavailable = false }
+            snapshot.held = Self.held(record: record, store: store, label: context.pilotLabel, files: before) != nil
+            snapshot.updatePresentation(context)
             try Task.checkCancellation()
             let latestEnd = AmbientController.trimmedEnd(of: record, against: store.all(), now: cutoff)
             guard before == (try Self.files(in: directory)),
                   ambientRevision == (try Self.ambientRevision(record: record, files: before, end: latestEnd, sessionsRoot: sessionsRoot)),
                   source == (context.material ?? record.materialCandidateID.flatMap { MeetingGoogleMaterials.load(candidateID: $0) }) else { continue }
+            snapshot.sourceRevision = .init(files: before, ambient: ambientRevision, end: end,
+                cutoff: cutoff, sessionsRoot: sessionsRoot)
             documents[cacheID] = Cached(files: documentFiles, ambientRevision: ambientRevision, source: source, snapshot: snapshot)
             documentOrder.removeAll { $0 == cacheID }
             documentOrder.append(cacheID)
@@ -221,9 +257,15 @@ final class MeetingWorkspaceDocument: ObservableObject {
     private var generation = 0
     private var pending: MeetingWorkspaceContext?
     private var selection: MeetingRecord?
-    private let loader: MeetingWorkspaceLoader
+    private let loadSnapshot: @Sendable (MeetingWorkspaceContext) async throws -> MeetingWorkspaceSnapshot
 
-    init(loader: MeetingWorkspaceLoader = .shared) { self.loader = loader }
+    init(loader: MeetingWorkspaceLoader = .shared) {
+        loadSnapshot = { try await loader.load($0) }
+    }
+
+    init(loadSnapshot: @escaping @Sendable (MeetingWorkspaceContext) async throws -> MeetingWorkspaceSnapshot) {
+        self.loadSnapshot = loadSnapshot
+    }
 
     func refresh(_ context: MeetingWorkspaceContext) {
         if task != nil, selection == context.record {
@@ -234,21 +276,32 @@ final class MeetingWorkspaceDocument: ObservableObject {
         selection = context.record
         if snapshot?.record.id != context.record.id { snapshot = nil }
         let request = generation
-        let loader = self.loader
-        let worker = Task.detached(priority: .userInitiated) { try await loader.load(context) }
+        let loadSnapshot = self.loadSnapshot
+        let worker = Task.detached(priority: .userInitiated) { try await loadSnapshot(context) }
         self.worker = worker
         task = Task { [weak self] in
             let result = await worker.result
             guard let self, self.generation == request, !Task.isCancelled else { return }
             self.task = nil
             self.worker = nil
-            if let next = self.pending {
-                self.pending = nil
+            let next = self.pending
+            self.pending = nil
+            if let next, !context.hasSameDocumentInputs(as: next) {
                 self.refresh(next)
                 return
             }
             switch result {
-            case .success(let snapshot): self.snapshot = snapshot; self.error = nil
+            case .success(var snapshot):
+                // A global notification may concern another meeting. Validate the
+                // selected document instead of starving it on every notification.
+                if let next, next.sourceRevision != context.sourceRevision,
+                   (try? MeetingWorkspaceLoader.sourceIsCurrent(snapshot, context: next)) != true {
+                    self.refresh(next)
+                    return
+                }
+                snapshot.updatePresentation(next ?? context)
+                self.snapshot = snapshot
+                self.error = nil
             case .failure(let failure) where failure is CancellationError: break
             case .failure: self.error = "表示データの更新中です。保存済みの表示を保持し、次の更新で再取得します。"
             }

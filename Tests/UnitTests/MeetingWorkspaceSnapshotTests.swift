@@ -9,7 +9,8 @@ final class MeetingWorkspaceSnapshotTests: XCTestCase {
     }
 
     private func context(_ record: MeetingRecord, store: MeetingStore) -> MeetingWorkspaceContext {
-        MeetingWorkspaceContext(record: record, store: store, material: nil, pilotLabel: nil, connected: true, activity: nil)
+        MeetingWorkspaceContext(record: record, store: store, material: nil, pilotLabel: nil, connected: true,
+            activity: nil, sourceRevision: 0)
     }
 
     private func seed(_ record: MeetingRecord, store: MeetingStore, text: String = "Budget approved for the next release") throws {
@@ -186,6 +187,82 @@ final class MeetingWorkspaceSnapshotTests: XCTestCase {
     }
 
     @MainActor
+    func testContinuousStatusAndUnrelatedRevisionRefreshPublishesWithoutRedundantLoads() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let meeting = record()
+        try seed(meeting, store: store)
+        let loader = MeetingWorkspaceLoader()
+        let starts = (0..<3).map { expectation(description: "load \($0) ready") }
+        let published = (0..<3).map { expectation(description: "load \($0) displayed") }
+        let gate = WorkspaceLoadGate(starts: starts)
+        let document = MeetingWorkspaceDocument(loadSnapshot: { context in
+            let result = try await loader.load(context)
+            await gate.wait()
+            return result
+        })
+        var publications = 0
+        let observation = document.$snapshot.compactMap { $0 }.sink { _ in
+            if publications < published.count { published[publications].fulfill() }
+            publications += 1
+        }
+        for index in 0..<3 {
+            let input = MeetingWorkspaceContext(record: meeting, store: store, material: nil,
+                pilotLabel: nil, connected: true, activity: ("Processing", index), sourceRevision: index * 2)
+            let next = MeetingWorkspaceContext(record: meeting, store: store, material: nil,
+                pilotLabel: nil, connected: true, activity: ("Processing", index + 1), sourceRevision: index * 2 + 1)
+            document.refresh(input)
+            await fulfillment(of: [starts[index]], timeout: 3)
+            document.refresh(next)
+            await gate.releaseNext()
+            await fulfillment(of: [published[index]], timeout: 3)
+            XCTAssertEqual(publications, index + 1, "A pending unchanged refresh must not discard the completed display")
+            XCTAssertEqual(document.snapshot?.activity?.elapsedSeconds, index + 1)
+        }
+        document.cancel()
+        await gate.releaseAll()
+        observation.cancel()
+    }
+
+    @MainActor
+    func testChangedSourceRevisionRejectsCompletedSnapshotWithSameRecord() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let meeting = record()
+        try seed(meeting, store: store)
+        let original = context(meeting, store: store)
+        let updated = MeetingWorkspaceContext(record: meeting, store: store, material: nil,
+            pilotLabel: nil, connected: true, activity: nil, sourceRevision: 1)
+        let loader = MeetingWorkspaceLoader()
+        let starts = (0..<2).map { expectation(description: "revision load \($0) ready") }
+        let gate = WorkspaceLoadGate(starts: starts)
+        let document = MeetingWorkspaceDocument(loadSnapshot: { context in
+            let result = try await loader.load(context)
+            await gate.wait()
+            return result
+        })
+        let applied = expectation(description: "latest revision displayed")
+        applied.assertForOverFulfill = true
+        var summaries: [String] = []
+        let observation = document.$snapshot.compactMap { $0?.shown?.minutes.summary }.sink {
+            summaries.append($0)
+            applied.fulfill()
+        }
+        document.refresh(original)
+        await fulfillment(of: [starts[0]], timeout: 3)
+        try seed(meeting, store: store, text: "Updated budget approved for a different release")
+        document.refresh(updated)
+        await gate.releaseNext()
+        await fulfillment(of: [starts[1]], timeout: 3)
+        XCTAssertTrue(summaries.isEmpty, "Equal record metadata does not make an older source revision current")
+        await gate.releaseNext()
+        await fulfillment(of: [applied], timeout: 3)
+        XCTAssertEqual(summaries, ["Updated budget approved for a different release"])
+        document.cancel()
+        observation.cancel()
+    }
+
+    @MainActor
     func testRapidABASelectionRejectsCancelledResultsAndCoalescesRefreshes() async throws {
         let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         defer { try? FileManager.default.removeItem(at: store.root) }
@@ -217,6 +294,34 @@ final class MeetingWorkspaceSnapshotTests: XCTestCase {
         XCTAssertEqual(count, 1)
         observation.cancel()
         document.cancel()
+    }
+}
+
+private actor WorkspaceLoadGate {
+    let starts: [XCTestExpectation]
+    private var count = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(starts: [XCTestExpectation]) { self.starts = starts }
+
+    func wait() async {
+        let index = count
+        count += 1
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+            if index < starts.count { starts[index].fulfill() }
+        }
+    }
+
+    func releaseNext() {
+        guard !waiters.isEmpty else { return }
+        waiters.removeFirst().resume()
+    }
+
+    func releaseAll() {
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
     }
 }
 

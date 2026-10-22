@@ -3439,7 +3439,7 @@ final class PetModel: NSObject, ObservableObject {
         MeetingWorkspaceContext(record: record, store: minutesStore(),
             material: record.materialCandidateID.flatMap { meetingMaterials[$0] },
             pilotLabel: minutesPilotLabels[record.id], connected: connectionState == .connected,
-            activity: minutesLiveActivity(for: record, now: Date()))
+            activity: minutesLiveActivity(for: record, now: Date()), sourceRevision: meetingsRevision)
     }
 
     func minutesWorkspaceSidebarContext() -> (store: MeetingStore, labels: [String: String]) {
