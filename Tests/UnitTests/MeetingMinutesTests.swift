@@ -235,6 +235,16 @@ final class MeetingMinutesTests: XCTestCase {
         }
     }
 
+    func testMinutesAndOverviewUseJapaneseWithOriginalProperNouns() {
+        for prompt in [MeetingMinutesPrompt.universalPrefix(), MeetingMinutesSummaryPass.prefix] {
+            XCTAssertTrue(prompt.contains("議事録の本文は日本語"))
+            XCTAssertTrue(prompt.contains("language は \"ja\""))
+            XCTAssertTrue(prompt.contains("固有名詞は原語表記"))
+            XCTAssertTrue(prompt.contains("ID・URL・コード・数値は変更せず"))
+            XCTAssertFalse(prompt.contains("言語は会議で主に話されていた言語に合わせて"))
+        }
+    }
+
     /// A one-sentence summary is unchanged by the split, so the single citation
     /// the prompt asks for keeps working.
     func testASingleSentenceSummaryIsStillOneClaim() throws {

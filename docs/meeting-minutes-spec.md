@@ -398,6 +398,11 @@ uses observed participants and named speakers. No invitee list is sent, so
 `attendance.absent` is empty and `calendarEventId` copies `calendarEventID`.
 The client enforces those last two fields when saving the reply.
 
+Minutes prose is Japanese regardless of the spoken language; retain proper names
+in their original spelling, including English names. Preserve original transcript
+text, source IDs, URLs, code and figures. Generated minutes use `language: "ja"`.
+The final overview rewrite follows the same language policy.
+
 `summary` is a short overview; `topics` is the detailed discussion body, not a
 second compressed summary. For each substantive topic, preserve supported
 background, proposals, concrete figures and names, alternatives, rationale,

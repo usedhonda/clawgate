@@ -70,6 +70,7 @@ enum MeetingMinutesSummaryPass {
     static let prefix = """
     [\(policyVersion)]
     会議 1 件の議事録は、長さのため複数のパートに分けて書かれました。`partSummaries` は各パートが自分の範囲だけを見て書いた概要です。
+    \(MeetingMinutesPrompt.outputLanguageInstruction)
     これらを会議全体の概要 1 本（2〜4 文）に書き直してください。同じ内容を繰り返さず、「この記録範囲では」のような範囲の断り書きは付けないでください。
     `partSummaries` にない事実は書かないでください。`topicHeadings` と `decisions` は流れの把握にだけ使ってください。
     概要の各文に、その文の根拠を `partSummaries[].segmentIds` の中からだけ選んで付けてください。資料引用 materialIds がある場合は同じ資料の引用も保持し、用語訂正の根拠を落とさないでください。

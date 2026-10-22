@@ -167,6 +167,12 @@ struct MeetingMinutesEnvelope: Codable, Equatable {
 
 enum MeetingMinutesPrompt {
     static let policyVersion = "meeting-minutes-v6"
+    static let outputLanguageInstruction = """
+    会議で話された言語にかかわらず、議事録の本文は日本語で書いてください。
+    title・summary・topics の heading/points・decisions・actionItems の what・openQuestions は日本語にし、language は "ja" にしてください。
+    人名・会社名・製品名・サービス名・略語などの固有名詞は原語表記（英語など）のまま残し、無理に翻訳・カタカナ化しないでください。
+    原文・引用元の ID・URL・コード・数値は変更せず、日本語の各主張を原文の segmentIds / materialIds で引用してください。
+    """
 
     /// The instruction text sent ahead of the JSON envelope. Pure, static and
     /// versioned, exactly like the Log prefix, and with the same trust boundary:
@@ -213,7 +219,8 @@ enum MeetingMinutesPrompt {
         招待者一覧は渡していないため `absent` は常に空配列にしてください。
         `attendance.calendarEventId` は envelope の `calendarEventID` をそのまま写してください。
 
-        書き方: 言語は会議で主に話されていた言語に合わせてください。`summary` は短い概要です。
+        書き方: \(outputLanguageInstruction)
+        `summary` は短い概要です。
         `topics` は概要の言い換えではなく、会議の詳細な議論を時系列に沿って残す本文です。
         各議題に背景・提案・具体的な数字や固有名詞・異論や比較・判断理由・未決点が発言されていれば、
         それぞれ独立した具体的な point として記録してください。長い会議でも冒頭だけで打ち切らず、
@@ -628,17 +635,12 @@ enum MeetingMinutesParser {
         let lines = summary.split(whereSeparator: \.isNewline)
         var out: [String] = []
         for line in lines {
-            var current = ""
-            for character in line {
-                current.append(character)
-                if character == "。" {
-                    let piece = current.trimmingCharacters(in: .whitespaces)
-                    if !piece.isEmpty { out.append(piece) }
-                    current = ""
-                }
+            let text = String(line)
+            text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .bySentences) { sentence, _, _, _ in
+                guard let sentence else { return }
+                let piece = sentence.trimmingCharacters(in: .whitespaces)
+                if !piece.isEmpty { out.append(piece) }
             }
-            let tail = current.trimmingCharacters(in: .whitespaces)
-            if !tail.isEmpty { out.append(tail) }
         }
         return out.isEmpty ? [summary] : out
     }
