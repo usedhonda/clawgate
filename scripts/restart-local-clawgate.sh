@@ -105,6 +105,12 @@ fi
 # Stop before replacing or signing mapped executable pages. Modifying a live
 # bundle can terminate the old process with CODESIGNING Invalid Page.
 APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
+AMBIENT_RESTART_STATE="null"
+if [[ "$STAGE_ONLY" != "true" ]] && pgrep -f "$APP_PROCESS_PAT" >/dev/null 2>&1; then
+  # Read immediately before stopping, not before the build: retain a user's
+  # latest microphone/transcription choice, including capture without a stream.
+  AMBIENT_RESTART_STATE="$(python3 "$SCRIPT_DIR/ambient-restart-state.py" snapshot)"
+fi
 if [[ "$STAGE_ONLY" != "true" ]]; then
 pkill -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
 
@@ -309,7 +315,8 @@ for ((i=1; i<=WAIT_SECONDS; i++)); do
   if curl -fsS -m 2 http://127.0.0.1:8765/v1/health >/dev/null 2>&1; then
     curl -sS -m 2 http://127.0.0.1:8765/v1/health || true
     echo
-    ops_log info "restart_ok" "local health check succeeded"
+    python3 "$SCRIPT_DIR/ambient-restart-state.py" restore "$AMBIENT_RESTART_STATE"
+    ops_log info "restart_ok" "local health and ambient restoration succeeded"
     exit 0
   fi
   sleep 1
