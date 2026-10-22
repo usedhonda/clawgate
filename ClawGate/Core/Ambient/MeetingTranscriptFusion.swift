@@ -13,27 +13,39 @@ struct MeetingTranscriptFusionResult: Equatable {
 
 enum MeetingTranscriptFusion {
     static func fuse(local: [TranscriptSegment], external: [MeetingTranscriptSourceSegment]) -> MeetingTranscriptFusionResult {
-        let localSources = local.enumerated().map { i, segment in
-            MeetingTranscriptSourceSegment(id: "seg-\(i + 1)", source: "local",
+        fuse(local: local, external: external, checkingCancellation: {})
+    }
+
+    static func fuse(local: [TranscriptSegment], external: [MeetingTranscriptSourceSegment],
+                     checkingCancellation: () throws -> Void) rethrows -> MeetingTranscriptFusionResult {
+        let localSources = try local.enumerated().map { index, segment in
+            try checkingCancellation()
+            return MeetingTranscriptSourceSegment(id: "seg-\(index + 1)", source: "local",
                                            text: segment.text, speaker: segment.speakerName,
                                            capturedAt: segment.capturedAt)
         }
-        return fuse(sourceSegments: localSources + external)
+        return try fuse(sourceSegments: localSources + external, checkingCancellation: checkingCancellation)
     }
 
     static func fuse(sourceSegments: [MeetingTranscriptSourceSegment]) -> MeetingTranscriptFusionResult {
+        fuse(sourceSegments: sourceSegments, checkingCancellation: {})
+    }
+
+    static func fuse(sourceSegments: [MeetingTranscriptSourceSegment],
+                     checkingCancellation: () throws -> Void) rethrows -> MeetingTranscriptFusionResult {
         var retained: [MeetingTranscriptSourceSegment] = []
         var provenance: [String: [String]] = [:]
         var notes: [String] = []
         var conflictTimes: [Double] = []
         for candidate in sourceSegments.sorted(by: { ($0.capturedAt ?? .greatestFiniteMagnitude) < ($1.capturedAt ?? .greatestFiniteMagnitude) }) where !candidate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            if let index = retained.firstIndex(where: { exactDuplicate($0, candidate) }) {
+            try checkingCancellation()
+            if let index = try retained.firstIndex(where: { try checkingCancellation(); return exactDuplicate($0, candidate) }) {
                 let id = retained[index].id
                 provenance[id, default: [id]].append(candidate.id)
                 // Keep both provider lines in the accepted source revision.
                 // Provenance is not a license to discard an original citation.
             }
-            if let prior = retained.first(where: { $0.source != candidate.source && sameWindow($0, candidate) && similar($0.text, candidate.text) }), numericOrNegationDiffers(prior.text, candidate.text) {
+            if let prior = try retained.first(where: { try checkingCancellation(); return $0.source != candidate.source && sameWindow($0, candidate) && similar($0.text, candidate.text) }), numericOrNegationDiffers(prior.text, candidate.text) {
                 if let time = (prior.source == "local" ? prior : candidate).capturedAt { conflictTimes.append(time) }
                 notes.append("未解決: \(prior.id) と \(candidate.id) で数字または否定表現が食い違います")
             }

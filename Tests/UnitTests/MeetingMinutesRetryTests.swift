@@ -52,6 +52,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         let done = expectation(description: "main queue drained")
         DispatchQueue.main.async { done.fulfill() }
         wait(for: [done], timeout: 1)
+        waitForMinutesPreparation(of: model)
     }
 
     func testIndexedResumeKeepsFrozenRequestAndDoesNotBlockOrdinaryQueue() throws {
@@ -67,6 +68,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         let jobURL = store.directory(for: record.id).appendingPathComponent("minutes-job.json")
         let frozen = try Data(contentsOf: jobURL)
         model.resumeMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         XCTAssertNil(model.pendingMinutesMeetingIDForTesting)
         XCTAssertEqual(try Data(contentsOf: jobURL), frozen)
         XCTAssertTrue(model.minutesActivity(for: try XCTUnwrap(store.load(id: record.id)))?.label.contains("再送はしません") == true)
@@ -74,11 +76,13 @@ final class MeetingMinutesRetryTests: XCTestCase {
         let ledgerURL = try MeetingMinutesExecutionState.fileURL(store: store, id: record.id, job: job)
         try Data("invalid".utf8).write(to: ledgerURL)
         model.resumeMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         XCTAssertNil(model.pendingMinutesMeetingIDForTesting)
         XCTAssertEqual(try Data(contentsOf: jobURL), frozen)
         var ordinary = record; ordinary.id = "mtg-ordinary"; ordinary.minutesState = "none"
         store.save(ordinary)
         model.requestMinutes(for: ordinary)
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, ordinary.id)
     }
 
@@ -97,6 +101,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
     func testFailedPartRetriesLaterAndKeepsWrittenParts() throws {
         let record = meeting()
         model.requestMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
         var job = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
         XCTAssertGreaterThan(job.envelopes.count, 1)
@@ -118,6 +123,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         // Resuming by hand continues from the same part.
         model.releaseCurrentSharedSummonForTesting()
         model.resumeMinutes(for: after)
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
         XCTAssertEqual(MeetingMinutesJob.load(store: store, id: record.id)?.completed.count, 1)
     }
@@ -125,6 +131,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
     func testSourceRefreshDoesNotReplaceFrozenPendingInput() throws {
         let record = meeting()
         model.requestMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         var frozen = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
         frozen.completed = [nil]
         try frozen.save(store: store, id: record.id)
@@ -132,6 +139,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         model.meetingTranscriptProvider = { _ in [TranscriptSegment(startSeconds: 0, endSeconds: 1, text: "Newly fetched source")] }
         let pending = try XCTUnwrap(store.load(id: record.id))
         model.requestMinutes(for: pending, markUserRequested: false)
+        waitForMinutesPreparation(of: model)
         let after = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
         XCTAssertEqual(after.fingerprint, frozen.fingerprint)
         XCTAssertEqual(after.completed.count, 1)
@@ -141,6 +149,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
     func testAFailureFromAnotherRunIsIgnored() throws {
         let record = meeting()
         model.requestMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         model.acknowledgeSharedSummonForTesting(runId: "run-mine")
         model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-other",
                                                                        sessionKey: "agent:main:proactive"),
@@ -162,6 +171,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
     func testASameSessionFailureBeforeAnyOutputIsOurs() throws {
         let record = meeting()
         model.requestMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         model.acknowledgeSharedSummonForTesting(runId: "run-mine")
         model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-gateway",
                                                                        sessionKey: "agent:main:main"),
@@ -195,6 +205,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
     func testActivityDistinguishesSendingFromQueuedMeeting() {
         let first = meeting()
         model.requestMinutes(for: first)
+        waitForMinutesPreparation(of: model)
         let active = store.load(id: first.id)!
         XCTAssertEqual(model.minutesActivity(for: active)?.label, "生成依頼を送信中")
         XCTAssertNotNil(model.minutesActivity(for: active)?.elapsedSeconds)
@@ -202,6 +213,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         waiting.id = "mtg-waiting"
         store.save(waiting)
         model.requestMinutes(for: waiting)
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(model.minutesActivity(for: store.load(id: waiting.id)!)?.label, "別の議事録処理の完了待ち")
         XCTAssertNil(model.minutesActivity(for: store.load(id: waiting.id)!)?.elapsedSeconds)
     }
@@ -209,6 +221,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
     func testActivityElapsedResetsWhenGenerationStarts() throws {
         let record = meeting()
         model.requestMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         let active = try XCTUnwrap(store.load(id: record.id))
         let dispatchStarted = try XCTUnwrap(model.minutesActivityPhaseStartedAtForTesting.dispatch)
         let sending = try XCTUnwrap(model.minutesActivity(for: active,
@@ -232,6 +245,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
     func testWrongMinutesModelStopsWithoutRetryAndKeepsCheckpoint() throws {
         let record = meeting()
         model.requestMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         let token = try XCTUnwrap(model.summonWatchdogTokenForTesting)
         var job = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
         job.completed = [nil]
@@ -295,6 +309,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         model.missingMinutesScanDidFinishForTesting = { finished.fulfill() }
         model.requestMissingMinutesForTesting()
         wait(for: [finished], timeout: 5)
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
     }
 

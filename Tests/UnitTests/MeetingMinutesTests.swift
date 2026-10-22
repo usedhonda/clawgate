@@ -67,12 +67,15 @@ final class MeetingMinutesTests: XCTestCase {
         // remains busy. None may count as a generation attempt.
         for _ in 0..<4 {
             model.requestMinutes(for: first)
+            waitForMinutesPreparation(of: model)
             model.requestMinutes(for: second)
+            waitForMinutesPreparation(of: model)
         }
         XCTAssertEqual(model.minutesAttemptsForTesting["mtg-first", default: 0], 0)
         XCTAssertEqual(model.minutesAttemptsForTesting["mtg-second", default: 0], 0)
 
         model.releaseSharedSummonForTesting(token: busyToken)
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-first")
         XCTAssertEqual(model.minutesAttemptsForTesting["mtg-first"], 1)
 
@@ -80,6 +83,7 @@ final class MeetingMinutesTests: XCTestCase {
         // advance to the remaining meeting rather than stall or duplicate.
         model.releaseCurrentSharedSummonForTesting()
         model.completeMinutesReplyForTesting("not JSON")
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, "mtg-second")
         XCTAssertEqual(model.minutesAttemptsForTesting["mtg-second"], 1)
     }

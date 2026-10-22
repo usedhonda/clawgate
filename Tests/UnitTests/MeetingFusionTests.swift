@@ -82,10 +82,12 @@ final class MeetingFusionTests: XCTestCase {
             TranscriptSegment(startSeconds: 0, endSeconds: 1, text: String(repeating: "discussion ", count: 900))
         } }
         model.requestMinutes(for: record)
+        waitForMinutesPreparation(of: model)
         XCTAssertEqual(MeetingMinutesJob.load(store: store, id: record.id)?.envelopes.count, 3)
         for _ in 0..<2 {
             model.releaseCurrentSharedSummonForTesting()
             model.completeMinutesReplyForTesting("{\"outcome\":\"insufficientEvidence\",\"minutes\":null,\"contextDecision\":{\"policyVersion\":\"\(MeetingMinutesPrompt.policyVersion)\"}}")
+            waitForMinutesPreparation(of: model)
             XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
             XCTAssertNil(store.loadAcceptedMinutes(id: record.id))
         }

@@ -5,6 +5,7 @@ import Darwin
 /// A crash-safe multi-part generation. Only completed, validated parts are
 /// checkpointed; an interrupted request resumes at the first unfinished part.
 struct MeetingMinutesJob: Codable {
+    enum RevisionError: Error { case changed }
     let fingerprint: String
     let envelopes: [MeetingMinutesEnvelope]
     var completed: [MeetingMinutes?]
@@ -112,6 +113,17 @@ struct MeetingMinutesJob: Codable {
     func save(store: MeetingStore, id: String) throws {
         try Self.withRevisionLock(store: store, id: id) {
             try JSONEncoder().encode(self).write(to: store.directory(for: id).appendingPathComponent("minutes-job.json"), options: .atomic)
+        }
+    }
+
+    func saveReplacing(store: MeetingStore, id: String, expected: Data?, validate: () throws -> Void) throws {
+        let data = try JSONEncoder().encode(self)
+        try Self.withRevisionLock(store: store, id: id) {
+            let url = store.directory(for: id).appendingPathComponent("minutes-job.json")
+            let current = FileManager.default.fileExists(atPath: url.path) ? try Data(contentsOf: url) : nil
+            guard current == expected else { throw RevisionError.changed }
+            try validate()
+            try data.write(to: url, options: .atomic)
         }
     }
 
