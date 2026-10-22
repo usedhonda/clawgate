@@ -24,6 +24,13 @@
 - 次の測定条件: native入力event時刻と同操作の表示完了を同clockで対応させる隔離fixtureが必要。既存fixtureはモデル更新/timer latenessのみで、native接続も未成立。この不足を解かずtraceやgreen検査を反復しない。
 - 本人への録音一時中断確認は未回答。現capture継続を確認したため新候補のtest-build/canonical反映は未実行。詳細はignored記録321と観測summary。新規委任・push・remote操作なし。
 
+## V2静的型検査 / 2026-10-22
+
+- 現ソース163ファイル（生成resource accessorを含む）を`swiftc -typecheck`で検査しexit0。対象3ファイルのreview済みhashは不変。XCTestの実行・link・module/executable生成・installは行っていない。
+- 古いSwiftPM manifestは対象source/SDKと不一致のため不採用。現Xcode file listが全現sourceを含むことを確認し、既存dependency moduleと現SDKで検査。初回は検査用引数のCNIOWindows module参照不足で失敗し、その参照を補った1回だけ再実行して44.91秒で成功。source修正なし。
+- 稼働appとbuild済みappのbinary SHA256はそれぞれ検査前後で一致。build成功や反映とは主張せず、canonical restart対象となる新binaryは生成していない。録音・新XCTest・S4/S5・反映の境界は維持する。
+- このturnは新たな静的型検査の直接証拠が得られたprogress。既存greenの再検証はしない。詳細はignored記録322。
+
 ## 最新レビュー是正候補 / 2026-10-22
 
 - 既存最終レビューで表示飢餓P2を受領。初期候補はglobal revision/elapsed-only更新でも破棄する残反例があり、採用してv2へ修正。
