@@ -2,9 +2,9 @@
 
 ## 現在の再開条件 / 2026-10-22
 
-本人の通常メッセージによる継続scopeで作業する。新しいGoalやagentは作らない。
+本人が同threadのGoalをactiveへ再開済み。既存scopeと全受入条件で継続し、別Goalやagentは作らない。
 最新到達点は`ui-responsiveness-state.md`冒頭を正本とし、以下の旧backend状態、lock、未反映の記述は各履歴時点のもの。
-既存sourceの保存と議事録修正時の反映は確認済み。残るS4/S5性能計測とS7最終レビューを、既に済んだ実装・green検査から分離する。
+既存sourceの保存と議事録修正時の反映は確認済み。残るS4/S5性能計測とv2修正のfocused test・local反映を、完了済みのsourceレビューと既存green検査から分離する。
 
 ## GOAL / Project Profile
 

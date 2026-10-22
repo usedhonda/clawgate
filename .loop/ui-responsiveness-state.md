@@ -16,6 +16,14 @@
 - S6: 対象ソース保存と既存反映確認済み。性能受入とは別。S7: 計画相談とv2ソース再レビューの返信を受領済み。source上のP2是正を確認。XCTest/build/反映/nativeUIの受入とは区別する。
 - 次手: 本人の録音一時中断への回答後、許可範囲のfocused testとcanonical local反映へ進む。無回答を承認としない。性能測定は上記故障を解く測定host/実入力と描画時刻の相関が必要。録音保護・同一green再試験禁止・新規委任禁止を維持。全件完了とはしない。
 
+## Goal再開と観測器の切分け / 2026-10-22
+
+- 本人が同threadのGoalをactiveへ再開。目的は残タスク全件の完遂で、S1-S7や録音保護条件は縮小しない。直前turnはsourceレビュー受領・state保存のprogress。
+- Animation Hitchesの12秒attachはrecord/exportともexit0。SwiftUI templateのSIGTRAPとは別に、現hostで有効な描画traceを保存できる経路が成立した。保存終了まで時間を要したがprocessは生存し、正常終了。アプリ再起動・録音中断なし。
+- 対象processのupdate span 66件をswap/surfaceでframe lifetimeへ結合。観測器の有効性証拠であり、制御されたA-D操作列・改修前後baselineではない。入力operation IDと意味上の表示完了の対応は未成立で、S4/S5は未達。runloop/frame durationを入力遅延に読み替えない。
+- 次の測定条件: native入力event時刻と同操作の表示完了を同clockで対応させる隔離fixtureが必要。既存fixtureはモデル更新/timer latenessのみで、native接続も未成立。この不足を解かずtraceやgreen検査を反復しない。
+- 本人への録音一時中断確認は未回答。現capture継続を確認したため新候補のtest-build/canonical反映は未実行。詳細はignored記録321と観測summary。新規委任・push・remote操作なし。
+
 ## 最新レビュー是正候補 / 2026-10-22
 
 - 既存最終レビューで表示飢餓P2を受領。初期候補はglobal revision/elapsed-only更新でも破棄する残反例があり、採用してv2へ修正。
