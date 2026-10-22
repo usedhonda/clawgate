@@ -10,11 +10,11 @@
 - 反映: 10/22議事録障害対応時のcanonical local反映記録315–317が最新。今回built/installed Mach-O UUID一致。今回の保存はsource内容を変えず、再build/restartは行わない。health成功は性能証明にしない。captureはstreaming=false/capturing/unknown/runningであり、停止・安全な再起動可能とは断定しない。
 - Native UI: 稼働appでログ区間、Minutes入口、専用議事録窓と議事録/文字起こし/資料切替を確認。8秒sampleのmain 656標本中、runloop待機の主要branchは577。従来のrefreshDocument/evidenceIDs/CitationIndex stackは0。旧profileと同一操作列/入力ではなく、性能改善率・p95の証明ではない。
 - 観測限界: SwiftUI Instrumentsは記録終了時SIGTRAP/exit133、exportはDocument Missing Template Error。CUA往復558–711msは入力→表示時刻ではない。既存隔離ChatFixtureは12秒の診断を実行できたがnative接続はprocNotFound。timer遅延値をS5へ代用せず、Dはunverifiedを維持。
-- 相談: 現conversation本人bindingを確認して旧submissionを同IDで再試行し、計画助言の実返信を受領。助言を採用。既存最終レビューへexact diff/base/head/hash/owner-fence/test証拠を供給済み。最新差分への静的レビューを受領。同一contextの継続refreshで結果を捨て続ける表示飢餓P2を採用し修正予定。receipt IDはignored記録のみ。
+- 相談: 現conversation本人bindingを確認して旧submissionを同IDで再試行し、計画助言の実返信を受領。助言を採用。既存最終レビューへexact diff/base/head/hash/owner-fence/test証拠を供給済み。v2全文の静的再レビューを受領。表示飢餓P2はsource上で是正され、この修正範囲の追加must-fixなし。receipt IDはignored記録のみ。
 - S1/S2/S3: 既存focused証拠を維持。ソース保存/実アプリ確認を追加。未変更greenの再実行なし。
 - S4/S5: 未達。Dの隔離stream実入力/scrollと描画完了を同一clockで結びつける観測方法、同条件baseline、p95/maxが必要。画像やtimer値で置換しない。
-- S6: 対象ソース保存と既存反映確認済み。性能受入とは別。S7: 計画相談返信は受領済み、最新ソースレビューの表示飢餓P2を修正・再レビュー待ち。
-- 次手: 最終レビューの具体反例が届けばscopeと根拠を評価して処置。性能測定は上記故障を解く測定host/実入力と描画時刻の相関が必要。録音保護・同一green再試験禁止・新規委任禁止を維持。全件完了とはしない。
+- S6: 対象ソース保存と既存反映確認済み。性能受入とは別。S7: 計画相談とv2ソース再レビューの返信を受領済み。source上のP2是正を確認。XCTest/build/反映/nativeUIの受入とは区別する。
+- 次手: 本人の録音一時中断への回答後、許可範囲のfocused testとcanonical local反映へ進む。無回答を承認としない。性能測定は上記故障を解く測定host/実入力と描画時刻の相関が必要。録音保護・同一green再試験禁止・新規委任禁止を維持。全件完了とはしない。
 
 ## 最新レビュー是正候補 / 2026-10-22
 
@@ -22,7 +22,7 @@
 - v2はrecord/root/materialの本文identityと最新presentationを分離。pendingのglobal revision変更時のみ対象source stamp/ambient/boundaryを再照合し、対象不変ならpublish、対象変更なら旧結果拒否。同一pendingの冗長再loadはしない。
 - 対象3ファイル: MeetingWorkspaceSnapshot.swift、PetModel.swift、MeetingWorkspaceSnapshotTests.swift。frontend parseとdiff check PASS。継続status更新と同record/source変更の回帰2件は作成済み、XCTestは未実行。新候補は未commit・未反映。
 - 現在mic captureは文字起こしstreamingと独立して継続中。build後restart規則と録音中断禁止の衝突について、1回のlocal反映の本人回答待ち。無回答は承認にしない。具体候補と再開条件はignored作業記録320。
-- 既存reviewerへv2 exact diff/hashを供給し、最終判定待ち。S4/S5の性能未達も維持する。
+- v2全文の静的再レビューで元P2是正、この修正範囲の追加must-fixなし。受領返信済み。新XCTest/build/反映/nativeUI/S4/S5は未確認。main側fenceのI/O費用は未計測で、通知/revisionに現れない変更まで同時点整合を保証する判定ではない。録音停止・再起動の追加指示はない。
 
 ## 過去チェックポイント（履歴）
 
