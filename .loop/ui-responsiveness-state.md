@@ -16,6 +16,14 @@
 - S6: 対象ソース保存と既存反映確認済み。性能受入とは別。S7: 計画相談返信は受領済み、最新ソースレビューの表示飢餓P2を修正・再レビュー待ち。
 - 次手: 最終レビューの具体反例が届けばscopeと根拠を評価して処置。性能測定は上記故障を解く測定host/実入力と描画時刻の相関が必要。録音保護・同一green再試験禁止・新規委任禁止を維持。全件完了とはしない。
 
+## 最新レビュー是正候補 / 2026-10-22
+
+- 既存最終レビューで表示飢餓P2を受領。初期候補はglobal revision/elapsed-only更新でも破棄する残反例があり、採用してv2へ修正。
+- v2はrecord/root/materialの本文identityと最新presentationを分離。pendingのglobal revision変更時のみ対象source stamp/ambient/boundaryを再照合し、対象不変ならpublish、対象変更なら旧結果拒否。同一pendingの冗長再loadはしない。
+- 対象3ファイル: MeetingWorkspaceSnapshot.swift、PetModel.swift、MeetingWorkspaceSnapshotTests.swift。frontend parseとdiff check PASS。継続status更新と同record/source変更の回帰2件は作成済み、XCTestは未実行。新候補は未commit・未反映。
+- 現在mic captureは文字起こしstreamingと独立して継続中。build後restart規則と録音中断禁止の衝突について、1回のlocal反映の本人回答待ち。無回答は承認にしない。具体候補と再開条件はignored作業記録320。
+- 既存reviewerへv2 exact diff/hashを供給し、最終判定待ち。S4/S5の性能未達も維持する。
+
 ## 過去チェックポイント（履歴）
 
 ## 起動・承認
