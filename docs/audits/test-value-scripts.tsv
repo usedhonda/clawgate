@@ -1,0 +1,98 @@
+id	test_source	phase	protected_contract	oracle	production_path	disposition	limits	findings	execution
+S001	Tests/ShellTests/restart-skip-plugin-sync.sh:21	forward-flag	skip-plugin-syncをremote commandへ伝える	捕捉SSH引数にflag=1	scripts/restart-macmini-openclaw.sh	retain-candidate	fake ssh; remoteは未実行	F25	static only; full script not run
+S002	Tests/ShellTests/restart-skip-plugin-sync.sh:25	local-args	remote側local restartがskip flagを継承	捕捉SSH本文のargs追加	scripts/restart-macmini-openclaw.sh	retain-static-guard	remote本文の文字列; 実remote効果は別	F25	static only; full script not run
+S003	scripts/tests/communication-candidate-revisions.py:27	distinct-pins	sourceとtargetが別revision	fixture revision非同値	scripts/communication-candidate.py	retain-candidate	temp Gitのみ	F25	static only; full script not run
+S004	scripts/tests/communication-candidate-revisions.py:33	source-admission	source側manifest受入	実validator returncode=0	scripts/communication-candidate.py	retain-candidate	local temp; hostなし	F25	static only; full script not run
+S005	scripts/tests/communication-candidate-revisions.py:34	target-admission	target側の別base受入	実validator returncode=0	scripts/communication-candidate.py	retain-candidate	local temp; hostなし	F25	static only; full script not run
+S006	scripts/tests/communication-candidate-revisions.py:36	wrong-target	target base不一致を拒否	stderrのmismatch分類	scripts/communication-candidate.py	retain-candidate	local temp; hostなし	F25	static only; full script not run
+S007	scripts/tests/communication-candidate-revisions.py:39	symlink-file	symlink candidateを拒否	validator returncode非0	scripts/communication-candidate.py	retain-candidate	local temp; hostなし	F25	static only; full script not run
+S008	scripts/tests/communication-maintenance-order.sh:32	stop-before-swap	停止確認前に交換しない	fake mv時のlast event=stop	scripts/communication-maintenance.sh	retain-candidate	process tools fake; swapはlocal fixture	F25	static only; full script not run
+S009	scripts/tests/communication-maintenance-order.sh:40	restart-after-swap	app/plugin/source交換後に再開	fake restartが各markerを照合	scripts/communication-maintenance.sh	retain-candidate	local fixture	F25	static only; full script not run
+S010	scripts/tests/communication-maintenance-order.sh:56	stop-failure	停止未完了時に旧資材を維持	old markerとstopのみのevents	scripts/communication-maintenance.sh	retain-candidate	local fixture	F25	static only; full script not run
+S011	scripts/tests/communication-maintenance-order.sh:64	apply-rollback-order	apply/rollback両方のstop-swap-restart	events列完全一致	scripts/communication-maintenance.sh	retain-candidate	本物host lifecycleではない	F25	static only; full script not run
+S012	scripts/tests/communication-restart-guard.sh:90	reject-no-effects	admission拒否を副作用より先に処理	event file empty	scripts/lib-communication-restart.sh	isolate-and-retain	固定runtime pathあり; 実checkoutでは未実行	F25,F26	static only; full script not run
+S013	scripts/tests/communication-restart-guard.sh:104	canonical-wiring	canonical呼出とhook wiring	fake自身が出すcheck-stop-apply-start列	scripts/lib-communication-restart.sh	document-limit	external canonical内部の順序は未検査	F26	static only; full script not run
+S014	scripts/tests/communication-restart-guard.sh:126	unsupported-wrapper	未対応preguardでremoteへ進まない	expected rejection events	scripts/restart-macmini-openclaw.sh	retain-candidate	fake external tools	F25,F26	static only; full script not run
+S015	scripts/tests/communication-restart-guard.sh:143	signed-admission	signed bundleもadmission先行	捕捉events順序	scripts/post-task-restart.sh	retain-candidate	fake external tools	F25,F26	static only; full script not run
+S016	scripts/tests/communication-restart-guard.sh:176	exact-apply	owned file/appだけを更新	new markers; unrelated helper存在	scripts/communication-maintenance.sh	retain-candidate	実local helper+temp資材	F25,F26	static only; full script not run
+S017	scripts/tests/communication-restart-guard.sh:187	exact-rollback	owned file/appだけを復元	old markers; unrelated helper存在	scripts/communication-maintenance.sh	retain-candidate	実local helper+temp資材	F25,F26	static only; full script not run
+S018	scripts/tests/communication-restart-guard.sh:198	skip-plugin	skip時pluginを維持	old marker	scripts/communication-maintenance.sh	retain-candidate	local fixture	F25,F26	static only; full script not run
+S019	scripts/tests/communication-rollout-residuals.sh:8	syntax	関連6scriptのshell構文	bash -n exit	scripts/stage-communication-candidate.sh	retain-static-guard	behaviorではない; 固定runtime削除に注意	F25,F26	static only; full script not run
+S020	scripts/tests/communication-rollout-residuals.sh:16	source-contract	files-from・shell・build mode・backup変数	4つのsource grep	scripts/stage-communication-candidate.sh	retain-static-guard	dead textでも通る; 補助規約	F26	static only; full script not run
+S021	scripts/tests/communication-rollout-residuals.sh:61	symlink-root	stage root symlinkの拒否	非0とrsync eventなし	scripts/stage-communication-candidate.sh	isolate-and-retain	決定的stageを事前削除; 実checkout禁止候補	F26	static only; full script not run
+S022	scripts/tests/communication-rollout-residuals.sh:69	symlink-component	stage配下symlink拒否	非0とrsync eventなし	scripts/stage-communication-candidate.sh	isolate-and-retain	同上	F26	static only; full script not run
+S023	scripts/tests/communication-rollout-residuals.sh:76	cli-wins	CLI manifestをstale envより優先	rsync event一致	scripts/stage-communication-candidate.sh	isolate-and-retain	fake rsync; local copy	F26	static only; full script not run
+S024	scripts/tests/communication-rollout-residuals.sh:90	scripts-only	pluginなしscripts-only apply	set-e下で正常終了	scripts/communication-maintenance.sh	retain-candidate	temp local	F25,F26	static only; full script not run
+S025	scripts/tests/communication-rollout-residuals.sh:105	failed-operation	失敗operationで前回currentを消費しない	失敗後とrollback後のpointer一致	scripts/communication-maintenance.sh	retain-candidate	temp local	F25,F26	static only; full script not run
+S026	scripts/tests/communication-rollout-residuals.sh:128	operation-root	canonicalへ隔離backup rootを渡す	捕捉path prefix	scripts/lib-communication-restart.sh	retain-candidate	fake canonical内部は別	F26	static only; full script not run
+S027	scripts/tests/communication-wrapper-branches.sh:52	normal-build	未admissionでstale stageを使わない	捕捉remote commandのmode/source	scripts/post-task-restart.sh	retain-candidate	SSH/build fake	F25,F26	static only; full script not run
+S028	scripts/tests/communication-wrapper-branches.sh:69	admitted-stage	admission済stageをremote signへ渡す	stageとcaptured sign command	scripts/post-task-restart.sh	retain-candidate	stage既存拒否あり; SSH/rsync fake	F25,F26	static only; full script not run
+S029	scripts/tests/communication-wrapper-branches.sh:109	signing-preference	live設定とstaged payloadの選択	fake toolsの捕捉値	scripts/macmini-local-sign-and-restart.sh	retain-candidate	keychain/codesign/swift/gateway fake	F25,F26	static only; full script not run
+S030	scripts/tests/signed-bundle-preserve.sh:39	caller-flags	signed bundleを再build/signしない	restart/deploy呼出引数の一致	scripts/post-task-restart.sh	retain-candidate	fake deploy	F25,F26	static only; full script not run
+S031	scripts/tests/signed-bundle-preserve.sh:101	prepared-bytes	既署名bundleのbytes維持	binary/resource/bundle hash一致と禁止tool監視	scripts/restart-local-clawgate.sh	retain-candidate	temp treeの実helper; 実署名検証は別	F25,F26	static only; full script not run
+S032	scripts/smoke-test.sh:44	S1	health到達	ok/version	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	live GET	-	static only; full script not run
+S033	scripts/smoke-test.sh:58	S2	doctor状態	ok=true	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	live GET; delivery証拠ではない	-	static only; full script not run
+S034	scripts/smoke-test.sh:70	S3	poll応答	okとcursor	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	live GET; 実event受領は別	-	static only; full script not run
+S035	scripts/smoke-test.sh:83	S4	invalid adapterを拒否	error.code	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	manual-only	live POST; 本監査では未実行	-	static only; full script not run
+S036	scripts/smoke-test.sh:97	S5	plugin doctor/poll観測	過去log文字列; cursor不明もPASS	extensions/openclaw-plugin/src/gateway.js	strengthen	correlation/freshness不足	F24	static only; full script not run
+S037	scripts/integration-test.sh:49	T0.1	health	ok/version	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	live	-	static only; full script not run
+S038	scripts/integration-test.sh:65	T1.1	method拒否	method_not_allowed	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	manual-only	live	-	static only; full script not run
+S039	scripts/integration-test.sh:74	T1.2	未定義path	not_found	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	manual-only	live	-	static only; full script not run
+S040	scripts/integration-test.sh:89	T2.1	doctor応答	nonempty bodyのみ	ClawGate/Core/BridgeServer/BridgeCore.swift	strengthen	healthy/有効JSONを保証しない	F20	static only; full script not run
+S041	scripts/integration-test.sh:97	T2.2	LINE running	doctor check; skip分岐あり	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	LINE環境依存	-	static only; full script not run
+S042	scripts/integration-test.sh:106	T2.3	Accessibility	doctor check; skip分岐あり	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	OS権限依存	-	static only; full script not run
+S043	scripts/integration-test.sh:120	T3.1	poll	ok/cursor	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	live	-	static only; full script not run
+S044	scripts/integration-test.sh:130	T3.2	since付きpoll	ok	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	live; 差分内容の検査は別	-	static only; full script not run
+S045	scripts/integration-test.sh:139	T3.3	SSE接続	無条件pass	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	strengthen	隔離失敗注入E3でもPASS	F20	isolated block only E3
+S046	scripts/integration-test.sh:149	T4.1	conversation context	ok/error分類	ClawGate/Adapters/LINE/LINEAdapter.swift	manual-only	AX/live; skipあり	-	static only; full script not run
+S047	scripts/integration-test.sh:164	T4.2	messages	ok/count	ClawGate/Adapters/LINE/LINEAdapter.swift	manual-only	AX/live; skipあり	-	static only; full script not run
+S048	scripts/integration-test.sh:177	T4.3	conversations	ok/count	ClawGate/Adapters/LINE/LINEAdapter.swift	manual-only	AX/live; skipあり	-	static only; full script not run
+S049	scripts/integration-test.sh:190	T4.4	AX dump	ok/error	ClawGate/Automation/AX/AXQuery.swift	manual-only	AX/live	-	static only; full script not run
+S050	scripts/integration-test.sh:212	T5.1	message send	okまたはexpected skip	ClawGate/Adapters/LINE/LINEAdapter.swift	manual-only	実送信し得る; skipをdeliveryに数えない	F20	static only; full script not run
+S051	scripts/integration-test.sh:228	T5.2	invalid adapter	adapter_not_found	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	manual-only	live POST	-	static only; full script not run
+S052	scripts/integration-test.sh:239	T5.3	invalid JSON	invalid_json	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	manual-only	live POST	-	static only; full script not run
+S053	scripts/integration-test.sh:249	T5.4	unsupported action	unsupported_action	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	manual-only	live POST	-	static only; full script not run
+S054	scripts/integration-test.sh:265	T6.1	browser Origin拒否	browser_origin_rejected	ClawGate/Core/BridgeServer/BridgeRequestHandler.swift	manual-only	live POST; CSRF境界	-	static only; full script not run
+S055	scripts/federation-verify.sh:25	relay-health	別relay到達	nonempty body	ClawGate/Core/Federation/	topology-specific	旧構成portに依存	F22	static only; full script not run
+S056	scripts/federation-verify.sh:42	federation-connected	federation接続	JSON bool=true	ClawGate/Core/Federation/	topology-specific	delivery受領とは別	F22	static only; full script not run
+S057	scripts/line-e2e-trace.sh:80	health	app応答	health JSON	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	remote SSH/live	-	static only; full script not run
+S058	scripts/line-e2e-trace.sh:96	doctor-detector	doctor/LINE検出metadata	ok/検出文字列; warning分岐	ClawGate/Adapters/LINE/	manual-only	実LINE環境依存	-	static only; full script not run
+S059	scripts/line-e2e-trace.sh:135	inbound-poll	LINE inbound event到達	cursor更新・event探索	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	live input依存	-	static only; full script not run
+S060	scripts/line-e2e-trace.sh:206	pipeline-emitted	inbound emit結果	falseでFAIL表示のみ	ClawGate/Adapters/LINE/LINEInboundWatcher.swift	strengthen	終端失敗へ反映されない分岐	F24	static only; full script not run
+S061	scripts/line-e2e-trace.sh:232	gateway-inbound	Gateway受領log	開始時刻以降のinbound	extensions/openclaw-plugin/src/gateway.js	manual-only	logによる相関	-	static only; full script not run
+S062	scripts/line-e2e-trace.sh:276	gateway-reply	reply log	require flag時だけ必須	extensions/openclaw-plugin/src/gateway.js	document-limit	sendingは相手受領でない	F24	static only; full script not run
+S063	scripts/macmini-colocated-e2e.sh:80	T1	health	ok	ClawGate/Core/BridgeServer/BridgeCore.swift	manual-only	remote live	-	static only; full script not run
+S064	scripts/macmini-colocated-e2e.sh:88	T2	server role	廃止済remote.node_role	ClawGate/Core/BridgeServer/BridgeCore.swift	update-or-retire	T0317と不整合	F22	static only; full script not run
+S065	scripts/macmini-colocated-e2e.sh:97	T3	listen owner	socketとprocess名	ClawGate/Core/BridgeServer/	manual-only	delivery保証ではない	-	static only; full script not run
+S066	scripts/macmini-colocated-e2e.sh:106	T4	strict LINE send	error.code空/nullでもPASS	ClawGate/Adapters/LINE/LINEAdapter.swift	strengthen	空応答PASSをE4で実証; 実送信なし	F21	isolated block only E4
+S067	scripts/macmini-colocated-e2e.sh:122	T5	strict tmux send	error.code空/nullでもPASS	ClawGate/Adapters/Tmux/	strengthen	同型判定; optional	F21	static only; full script not run
+S068	scripts/proxy-macmini-e2e.sh:23	delegate	remote E2E呼出	呼出先不存在	scripts/run-macmini-relay-and-e2e.sh (missing)	repair-or-retire	引数metadata保存のsecretリスク	F23	static only; full script not run
+S069	scripts/proxy-macmini-e2e.sh:38	diagnostics	remote relay log保存	best-effort SSH	scripts/legacy/	retired-reference	test oracleでない; private raw log	F23	static only; full script not run
+S070	scripts/verify-cc-observe-e2e.sh:47	1-health	relay health	ok文字列	ClawGate/Core/Federation/	topology-specific	旧relay構成; live	F22	static only; full script not run
+S071	scripts/verify-cc-observe-e2e.sh:61	2-inject	dummy completion投入	curl成功	ClawGate/Core/Federation/	topology-specific	token読取・debug POST; 未実行	F22	static only; full script not run
+S072	scripts/verify-cc-observe-e2e.sh:71	3-delivery	ops logへの到達	生成project文字列	ClawGate/Core/BridgeServer/	topology-specific	SSH・live	F22	static only; full script not run
+S073	scripts/verify-cc-observe-e2e.sh:87	4-api	messages/conversations反映	両応答にproject	ClawGate/Core/BridgeServer/	topology-specific	SSH・live	F22	static only; full script not run
+S074	scripts/verify-cc-observe-e2e.sh:104	5-gateway	Gateway観測	logにproject	extensions/openclaw-plugin/src/gateway.js	topology-specific	実相手受領ではない	F22	static only; full script not run
+S075	scripts/legacy/federation-e2e.sh:95	R1	旧relay health	health ok	ClawGate/Core/Federation/	retired-reference	legacy READMEで退役	F22	static only; full script not run
+S076	scripts/legacy/federation-e2e.sh:112	R2	旧federation接続	connected; optional skip	ClawGate/Core/Federation/	retired-reference	現行gateに数えない	F22	static only; full script not run
+S077	scripts/legacy/federation-e2e.sh:121	R3	旧bearer拒否	unauthorized	ClawGate/Core/Federation/	retired-reference	auth方式が現行と別	F22	static only; full script not run
+S078	scripts/legacy/federation-e2e.sh:134	R4	旧relay poll	ok	ClawGate/Core/Federation/	retired-reference	現行gateに数えない	F22	static only; full script not run
+S079	scripts/legacy/federation-e2e.sh:144	R5	LINE forwarding	unavailable以外を許容	ClawGate/Core/Federation/	retired-reference	成功受領ではない	F22	static only; full script not run
+S080	scripts/legacy/federation-e2e.sh:157	R6	tmux local route	unavailable以外を許容	ClawGate/Core/Federation/	retired-reference	成功受領ではない	F22	static only; full script not run
+S081	scripts/legacy/host-a-host-b-e2e.sh:103	T1	旧relay health	ok	ClawGate/Core/Federation/	retired-reference	legacy READMEで退役	F22	static only; full script not run
+S082	scripts/legacy/host-a-host-b-e2e.sh:116	T1.5	旧host role	server/client文字列	ClawGate/Core/Federation/	retired-reference	旧公開config	F22	static only; full script not run
+S083	scripts/legacy/host-a-host-b-e2e.sh:129	T2	旧auth拒否	unauthorized	ClawGate/Core/Federation/	retired-reference	現行authとは別	F22	static only; full script not run
+S084	scripts/legacy/host-a-host-b-e2e.sh:138	T3	旧federation	connected	ClawGate/Core/Federation/	retired-reference	現行gateに数えない	F22	static only; full script not run
+S085	scripts/legacy/host-a-host-b-e2e.sh:145	T4	旧poll	ok	ClawGate/Core/Federation/	retired-reference	現行gateに数えない	F22	static only; full script not run
+S086	scripts/legacy/host-a-host-b-e2e.sh:154	T5	旧tmux send	strict/relaxedで判定が異なる	ClawGate/Core/Federation/	retired-reference	live送信し得る; 未実行	F22	static only; full script not run
+S087	scripts/legacy/host-a-host-b-e2e.sh:177	T6	旧LINE send	strict/relaxedで判定が異なる	ClawGate/Core/Federation/	retired-reference	live送信し得る; 未実行	F22	static only; full script not run
+S088	scripts/security-leak-check.sh:152	root_AGENTS_allowed	共有AGENTSを許可	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S089	scripts/security-leak-check.sh:153	root_CLAUDE_allowed	互換CLAUDEを許可	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S090	scripts/security-leak-check.sh:154	claude_local_blocked	local overrideを拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S091	scripts/security-leak-check.sh:155	dotlocal_blocked	private layerを拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S092	scripts/security-leak-check.sh:156	codex_config_blocked	private configを拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S093	scripts/security-leak-check.sh:157	empty_claude_local_blocked	空local overrideも拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S094	scripts/security-leak-check.sh:158	empty_dotlocal_blocked	空private fileも拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S095	scripts/security-leak-check.sh:159	empty_codex_config_blocked	空private configも拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S096	scripts/security-leak-check.sh:160	personal_path_content_blocked	個人path本文を拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
+S097	scripts/security-leak-check.sh:161	secret_token_content_blocked	secret形式を拒否	実scan helperのpass/failと期待値比較	scripts/security-leak-check.sh	retain-candidate	--self-test限定; --allとは別	F25	static only; full script not run
