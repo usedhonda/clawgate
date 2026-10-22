@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 /// the right. It reads the same records and minutes as the pet's Minutes tab;
 /// the difference is room — a full window instead of a 360pt bubble — and a
 /// status banner that says how far generation got and what happens next.
+@MainActor
 struct MeetingWorkspaceView: View {
     let model: PetModel
 
@@ -18,6 +19,9 @@ struct MeetingWorkspaceView: View {
     @State private var scrollTarget: String?
     @State private var copied = false
     @State private var showArchiveSheet = false
+    @State private var indexTask: Task<Void, Never>?
+    @State private var indexRefreshPending = false
+    @State private var indexedMeetings: [MeetingRecord] = []
 
     enum Tab: String, CaseIterable, Identifiable {
         case minutes = "議事録", transcript = "文字起こし", materials = "資料"
@@ -53,10 +57,11 @@ struct MeetingWorkspaceView: View {
         }
         .onAppear { reload() }
         .onReceive(model.$meetingsRevision.dropFirst()) { _ in reload() }
-        .onChange(of: searchText) { _ in reload() }
+        .onChange(of: searchText) { _ in filterMeetings() }
         .onChange(of: selectedID) { _ in copied = false }
         .onChange(of: tab) { _ in copied = false }
         .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in reload() }
+        .onDisappear { indexTask?.cancel(); indexTask = nil; indexRefreshPending = false }
     }
 
     // MARK: Sidebar
@@ -139,18 +144,33 @@ struct MeetingWorkspaceView: View {
     }
 
     private func reload() {
+        guard indexTask == nil else { indexRefreshPending = true; return }
+        let context = model.minutesWorkspaceSidebarContext()
+        indexTask = Task { @MainActor in
+            let worker = Task.detached(priority: .userInitiated) {
+                try await MeetingWorkspaceLoader.shared.sidebar(store: context.store, labels: context.labels)
+            }
+            let result = await withTaskCancellationHandler(operation: { await worker.result }, onCancel: { worker.cancel() })
+            guard !Task.isCancelled else { return }
+            indexTask = nil
+            if case .success(let index) = result {
+                indexedMeetings = index.meetings
+                rowStatuses = index.statuses
+                rowLabels = index.labels
+                filterMeetings()
+            }
+            if indexRefreshPending { indexRefreshPending = false; reload() }
+        }
+    }
+
+    private func filterMeetings() {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        meetings = model.meetingList()
-            .filter { $0.mergedIntoMeetingID == nil }
+        meetings = indexedMeetings
             .filter { meeting in
                 guard !query.isEmpty else { return true }
                 let haystack = ([meeting.title ?? ""] + meeting.participants).joined(separator: " ").lowercased()
                 return haystack.contains(query)
             }
-        rowStatuses = Dictionary(uniqueKeysWithValues: meetings.map { meeting in
-            (meeting.id, MeetingWorkspaceStatus(meeting: meeting, held: model.minutesHoldReason(for: meeting) != nil))
-        })
-        rowLabels = rowStatuses.mapValues { $0.shortLabel }
         if selectedID == nil || !meetings.contains(where: { $0.id == selectedID }) {
             selectedID = meetings.first?.id
         }
@@ -159,6 +179,7 @@ struct MeetingWorkspaceView: View {
 
 // MARK: - Detail
 
+@MainActor
 private struct MeetingWorkspaceDetail: View {
     // Refresh through meetingsRevision below, not unrelated chat/pet publications.
     let model: PetModel
@@ -168,7 +189,8 @@ private struct MeetingWorkspaceDetail: View {
     @Binding var copied: Bool
     @State private var highlighted: Set<String> = []
     @State private var highlightedMaterials: Set<String> = []
-    @State private var supplemental: [MeetingSupplementalMaterial] = []
+    @StateObject private var document = MeetingWorkspaceDocument()
+    private var supplemental: [MeetingSupplementalMaterial] { document.snapshot?.supplemental ?? [] }
     @State private var materialText = ""
     @State private var materialName = ""
     @State private var materialNote = ""
@@ -179,62 +201,19 @@ private struct MeetingWorkspaceDetail: View {
     @State private var editingNote = ""
     @State private var confirmFullRegeneration = false
 
-    // Document reads and citation preparation belong to refresh, never to a
-    // SwiftUI body evaluation (PetModel publishes unrelated state frequently).
-    @State private var accepted: MeetingAcceptedMinutes?
-    @State private var job: MeetingMinutesJob?
-    @State private var shown: (minutes: MeetingMinutes, partial: Bool)?
-    @State private var transcriptRows: [TranscriptRow] = []
-    @State private var citedText: [String: AttributedString] = [:]
-    @State private var indexedProgress: MeetingMinutesExecutionProgress?
-    @State private var holdReason: String?
-    @State private var activity: (label: String, elapsedSeconds: Int?)?
-    @State private var activityCapturedAt = Date()
+    private var accepted: MeetingAcceptedMinutes? { document.snapshot?.accepted }
+    private var job: MeetingMinutesJob? { document.snapshot?.job }
+    private var shown: (minutes: MeetingMinutes, partial: Bool)? { document.snapshot?.shown }
+    private var transcriptRows: [MeetingWorkspaceSnapshot.TranscriptRow] { document.snapshot?.transcriptRows ?? [] }
+    private var citedText: [String: AttributedString] { document.snapshot?.citedText ?? [:] }
+    private var indexedProgress: MeetingMinutesExecutionProgress? { document.snapshot?.indexedProgress }
+    private var holdReason: String? { document.snapshot?.holdReason }
+    private var activity: (label: String, elapsedSeconds: Int?)? { document.snapshot?.activity }
+    private var activityCapturedAt: Date { document.snapshot?.capturedAt ?? Date() }
+    private var googleMaterial: MeetingGoogleMaterials.Snapshot? { document.snapshot?.material }
 
     private func refreshDocument() {
-        let store = MeetingStore()
-        let nextAccepted = store.loadAcceptedMinutes(id: meeting.id)
-        let nextJob = MeetingMinutesJob.load(store: store, id: meeting.id)
-        let minutes = nextAccepted?.minutes ?? store.loadMinutes(id: meeting.id)
-        let nextShown = minutes.map { (minutes: $0, partial: false) }
-            ?? nextJob.flatMap { job in
-                MeetingMinutes.combining(job.completed.compactMap { $0 }).map { (minutes: $0, partial: true) }
-            }
-        let zone = TimeZone(identifier: meeting.timeZone) ?? .current
-        let rows: [TranscriptRow]
-        if let nextAccepted {
-            rows = nextAccepted.segments.map {
-                TranscriptRow(id: $0.id, time: WorkspaceFormat.clock($0.capturedAt, zone: zone),
-                              speaker: $0.speakerName ?? "話者未確認", text: $0.text)
-            }
-        } else {
-            rows = model.meetingTranscript(for: meeting).enumerated().map { index, seg in
-                TranscriptRow(id: "seg-\(index + 1)", time: WorkspaceFormat.clock(seg.capturedAt, zone: zone),
-                              speaker: seg.speakerName ?? (seg.stream == "system" ? "PC音声" : "マイク"), text: seg.text)
-            }
-        }
-        var rendered: [String: AttributedString] = [:]
-        if let minutes = nextShown?.minutes {
-            let evidence = minutes.evidence ?? []
-            let allowed = Set(evidence.flatMap(\.segmentIds))
-            var texts = [minutes.summary]
-            texts += minutes.topics.flatMap(\.points)
-            texts += minutes.decisions
-            texts += minutes.actionItems.map(\.what)
-            texts += WorkspaceFormat.collapseNearDuplicates(minutes.openQuestions + (nextAccepted?.unresolvedNotes ?? []))
-            for text in Set(texts) {
-                rendered[text] = WorkspaceFormat.cited(text, allowed: allowed, evidence: evidence)
-            }
-        }
-        accepted = nextAccepted
-        job = nextJob
-        shown = nextShown
-        transcriptRows = rows
-        citedText = rendered
-        indexedProgress = model.minutesIndexedProgress(for: meeting, job: nextJob)
-        holdReason = model.minutesHoldReason(for: meeting)
-        activityCapturedAt = Date()
-        activity = model.minutesActivity(for: meeting, now: activityCapturedAt)
+        document.refresh(model.minutesWorkspaceContext(for: meeting))
     }
 
     private func renderedCitation(_ text: String) -> AttributedString {
@@ -245,11 +224,14 @@ private struct MeetingWorkspaceDetail: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             workflowBar
-            MeetingSourcesRow(model: model, meeting: meeting, accepted: accepted, transcriptCount: transcriptRows.count)
+            MeetingSourcesRow(material: googleMaterial, meeting: meeting, accepted: accepted, transcriptCount: transcriptRows.count)
             MeetingStatusBanner(meeting: meeting, job: job, indexed: indexedProgress,
                                 holdReason: holdReason, activity: activity, activityCapturedAt: activityCapturedAt,
                                 hasTranscript: !transcriptRows.isEmpty)
             tabBar
+            if let error = document.error {
+                Text(error).font(.system(size: 12)).foregroundColor(WorkspaceTheme.warningText)
+            }
             GeometryReader { geometry in
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -293,7 +275,8 @@ private struct MeetingWorkspaceDetail: View {
             })
         }
         .foregroundColor(WorkspaceTheme.ink)
-        .onAppear { refreshDocument(); reloadSupplemental() }
+        .onAppear { refreshDocument() }
+        .onDisappear { document.cancel() }
         .onChange(of: meeting) { _ in refreshDocument() }
         .onReceive(model.$meetingsRevision.dropFirst()) { _ in refreshDocument() }
         .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in refreshDocument() }
@@ -327,9 +310,10 @@ private struct MeetingWorkspaceDetail: View {
     private var workflowBar: some View {
         let included = supplemental.filter { $0.included && $0.status != .failed && !$0.sections.isEmpty }
         let failed = supplemental.filter { $0.status == .failed }.count
-        let changed = accepted != nil && model.minutesInputsChanged(for: meeting)
+        let changed = document.snapshot?.inputsChanged ?? false
         let pending = meeting.minutesState == "pending"
-        let disabled = pending || materialBusy || model.googleMaterialBusy(for: meeting)
+        let preparing = model.preparingMinutesIDs.contains(meeting.id)
+        let disabled = document.snapshot == nil || pending || preparing || materialBusy || model.googleMaterialBusy(for: meeting)
             || activity != nil
         let checkpoint = meeting.minutesState == "failed"
             && (job?.completed.count ?? 0) > 0
@@ -363,10 +347,16 @@ private struct MeetingWorkspaceDetail: View {
                             .disabled(disabled)
                     }
                     Spacer()
-                    if pending {
+                    if preparing {
+                        Text("議事録の入力を準備中")
+                            .font(.system(size: 12))
+                    } else if pending {
                         Text(accepted == nil ? "議事録を生成中" : "新版を生成中・現在の議事録は引き続き読めます")
                             .font(.system(size: 12))
                     }
+            }
+            if let error = model.minutesPreparationErrors[meeting.id] {
+                Text(error).font(.system(size: 12)).foregroundColor(WorkspaceTheme.muted)
             }
             HStack(spacing: 12) {
                 Text("使用する追加資料 \(included.count) 件")
@@ -459,7 +449,7 @@ private struct MeetingWorkspaceDetail: View {
         case .transcript:
             return transcriptRows.map { "[\($0.time)] \($0.speaker): \($0.text)" }.joined(separator: "\n")
         case .materials:
-            let google = model.googleMaterial(for: meeting)?.notes.map { $0.text + "\n出典: " + $0.sourceURL } ?? []
+            let google = googleMaterial?.notes.map { $0.text + "\n出典: " + $0.sourceURL } ?? []
             let supplemental = displayedSupplemental.flatMap { material in
                 ["## \(material.name)\nメモ: \(material.note)\n状態: \(material.status.rawValue)"] + material.sections.map { "[\($0.locator)] \($0.text)" }
             }
@@ -578,7 +568,7 @@ private struct MeetingWorkspaceDetail: View {
                         }
                     }
                     listCard("未解決・要確認",
-                             WorkspaceFormat.collapseNearDuplicates(minutes.openQuestions + (accepted?.unresolvedNotes ?? [])),
+                             document.snapshot?.questions ?? [],
                              citations, empty: "なし", evidence: evidence)
                 }
             }
@@ -613,6 +603,7 @@ private struct MeetingWorkspaceDetail: View {
     }
 
     private var emptyMinutesText: String {
+        if document.snapshot == nil { return "議事録を読み込んでいます。タブ・会議の切り替えは引き続き操作できます。" }
         switch meeting.minutesState {
         case "pending": return "議事録を作っています。完成したパートから、ここに表示します。"
         case "failed": return "議事録はまだできていません。上の帯から続きを作れます。"
@@ -658,8 +649,6 @@ private struct MeetingWorkspaceDetail: View {
         }
     }
 
-    private struct TranscriptRow { let id: String; let time: String; let speaker: String; let text: String }
-
     // MARK: Materials tab
 
     @ViewBuilder
@@ -674,7 +663,7 @@ private struct MeetingWorkspaceDetail: View {
     }
 
     @ViewBuilder private var googleMaterialsSection: some View {
-        let snapshot = model.googleMaterial(for: meeting)
+        let snapshot = googleMaterial
         WorkspaceCard(title: "Google Meet") {
             HStack {
                 Text("Meet の資料・メモは参考情報です。議事録の発言根拠には使いません。").font(.system(size: 13)).foregroundColor(WorkspaceTheme.secondary)
@@ -700,7 +689,7 @@ private struct MeetingWorkspaceDetail: View {
                 Button("ファイルを追加…") { chooseFiles() }
                 Button("テキストを追加…") { materialName = "メモ"; materialText = "" }
                 Spacer()
-                if model.supplementalMaterialsChanged(for: meeting) { Text("議事録が古い資料を参照しています").foregroundColor(WorkspaceTheme.warningText).font(.system(size: 12, weight: .semibold)) }
+                if document.snapshot?.supplementalChanged == true { Text("議事録が古い資料を参照しています").foregroundColor(WorkspaceTheme.warningText).font(.system(size: 12, weight: .semibold)) }
             }
             if !materialText.isEmpty || materialName == "メモ" {
                 VStack(alignment: .leading, spacing: 8) {
@@ -775,7 +764,7 @@ private struct MeetingWorkspaceDetail: View {
     }
 
     private func reloadSupplemental() {
-        supplemental = MeetingSupplementalMaterials().load(meetingID: meeting.id)
+        refreshDocument()
     }
 
     private func chooseFiles() {
@@ -821,7 +810,7 @@ private struct MeetingWorkspaceDetail: View {
     }
 
     private var materialStatus: String {
-        switch model.googleMaterial(for: meeting)?.status {
+        switch googleMaterial?.status {
         case .checking?: return "資料を確認しています…"
         case .permissionDenied?: return "資料を読む権限がありません。"
         case .serviceUnavailable?: return "Google Docs API の有効化が必要です。資料がないとは判定していません。"
@@ -840,7 +829,7 @@ private struct MeetingWorkspaceDetail: View {
 /// ClawGate-only generation from one cross-checked against Meet.
 private struct MeetingSourcesRow: View {
     // The parent refreshes this row together with its meeting document.
-    let model: PetModel
+    let material: MeetingGoogleMaterials.Snapshot?
     let meeting: MeetingRecord
     let accepted: MeetingAcceptedMinutes?
     let transcriptCount: Int
@@ -851,7 +840,6 @@ private struct MeetingSourcesRow: View {
         let local = sources?.filter { $0 == "local" }.count ?? transcriptCount
         let recheck = sources?.filter { $0 == "audio-recheck" }.count ?? 0
         let external = sources?.filter { $0 != "local" && $0 != "audio-recheck" }.count ?? 0
-        let material = model.googleMaterial(for: meeting)
         let notes = material?.notes.count ?? 0
         let unresolved = accepted?.unresolvedNotes.count ?? 0
         VStack(alignment: .leading, spacing: 8) {
@@ -1060,9 +1048,17 @@ struct MeetingWorkspaceStatus {
     var held = false
 
     var shortLabel: String {
-        let job = MeetingMinutesJob.load(store: MeetingStore(), id: meeting.id)
+        shortLabel(store: MeetingStore())
+    }
+
+    func shortLabel(store: MeetingStore) -> String {
+        if !held {
+            if meeting.minutesState == "ready" { return "議事録あり" }
+            if meeting.minutesState != "pending" && meeting.minutesState != "failed" { return "議事録なし" }
+        }
+        let job = MeetingMinutesJob.load(store: store, id: meeting.id)
         let total = job?.envelopes.count ?? 0
-        let indexed = job.flatMap { try? MeetingMinutesExecutionProgress.load(store: MeetingStore(), id: meeting.id, job: $0) }
+        let indexed = job.flatMap { try? MeetingMinutesExecutionProgress.load(store: store, id: meeting.id, job: $0) }
         let done = indexed?.completedIndices.count ?? min(job?.completed.count ?? 0, total)
         let progress = total > 1 ? " \(done)/\(total)" : ""
         if held { return "保留中\(progress)" }
@@ -1189,11 +1185,63 @@ enum WorkspaceFormat {
 
     /// `[seg-N]` citations become small links to the transcript line; a
     /// token the parser did not accept as evidence stays plain text.
+    struct CitationIndex {
+        struct Claim {
+            let normalized: String
+            let longEnough: Bool
+            let segments: [String]
+            let materials: [String]
+        }
+        let claims: [Claim]
+
+        init(evidence: [MeetingEvidence]) {
+            self.init(evidence: evidence, checkingCancellation: {})
+        }
+
+        init(evidence: [MeetingEvidence], checkingCancellation: () throws -> Void) rethrows {
+            claims = try evidence.map { item in
+                try checkingCancellation()
+                let normalized = Self.normalize(item.claim)
+                return Claim(normalized: normalized, longEnough: normalized.count >= 8,
+                    segments: item.segmentIds, materials: item.materialIds ?? [])
+            }
+        }
+
+        static func normalize(_ text: String) -> String {
+            text.filter { !$0.isWhitespace && !"。、，．.,".contains($0) }
+        }
+
+        func matches(_ text: String) -> (segments: [String], materials: [String]) {
+            matches(text, checkingCancellation: {})
+        }
+
+        func matches(_ text: String, checkingCancellation: () throws -> Void) rethrows -> (segments: [String], materials: [String]) {
+            let line = Self.normalize(text)
+            guard !line.isEmpty else { return ([], []) }
+            let longEnough = line.count >= 8
+            var segments = Set<String>(), materialSet = Set<String>(), materials: [String] = []
+            for claim in claims {
+                try checkingCancellation()
+                guard !claim.normalized.isEmpty,
+                      line.contains(claim.normalized) || claim.normalized.contains(line) else { continue }
+                if longEnough && claim.longEnough {
+                    segments.formUnion(claim.segments.filter { $0.hasPrefix("seg-") })
+                }
+                for material in claim.materials where materialSet.insert(material).inserted { materials.append(material) }
+            }
+            return (segments.sorted { (Int($0.dropFirst(4)) ?? 0) < (Int($1.dropFirst(4)) ?? 0) }, materials)
+        }
+    }
+
     static func cited(_ text: String, allowed: Set<String>, evidence: [MeetingEvidence] = []) -> AttributedString {
+        cited(text, allowed: allowed, index: CitationIndex(evidence: evidence))
+    }
+
+    static func cited(_ text: String, allowed: Set<String>, index: CitationIndex,
+                      checkingCancellation: () throws -> Void) rethrows -> AttributedString {
         var output = inlineCited(text, allowed: allowed)
-        // The parser keeps grounding beside the text, claim by claim. A line
-        // links to every segment whose claim it states (or is part of).
-        let ids = evidenceIDs(for: text, evidence: evidence)
+        let matches = try index.matches(text, checkingCancellation: checkingCancellation)
+        let ids = matches.segments
         if !ids.isEmpty && !text.contains("[seg-") {
             var link = AttributedString("  発言\(ids.count)件")
             link.link = URL(string: "clawgate-segment://" + ids.map { String($0.dropFirst(4)) }.joined(separator: ","))
@@ -1201,8 +1249,7 @@ enum WorkspaceFormat {
             link.font = .system(size: 12, weight: .semibold)
             output.append(link)
         }
-        let materials = materialEvidenceIDs(for: text, evidence: evidence)
-        for (index, id) in materials.enumerated() {
+        for (index, id) in matches.materials.enumerated() {
             var link = AttributedString("  資料\(index + 1)")
             link.link = URL(string: "clawgate-material://" + id)
             link.foregroundColor = WorkspaceTheme.accent
@@ -1212,29 +1259,16 @@ enum WorkspaceFormat {
         return output
     }
 
+    static func cited(_ text: String, allowed: Set<String>, index: CitationIndex) -> AttributedString {
+        cited(text, allowed: allowed, index: index, checkingCancellation: {})
+    }
+
     static func materialEvidenceIDs(for text: String, evidence: [MeetingEvidence]) -> [String] {
-        let squash = { (value: String) in value.filter { !$0.isWhitespace && !"。、，．.,".contains($0) } }
-        let line = squash(text)
-        guard !line.isEmpty else { return [] }
-        var seen = Set<String>()
-        return evidence.filter { item in
-            let claim = squash(item.claim)
-            return !claim.isEmpty && (line.contains(claim) || claim.contains(line))
-        }.flatMap { $0.materialIds ?? [] }.filter { seen.insert($0).inserted }
+        CitationIndex(evidence: evidence).matches(text).materials
     }
 
     static func evidenceIDs(for text: String, evidence: [MeetingEvidence]) -> [String] {
-        let squash = { (value: String) in value.filter { !$0.isWhitespace && !"。、，．.,".contains($0) } }
-        let line = squash(text)
-        guard line.count >= 8 else { return [] }
-        var seen = Set<String>()
-        var ids: [String] = []
-        for item in evidence {
-            let claim = squash(item.claim)
-            guard claim.count >= 8, line.contains(claim) || claim.contains(line) else { continue }
-            for id in item.segmentIds where id.hasPrefix("seg-") && seen.insert(id).inserted { ids.append(id) }
-        }
-        return ids.sorted { (Int($0.dropFirst(4)) ?? 0) < (Int($1.dropFirst(4)) ?? 0) }
+        CitationIndex(evidence: evidence).matches(text).segments
     }
 
     private static func inlineCited(_ text: String, allowed: Set<String>) -> AttributedString {
@@ -1264,6 +1298,11 @@ enum WorkspaceFormat {
     /// figures and overlaps moderately; distinct questions share little
     /// beyond endings and are kept.
     static func collapseNearDuplicates(_ items: [String], threshold: Double = 0.5) -> [String] {
+        collapseNearDuplicates(items, threshold: threshold, checkingCancellation: {})
+    }
+
+    static func collapseNearDuplicates(_ items: [String], threshold: Double = 0.5,
+                                       checkingCancellation: () throws -> Void) rethrows -> [String] {
         func pairs(_ text: String) -> Set<String> {
             let chars = Array(text.filter { !$0.isWhitespace && !"。、，．.,「」『』".contains($0) })
             guard chars.count > 1 else { return Set(chars.map(String.init)) }
@@ -1279,8 +1318,10 @@ enum WorkspaceFormat {
         }
         var kept: [(text: String, pairs: Set<String>, figures: Set<String>)] = []
         for item in items {
+            try checkingCancellation()
             let current = pairs(item), nums = figures(item)
-            let duplicate = kept.contains { other in
+            let duplicate = try kept.contains { other in
+                try checkingCancellation()
                 let union = other.pairs.union(current).count
                 guard union > 0 else { return false }
                 let overlap = Double(other.pairs.intersection(current).count) / Double(union)

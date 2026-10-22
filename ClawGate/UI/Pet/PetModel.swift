@@ -3435,6 +3435,17 @@ final class PetModel: NSObject, ObservableObject {
         return ("生成の開始準備中（順番待ち）", nil)
     }
 
+    func minutesWorkspaceContext(for record: MeetingRecord) -> MeetingWorkspaceContext {
+        MeetingWorkspaceContext(record: record, store: minutesStore(),
+            material: record.materialCandidateID.flatMap { meetingMaterials[$0] },
+            pilotLabel: minutesPilotLabels[record.id], connected: connectionState == .connected,
+            activity: minutesLiveActivity(for: record, now: Date()))
+    }
+
+    func minutesWorkspaceSidebarContext() -> (store: MeetingStore, labels: [String: String]) {
+        (minutesStore(), minutesPilotLabels)
+    }
+
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
     /// a Log question the owner just asked matters more than a background write.
     func requestMinutes(for record: MeetingRecord, preservingMaterials: Bool = false,
