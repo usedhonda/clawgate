@@ -2,6 +2,9 @@ import importlib.util
 from pathlib import Path
 import unittest
 from unittest.mock import patch
+import tempfile
+import urllib.error
+import json
 
 
 spec = importlib.util.spec_from_file_location(
@@ -18,6 +21,18 @@ def status(capturing=True, streaming=False, chunks=0, **extra):
 
 
 class AmbientRestartStateTests(unittest.TestCase):
+    def test_explicit_recovery_receipt_only_applies_to_unreachable_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = Path(directory) / "before.json"
+            receipt.write_text(json.dumps({"state": status()}))
+            with patch.object(subject, "request", side_effect=urllib.error.URLError("refused")):
+                self.assertEqual(subject.snapshot(receipt), {"capturing": True, "streaming": False})
+            with patch.object(subject, "request", return_value=status(False)):
+                self.assertEqual(subject.snapshot(receipt), {"capturing": False, "streaming": False})
+            with patch.object(subject, "request", side_effect=RuntimeError("unacknowledged")):
+                with self.assertRaises(RuntimeError):
+                    subject.snapshot(receipt)
+
     def test_incomplete_status_cannot_open_microphone(self):
         with patch.object(subject, "request", return_value={}) as request:
             with self.assertRaisesRegex(RuntimeError, "not restorable"):

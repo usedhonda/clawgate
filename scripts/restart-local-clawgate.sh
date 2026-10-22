@@ -10,6 +10,7 @@ set -euo pipefail
 #   ./scripts/restart-local-clawgate.sh --skip-plugin-sync
 #   ./scripts/restart-local-clawgate.sh --plugin-client-only
 #   ./scripts/restart-local-clawgate.sh --project-path "$(pwd)"
+#   ./scripts/restart-local-clawgate.sh --recover-ambient-state-file .local/before.json
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -20,6 +21,7 @@ PLUGIN_CLIENT_ONLY=false
 SKIP_SIGN=false
 STAGE_ONLY=false
 WAIT_SECONDS=8
+AMBIENT_RECOVERY_FILE=""
 export CLAWGATE_ROLE="host_b_client"
 export OPS_SCRIPT_NAME="restart-local-clawgate.sh"
 
@@ -41,6 +43,8 @@ while [[ $# -gt 0 ]]; do
       STAGE_ONLY=true; shift ;;
     --wait-seconds)
       WAIT_SECONDS="$2"; shift 2 ;;
+    --recover-ambient-state-file)
+      AMBIENT_RECOVERY_FILE="$2"; shift 2 ;;
     *)
       echo "Unknown arg: $1" >&2
       exit 2 ;;
@@ -106,10 +110,14 @@ fi
 # bundle can terminate the old process with CODESIGNING Invalid Page.
 APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
 AMBIENT_RESTART_STATE="null"
-if [[ "$STAGE_ONLY" != "true" ]] && pgrep -f "$APP_PROCESS_PAT" >/dev/null 2>&1; then
+if [[ "$STAGE_ONLY" != "true" ]] && { [[ -n "$AMBIENT_RECOVERY_FILE" ]] || pgrep -f "$APP_PROCESS_PAT" >/dev/null 2>&1; }; then
   # Read immediately before stopping, not before the build: retain a user's
   # latest microphone/transcription choice, including capture without a stream.
-  AMBIENT_RESTART_STATE="$(python3 "$SCRIPT_DIR/ambient-restart-state.py" snapshot)"
+  if [[ -n "$AMBIENT_RECOVERY_FILE" ]]; then
+    AMBIENT_RESTART_STATE="$(python3 "$SCRIPT_DIR/ambient-restart-state.py" snapshot --recovery-file "$AMBIENT_RECOVERY_FILE")"
+  else
+    AMBIENT_RESTART_STATE="$(python3 "$SCRIPT_DIR/ambient-restart-state.py" snapshot)"
+  fi
 fi
 if [[ "$STAGE_ONLY" != "true" ]]; then
 pkill -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
@@ -265,7 +273,11 @@ fi
 
 echo "[5/5] Restart app + local gateway"
 
-open -na "$APP_PATH"
+STARTUP_LOG="$PROJECT_PATH/.local/logs/clawgate-startup.log"
+mkdir -p "$(dirname "$STARTUP_LOG")"
+touch "$STARTUP_LOG"
+chmod 600 "$STARTUP_LOG"
+open -na "$APP_PATH" --stdout "$STARTUP_LOG" --stderr "$STARTUP_LOG" --env NSUnbufferedIO=YES
 sleep 2
 
 GATEWAY_LABEL="ai.openclaw.gateway"

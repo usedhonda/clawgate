@@ -2,6 +2,7 @@
 """Preserve the local microphone/stream choice across a canonical restart."""
 
 import json
+from pathlib import Path
 import sys
 import time
 import urllib.error
@@ -40,8 +41,16 @@ def choice(status):
     }
 
 
-def snapshot():
-    status = request("/status")
+def snapshot(recovery_file=None):
+    try:
+        status = request("/status")
+    except (urllib.error.URLError, TimeoutError):
+        if recovery_file is None:
+            raise
+        # Use an explicit prior restart receipt only when the API is unreachable.
+        # A live user's newer choice always wins.
+        status = json.loads(Path(recovery_file).read_text())["state"]
+        print("Using explicit pre-failure ambient restart receipt.", file=sys.stderr)
     return None if status is None else choice(status)
 
 
@@ -88,11 +97,13 @@ def restore(before, timeout=45):
 def main():
     if len(sys.argv) == 2 and sys.argv[1] == "snapshot":
         print(json.dumps(snapshot(), separators=(",", ":")))
+    elif len(sys.argv) == 4 and sys.argv[1:3] == ["snapshot", "--recovery-file"]:
+        print(json.dumps(snapshot(sys.argv[3]), separators=(",", ":")))
     elif len(sys.argv) == 3 and sys.argv[1] == "restore":
         restore(json.loads(sys.argv[2]))
         print("Ambient pre-restart choice verified (fresh audio required when active).")
     else:
-        raise RuntimeError("usage: ambient-restart-state.py snapshot | restore <snapshot>")
+        raise RuntimeError("usage: ambient-restart-state.py snapshot [--recovery-file <receipt>] | restore <snapshot>")
 
 
 if __name__ == "__main__":
