@@ -1,8 +1,19 @@
 # Loop state: UI応答性改善
 
-## 最新チェックポイント / 2026-10-22
+## 現在のチェックポイント / 2026-10-23
 
-この節が現在の到達点。以下の履歴中のcurrent/blocker/未反映/lock残存は記録時点の状態であり、現状へ再適用しない。
+- Goalは本人操作でactiveに再開済み。健康確認の厳格化を理由に全体を再blockしない。現在の本人指示は追加した停止条件の是正と残件の続行。
+- 実際の最新成果: recovery 3cb60d9、native observer 89c3a4a、A-D制御workload 4d1401e。workspace 10件PASS・正規反映済み。P3/P4の限定受入、レビュー返信、capture-only復帰はignored記録325–327とexecution-stateを正本にする。
+- 描画測定はnative event→semantic host transaction completion。physical presentationや改修前後の改善率は未証明。Dは測定したworkloadでは本体変更不要。過去の「native計測不能」を現在へ再適用しない。
+- 今回の是正: restart helperの新chunk確定待ちを成功条件から除外。backend running・元の録音/文字起こし選択・durable control settledで復元を判定する。user intentのrevision/receipt/消費済み/不確定POST再投入禁止・安全抑止は維持。音声到達は別観測として記録する。
+- 現物確認: health OK、録音ON/文字起こしOFF/backend running、新chunk8件。新しいhelperを追加POSTなしで実行確認。built/installed UUID一致、署名identity不変。今回の修正後にapp build/restartは行っていない（Python helperのみ）。
+- 直前のrestart失敗には別Python previewによる8765競合という実障害があった。現在はClawGate自身が同portを保持。失敗をhealth閾値超過と混同しない。
+- 残件: P2共有routing設定の選択は未回答。現在の動作する設定は変更しない。通常affected-clientの実応答/tool継続は記録328で確認済み。新しいglobal変更や同一検査の反復をせず、最終scope照合と未決事項を保持する。
+
+
+## 保存時チェックポイント（履歴） / 2026-10-22
+
+この節以下は保存時点の履歴。current/blocker/未反映/lock残存を現状へ再適用しない。
 
 - 本人指示: 完了済み成果を保存し、元のUI応答性改善を継続。監査で提案されたテスト改修は未承認・未実施。新規Goal/agent/runnerなし。
 - Git lock: 本人の削除指示でholderなし・Git processなし・同一inodeを再確認し除去。index refresh後、status/staged/worktree/content hash一致。復旧記録319。Git書込みの阻害は解消。

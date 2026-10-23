@@ -63,9 +63,14 @@ class AmbientRestartStateTests(unittest.TestCase):
                 subject.restore({"capturing": True, "streaming": False})
         request.assert_called_once_with("/status")
 
-    def test_running_backend_without_audio_is_not_success(self):
+    def test_chunk_finalization_does_not_block_restored_capture(self):
         with patch.object(subject, "request", return_value=status()) as request:
-            with self.assertRaisesRegex(RuntimeError, "fresh audio"):
+            subject.restore({"capturing": True, "streaming": False}, timeout=0)
+        request.assert_called_once_with("/status")
+
+    def test_pending_control_still_cannot_complete_restoration(self):
+        with patch.object(subject, "request", return_value=status(chunks=1)) as request, patch.object(subject, "read_intent", return_value={"settled": False}):
+            with self.assertRaisesRegex(RuntimeError, "control state"):
                 subject.restore({"capturing": True, "streaming": False}, timeout=0)
         request.assert_called_once_with("/status")
 

@@ -92,15 +92,15 @@ def restore(before, timeout=45, guard=lambda: None, before_post=lambda: None):
                 raise RuntimeError("ambient restoration was not acknowledged")
             resumed = True  # An uncertain/failed POST is never retried.
         elif capturing and streaming == before["streaming"] and status.get("backendPhase") == "running":
-            # Capture-only status deliberately hides tap liveness. A new process's
-            # finalized chunk is direct audio-delivery evidence in either mode.
-            age = status.get("secondsSinceLastChunk", -1)
+            # Restore the acknowledged control state, not a chunk-production
+            # schedule. Audio delivery is observed separately: a finalized chunk
+            # can take 30 seconds and must not become an extra restart gate.
             intent = read_intent(allow_pending=True)
             intent_settled = intent is None or intent["settled"]
-            if intent_settled and status.get("chunksSurfaced", 0) > 0 and 0 <= age <= 35:
+            if intent_settled:
                 return
         if time.monotonic() >= deadline:
-            raise RuntimeError("ambient restoration lacks fresh audio delivery")
+            raise RuntimeError("ambient control state was not restored")
         time.sleep(1)
 
 
