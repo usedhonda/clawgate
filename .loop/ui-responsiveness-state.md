@@ -1,6 +1,14 @@
 # Loop state: UI応答性改善
 
-## 現在のチェックポイント / 2026-10-23
+## 完了照合 / 2026-10-23
+
+- 本人の「すすめて」を受領し、既に正常動作している設定を追加変更せず維持する方針を告知して残件を照合。将来の共有設定変更を承認済みとは扱わない。
+- recovery、workspace表示更新、native observer、A-D制御workload、通常client応答/tool継続、レビュー処置、対象commitを各証拠と照合済み。直近修正は1cf009d。測定32件のprimary artifact hashは不変、選択された全sampleのsemantic matchを確認。
+- 現在のhealth正常、録音ON/文字起こしOFF/backend running、durable user intent一致。設定更新・app build/restart・追加test・push/release・新規委任なし。
+- 限定: 測定endpointはsemantic host transaction completionでありphysical presentationではない。改修前後改善率・全UI・実接続drainの証明ではない。元のWebSocket拒否frame種別は不明のまま。これらを新たな受入済み項目や追加実装へ置換しない。
+- 承認済みscopeの必須残件なし。最終記録331、completion auditとexecution-stateはignored layer。以下のactive/blocked/未決は記録時点の履歴であり現在へ再適用しない。
+
+## 直前チェックポイント（履歴） / 2026-10-23
 
 - Goalは本人操作でactiveに再開済み。健康確認の厳格化を理由に全体を再blockしない。現在の本人指示は追加した停止条件の是正と残件の続行。
 - 実際の最新成果: recovery 3cb60d9、native observer 89c3a4a、A-D制御workload 4d1401e。workspace 10件PASS・正規反映済み。P3/P4の限定受入、レビュー返信、capture-only復帰はignored記録325–327とexecution-stateを正本にする。
