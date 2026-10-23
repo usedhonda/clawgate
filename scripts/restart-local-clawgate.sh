@@ -12,6 +12,7 @@ set -euo pipefail
 #   ./scripts/restart-local-clawgate.sh --project-path "$(pwd)"
 #   ./scripts/restart-local-clawgate.sh --recover-ambient-state-file .local/ambient-restart-receipt.json
 #   ./scripts/restart-local-clawgate.sh --restart-without-ambient-restore
+#   ./scripts/restart-local-clawgate.sh --skip-build --skip-plugin-sync --native-input-probe .local/probe-run
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 ORIGINAL_ARGS=("$@")
@@ -25,6 +26,7 @@ STAGE_ONLY=false
 WAIT_SECONDS=8
 AMBIENT_RECOVERY_FILE=""
 WITHOUT_AMBIENT_RESTORE=false
+NATIVE_PROBE_DIR=""
 export CLAWGATE_ROLE="host_b_client"
 export OPS_SCRIPT_NAME="restart-local-clawgate.sh"
 
@@ -50,6 +52,8 @@ while [[ $# -gt 0 ]]; do
       AMBIENT_RECOVERY_FILE="$2"; shift 2 ;;
     --restart-without-ambient-restore)
       WITHOUT_AMBIENT_RESTORE=true; shift ;;
+    --native-input-probe)
+      NATIVE_PROBE_DIR="$2"; shift 2 ;;
     *)
       echo "Unknown arg: $1" >&2
       exit 2 ;;
@@ -103,6 +107,19 @@ if [[ "${CLAWGATE_RESTART_LOCK:-}" != "$PROJECT_PATH" ]]; then
   exec python3 "$SCRIPT_DIR/ambient-restart-state.py" run-locked "$PROJECT_PATH" "$SCRIPT_DIR/restart-local-clawgate.sh" "${ORIGINAL_ARGS[@]}"
 fi
 
+APP_LAUNCH_ARGS=()
+if [[ -n "$NATIVE_PROBE_DIR" ]]; then
+  [[ "$STAGE_ONLY" != "true" ]] || { echo "Probe requires normal app launch." >&2; exit 2; }
+  [[ "$NATIVE_PROBE_DIR" != .local/* ]] || NATIVE_PROBE_DIR="$PROJECT_PATH/$NATIVE_PROBE_DIR"
+  NATIVE_PROBE_PARENT="$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$(dirname "$NATIVE_PROBE_DIR")")"
+  [[ "$NATIVE_PROBE_PARENT/" == "$PROJECT_PATH/.local/"* ]] || { echo "Diagnostic output must be project-local." >&2; exit 2; }
+  mkdir -p "$NATIVE_PROBE_PARENT"
+  NATIVE_PROBE_DIR="$NATIVE_PROBE_PARENT/$(basename "$NATIVE_PROBE_DIR")"
+  mkdir "$NATIVE_PROBE_DIR"
+  chmod 700 "$NATIVE_PROBE_DIR"
+  APP_LAUNCH_ARGS=(--args --native-input-probe "$NATIVE_PROBE_DIR")
+fi
+
 echo "== restart-local-clawgate =="
 echo "Project path: $PROJECT_PATH"
 echo "Skip build  : $SKIP_BUILD"
@@ -118,7 +135,7 @@ fi
 
 # Stop before replacing or signing mapped executable pages. Modifying a live
 # bundle can terminate the old process with CODESIGNING Invalid Page.
-APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
+APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate($| --native-input-probe )"
 AMBIENT_RECEIPT="${AMBIENT_RECOVERY_FILE:-$PROJECT_PATH/.local/ambient-restart-receipt.json}"
 if [[ "$STAGE_ONLY" != "true" ]]; then
   AMBIENT_PREPARE_ARGS=(prepare --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN")
@@ -302,7 +319,11 @@ if [[ -f "$STARTUP_LOG" ]]; then
 fi
 touch "$STARTUP_LOG"
 chmod 600 "$STARTUP_LOG"
-open -na "$APP_PATH" --stdout "$STARTUP_LOG" --stderr "$STARTUP_LOG" --env NSUnbufferedIO=YES
+if [[ -n "$NATIVE_PROBE_DIR" ]]; then
+  open -na "$APP_PATH" --stdout "$STARTUP_LOG" --stderr "$STARTUP_LOG" --env NSUnbufferedIO=YES "${APP_LAUNCH_ARGS[@]}"
+else
+  open -na "$APP_PATH" --stdout "$STARTUP_LOG" --stderr "$STARTUP_LOG" --env NSUnbufferedIO=YES
+fi
 if [[ "$WITHOUT_AMBIENT_RESTORE" != "true" ]]; then
   python3 "$SCRIPT_DIR/ambient-restart-state.py" launched --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN"
 fi

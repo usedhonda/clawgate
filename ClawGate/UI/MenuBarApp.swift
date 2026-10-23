@@ -137,6 +137,9 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     self.petWindowController?.hide()
                 }
             }
+        #if DEBUG
+        NativeInputFixture.presentIfRequested()
+        #endif
     }
 
     func applicationWillTerminate(_ notification: Notification) {

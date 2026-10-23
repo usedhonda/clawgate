@@ -16,7 +16,7 @@ PROJECT_PATH="$HOME/projects/ios/clawgate"
 # Match the running app regardless of which local worktree supplied the bundle.
 # A canonical-path-only pattern treats a healthy worktree build as missing and
 # starts a destructive one-minute restart loop.
-APP_BIN_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
+APP_BIN_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate($| --native-input-probe )"
 LOG_DIR="$HOME/.clawgate/logs"
 LOG="$LOG_DIR/watchdog.log"
 HEALTH_URL="http://127.0.0.1:8765/v1/health"

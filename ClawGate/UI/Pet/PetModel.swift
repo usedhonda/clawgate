@@ -1249,11 +1249,19 @@ final class PetModel: NSObject, ObservableObject {
         }
     }
 
+    #if DEBUG
+    // Instance-only: a diagnostic model must never overwrite the live Pet stores.
+    var persistenceDisabledForFixture = false
+    #endif
+
     /// Persists a main store, surfacing a promote failure as a durable
     /// `backupDegraded` warning rather than swallowing it. Returns whether the
     /// primary is durable (the append landed).
     @discardableResult
     private func persistStore(_ entries: [NotificationEntry], file: String) -> Bool {
+        #if DEBUG
+        guard !persistenceDisabledForFixture else { return true }
+        #endif
         switch PetLogStore.saveOutcome(entries, file: file) {
         case .committed:
             return true
