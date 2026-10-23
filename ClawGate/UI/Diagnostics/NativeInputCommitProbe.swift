@@ -126,6 +126,34 @@ final class NativeInputCommitProbe {
         }
     }
 
+    /// Native action activation -> verified state transition. AX-only actions
+    /// without a recent event in this exact window are never latency samples.
+    func beginNativeAction(_ workload: String) -> Int? {
+        guard let host, let event = NSApp.currentEvent, event.window === host.window,
+              [.leftMouseDown, .leftMouseUp, .keyDown].contains(event.type),
+              ProcessInfo.processInfo.systemUptime - event.timestamp < 0.25 else { return nil }
+        sequence += 1
+        let overlaps = pending.values.filter { $0.kind == "action" }.map(\.id)
+        for id in overlaps { pending[id]?.overlapped = true }
+        let signpost = OSSignpostID(log: log)
+        pending[sequence] = Pending(id: sequence, kind: "action", workload: workload,
+            started: event.timestamp, beforeInput: "", editor: nil, beforeEditorText: nil,
+            clip: nil, beforeOrigin: nil, responder: "native action",
+            keyCode: 0, modifiers: event.modifierFlags.rawValue, signpost: signpost,
+            overlapped: !overlaps.isEmpty)
+        let id = sequence
+        os_signpost(.begin, log: log, name: "NativeInputCommit", signpostID: signpost,
+                    "operation=%d", id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.expire(id, reason: "action semantic update not confirmed")
+        }
+        return id
+    }
+
+    func completeNativeAction(_ id: Int?) {
+        if let id { semanticUpdate(id, source: "verified-native-action-state") }
+    }
+
     private func semanticUpdate(_ id: Int, source: String) {
         guard let operation = pending.removeValue(forKey: id) else { return }
         // @Published emits in willSet. Complete after its binding update returns,

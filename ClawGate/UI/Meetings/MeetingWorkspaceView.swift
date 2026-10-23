@@ -101,8 +101,14 @@ struct MeetingWorkspaceView: View {
         let status = rowStatuses[meeting.id] ?? MeetingWorkspaceStatus(meeting: meeting)
         let active = meeting.id == selectedID
         return Button {
+            #if DEBUG
+            let changed = selectedID != meeting.id
+            #endif
             selectedID = meeting.id
             tab = .minutes
+            #if DEBUG
+            if changed { NativeInputFixture.workspaceAction(model: model, workload: "workspace-selection") }
+            #endif
         } label: {
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -495,7 +501,15 @@ private struct MeetingWorkspaceDetail: View {
     private var tabBar: some View {
         HStack(spacing: 4) {
             ForEach(MeetingWorkspaceView.Tab.allCases) { item in
-                Button { tab = item } label: {
+                Button {
+                    #if DEBUG
+                    let changed = tab != item
+                    #endif
+                    tab = item
+                    #if DEBUG
+                    if changed { NativeInputFixture.workspaceAction(model: model, workload: "workspace-tab") }
+                    #endif
+                } label: {
                     Text(item.rawValue)
                         .font(.system(size: 14, weight: tab == item ? .bold : .regular))
                         .padding(.horizontal, 14).frame(height: 38)

@@ -6,8 +6,10 @@ import SwiftUI
 /// The PetModel is never started; only this object's timers/window/probe are owned.
 final class NativeInputFixture: NSObject, ObservableObject, NSWindowDelegate {
     private static var active: NativeInputFixture?
-    let model = PetModel()
+    let model: PetModel
     @Published var streaming = false
+    @Published var scope = "Chat"
+    let workloads: NativeWorkloadFixture
     private let output: URL
     private var window: NSWindow?
     private var probe: NativeInputCommitProbe?
@@ -15,10 +17,13 @@ final class NativeInputFixture: NSObject, ObservableObject, NSWindowDelegate {
     private var ticks = 0
     private var finished = false
 
-    private init(output: URL) {
-        self.output = output
-        super.init()
+    private init(output: URL) throws {
+        let model = PetModel()
         model.persistenceDisabledForFixture = true
+        self.model = model
+        self.output = output
+        workloads = try NativeWorkloadFixture(root: output.appendingPathComponent("workloads"), model: model)
+        super.init()
         let text = String(repeating: "**Synthetic fixture**: input, links and `code` remain visible. ", count: 30)
         model.messages = (0..<60).map {
             OpenClawChatMessage(id: "fixture-\($0)", role: .assistant, text: text,
@@ -30,11 +35,13 @@ final class NativeInputFixture: NSObject, ObservableObject, NSWindowDelegate {
     static func presentIfRequested() {
         guard CommandLine.arguments.count == 3,
               CommandLine.arguments[1] == "--native-input-probe", active == nil else { return }
-        let fixture = NativeInputFixture(output: URL(fileURLWithPath: CommandLine.arguments[2]))
-        active = fixture
-        do { try fixture.start() }
+        do {
+            let fixture = try NativeInputFixture(output: URL(fileURLWithPath: CommandLine.arguments[2]))
+            active = fixture
+            try fixture.start()
+        }
         catch {
-            fixture.stop()
+            active?.stop()
             active = nil
             fputs("Native input fixture could not initialize.\n", stderr)
         }
@@ -53,6 +60,8 @@ final class NativeInputFixture: NSObject, ObservableObject, NSWindowDelegate {
                                       inputChanges: model.$inputText.eraseToAnyPublisher(),
                                       phase: { [weak self] in self?.streaming == true ? "stream" : "static" },
                                       onSample: { [weak self] in self?.flushReport() })
+        workloads.beginAction = { [weak self] in self?.probe?.beginNativeAction($0) }
+        workloads.completeAction = { [weak self] in self?.probe?.completeNativeAction($0) }
         probe?.start()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -84,6 +93,7 @@ final class NativeInputFixture: NSObject, ObservableObject, NSWindowDelegate {
 
     private func flushReport() {
         var result = probe?.report() ?? [:]
+        result["workloadState"] = workloads.evidence()
         result["historyCount"] = 60
         result["streamIntervalMs"] = 50
         result["connected"] = model.connectionState == .connected
@@ -95,11 +105,18 @@ final class NativeInputFixture: NSObject, ObservableObject, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) { finish() }
 
     private func stop() {
+        workloads.stop()
         timer?.invalidate()
         timer = nil
         probe?.stop()
         // Do not call model.cleanup(): an unstarted diagnostic model does not
         // own shared watcher lifecycle.
+    }
+
+    static func workspaceAction(model: PetModel, workload: String) {
+        guard let fixture = active, fixture.model === model, fixture.scope == "Workloads" else { return }
+        let id = fixture.probe?.beginNativeAction(workload)
+        fixture.probe?.completeNativeAction(id)
     }
 
     private func write(_ value: [String: Any], name: String) throws {
@@ -123,7 +140,15 @@ private struct NativeInputFixtureView: View {
                 Button("Finish fixture") { fixture.finish() }
                 Text(fixture.streaming ? "stream" : "static")
             }
-            PetChatContainerView(model: fixture.model)
+            Picker("Scope", selection: $fixture.scope) {
+                Text("Chat").tag("Chat")
+                Text("Workloads").tag("Workloads")
+            }.pickerStyle(.segmented)
+            if fixture.scope == "Chat" {
+                PetChatContainerView(model: fixture.model)
+            } else {
+                NativeWorkloadFixtureView(fixture: fixture.workloads)
+            }
         }
     }
 }

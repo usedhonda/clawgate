@@ -92,7 +92,7 @@ private final class PaneResizeHandleNSView: NSView {
 }
 
 
-private struct AmbientTranscriptTextView: NSViewRepresentable {
+struct AmbientTranscriptTextView: NSViewRepresentable {
     let attributedTranscript: NSAttributedString
     let textRevision: Int
     let scrollRevision: Int
