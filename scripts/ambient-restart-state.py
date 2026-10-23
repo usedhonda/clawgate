@@ -3,13 +3,25 @@
 
 import json
 from pathlib import Path
+import argparse
+from datetime import datetime, timedelta, timezone
+import fcntl
+import hashlib
+import os
+import socket
+import stat
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 
 BASE = "http://127.0.0.1:8765/v1/ambient"
+INTENT_FILE = Path.home() / "Library/Application Support/ClawGate/ambient-context/capture-choice.json"
+RECEIPT_SECONDS = 15 * 60
 
 
 def request(path, method="GET"):
@@ -41,20 +53,12 @@ def choice(status):
     }
 
 
-def snapshot(recovery_file=None):
-    try:
-        status = request("/status")
-    except (urllib.error.URLError, TimeoutError):
-        if recovery_file is None:
-            raise
-        # Use an explicit prior restart receipt only when the API is unreachable.
-        # A live user's newer choice always wins.
-        status = json.loads(Path(recovery_file).read_text())["state"]
-        print("Using explicit pre-failure ambient restart receipt.", file=sys.stderr)
+def snapshot():
+    status = request("/status")
     return None if status is None else choice(status)
 
 
-def restore(before, timeout=45):
+def restore(before, timeout=45, guard=lambda: None, before_post=lambda: None):
     if before is None:
         return
     if set(before) != {"capturing", "streaming"} or any(type(v) is not bool for v in before.values()):
@@ -62,6 +66,8 @@ def restore(before, timeout=45):
     deadline = time.monotonic() + timeout
     resumed = False
     while True:
+        if not resumed:
+            guard()
         status = request("/status")
         if status is None:
             raise RuntimeError("ambient became unavailable after restart")
@@ -80,6 +86,8 @@ def restore(before, timeout=45):
             raise RuntimeError("transcription unexpectedly enabled after restart")
         if not resumed and (not capturing or streaming != before["streaming"]):
             route = "/stream/start" if before["streaming"] else "/capture/resume"
+            guard()
+            before_post()  # Persist before sending: an uncertain POST is never replayed.
             if request(route, "POST") is None:
                 raise RuntimeError("ambient restoration was not acknowledged")
             resumed = True  # An uncertain/failed POST is never retried.
@@ -87,23 +95,222 @@ def restore(before, timeout=45):
             # Capture-only status deliberately hides tap liveness. A new process's
             # finalized chunk is direct audio-delivery evidence in either mode.
             age = status.get("secondsSinceLastChunk", -1)
-            if status.get("chunksSurfaced", 0) > 0 and 0 <= age <= 35:
+            intent = read_intent(allow_pending=True)
+            intent_settled = intent is None or intent["settled"]
+            if intent_settled and status.get("chunksSurfaced", 0) > 0 and 0 <= age <= 35:
                 return
         if time.monotonic() >= deadline:
             raise RuntimeError("ambient restoration lacks fresh audio delivery")
         time.sleep(1)
 
 
+def atomic_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix="." + path.name, dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(value, stream, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def read_intent(allow_pending=False):
+    try:
+        value = json.loads(INTENT_FILE.read_text())
+    except FileNotFoundError:
+        return None  # First installation: live status only, never crash replay.
+    if not isinstance(value, dict) or type(value.get("settled")) is not bool:
+        raise RuntimeError("ambient user intent is invalid")
+    try:
+        uuid.UUID(value["revision"])
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise RuntimeError("ambient user intent is invalid") from None
+    if not allow_pending and not value["settled"]:
+        raise RuntimeError("ambient user control is pending; restart stopped before termination; "
+                           "--restart-without-ambient-restore requires explicit one-operation authorization")
+    return value
+
+
+def intent_matches(receipt):
+    current = read_intent()
+    revision = current["revision"] if current else None
+    if revision != receipt["intent_revision"]:
+        raise RuntimeError("newer ambient user control; restoration refused")
+
+
+def process_for(app_bin):
+    result = subprocess.run(["ps", "-axo", "pid=,lstart=,comm="],
+                            check=True, capture_output=True, text=True)
+    matches = []
+    for line in result.stdout.splitlines():
+        fields = line.split(None, 6)
+        if len(fields) == 7 and fields[6] == str(Path(app_bin).resolve()):
+            matches.append({"pid": int(fields[0]), "started": " ".join(fields[1:6])})
+    if len(matches) > 1:
+        raise RuntimeError("multiple local app processes; restart refused")
+    return matches[0] if matches else None
+
+
+def binary_uuid(app_bin):
+    result = subprocess.run(["xcrun", "dwarfdump", "--uuid", str(app_bin)],
+                            check=True, capture_output=True, text=True)
+    values = [line.split()[1] for line in result.stdout.splitlines() if line.startswith("UUID:")]
+    if not values:
+        raise RuntimeError("application binary identity unavailable")
+    return sorted(values)
+
+
+def app_identity(app_bin):
+    return hashlib.sha256(str(Path(app_bin).resolve()).encode()).hexdigest()
+
+
+def private_json(path):
+    path = Path(path)
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise RuntimeError("restart receipt must be an owned private regular file")
+    return json.loads(path.read_text())
+
+
+def load_receipt(path, app_bin):
+    value = private_json(path)
+    try:
+        uuid.UUID(value["operation"])
+        captured = datetime.fromisoformat(value["capturedAt"]).timestamp()
+        expires = datetime.fromisoformat(value["expiresAt"]).timestamp()
+        age = time.time() - captured
+        valid = (value["schema"] == 1 and 0 <= age <= RECEIPT_SECONDS
+                 and 0 < expires - captured <= RECEIPT_SECONDS and time.time() <= expires
+                 and value["phase"] in ("prepared", "stopped", "launched")
+                 and type(value["restore_attempted"]) is bool
+                 and value["app_identity"] == app_identity(app_bin)
+                 and binary_uuid(app_bin) in (value["source_uuid"], value["target_uuid"]))
+        if value["state"] is not None:
+            choice(value["state"])
+    except (ValueError, KeyError, TypeError):
+        valid = False
+    if not valid:
+        raise RuntimeError("restart receipt is stale, foreign, invalid or consumed")
+    return value
+
+
+def prepare(path, app_bin, target_bin, without_restore=False, existing_receipt=False):
+    if without_restore:
+        print("Explicit restart without ambient restoration; any receipt retained.", file=sys.stderr)
+        return
+    if existing_receipt:
+        load_receipt(path, app_bin)
+    source = process_for(app_bin)
+    try:
+        intent_before = read_intent()
+        status = request("/status") if source else None
+        intent_after = read_intent()
+        if intent_before != intent_after:
+            raise RuntimeError("ambient control changed during snapshot")
+        if status is not None:
+            choice(status)
+            if intent_after and choice(intent_after) != choice(status):
+                raise RuntimeError("ambient user intent has not settled to current state")
+    except (urllib.error.URLError, TimeoutError, socket.timeout):
+        if source:
+            raise RuntimeError("live app API unavailable; stopped before termination; receipt: " + str(path)
+                               + "; --restart-without-ambient-restore requires explicit one-operation authorization") from None
+        status = None
+        intent_after = read_intent()
+    if source is None and Path(path).exists():
+        receipt = load_receipt(path, app_bin)
+        if receipt["restore_attempted"] or receipt["intent_revision"] is None:
+            raise RuntimeError("restart receipt cannot be automatically replayed")
+        if binary_uuid(target_bin) != receipt["target_uuid"]:
+            raise RuntimeError("recovery target differs from interrupted operation")
+        intent_matches(receipt)
+        # No app is alive to accept a newer GUI control; the durable revision
+        # fences any control received before the source or replacement exited.
+        return
+    captured_at = datetime.now(timezone.utc)
+    value = {
+        "schema": 1, "operation": str(uuid.uuid4()),
+        "capturedAt": captured_at.isoformat(),
+        "expiresAt": (captured_at + timedelta(seconds=RECEIPT_SECONDS)).isoformat(),
+        "app_identity": app_identity(app_bin), "source_process": source,
+        "source_uuid": binary_uuid(app_bin), "target_uuid": binary_uuid(target_bin),
+        "intent_revision": intent_after["revision"] if intent_after else None,
+        "state": None if status is None else {key: status[key] for key in ("captureState", "streaming")},
+        "phase": "prepared", "restore_attempted": False,
+    }
+    if Path(path).exists():
+        old = private_json(path)
+        old["phase"] = "superseded"
+        atomic_json(str(path) + ".previous", old)
+    atomic_json(path, value)  # Must complete before the caller sends SIGTERM.
+
+
+def finish(path, app_bin):
+    receipt = load_receipt(path, app_bin)
+    process = process_for(app_bin)
+    if process is None or process == receipt["source_process"]:
+        raise RuntimeError("replacement process identity not established")
+    if binary_uuid(app_bin) != receipt["target_uuid"]:
+        raise RuntimeError("installed replacement differs from restart target")
+    if receipt["restore_attempted"]:
+        raise RuntimeError("earlier restore POST outcome uncertain; not retried")
+    intent_matches(receipt)
+
+    def mark_post():
+        receipt["restore_attempted"] = True
+        atomic_json(path, receipt)
+
+    before = None if receipt["state"] is None else choice(receipt["state"])
+    restore(before, guard=lambda: intent_matches(receipt), before_post=mark_post)
+    receipt["phase"] = "consumed"
+    atomic_json(path, receipt)
+    os.replace(path, str(path) + ".consumed")
+    print("Ambient pre-restart choice verified; receipt consumed.")
+
+
+def run_locked(project, script, arguments):
+    path = Path(project) / ".local/ambient-restart.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise RuntimeError("another canonical local restart owns the receipt") from None
+    os.set_inheritable(fd, True)
+    os.environ["CLAWGATE_RESTART_LOCK"] = str(Path(project).resolve())
+    os.execv("/bin/bash", ["/bin/bash", script, *arguments])
+
+
 def main():
-    if len(sys.argv) == 2 and sys.argv[1] == "snapshot":
+    if len(sys.argv) >= 4 and sys.argv[1] == "run-locked":
+        run_locked(sys.argv[2], sys.argv[3], sys.argv[4:])
+        return
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("snapshot", "prepare", "stopped", "launched", "finish"))
+    parser.add_argument("--receipt")
+    parser.add_argument("--app-bin")
+    parser.add_argument("--target-bin")
+    parser.add_argument("--without-restore", action="store_true")
+    parser.add_argument("--existing-receipt", action="store_true")
+    args = parser.parse_args()
+    if args.action == "snapshot":
         print(json.dumps(snapshot(), separators=(",", ":")))
-    elif len(sys.argv) == 4 and sys.argv[1:3] == ["snapshot", "--recovery-file"]:
-        print(json.dumps(snapshot(sys.argv[3]), separators=(",", ":")))
-    elif len(sys.argv) == 3 and sys.argv[1] == "restore":
-        restore(json.loads(sys.argv[2]))
-        print("Ambient pre-restart choice verified (fresh audio required when active).")
+    elif args.action == "prepare":
+        prepare(args.receipt, args.app_bin, args.target_bin, args.without_restore, args.existing_receipt)
+    elif args.action == "finish":
+        finish(args.receipt, args.app_bin)
     else:
-        raise RuntimeError("usage: ambient-restart-state.py snapshot [--recovery-file <receipt>] | restore <snapshot>")
+        receipt = load_receipt(args.receipt, args.app_bin)
+        if args.action == "stopped" and process_for(args.app_bin) is not None:
+            raise RuntimeError("old application is still alive")
+        receipt["phase"] = args.action
+        atomic_json(args.receipt, receipt)
 
 
 if __name__ == "__main__":

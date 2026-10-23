@@ -169,6 +169,8 @@ final class AmbientController {
     private let audioHubRuntime: AudioHubRuntime?
 
     private let state = DispatchQueue(label: "ai.clawgate.ambient.state")
+    private let restartIntent = AmbientRestartIntent(
+        url: AmbientStorage.ambientRoot.appendingPathComponent("capture-choice.json"))
     private let work = DispatchQueue(label: "ai.clawgate.ambient.transcribe")
 
     private var streaming = false
@@ -321,12 +323,17 @@ final class AmbientController {
     }
 
     /// Start the Context Stream: ensure capture is running and begin transcribing.
-    func startStream(completion: @escaping (Result<Void, ControlError>) -> Void) {
+    func startStream(recordIntent: Bool = true, completion: @escaping (Result<Void, ControlError>) -> Void) {
         guard isAvailable else { completion(.failure(.clientOnly)); return }
+        let revision = recordIntent ? beginRestartIntent() : nil
         AmbientCaptureManager.requestMicAccess { [weak self] granted in
             guard let self else { return }
-            guard granted else { completion(.failure(.micDenied)); return }
+            guard granted else {
+                self.state.async { self.settleRestartIntent(revision) }
+                completion(.failure(.micDenied)); return
+            }
             self.state.async {
+                defer { self.settleRestartIntent(revision) }
                 do {
                     if self.capture.state != .capturing {
                         self.micCaptureReady = false
@@ -363,7 +370,9 @@ final class AmbientController {
 
     /// Stop transcribing/delivering. Capture may keep running.
     func stopStream() {
+        let revision = beginRestartIntent()
         state.async {
+            defer { self.settleRestartIntent(revision) }
             self.streaming = false
             self.setWasStreaming(false)
             // The microphone may stay open after the stream stops. While it does,
@@ -382,7 +391,9 @@ final class AmbientController {
 
     /// Hard-stop the microphone (privacy control).
     func pauseCapture() {
+        let revision = beginRestartIntent()
         state.async {
+            defer { self.settleRestartIntent(revision) }
             self.streaming = false
             self.setWasStreaming(false)
             self.healthMonitor.stop()
@@ -660,7 +671,7 @@ final class AmbientController {
             return
         }
         log("ambient auto-resume: stream was on before launch, restarting")
-        startStream { [weak self] result in
+        startStream(recordIntent: false) { [weak self] result in
             switch result {
             case .success: self?.log("ambient auto-resume ok")
             case .failure(let e): self?.log("ambient auto-resume failed: \(e)")
@@ -670,10 +681,15 @@ final class AmbientController {
 
     func resumeCapture(completion: @escaping (Result<Void, ControlError>) -> Void) {
         guard isAvailable else { completion(.failure(.clientOnly)); return }
+        let revision = beginRestartIntent()
         AmbientCaptureManager.requestMicAccess { [weak self] granted in
             guard let self else { return }
-            guard granted else { completion(.failure(.micDenied)); return }
+            guard granted else {
+                self.state.async { self.settleRestartIntent(revision) }
+                completion(.failure(.micDenied)); return
+            }
             self.state.async {
+                defer { self.settleRestartIntent(revision) }
                 do {
                     if self.capture.state == .idle {
                         self.micCaptureReady = false
@@ -692,6 +708,19 @@ final class AmbientController {
                 }
             }
         }
+    }
+
+    private func beginRestartIntent() -> String? {
+        do { return try restartIntent.begin() }
+        catch { log("ambient restart intent could not be persisted"); return nil }
+    }
+
+    /// Called on state, after the corresponding control has completed.
+    private func settleRestartIntent(_ revision: String?) {
+        do {
+            try restartIntent.settle(revision, captureState: capture.state.rawValue,
+                                     streaming: streaming)
+        } catch { log("ambient restart intent remains unavailable") }
     }
 
     // MARK: - Status

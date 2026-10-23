@@ -10,9 +10,11 @@ set -euo pipefail
 #   ./scripts/restart-local-clawgate.sh --skip-plugin-sync
 #   ./scripts/restart-local-clawgate.sh --plugin-client-only
 #   ./scripts/restart-local-clawgate.sh --project-path "$(pwd)"
-#   ./scripts/restart-local-clawgate.sh --recover-ambient-state-file .local/before.json
+#   ./scripts/restart-local-clawgate.sh --recover-ambient-state-file .local/ambient-restart-receipt.json
+#   ./scripts/restart-local-clawgate.sh --restart-without-ambient-restore
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+ORIGINAL_ARGS=("$@")
 PROJECT_PATH="${PROJECT_PATH:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 SKIP_BUILD=false
 SKIP_SYNC=false
@@ -22,6 +24,7 @@ SKIP_SIGN=false
 STAGE_ONLY=false
 WAIT_SECONDS=8
 AMBIENT_RECOVERY_FILE=""
+WITHOUT_AMBIENT_RESTORE=false
 export CLAWGATE_ROLE="host_b_client"
 export OPS_SCRIPT_NAME="restart-local-clawgate.sh"
 
@@ -45,11 +48,15 @@ while [[ $# -gt 0 ]]; do
       WAIT_SECONDS="$2"; shift 2 ;;
     --recover-ambient-state-file)
       AMBIENT_RECOVERY_FILE="$2"; shift 2 ;;
+    --restart-without-ambient-restore)
+      WITHOUT_AMBIENT_RESTORE=true; shift ;;
     *)
       echo "Unknown arg: $1" >&2
       exit 2 ;;
   esac
 done
+
+PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd -P)"
 
 if [[ "$PLUGIN_CLIENT_ONLY" == "true" && "$SKIP_PLUGIN_SYNC" == "true" ]]; then
   echo "--plugin-client-only cannot be combined with --skip-plugin-sync" >&2
@@ -92,6 +99,9 @@ if [[ "$PLUGIN_CLIENT_ONLY" == "true" ]]; then
 fi
 
 cd "$PROJECT_PATH"
+if [[ "${CLAWGATE_RESTART_LOCK:-}" != "$PROJECT_PATH" ]]; then
+  exec python3 "$SCRIPT_DIR/ambient-restart-state.py" run-locked "$PROJECT_PATH" "$SCRIPT_DIR/restart-local-clawgate.sh" "${ORIGINAL_ARGS[@]}"
+fi
 
 echo "== restart-local-clawgate =="
 echo "Project path: $PROJECT_PATH"
@@ -109,15 +119,19 @@ fi
 # Stop before replacing or signing mapped executable pages. Modifying a live
 # bundle can terminate the old process with CODESIGNING Invalid Page.
 APP_PROCESS_PAT="/ClawGate\\.app/Contents/MacOS/ClawGate$"
-AMBIENT_RESTART_STATE="null"
-if [[ "$STAGE_ONLY" != "true" ]] && { [[ -n "$AMBIENT_RECOVERY_FILE" ]] || pgrep -f "$APP_PROCESS_PAT" >/dev/null 2>&1; }; then
-  # Read immediately before stopping, not before the build: retain a user's
-  # latest microphone/transcription choice, including capture without a stream.
-  if [[ -n "$AMBIENT_RECOVERY_FILE" ]]; then
-    AMBIENT_RESTART_STATE="$(python3 "$SCRIPT_DIR/ambient-restart-state.py" snapshot --recovery-file "$AMBIENT_RECOVERY_FILE")"
+AMBIENT_RECEIPT="${AMBIENT_RECOVERY_FILE:-$PROJECT_PATH/.local/ambient-restart-receipt.json}"
+if [[ "$STAGE_ONLY" != "true" ]]; then
+  AMBIENT_PREPARE_ARGS=(prepare --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN")
+  if [[ "$SKIP_SYNC" == "true" ]]; then
+    AMBIENT_PREPARE_ARGS+=(--target-bin "$APP_BIN")
   else
-    AMBIENT_RESTART_STATE="$(python3 "$SCRIPT_DIR/ambient-restart-state.py" snapshot)"
+    AMBIENT_PREPARE_ARGS+=(--target-bin "$BUILD_BIN")
   fi
+  [[ -z "$AMBIENT_RECOVERY_FILE" ]] || AMBIENT_PREPARE_ARGS+=(--existing-receipt)
+  [[ "$WITHOUT_AMBIENT_RESTORE" != "true" ]] || AMBIENT_PREPARE_ARGS+=(--without-restore)
+  # Atomically persist the operation before killing the process. A live but
+  # unresponsive API is not permission to substitute an old microphone choice.
+  python3 "$SCRIPT_DIR/ambient-restart-state.py" "${AMBIENT_PREPARE_ARGS[@]}"
 fi
 if [[ "$STAGE_ONLY" != "true" ]]; then
 pkill -f "$APP_PROCESS_PAT" >/dev/null 2>&1 || true
@@ -134,6 +148,9 @@ for ((w=1; w<=5; w++)); do
   fi
   sleep 1
 done
+if [[ "$WITHOUT_AMBIENT_RESTORE" != "true" ]]; then
+  python3 "$SCRIPT_DIR/ambient-restart-state.py" stopped --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN"
+fi
 fi
 
 STAGE_TEAM=""
@@ -275,9 +292,20 @@ echo "[5/5] Restart app + local gateway"
 
 STARTUP_LOG="$PROJECT_PATH/.local/logs/clawgate-startup.log"
 mkdir -p "$(dirname "$STARTUP_LOG")"
+if [[ -L "$STARTUP_LOG" || -L "$STARTUP_LOG.previous" ]]; then
+  echo "Refusing symlinked startup log." >&2
+  exit 1
+fi
+if [[ -f "$STARTUP_LOG" ]]; then
+  chmod 600 "$STARTUP_LOG"
+  mv -f "$STARTUP_LOG" "$STARTUP_LOG.previous"
+fi
 touch "$STARTUP_LOG"
 chmod 600 "$STARTUP_LOG"
 open -na "$APP_PATH" --stdout "$STARTUP_LOG" --stderr "$STARTUP_LOG" --env NSUnbufferedIO=YES
+if [[ "$WITHOUT_AMBIENT_RESTORE" != "true" ]]; then
+  python3 "$SCRIPT_DIR/ambient-restart-state.py" launched --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN"
+fi
 sleep 2
 
 GATEWAY_LABEL="ai.openclaw.gateway"
@@ -327,7 +355,11 @@ for ((i=1; i<=WAIT_SECONDS; i++)); do
   if curl -fsS -m 2 http://127.0.0.1:8765/v1/health >/dev/null 2>&1; then
     curl -sS -m 2 http://127.0.0.1:8765/v1/health || true
     echo
-    python3 "$SCRIPT_DIR/ambient-restart-state.py" restore "$AMBIENT_RESTART_STATE"
+    if [[ "$WITHOUT_AMBIENT_RESTORE" != "true" ]]; then
+      python3 "$SCRIPT_DIR/ambient-restart-state.py" finish --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN"
+    else
+      echo "Ambient restoration skipped by explicit request; recording preservation is not verified."
+    fi
     ops_log info "restart_ok" "local health and ambient restoration succeeded"
     exit 0
   fi

@@ -21,17 +21,17 @@ def status(capturing=True, streaming=False, chunks=0, **extra):
 
 
 class AmbientRestartStateTests(unittest.TestCase):
-    def test_explicit_recovery_receipt_only_applies_to_unreachable_api(self):
-        with tempfile.TemporaryDirectory() as directory:
-            receipt = Path(directory) / "before.json"
-            receipt.write_text(json.dumps({"state": status()}))
-            with patch.object(subject, "request", side_effect=urllib.error.URLError("refused")):
-                self.assertEqual(subject.snapshot(receipt), {"capturing": True, "streaming": False})
-            with patch.object(subject, "request", return_value=status(False)):
-                self.assertEqual(subject.snapshot(receipt), {"capturing": False, "streaming": False})
-            with patch.object(subject, "request", side_effect=RuntimeError("unacknowledged")):
-                with self.assertRaises(RuntimeError):
-                    subject.snapshot(receipt)
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        fence = patch.object(subject, "INTENT_FILE", Path(directory.name) / "intent.json")
+        fence.start()
+        self.addCleanup(fence.stop)
+
+    def test_snapshot_does_not_substitute_unattributed_historical_state(self):
+        with patch.object(subject, "request", side_effect=urllib.error.URLError("refused")):
+            with self.assertRaises(urllib.error.URLError):
+                subject.snapshot()
 
     def test_incomplete_status_cannot_open_microphone(self):
         with patch.object(subject, "request", return_value={}) as request:
