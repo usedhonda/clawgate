@@ -377,11 +377,20 @@ for ((i=1; i<=WAIT_SECONDS; i++)); do
     curl -sS -m 2 http://127.0.0.1:8765/v1/health || true
     echo
     if [[ "$WITHOUT_AMBIENT_RESTORE" != "true" ]]; then
-      python3 "$SCRIPT_DIR/ambient-restart-state.py" finish --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN"
+      if python3 "$SCRIPT_DIR/ambient-restart-state.py" finish --receipt "$AMBIENT_RECEIPT" --app-bin "$APP_BIN"; then
+        ops_log info "restart_ok" "local health and ambient control choice verified; audio delivery observed separately"
+      else
+        RESTORE_RC=$?
+        if [[ "$RESTORE_RC" -ne 3 ]]; then
+          exit "$RESTORE_RC"
+        fi
+        echo "Application ready; pre-restart ambient choice unknown, restoration unverified." >&2
+        ops_log warn "restart_ready_ambient_unknown" "local health ready; ambient restoration unverified; receipt retained"
+      fi
     else
       echo "Ambient restoration skipped by explicit request; recording preservation is not verified."
+      ops_log warn "restart_ready_ambient_skipped" "local health ready; ambient restoration explicitly skipped"
     fi
-    ops_log info "restart_ok" "local health and ambient restoration succeeded"
     exit 0
   fi
   sleep 1

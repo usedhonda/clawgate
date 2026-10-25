@@ -148,6 +148,57 @@ class RestartReceiptTests(unittest.TestCase):
             request.assert_not_called()
         self.assertEqual(json.loads(self.receipt.read_text()), original)
 
+    def test_absent_source_uses_only_settled_durable_choice(self):
+        for active in (False, True):
+            with self.subTest(active=active):
+                self.receipt.unlink(missing_ok=True)
+                self.set_intent(active=active)
+                with patch.object(subject, "process_for", return_value=None), patch.object(
+                        subject, "binary_uuid", return_value=["binary-id"]), patch.object(subject, "request") as request:
+                    subject.prepare(self.receipt, self.app, self.app)
+                    request.assert_not_called()
+                saved = subject.private_json(self.receipt)
+                self.assertEqual(saved["state_kind"], "known")
+                self.assertEqual(saved["state_source"], "durable_user_intent")
+                self.assertEqual(subject.choice(saved["state"]), dict(capturing=active, streaming=False))
+
+    def test_unknown_and_legacy_null_are_not_success_or_microphone_authority(self):
+        self.intent.unlink()
+        with patch.object(subject, "process_for", return_value=None), patch.object(
+                subject, "binary_uuid", return_value=["binary-id"]), patch.object(subject, "request") as request:
+            subject.prepare(self.receipt, self.app, self.app)
+            request.assert_not_called()
+        original = subject.private_json(self.receipt)
+        self.assertEqual(original["state_kind"], "unknown")
+        legacy = dict(original)
+        legacy.pop("state_kind")
+        for saved in (original, legacy):
+            subject.atomic_json(self.receipt, saved)
+            with patch.object(subject, "process_for", return_value=self.new), patch.object(
+                    subject, "binary_uuid", return_value=["binary-id"]), patch.object(subject, "request") as request:
+                with self.assertRaises(subject.UnverifiedAmbientState):
+                    subject.finish(self.receipt, self.app)
+                request.assert_not_called()
+            self.assertEqual(subject.private_json(self.receipt), saved)
+            self.assertFalse(Path(str(self.receipt) + ".consumed").exists())
+
+    def test_explicit_unavailable_is_distinct_from_unknown(self):
+        import io
+        failure = subject.urllib.error.HTTPError(
+            subject.BASE + "/status", 403, "Forbidden", {},
+            io.BytesIO(b'{"ok":false,"error":{"code":"client_only_feature"}}'))
+        with patch.object(subject.urllib.request, "urlopen", side_effect=failure):
+            self.assertIsNone(subject.request("/status"))
+        with patch.object(subject, "process_for", return_value=self.old), patch.object(
+                subject, "binary_uuid", return_value=["binary-id"]), patch.object(subject, "request", return_value=None):
+            subject.prepare(self.receipt, self.app, self.app)
+        self.assertEqual(subject.private_json(self.receipt)["state_kind"], "not_applicable")
+        with patch.object(subject, "process_for", return_value=self.new), patch.object(
+                subject, "binary_uuid", return_value=["binary-id"]), patch.object(subject, "request", return_value=None) as request:
+            subject.finish(self.receipt, self.app)
+            request.assert_called_once_with("/status")
+        self.assertEqual(subject.private_json(str(self.receipt) + ".consumed")["outcome"], "not_applicable")
+
     def test_canonical_lease_preserves_arguments_and_excludes_another_restart(self):
         driver = self.root / "driver.sh"
         # The inherited lock must outlive exec into the canonical shell process.

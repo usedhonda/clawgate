@@ -24,6 +24,10 @@ INTENT_FILE = Path.home() / "Library/Application Support/ClawGate/ambient-contex
 RECEIPT_SECONDS = 15 * 60
 
 
+class UnverifiedAmbientState(RuntimeError):
+    """The app is ready, but no trustworthy pre-restart choice is available."""
+
+
 def request(path, method="GET"):
     req = urllib.request.Request(BASE + path, method=method)
     try:
@@ -32,7 +36,7 @@ def request(path, method="GET"):
     except urllib.error.HTTPError as error:
         if error.code == 403:
             payload = json.load(error)
-            if (payload.get("error") or {}).get("code") == "ambient_unavailable":
+            if (payload.get("error") or {}).get("code") in ("ambient_unavailable", "client_only_feature"):
                 return None
         raise RuntimeError("ambient request failed") from None
     if payload.get("ok") is not True or not isinstance(payload.get("result"), dict):
@@ -60,7 +64,7 @@ def snapshot():
 
 def restore(before, timeout=45, guard=lambda: None, before_post=lambda: None):
     if before is None:
-        return
+        raise UnverifiedAmbientState("pre-restart ambient choice unknown; no restoration attempted")
     if set(before) != {"capturing", "streaming"} or any(type(v) is not bool for v in before.values()):
         raise RuntimeError("invalid ambient restart snapshot")
     deadline = time.monotonic() + timeout
@@ -77,7 +81,7 @@ def restore(before, timeout=45, guard=lambda: None, before_post=lambda: None):
         if not before["capturing"]:
             if capturing or streaming != before["streaming"]:
                 raise RuntimeError("ambient inactive choice changed after restart")
-            return  # Never open a microphone that was intentionally inactive.
+            return "not_required"  # Never open an intentionally inactive microphone.
         if status.get("autoResumeBlockedReason"):
             raise RuntimeError("ambient safety inhibit prevents restoration")
         if status.get("backendPhase") in ("failed", "timedOut"):
@@ -98,7 +102,7 @@ def restore(before, timeout=45, guard=lambda: None, before_post=lambda: None):
             intent = read_intent(allow_pending=True)
             intent_settled = intent is None or intent["settled"]
             if intent_settled:
-                return
+                return "restored" if resumed else "already_matching"
         if time.monotonic() >= deadline:
             raise RuntimeError("ambient control state was not restored")
         time.sleep(1)
@@ -193,6 +197,9 @@ def load_receipt(path, app_bin):
                  and binary_uuid(app_bin) in (value["source_uuid"], value["target_uuid"]))
         if value["state"] is not None:
             choice(value["state"])
+        kind = value.get("state_kind", "known" if value["state"] is not None else "unknown")
+        valid = valid and kind in ("known", "unknown", "not_applicable")
+        valid = valid and ((kind == "known") == (value["state"] is not None))
     except (ValueError, KeyError, TypeError):
         valid = False
     if not valid:
@@ -233,6 +240,13 @@ def prepare(path, app_bin, target_bin, without_restore=False, existing_receipt=F
         # No app is alive to accept a newer GUI control; the durable revision
         # fences any control received before the source or replacement exited.
         return
+    state_kind = "known" if status is not None else "not_applicable" if source else "unknown"
+    state_source = "live_status" if source else "unavailable"
+    if source is None and intent_after is not None:
+        choice(intent_after)
+        status = intent_after
+        state_kind = "known"
+        state_source = "durable_user_intent"
     captured_at = datetime.now(timezone.utc)
     value = {
         "schema": 1, "operation": str(uuid.uuid4()),
@@ -242,6 +256,7 @@ def prepare(path, app_bin, target_bin, without_restore=False, existing_receipt=F
         "source_uuid": binary_uuid(app_bin), "target_uuid": binary_uuid(target_bin),
         "intent_revision": intent_after["revision"] if intent_after else None,
         "state": None if status is None else {key: status[key] for key in ("captureState", "streaming")},
+        "state_kind": state_kind, "state_source": state_source,
         "phase": "prepared", "restore_attempted": False,
     }
     if Path(path).exists():
@@ -266,12 +281,19 @@ def finish(path, app_bin):
         receipt["restore_attempted"] = True
         atomic_json(path, receipt)
 
-    before = None if receipt["state"] is None else choice(receipt["state"])
-    restore(before, guard=lambda: intent_matches(receipt), before_post=mark_post)
+    kind = receipt.get("state_kind", "known" if receipt["state"] is not None else "unknown")
+    if kind == "not_applicable":
+        if request("/status") is not None:
+            raise UnverifiedAmbientState("ambient availability changed; pre-restart choice unknown")
+        outcome = "not_applicable"
+    else:
+        before = None if receipt["state"] is None else choice(receipt["state"])
+        outcome = restore(before, guard=lambda: intent_matches(receipt), before_post=mark_post)
+    receipt["outcome"] = outcome
     receipt["phase"] = "consumed"
     atomic_json(path, receipt)
     os.replace(path, str(path) + ".consumed")
-    print("Ambient pre-restart choice verified; receipt consumed.")
+    print("Ambient control outcome: " + outcome + "; receipt consumed. Audio delivery is observed separately.")
 
 
 def run_locked(project, script, arguments):
@@ -316,6 +338,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except UnverifiedAmbientState as error:
+        print("Ambient restoration unverified: " + str(error) + "; receipt retained.", file=sys.stderr)
+        sys.exit(3)
     except Exception as error:
         reason = str(error) if isinstance(error, RuntimeError) else type(error).__name__
         print("Ambient restart preservation failed: " + reason, file=sys.stderr)
