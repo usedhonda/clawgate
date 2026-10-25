@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 /// Bounded, stateless reader for one session's append-only raw transcript.
 ///
@@ -10,17 +11,26 @@ struct AudioHubRawTranscriptReader {
         let device: UInt64
         let inode: UInt64
         let length: UInt64
+        let volumeUUID: String?
+
+        init(device: UInt64, inode: UInt64, length: UInt64, volumeUUID: String? = nil) {
+            self.device = device; self.inode = inode; self.length = length
+            self.volumeUUID = volumeUUID?.lowercased()
+        }
     }
 
     struct Checkpoint: Codable, Equatable {
         let offset: UInt64
         let physicalLine: UInt64
         let snapshot: Snapshot?
+        let previousLineSHA256: String?
 
-        init(offset: UInt64 = 0, physicalLine: UInt64 = 0, snapshot: Snapshot? = nil) {
+        init(offset: UInt64 = 0, physicalLine: UInt64 = 0, snapshot: Snapshot? = nil,
+             previousLineSHA256: String? = nil) {
             self.offset = offset
             self.physicalLine = physicalLine
             self.snapshot = snapshot
+            self.previousLineSHA256 = previousLineSHA256
         }
     }
 
@@ -54,7 +64,9 @@ struct AudioHubRawTranscriptReader {
     /// Device/inode and shrink checks detect replacement and truncation; they do
     /// not prove that a writer did not rewrite bytes in place on the same inode.
     static func read(sessionsRoot: URL, sessionID: String, checkpoint: Checkpoint,
-                     maxReadBytes: Int, maxLineBytes: Int) throws -> Outcome {
+                     maxReadBytes: Int, maxLineBytes: Int,
+                     legacyLineSHA256: String? = nil, legacyPrefixSHA256: String? = nil,
+                     onReconciled: ((Checkpoint) throws -> Void)? = nil) throws -> Outcome {
         guard maxReadBytes > 0, maxLineBytes > 0,
               checkpoint.offset <= UInt64(Int64.max), checkpoint.physicalLine < UInt64(Int.max)
         else { throw Error.invalidBounds }
@@ -84,15 +96,16 @@ struct AudioHubRawTranscriptReader {
         guard fstat(raw, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
               info.st_uid == getuid(), info.st_size >= 0 else { throw Error.unsafePath }
         let snapshot = Snapshot(device: UInt64(info.st_dev), inode: UInt64(info.st_ino),
-                                length: UInt64(info.st_size))
+                                length: UInt64(info.st_size), volumeUUID: try volumeUUID(root: sessionsRoot, descriptor: raw))
         if checkpoint.offset > 0 && checkpoint.snapshot == nil { throw Error.staleCursor }
         if let expected = checkpoint.snapshot {
-            guard expected.device == snapshot.device, expected.inode == snapshot.inode else {
+            guard expected.inode == snapshot.inode else {
                 throw Error.staleCursor
             }
             guard snapshot.length >= expected.length, snapshot.length >= checkpoint.offset else {
                 throw Error.truncatedCursor
             }
+            if let volume = expected.volumeUUID, volume.lowercased() != snapshot.volumeUUID { throw Error.staleCursor }
         } else if checkpoint.offset > snapshot.length {
             throw Error.truncatedCursor
         }
@@ -104,6 +117,32 @@ struct AudioHubRawTranscriptReader {
             var previous: UInt8 = 0
             let n = pread(raw, &previous, 1, off_t(checkpoint.offset - 1))
             guard n == 1, previous == 0x0A else { throw Error.staleCursor }
+        }
+        if let expected = checkpoint.snapshot, expected.device != snapshot.device {
+            guard snapshot.volumeUUID != nil else { throw Error.staleCursor }
+            if let anchor = checkpoint.previousLineSHA256 ?? legacyLineSHA256 {
+                guard try previousLineHash(raw, offset: checkpoint.offset, limit: maxLineBytes) == anchor else {
+                    throw Error.staleCursor
+                }
+            } else if let prefix = legacyPrefixSHA256 {
+                guard try prefixHash(raw, count: checkpoint.offset, lines: checkpoint.physicalLine) == prefix else {
+                    throw Error.staleCursor
+                }
+            } else if expected.volumeUUID == nil {
+                // No historical bytes exist to confuse with a replacement.
+                guard checkpoint.offset == 0, expected.length == 0, snapshot.length == 0 else {
+                    throw Error.staleCursor
+                }
+            }
+        }
+        if let expected = checkpoint.snapshot,
+           expected.device != snapshot.device || expected.volumeUUID != snapshot.volumeUUID {
+            var afterProof = stat()
+            guard fstat(raw, &afterProof) == 0, afterProof.st_size >= info.st_size else {
+                throw Error.truncatedCursor
+            }
+            try onReconciled?(.init(offset: checkpoint.offset, physicalLine: checkpoint.physicalLine,
+                snapshot: snapshot, previousLineSHA256: checkpoint.previousLineSHA256 ?? legacyLineSHA256))
         }
         if checkpoint.offset == snapshot.length { return .endOfFile }
 
@@ -137,6 +176,48 @@ struct AudioHubRawTranscriptReader {
         if UInt64(bytes.count) < available { throw Error.readLimitExceeded }
         // No LF before EOF: hold the torn tail and do not advance.
         return .incompleteTail
+    }
+
+    /// Query the persistent volume UUID, then bind the path-based Foundation
+    /// result back to the already-open, no-follow descriptor.
+    static func volumeUUID(root: URL, descriptor: Int32) throws -> String? {
+        var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(descriptor, F_GETPATH, &path) == 0 else { throw Error.unsafePath }
+        let url = URL(fileURLWithPath: String(cString: path))
+        let rootUUID = try root.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString?.lowercased()
+        let fileUUID = try url.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString?.lowercased()
+        var opened = stat(), named = stat()
+        guard fstat(descriptor, &opened) == 0, lstat(url.path, &named) == 0,
+              opened.st_dev == named.st_dev, opened.st_ino == named.st_ino,
+              rootUUID == fileUUID else { throw Error.unsafePath }
+        return fileUUID
+    }
+
+    private static func previousLineHash(_ fd: Int32, offset: UInt64, limit: Int) throws -> String {
+        guard offset > 0, limit < Int.max else { throw Error.staleCursor }
+        let start = offset > UInt64(limit) ? offset - UInt64(limit) - 1 : 0
+        var bytes = [UInt8](repeating: 0, count: Int(offset - start))
+        guard pread(fd, &bytes, bytes.count, off_t(start)) == bytes.count,
+              bytes.last == 0x0A else { throw Error.staleCursor }
+        let preceding = bytes.dropLast().lastIndex(of: 0x0A)
+        guard preceding != nil || start == 0 else { throw Error.staleCursor }
+        let line = Data(bytes.suffix(from: preceding.map { $0 + 1 } ?? 0))
+        guard line.count <= limit else { throw Error.lineLimitExceeded }
+        return SHA256.hash(data: line).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func prefixHash(_ fd: Int32, count: UInt64, lines: UInt64) throws -> String {
+        var position: UInt64 = 0, foundLines: UInt64 = 0
+        var hasher = SHA256()
+        var bytes = [UInt8](repeating: 0, count: 1024 * 1024)
+        while position < count {
+            let amount = Int(min(UInt64(bytes.count), count - position))
+            guard pread(fd, &bytes, amount, off_t(position)) == amount else { throw Error.readFailed }
+            let block = Data(bytes.prefix(amount)); hasher.update(data: block)
+            foundLines += UInt64(block.filter { $0 == 0x0A }.count); position += UInt64(amount)
+        }
+        guard foundLines == lines else { throw Error.staleCursor }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private static func openDirectory(_ path: String) -> Int32 {

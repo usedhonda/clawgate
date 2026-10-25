@@ -11,9 +11,17 @@ enum AudioHubBaselineReader {
         let fd = try openRaw(root: sessionsRoot, sessionID: entry.sessionID)
         defer { close(fd) }
         var before = stat()
-        guard fstat(fd, &before) == 0, UInt64(before.st_dev) == expected.device,
+        guard fstat(fd, &before) == 0,
               UInt64(before.st_ino) == expected.inode, before.st_size >= 0,
               UInt64(before.st_size) >= expected.length else { throw AudioHubRuntime.Failure.invalidPath }
+        let volume = try AudioHubRawTranscriptReader.volumeUUID(root: sessionsRoot, descriptor: fd)
+        if let expectedVolume = expected.volumeUUID {
+            guard volume == expectedVolume.lowercased() else { throw AudioHubRuntime.Failure.invalidPath }
+        } else if UInt64(before.st_dev) != expected.device {
+            guard volume != nil, entry.initial.offset > 0 || (expected.length == 0 && before.st_size == 0) else {
+                throw AudioHubRuntime.Failure.invalidPath
+            }
+        }
         var hasher = SHA256()
         var remaining = entry.initial.offset
         var lines: UInt64 = 0

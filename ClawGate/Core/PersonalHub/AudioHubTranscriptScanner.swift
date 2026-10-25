@@ -15,18 +15,20 @@ final class AudioHubTranscriptScanner {
     private let outbox: AudioHubOutbox
     private let maxReadBytes: Int
     private let maxLineBytes: Int
+    private let legacyPrefixSHA256: String?
     private let lock = NSLock()
 
     init(sessionsRoot: URL, sessionID: String,
          initialCheckpoint: AudioHubRawTranscriptReader.Checkpoint,
          control: AudioHubControlStore, outbox: AudioHubOutbox,
-         maxReadBytes: Int, maxLineBytes: Int) throws {
+         maxReadBytes: Int, maxLineBytes: Int, legacyPrefixSHA256: String? = nil) throws {
         guard maxReadBytes > 0, maxLineBytes > 0, maxLineBytes < Int.max else {
             throw AudioHubRawTranscriptReader.Error.invalidBounds
         }
         self.sessionsRoot = sessionsRoot; self.sessionID = sessionID
         self.control = control; self.outbox = outbox
         self.maxReadBytes = maxReadBytes; self.maxLineBytes = maxLineBytes
+        self.legacyPrefixSHA256 = legacyPrefixSHA256
         try control.startScan(sessionID: sessionID, initial: initialCheckpoint)
     }
 
@@ -40,11 +42,23 @@ final class AudioHubTranscriptScanner {
     private func stageUnlocked() throws -> AudioHubRawTranscriptReader.Outcome {
         let scan = try control.scan(sessionID: sessionID)
         if let staged = scan.staged { return .line(staged) }
+        var cursor = scan.cursor
+        let needsProof = cursor.snapshot?.volumeUUID == nil
+        let lastLine = needsProof ? try control.checkpoints().first {
+            $0.sourceRecordRef == "clawgate:session:\(sessionID):raw:\(cursor.physicalLine)"
+        }?.revisionRef : nil
+        let prefix = cursor.offset == scan.initial.offset && cursor.physicalLine == scan.initial.physicalLine
+            ? legacyPrefixSHA256 : nil
         let outcome = try AudioHubRawTranscriptReader.read(sessionsRoot: sessionsRoot,
-            sessionID: sessionID, checkpoint: scan.cursor,
-            maxReadBytes: maxReadBytes, maxLineBytes: maxLineBytes)
+            sessionID: sessionID, checkpoint: cursor,
+            maxReadBytes: maxReadBytes, maxLineBytes: maxLineBytes,
+            legacyLineSHA256: lastLine.flatMap { $0.hasPrefix("sha256:") ? String($0.dropFirst(7)) : nil },
+            legacyPrefixSHA256: prefix, onReconciled: { replacement in
+                try self.control.reconcileCursor(sessionID: self.sessionID, expected: cursor, replacement: replacement)
+                cursor = replacement
+            })
         if case .line(let line) = outcome {
-            try control.stage(sessionID: sessionID, expected: scan.cursor, line: line)
+            try control.stage(sessionID: sessionID, expected: cursor, line: line)
         }
         return outcome
     }

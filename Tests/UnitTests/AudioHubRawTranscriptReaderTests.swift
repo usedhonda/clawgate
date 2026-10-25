@@ -101,4 +101,22 @@ final class AudioHubRawTranscriptReaderTests: XCTestCase {
             XCTAssertEqual($0 as? AudioHubRawTranscriptReader.Error, .unsafePath)
         }
     }
+
+    func testDeviceMigrationRejectsMissingWrongContentAndDifferentVolume() throws {
+        let r = try root(); defer { try? FileManager.default.removeItem(at: r) }
+        let file = try rawURL(r); try Data("one\ntwo\n".utf8).write(to: file)
+        var info = stat(); XCTAssertEqual(lstat(file.path, &info), 0)
+        for volume in [nil, UUID().uuidString] {
+            let cp = AudioHubRawTranscriptReader.Checkpoint(offset: 4, physicalLine: 1,
+                snapshot: .init(device: UInt64(info.st_dev) + 1, inode: UInt64(info.st_ino), length: 8, volumeUUID: volume))
+            XCTAssertThrowsError(try AudioHubRawTranscriptReader.read(sessionsRoot: r, sessionID: "ctx-test", checkpoint: cp,
+                maxReadBytes: 100, maxLineBytes: 100)) {
+                XCTAssertEqual($0 as? AudioHubRawTranscriptReader.Error, .staleCursor)
+            }
+            XCTAssertThrowsError(try AudioHubRawTranscriptReader.read(sessionsRoot: r, sessionID: "ctx-test", checkpoint: cp,
+                maxReadBytes: 100, maxLineBytes: 100, legacyLineSHA256: String(repeating: "0", count: 64))) {
+                XCTAssertEqual($0 as? AudioHubRawTranscriptReader.Error, .staleCursor)
+            }
+        }
+    }
 }

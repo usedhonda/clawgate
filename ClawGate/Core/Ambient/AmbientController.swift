@@ -44,7 +44,8 @@ struct AmbientRawTranscriptAppender {
         }
         // Registration observes the actual locked inode before its first byte.
         // Hub failure is reported by its lane; source persistence still runs.
-        beforeAppend?(.init(device: UInt64(info.st_dev), inode: UInt64(info.st_ino), length: UInt64(info.st_size)))
+        beforeAppend?(.init(device: UInt64(info.st_dev), inode: UInt64(info.st_ino), length: UInt64(info.st_size),
+            volumeUUID: try? AudioHubRawTranscriptReader.volumeUUID(root: url.deletingLastPathComponent(), descriptor: descriptor)))
         var written = 0
         try data.withUnsafeBytes { rawBuffer in
             guard let base = rawBuffer.baseAddress else {

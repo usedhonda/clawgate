@@ -1,5 +1,6 @@
 import XCTest
 import Darwin
+import CryptoKit
 @testable import ClawGate
 
 final class AudioHubTranscriptScannerTests: XCTestCase {
@@ -33,6 +34,56 @@ final class AudioHubTranscriptScannerTests: XCTestCase {
                          _ journal: AudioHubControlStore, _ queue: AudioHubOutbox) throws -> AudioHubTranscriptScanner {
         try AudioHubTranscriptScanner(sessionsRoot: sessions, sessionID: session,
             initialCheckpoint: checkpoint, control: journal, outbox: queue, maxReadBytes: 4096, maxLineBytes: 4096)
+    }
+
+    func testDeviceRenumberingReconcilesLegacyContentProofWithoutReadmittingHistory() throws {
+        let first = Data("{\"text\":\"accepted\",\"capturedAt\":1700000000}\n".utf8)
+        let next = Data("{\"text\":\"next\",\"capturedAt\":1700000001}\n".utf8)
+        try (first + next).write(to: rawURL)
+        var info = stat(); XCTAssertEqual(lstat(rawURL.path, &info), 0)
+        let digest = SHA256.hash(data: first).map { String(format: "%02x", $0) }.joined()
+        for useJournal in [true, false] {
+            let directory = root.appendingPathComponent(useJournal ? "journal-proof" : "baseline-proof")
+            let queue = try AudioHubOutbox(directory: directory.appendingPathComponent("queue"), maxMetadataBytes: 32_000, sourceUUID: source)
+            let controlURL = directory.appendingPathComponent("control")
+            var journal = try AudioHubControlStore(directory: controlURL, sourceUUID: source, maxControlBytes: 16_000)
+            if useJournal {
+                _ = try journal.admit(AudioHubTranscriptWire.prepare(raw: first, sourceSessionID: session, line: 1), into: queue)
+            }
+            let initial = AudioHubRawTranscriptReader.Checkpoint(offset: UInt64(first.count), physicalLine: 1,
+                snapshot: .init(device: UInt64(info.st_dev) + 1, inode: UInt64(info.st_ino), length: UInt64(info.st_size)))
+            let scanner = try AudioHubTranscriptScanner(sessionsRoot: sessions, sessionID: session, initialCheckpoint: initial,
+                control: journal, outbox: queue, maxReadBytes: 4096, maxLineBytes: 4096,
+                legacyPrefixSHA256: useJournal ? nil : digest)
+            guard case .admitted = try scanner.step() else { return XCTFail("new line was not admitted") }
+            let scan = try journal.scan(sessionID: session)
+            XCTAssertEqual(scan.initial, initial) // Original registration boundary never moves.
+            XCTAssertEqual(scan.cursor.snapshot?.device, UInt64(info.st_dev))
+            XCTAssertNotNil(scan.cursor.snapshot?.volumeUUID)
+            XCTAssertEqual(scan.cursor.physicalLine, 2)
+            XCTAssertEqual(try queue.pending(limit: 10).count, useJournal ? 2 : 1)
+            journal = try AudioHubControlStore(directory: controlURL, sourceUUID: source, maxControlBytes: 16_000)
+            let reopened = try AudioHubTranscriptScanner(sessionsRoot: sessions, sessionID: session, initialCheckpoint: initial,
+                control: journal, outbox: queue, maxReadBytes: 4096, maxLineBytes: 4096)
+            XCTAssertEqual(try reopened.step(), .endOfFile)
+            XCTAssertEqual(try queue.pending(limit: 10).count, useJournal ? 2 : 1)
+            let foreign = AudioHubRawTranscriptReader.Checkpoint(offset: scan.cursor.offset,
+                physicalLine: scan.cursor.physicalLine,
+                snapshot: .init(device: UInt64(info.st_dev), inode: UInt64(info.st_ino),
+                    length: UInt64(info.st_size), volumeUUID: UUID().uuidString),
+                previousLineSHA256: scan.cursor.previousLineSHA256)
+            XCTAssertThrowsError(try journal.reconcileCursor(sessionID: session, expected: scan.cursor, replacement: foreign)) {
+                XCTAssertEqual($0 as? AudioHubControlStore.Failure, .invalidState)
+            }
+            XCTAssertEqual(try journal.scan(sessionID: session).cursor, scan.cursor)
+            let remounted = AudioHubRawTranscriptReader.Checkpoint(offset: scan.cursor.offset,
+                physicalLine: scan.cursor.physicalLine,
+                snapshot: .init(device: UInt64(info.st_dev) + 2, inode: UInt64(info.st_ino),
+                    length: UInt64(info.st_size), volumeUUID: scan.cursor.snapshot?.volumeUUID),
+                previousLineSHA256: scan.cursor.previousLineSHA256)
+            XCTAssertEqual(try AudioHubRawTranscriptReader.read(sessionsRoot: sessions, sessionID: session,
+                checkpoint: remounted, maxReadBytes: 4096, maxLineBytes: 4096), .endOfFile)
+        }
     }
 
     func testCrashStopsConvergeToFrozenBytesAndSameID() throws {

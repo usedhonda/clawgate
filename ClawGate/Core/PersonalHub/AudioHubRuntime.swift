@@ -241,15 +241,17 @@ final class AudioHubRuntime {
         }
     }
 
-    private func makeScanner(_ id: String, initial: AudioHubRawTranscriptReader.Checkpoint) throws -> AudioHubTranscriptScanner {
+    private func makeScanner(_ id: String, initial: AudioHubRawTranscriptReader.Checkpoint,
+                             legacyPrefixSHA256: String? = nil) throws -> AudioHubTranscriptScanner {
         try AudioHubTranscriptScanner(sessionsRoot: sessionsRoot, sessionID: id,
             initialCheckpoint: initial, control: control, outbox: outbox,
-            maxReadBytes: 1 * 1024 * 1024, maxLineBytes: 512 * 1024)
+            maxReadBytes: 1 * 1024 * 1024, maxLineBytes: 512 * 1024, legacyPrefixSHA256: legacyPrefixSHA256)
     }
 
     private func installBaseline(_ entry: AudioHubActivationManifest.Session) throws {
         try AudioHubBaselineReader.verify(sessionsRoot: sessionsRoot, entry: entry)
-        scanners[entry.sessionID] = try makeScanner(entry.sessionID, initial: entry.initial)
+        scanners[entry.sessionID] = try makeScanner(entry.sessionID, initial: entry.initial,
+                                                   legacyPrefixSHA256: entry.prefixSHA256)
     }
 
     /// Called under the raw writer's file lock, before any new bytes. Only an
@@ -268,8 +270,8 @@ final class AudioHubRuntime {
                     initial: .init(offset: 0, physicalLine: 0, snapshot: snapshot))
             }
             let scan = try control.scan(sessionID: sessionID)
-            guard scan.initial.snapshot?.device == snapshot.device,
-                  scan.initial.snapshot?.inode == snapshot.inode,
+            guard scan.cursor.snapshot?.device == snapshot.device,
+                  scan.cursor.snapshot?.inode == snapshot.inode,
                   snapshot.length >= scan.cursor.offset else { throw Failure.invalidPath }
         } catch {
             recordRegistrationFailure("raw_registration_failed")

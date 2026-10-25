@@ -139,6 +139,25 @@ final class AudioHubControlStore {
         return state.scans ?? [:]
     }
 
+    /// The reader has verified volume/inode/boundary and historical content.
+    /// Persist only identity metadata: never move or reset the durable cursor.
+    func reconcileCursor(sessionID: String, expected: AudioHubRawTranscriptReader.Checkpoint,
+                         replacement: AudioHubRawTranscriptReader.Checkpoint) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard !storageFailed else { throw Failure.storageFailed }
+        guard var scan = state.scans?[sessionID], scan.cursor == expected, scan.staged == nil,
+              replacement.offset == expected.offset, replacement.physicalLine == expected.physicalLine,
+              replacement.snapshot?.inode == expected.snapshot?.inode,
+              let volume = replacement.snapshot?.volumeUUID, UUID(uuidString: volume) != nil,
+              expected.snapshot?.volumeUUID.map({ $0.lowercased() == volume.lowercased() }) ?? true,
+              expected.previousLineSHA256 == nil || replacement.previousLineSHA256 == expected.previousLineSHA256,
+              replacement.snapshot!.length >= expected.snapshot!.length else { throw Failure.invalidState }
+        scan.cursor = replacement
+        guard Self.validScan(scan) else { throw Failure.invalidState }
+        var candidate = state; candidate.scans?[sessionID] = scan
+        try replace(candidate)
+    }
+
     /// Persist a frozen selected-meeting intent. The exact sorted JSON bytes
     /// define its identity, so identical retries are idempotent while later
     /// revisions remain available under distinct identities.
@@ -243,7 +262,7 @@ final class AudioHubControlStore {
         guard checkpoint.sourceRecordRef == prepared.sourceRecordRef,
               checkpoint.revisionRef == prepared.revisionRef else { throw Failure.invalidState }
         scan.cursor = .init(offset: expectedLine.nextOffset, physicalLine: expectedLine.nextPhysicalLine,
-                            snapshot: expectedLine.snapshot)
+                            snapshot: expectedLine.snapshot, previousLineSHA256: Self.hash(expectedLine.rawLine))
         scan.staged = nil
         var candidate = state; candidate.scans?[sessionID] = scan
         try replace(candidate)
@@ -507,6 +526,11 @@ final class AudioHubControlStore {
     private static func validCursor(_ value: AudioHubRawTranscriptReader.Checkpoint) -> Bool {
         guard let snapshot = value.snapshot, snapshot.length <= UInt64(Int64.max),
               value.offset <= snapshot.length, value.physicalLine < UInt64(Int.max) else { return false }
+        if let volume = snapshot.volumeUUID, UUID(uuidString: volume) == nil { return false }
+        if let anchor = value.previousLineSHA256,
+           value.offset == 0 || anchor.count != 64 || !anchor.allSatisfy({ "0123456789abcdef".contains($0) }) {
+            return false
+        }
         return value.offset == 0 ? value.physicalLine == 0 : value.physicalLine > 0 && value.physicalLine <= value.offset
     }
 
@@ -514,7 +538,7 @@ final class AudioHubControlStore {
         guard validCursor(scan.initial), validCursor(scan.cursor),
               scan.cursor.offset >= scan.initial.offset,
               scan.cursor.physicalLine >= scan.initial.physicalLine,
-              scan.cursor.snapshot?.device == scan.initial.snapshot?.device,
+              sameFile(scan.initial.snapshot!, scan.cursor.snapshot!, legacyInitial: true),
               scan.cursor.snapshot?.inode == scan.initial.snapshot?.inode else { return false }
         guard let line = scan.staged else { return true }
         return !line.rawLine.isEmpty && line.rawLine.last == 0x0A &&
@@ -525,7 +549,17 @@ final class AudioHubControlStore {
             line.nextOffset - scan.cursor.offset == UInt64(line.rawLine.count) &&
             line.nextOffset <= line.snapshot.length && line.snapshot.length <= UInt64(Int64.max) &&
             line.snapshot.length >= (scan.cursor.snapshot?.length ?? 0) &&
-            line.snapshot.device == scan.cursor.snapshot?.device && line.snapshot.inode == scan.cursor.snapshot?.inode
+            sameFile(line.snapshot, scan.cursor.snapshot!)
+    }
+
+    private static func sameFile(_ a: AudioHubRawTranscriptReader.Snapshot,
+                                 _ b: AudioHubRawTranscriptReader.Snapshot, legacyInitial: Bool = false) -> Bool {
+        guard a.inode == b.inode else { return false }
+        if let volume = a.volumeUUID, let other = b.volumeUUID { return volume.lowercased() == other.lowercased() }
+        // The immutable registration boundary stays byte-for-byte unchanged.
+        // Only reconcileCursor can bridge its legacy identity to a verified UUID.
+        if legacyInitial, a.volumeUUID == nil, b.volumeUUID != nil { return true }
+        return a.device == b.device
     }
 
     private static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }

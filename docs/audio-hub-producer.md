@@ -138,14 +138,22 @@ caller-supplied read and line byte limits. It preserves LF/CRLF and blank lines
 as source bytes and counts physical lines. An unterminated tail is held without
 advancing the position. It rejects symlinks, non-owned directories/files,
 non-regular files, replacement, truncation and invalid line-boundary cursors.
-It assumes append-only input; inode/length checks cannot detect an in-place
-rewrite on the same inode. No cursor is persisted by this helper, and it does
+New cursor snapshots include the persistent volume UUID; an admitted cursor also
+retains the preceding physical line's SHA-256. A device-number change is not a
+file replacement when volume UUID, inode, nonshrinking length and line boundary
+still match. Legacy snapshots additionally require an existing journal line hash
+or a verified activation-prefix hash (an empty source has no historical bytes).
+Missing or contradictory proof remains stale. The UUID query is checked against
+the already-open descriptor; both source and session root must share that volume.
+It assumes append-only input; inode/length checks cannot detect an arbitrary
+in-place rewrite of unread bytes on the same inode. Cursor persistence remains
+caller-owned through the reconciliation callback; the reader does
 not parse JSON, enumerate sessions, enqueue records or enable a runtime route.
 
 ## Explicit scanner and delivery orchestration (inactive)
 
 `AudioHubTranscriptScanner` requires an explicit session and initial physical
-line/byte checkpoint with device, inode and length. There is no implicit zero
+line/byte checkpoint with device, inode, length and, for new snapshots, volume UUID. There is no implicit zero
 start, directory enumeration or historical backfill. Reopening must supply the
 same initial boundary; the durable current position wins. One `step()` freezes
 one complete raw line in the private control state, admits its immutable event
@@ -153,6 +161,10 @@ or clock exclusion, then advances the cursor. A crash between those writes
 replays the frozen bytes and source/revision ID, not a fresh read of that line.
 The staged bytes, cursor and admission journal share the caller's one control
 byte budget; staging failure cannot advance the cursor or enqueue a new record.
+Verified identity reconciliation is persisted atomically even at EOF, without
+changing the offset, physical line or immutable original registration boundary.
+The control store permits that legacy boundary only alongside the reader-verified
+volume identity. It does not reset the scan or re-admit an acknowledged record.
 
 Existing queue admission is reconciled by immutable ID/body. A journaled
 admission that was delivered before cursor recovery is not re-enqueued. Invalid
@@ -218,7 +230,7 @@ re-admitted under native IDs. There is no automatic directory discovery or
 backfill of unlisted historical sources.
 
 `recover()` isolates each baseline and registered-scanner failure: a baseline
-that fails verification (for example a device or prefix mismatch) stays
+that fails verification (for example a volume/inode or prefix mismatch) stays
 unadmitted and is never rebound, while independent registered sources and
 selected-original recovery still run. The first source error is rethrown after
 the loop so `source_admission_failed` remains visible. Unreadable control state
