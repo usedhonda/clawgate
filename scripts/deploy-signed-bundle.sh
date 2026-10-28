@@ -81,6 +81,12 @@ for ((i=0; i<10; i++)); do
   sleep 1
 done
 if pgrep -f "$project/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null; then
+  # A blocked main thread may not service the app's termination handler.
+  # Match the canonical restart's bounded escalation before touching the bundle.
+  pkill -9 -f "$project/ClawGate.app/Contents/MacOS/ClawGate" 2>/dev/null || true
+  sleep 1
+fi
+if pgrep -f "$project/ClawGate.app/Contents/MacOS/ClawGate" >/dev/null; then
   echo "Previous app did not exit; leaving bundle untouched" >&2
   exit 1
 fi
