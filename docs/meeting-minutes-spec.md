@@ -803,3 +803,26 @@ request is never labeled saved/searchable. Receipt presentation is loaded off-ma
 independently of the document cache and does not become a global source fence.
 Isolated/test store roots cannot dispatch through the production namespace. No
 historical document is chosen or transmitted automatically by opening the view.
+
+### Selected legacy Recall transcript adapter
+
+The canonical reader's fully paginated, policy-filtered legacy projection can be
+adapted separately from Hub-STT. Only selected Recall transcript/transcript_variant
+events with matching event UUID and Hub event hash scheme are accepted. Suppressed
+or disallowed privacy bodies are not imported. The event/hash locator is retained,
+but no result UUID, processing lineage, speaker, capture time or sample offset is
+invented. One untimed source block and explicit uncertainty are preferable to false
+precision. This data adapter does not activate a Gateway read method or cache an
+evergreen read permission; the chosen source must be read fresh for regeneration.
+
+### Recall selection references
+
+A meeting's private `recall-selection.json` may retain chosen source event UUIDs
+and an optional explicitly chosen derived result **event** UUID, not the distinct
+result artifact ID. It contains no text, audio, token or permission marker. Reopening
+or regeneration must still perform a fresh canonical read. A stale picker cannot
+overwrite a newer selection: its expected exact-file fingerprint must match under
+the process selection lock. Same choices do not rewrite the file. Corrupt selection
+state is an error, not an empty choice or permission to use a fallback source.
+The metadata file has an operational 64 KiB bound; it is not a user iteration,
+wall-clock or token budget. No selector/read route is activated by this data store.
