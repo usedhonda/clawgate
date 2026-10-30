@@ -3,6 +3,38 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingWorkspaceSnapshotTests: XCTestCase {
+    func testAcceptedRecallUsesFrozenEvidenceOnlyForDisplayComparison() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root.appendingPathComponent("meetings"))
+        var meeting = record()
+        meeting.source = "calendar"
+        store.save(meeting)
+        let event = "00000000-0000-4000-8000-000000000001"
+        let choices = MeetingRecallSelectionStore(store: store)
+        let selection = try choices.save(items: [.init(eventID: event, resultEventID: nil, kind: "transcript")],
+            record: meeting, expectedFingerprint: nil)
+        let source = MeetingTranscriptSourceSegment(id: "recall-fixture", source: "recall", text: "Selected evidence",
+            sourceLocator: "Hub event " + event)
+        let input = MeetingMinutesPreparation.RecallInput(selectionFingerprint: try XCTUnwrap(selection.fingerprint),
+            segments: [source], coverageHints: ["Capture time unknown"])
+        let envelope = PetModel.minutesEnvelope(for: meeting, store: store, local: [], material: nil, recall: input)
+        let minutes = MeetingMinutes(title: "Fixture", summary: source.text, topics: [], decisions: [],
+            actionItems: [], openQuestions: [], evidence: [.init(claim: source.text, segmentIds: [source.id])],
+            attendance: nil, language: "en")
+        try store.saveValidatedMinutes(minutes, for: meeting, job: .init(
+            fingerprint: MeetingMinutesJob.fingerprint(envelope), envelopes: [envelope], completed: [minutes]))
+        let loader = MeetingWorkspaceLoader(sessionsRoot: root.appendingPathComponent("sessions"))
+        let snapshot = try await loader.load(context(meeting, store: store))
+        XCTAssertFalse(snapshot.inputsChanged)
+        XCTAssertEqual(snapshot.transcriptRows.map(\.text), [source.text])
+        XCTAssertEqual(snapshot.transcriptRows.first?.time, "--:--")
+        XCTAssertEqual(snapshot.accepted?.recallSelectionFingerprint, selection.fingerprint)
+        _ = try choices.save(items: [], record: meeting, expectedFingerprint: selection.fingerprint)
+        let changed = try await loader.load(context(meeting, store: store))
+        XCTAssertTrue(changed.inputsChanged)
+        XCTAssertEqual(changed.transcriptRows.map(\.text), [source.text])
+    }
     private func record(_ id: String = "meeting") -> MeetingRecord {
         MeetingRecord(id: id, source: "calendar", startedAt: 100, endedAt: 200,
             timeZone: "UTC", title: "Review", conferenceCode: nil, participants: [], minutesState: "ready", minutesError: nil)

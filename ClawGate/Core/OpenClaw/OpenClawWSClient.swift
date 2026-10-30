@@ -188,6 +188,39 @@ actor OpenClawWSClient {
             advertisedGatewayMethods?.contains("wiki.minutes.publish") == true
     }
 
+    func supportsMinutesRecallRead() -> Bool {
+        guard isConnected, handshakeComplete, advertisedGatewayMethodsGeneration == connectionGeneration,
+              let methods = advertisedGatewayMethods else { return false }
+        return ["wiki.minutes.recall.candidates", "wiki.minutes.recall.resolve", "wiki.minutes.recall.read"]
+            .allSatisfy { methods.contains($0) }
+    }
+
+    func minutesRecallCandidates(_ params: MeetingRecallReadBridge.CandidatesRequest) async throws -> MeetingRecallReadBridge.Candidates {
+        guard supportsMinutesRecallRead() else { throw MeetingRecallReadBridge.Failure.unavailable }
+        let response = try await request(method: "wiki.minutes.recall.candidates", params: params)
+        guard let value = response?.minutesRecallCandidates, value.schemaVersion == 1,
+              ["ok", "incomplete"].contains(value.status), value.items.count <= params.limit,
+              value.timeBasis == "occurrence", value.coverageBasis == "summary_only",
+              value.complete == (value.nextCursor == nil), value.items.allSatisfy({
+                  $0.source == "recall" && $0.domain == "audio" && $0.kind == params.kind && UUID(uuidString: $0.id) != nil
+              }) else { throw MeetingRecallReadBridge.Failure.denied }
+        return value
+    }
+
+    func minutesRecallResolve(_ params: MeetingRecallReadBridge.ResolveRequest) async throws -> MeetingRecallReadBridge.Resolution {
+        guard supportsMinutesRecallRead() else { throw MeetingRecallReadBridge.Failure.unavailable }
+        let response = try await request(method: "wiki.minutes.recall.resolve", params: params)
+        guard let value = response?.minutesRecallResolution else { throw MeetingRecallReadBridge.Failure.invalidResponse }
+        return value
+    }
+
+    func minutesRecallRead(_ params: MeetingRecallReadBridge.ReadRequest) async throws -> MeetingRecallReadBridge.Read {
+        guard supportsMinutesRecallRead() else { throw MeetingRecallReadBridge.Failure.unavailable }
+        let response = try await request(method: "wiki.minutes.recall.read", params: params)
+        guard let value = response?.minutesRecallRead else { throw MeetingRecallReadBridge.Failure.invalidResponse }
+        return value
+    }
+
     /// Uses the already authenticated ordinary socket. A catalog entry is not
     /// itself proof that this device owns the publication namespace.
     func publishMinutes(_ publication: MeetingMinutesPublication) async throws -> MeetingMinutesPublicationReceipt {

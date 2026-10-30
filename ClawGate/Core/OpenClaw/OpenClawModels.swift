@@ -377,6 +377,9 @@ struct IncomingPayload: Decodable {
     /// Optional typed response for wiki.minutes.publish. Unknown/malformed
     /// receipts never become delivery acknowledgements.
     let minutesPublicationReceipt: MeetingMinutesPublicationReceipt?
+    let minutesRecallCandidates: MeetingRecallReadBridge.Candidates?
+    let minutesRecallResolution: MeetingRecallReadBridge.Resolution?
+    let minutesRecallRead: MeetingRecallReadBridge.Read?
     let stream: String?
     let data: AgentDataPayload?
     let state: String?
@@ -481,6 +484,9 @@ struct IncomingPayload: Decodable {
         executionBinding = try? container.decode(MinutesExecutionBinding.self, forKey: .executionBinding)
         minutesFieldNames = Set(try decoder.container(keyedBy: MinutesPayloadKey.self).allKeys.map(\.stringValue))
         minutesPublicationReceipt = try? MeetingMinutesPublicationReceipt(from: decoder)
+        minutesRecallCandidates = try? MeetingRecallReadBridge.Candidates(from: decoder)
+        minutesRecallResolution = try? MeetingRecallReadBridge.Resolution(from: decoder)
+        minutesRecallRead = try? MeetingRecallReadBridge.Read(from: decoder)
         stream = try container.decodeIfPresent(String.self, forKey: .stream)
         data = try container.decodeIfPresent(AgentDataPayload.self, forKey: .data)
         state = try container.decodeIfPresent(String.self, forKey: .state)

@@ -2961,6 +2961,82 @@ final class PetModel: NSObject, ObservableObject {
     private var minutesDrainTicket: MeetingMinutesPreparation.Ticket?
     @Published private(set) var preparingMinutesIDs: Set<String> = []
     @Published private(set) var minutesPreparationErrors: [String: String] = [:]
+    @Published var minutesRecallPickerRecord: MeetingRecord?
+
+    func recallSelection(for record: MeetingRecord) async throws -> MeetingRecallSelectionStore.Snapshot {
+        let store = minutesStore()
+        return try await Task.detached {
+            try MeetingRecallSelectionStore(store: store).load(meetingID: record.id)
+        }.value
+    }
+
+    func saveRecallSelection(_ items: [MeetingRecallSelectionStore.Item], for record: MeetingRecord,
+                             expectedFingerprint: String?) async throws {
+        let store = minutesStore()
+        _ = try await Task.detached {
+            try MeetingRecallSelectionStore(store: store).save(items: items, record: record,
+                expectedFingerprint: expectedFingerprint)
+        }.value
+        await MainActor.run { self.meetingsRevision += 1 }
+    }
+
+    func recallCandidates(kind: MeetingRecallReadBridge.Kind, start: Date, end: Date,
+                          cursor: String?) async throws -> MeetingRecallReadBridge.Candidates {
+        guard start < end else { throw MeetingRecallReadBridge.Failure.invalidResponse }
+        let source = try await MeetingMinutesPublisher.shared.sourceUUID()
+        let formatter = ISO8601DateFormatter()
+        return try await wsClient.minutesRecallCandidates(.init(sourceUUID: source, kind: kind,
+            start: formatter.string(from: start), end: formatter.string(from: end), cursor: cursor))
+    }
+
+    func resolveRecallOriginal(_ id: String) async throws -> MeetingRecallReadBridge.Resolution {
+        let source = try await MeetingMinutesPublisher.shared.sourceUUID()
+        return try await wsClient.minutesRecallResolve(.init(sourceUUID: source, originalEventId: id))
+    }
+
+    /// Called only after preparation discovers saved explicit selections. The
+    /// ticket stays live across network reads, so cleanup/coalescing still apply.
+    private func hydrateSelectedRecall(_ input: MeetingMinutesPreparation.Input,
+                                       ticket: MeetingMinutesPreparation.Ticket) {
+        let id = input.record.id
+        minutesPreparationTickets[id] = ticket
+        preparingMinutesIDs.insert(id)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let result: Result<MeetingMinutesPreparation.RecallInput, Error>
+            do {
+                let selection = try await self.recallSelection(for: input.record)
+                try ticket.check()
+                guard !selection.items.isEmpty, let fingerprint = selection.fingerprint else {
+                    throw MeetingMinutesPreparation.Failure.changed
+                }
+                let source = try await MeetingMinutesPublisher.shared.sourceUUID()
+                let socket = self.wsClient
+                let recall = try await MeetingRecallReadBridge.readSelection(items: selection.items,
+                    selectionFingerprint: fingerprint, sourceUUID: source,
+                    resolve: { try ticket.check(); return try await socket.minutesRecallResolve($0) },
+                    read: { try ticket.check(); return try await socket.minutesRecallRead($0) })
+                try ticket.check()
+                result = .success(recall)
+            } catch { result = .failure(error) }
+            guard !self.didCleanup, self.minutesPreparationTickets[id] === ticket else { return }
+            self.minutesPreparationTickets[id] = nil
+            self.preparingMinutesIDs.remove(id)
+            self.meetingsRevision += 1
+            guard input.store.load(id: id) == input.record else { return }
+            switch result {
+            case .success(let recall):
+                self.prepareMinutes(for: input.record, preservingMaterials: input.preservingMaterials,
+                    markUserRequested: ticket.requestedAt != nil, refreshPreparedInput: input.refreshPreparedInput,
+                    regenerate: input.regenerate, forceFull: input.forceFull, recall: recall)
+            case .failure(MeetingRecallReadBridge.Failure.selectionRequired):
+                self.minutesPreparationErrors[id] = "使用するRecallの文字起こしを選んでください。旧議事録は保持しています。"
+                self.minutesRecallPickerRecord = input.record
+            case .failure:
+                self.minutesPreparationErrors[id] = "選択したRecallを最後まで読み取れませんでした。接続・読取許可・選択した版を確認してください。旧議事録は保持しています。"
+            }
+        }
+    }
     private var meetingMaterials: [String: MeetingGoogleMaterials.Snapshot] = [:]
     @Published private var refreshingMaterialIDs: Set<String> = []
 
@@ -3229,6 +3305,7 @@ final class PetModel: NSObject, ObservableObject {
         }
         let coverage = (material?.notes.map(\.text) ?? []) + (recall?.coverageHints ?? [])
         envelope.coverageHints = coverage.isEmpty ? nil : coverage
+        envelope.recallSelectionFingerprint = recall?.selectionFingerprint
         let materials = Self.selectedSupplementalMaterials(store: store, id: record.id)
         envelope.supplementalMaterials = materials.isEmpty ? nil : materials
         return envelope
@@ -3587,9 +3664,14 @@ final class PetModel: NSObject, ObservableObject {
                 case .failure(MeetingMinutesPreparation.Failure.changed), .failure(MeetingMinutesJob.RevisionError.changed):
                     self.minutesPreparationErrors[record.id] = "入力または実行状態が変わったため準備を取り消しました。もう一度生成できます。"
                 case .failure(MeetingMinutesPreparation.Failure.noTranscript):
-                    self.finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
+                    if ticket.requestedAt != nil {
+                        self.minutesPreparationErrors[record.id] = "この会議には発言データがありません。使用するRecallの音声・文字起こしを選んでください。"
+                        self.minutesRecallPickerRecord = record
+                    } else {
+                        self.finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
+                    }
                 case .failure(MeetingMinutesPreparation.Failure.recallReadRequired):
-                    self.minutesPreparationErrors[record.id] = "選択したRecallの発言を読み取る必要があります。旧議事録は保持しています。"
+                    self.hydrateSelectedRecall(input, ticket: ticket)
                 case .failure(MeetingMinutesPreparation.Failure.materialLimit):
                     self.finishMinutes(id: record.id, state: "failed", error: "選択資料が20万文字を超えています。使用する資料を絞ってください。旧議事録は保持しています。")
                 case .failure:

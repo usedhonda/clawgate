@@ -162,10 +162,26 @@ actor MeetingWorkspaceLoader {
                 }
                 let local = Self.transcript(for: record, store: store, end: end, sessionsRoot: sessionsRoot)
                 try checkingCancellation()
-                let envelope = try accepted.map { _ in try PetModel.minutesEnvelope(for: record, store: store, local: local, material: source, checkingCancellation: { try Task.checkCancellation() }) }
+                // Accepted Recall evidence is usable for display comparison,
+                // never as authorization or input to a new generation.
+                let envelope = try accepted.map { accepted in
+                    let recallSegments = accepted.segments.filter { $0.source == "recall" }.map {
+                        MeetingTranscriptSourceSegment(id: $0.id, source: $0.source, text: $0.text,
+                            speaker: $0.speakerName, capturedAt: $0.capturedAt, sourceURL: $0.sourceURL,
+                            sourceLocator: $0.sourceLocator, startSeconds: $0.startSeconds,
+                            endSeconds: $0.endSeconds, recallLineage: $0.recallLineage)
+                    }
+                    let recall = recallSegments.isEmpty ? nil : MeetingMinutesPreparation.RecallInput(
+                        selectionFingerprint: accepted.recallSelectionFingerprint ?? "",
+                        segments: recallSegments, coverageHints: [])
+                    return try PetModel.minutesEnvelope(for: record, store: store, local: local, material: source,
+                        recall: recall, checkingCancellation: { try Task.checkCancellation() })
+                }
+                let recallSelection = try MeetingRecallSelectionStore(store: store).load(meetingID: record.id)
                 try Task.checkCancellation()
                 let inputsChanged = accepted.map { accepted in
-                    envelope.map { MeetingMinutesJob.fingerprint($0) != accepted.fingerprint } ?? false
+                    (envelope.map { MeetingMinutesJob.fingerprint($0) != accepted.fingerprint } ?? false)
+                        || (recallSelection.items.isEmpty ? nil : recallSelection.fingerprint) != accepted.recallSelectionFingerprint
                 } ?? false
                 let supplemental = MeetingSupplementalMaterials(store: store).load(meetingID: record.id)
                 let selected = supplemental.filter { $0.included && $0.status != .failed && !$0.sections.isEmpty }

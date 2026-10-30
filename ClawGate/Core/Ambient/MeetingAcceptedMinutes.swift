@@ -14,6 +14,7 @@ struct MeetingAcceptedMinutes: Codable {
     /// implicitly enrolled for knowledge sharing during startup reconciliation.
     var knowledgeContext: MeetingMinutesKnowledgeSnapshot.Context? = nil
     var coverageHints: [String]? = nil
+    var recallSelectionFingerprint: String? = nil
 }
 
 extension MeetingStore {
@@ -35,7 +36,8 @@ extension MeetingStore {
             unresolvedNotes: job.envelopes.first?.unresolvedNotes ?? [], createdAt: Date(),
             supplementalMaterials: job.materialCitationSnapshot, supplementalInput: job.allSupplementalMaterials,
             knowledgeContext: MeetingMinutesKnowledgeSnapshot.Context(record: record),
-            coverageHints: job.envelopes.first?.coverageHints)
+            coverageHints: job.envelopes.first?.coverageHints,
+            recallSelectionFingerprint: job.envelopes.first?.recallSelectionFingerprint)
         let dir = directory(for: record.id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let acceptedData = try JSONEncoder().encode(accepted)

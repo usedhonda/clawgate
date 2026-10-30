@@ -285,6 +285,10 @@ private struct MeetingWorkspaceDetail: View {
         .foregroundColor(WorkspaceTheme.ink)
         .onAppear { refreshDocument() }
         .onDisappear { document.cancel() }
+        .sheet(isPresented: Binding(get: { model.minutesRecallPickerRecord?.id == meeting.id },
+            set: { if !$0 { model.minutesRecallPickerRecord = nil } })) {
+            MeetingRecallPicker(model: model, record: meeting)
+        }
         .onChange(of: meeting) { _ in refreshDocument() }
         .onReceive(model.$meetingsRevision.dropFirst()) { _ in refreshDocument() }
         .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in refreshDocument() }
@@ -345,6 +349,8 @@ private struct MeetingWorkspaceDetail: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(disabled)
+                    Button("Recallの発言を選ぶ…") { model.minutesRecallPickerRecord = meeting }
+                        .disabled(disabled)
                     if checkpoint {
                         Button("失敗した続きから再開") { model.resumeMinutes(for: meeting) }
                             .controlSize(.small)
@@ -384,6 +390,9 @@ private struct MeetingWorkspaceDetail: View {
                     .font(.system(size: 12)).foregroundColor(WorkspaceTheme.secondary)
             }
             if let accepted {
+                ForEach(Array((accepted.coverageHints ?? []).enumerated()), id: \.offset) { hint in
+                    Text(hint.element).font(.system(size: 11)).foregroundColor(WorkspaceTheme.secondary)
+                }
                 Text("表示中の議事録: \(accepted.createdAt.formatted(date: .abbreviated, time: .shortened)) に生成")
                     .font(.system(size: 11)).foregroundColor(WorkspaceTheme.muted)
                 knowledgeRow

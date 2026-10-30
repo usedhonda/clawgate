@@ -833,4 +833,33 @@ overwrite a newer selection: its expected exact-file fingerprint must match unde
 the process selection lock. Same choices do not rewrite the file. Corrupt selection
 state is an error, not an empty choice or permission to use a fallback source.
 The metadata file has an operational 64 KiB bound; it is not a user iteration,
-wall-clock or token budget. No selector/read route is activated by this data store.
+wall-clock or token budget. The selected kind is retained to distinguish original
+audio resolution from direct legacy transcript reads.
+
+### Advertised Recall read bridge and selection UI
+
+The existing signed Gateway connection uses only the owner-frozen
+`wiki.minutes.recall.candidates`, `.resolve` and `.read` methods after all three
+are advertised by its current authenticated connection generation. Namespace
+binding and the canonical reader's current Hub policy remain separate checks.
+Candidate listing is metadata-only and occurrence-filtered, not a capture-time
+claim or an automatic meeting association. Original selection resolves related
+metadata before the owner chooses a derived transcript; truncated or multi-parent
+results are not silently treated as unique. No body is read just to list candidates.
+
+Generation after explicit selection reads every 2000-codepoint page with exact
+event/parent/version/hash/privacy binding. Offsets are Unicode codepoints, not
+Swift grapheme or UTF-16 counts. A denied/changed/missing continuation or the
+operational 200,000-codepoint input limit rejects the entire preparation, never
+accepts a truncated transcript. The bridge's text-only projection is cited by
+event and text range, without fabricated ASR segment indices, speakers or clocks.
+Existing offset-bearing Hub-STT lineage remains unchanged; event-level lineage
+omits `segmentIndex`. Accepted text may support display/citation comparison, not
+new-generation permission. The accepted selection fingerprint distinguishes an
+explicit changed choice from an unchanged displayed document.
+
+The minutes window offers explicit Recall selection; a user generation with no
+local/Meet speech opens that same picker. Saving choices precedes a separate fresh
+read and the ordinary generation job. Unavailable reader methods produce an
+honest error, not an alternative identity/tool/raw read. No ASR, recording,
+notification, new grant or original archive is started by these controls.

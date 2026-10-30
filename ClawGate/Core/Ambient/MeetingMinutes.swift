@@ -25,7 +25,8 @@ struct MeetingRecallTranscriptLineage: Codable, Equatable {
     let resultID: String
     let processingVersion: String
     let parents: [Parent]
-    let segmentIndex: Int
+    /// Nil for event-level text pages: a page is not a provider ASR segment.
+    let segmentIndex: Int?
 }
 
 /// One transcript line as the model sees it. Unlike the Log envelope this
@@ -142,6 +143,7 @@ struct MeetingMinutesEnvelope: Codable, Equatable {
     var unresolvedNotes: [String]? = nil
     var coverageHints: [String]? = nil
     var supplementalMaterials: [MeetingSupplementalMaterial]? = nil
+    var recallSelectionFingerprint: String? = nil
 
     func replacingSegments(_ value: [MeetingMinutesSegment]) -> MeetingMinutesEnvelope {
         var copy = MeetingMinutesEnvelope(policyVersion: policyVersion, requestId: requestId,
@@ -151,6 +153,7 @@ struct MeetingMinutesEnvelope: Codable, Equatable {
             scheduledEndAt: scheduledEndAt, segments: value)
         copy.unresolvedNotes = unresolvedNotes; copy.coverageHints = coverageHints
         copy.supplementalMaterials = supplementalMaterials
+        copy.recallSelectionFingerprint = recallSelectionFingerprint
         return copy
     }
 

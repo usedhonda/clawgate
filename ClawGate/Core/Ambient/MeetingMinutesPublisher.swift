@@ -52,6 +52,10 @@ actor MeetingMinutesPublisher {
 
     func disconnect() { sender = nil }
 
+    func sourceUUID() throws -> String {
+        try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: metadataBytes).sourceUUID
+    }
+
     private func drain() async {
         if draining { drainAgain = true; return }
         guard sender != nil else { return }

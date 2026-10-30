@@ -7,6 +7,7 @@ struct MeetingRecallSelectionStore {
         let eventID: String
         /// Optional explicitly chosen derived Hub event, not its resultId.
         let resultEventID: String?
+        var kind: String? = nil
     }
     struct Snapshot {
         let items: [Item]
@@ -62,6 +63,7 @@ struct MeetingRecallSelectionStore {
 
     private static func valid(_ items: [Item]) -> Bool {
         Set(items.map(\.eventID)).count == items.count && items.allSatisfy {
+            ($0.kind == nil || MeetingRecallReadBridge.Kind(rawValue: $0.kind!) != nil) &&
             UUID(uuidString: $0.eventID) != nil && ($0.resultEventID == nil ||
                 ($0.resultEventID != $0.eventID && UUID(uuidString: $0.resultEventID!) != nil))
         }
