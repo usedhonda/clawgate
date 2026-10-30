@@ -100,4 +100,89 @@ final class MeetingMinutesKnowledgeTests: XCTestCase {
         XCTAssertEqual(try restored.pending().count, 2)
         XCTAssertEqual(try Data(contentsOf: source), revised)
     }
+    private func receipt(_ item: MeetingMinutesPublication,
+                         status: MeetingMinutesPublicationReceipt.Status,
+                         current: Bool = true, hash: String? = nil) -> MeetingMinutesPublicationReceipt {
+        .init(schemaVersion: 1, sourceUUID: item.sourceUUID, meetingID: item.meetingID,
+              publicationOrdinal: item.publicationOrdinal, outputRevision: item.outputRevision,
+              payloadSHA256: hash ?? item.payloadSHA256, status: status, isCurrent: current)
+    }
+
+    func testPublicationStoredRestartAndSearchabilityDoNotReenqueueOrArchiveBody() throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let r = record(), bytes = try accepted(r)
+        var queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try queue.enqueue(acceptedData: bytes, record: r)
+        let item = try XCTUnwrap(queue.publications().first)
+        XCTAssertEqual(item.publicationOrdinal, 1)
+        XCTAssertNil(item.previousRevision)
+        XCTAssertEqual(item.selectionBasis, .futureAccepted)
+        XCTAssertEqual(MeetingMinutesPublication.digest(try XCTUnwrap(Data(base64Encoded: item.payloadBase64))), item.payloadSHA256)
+        XCTAssertThrowsError(try queue.receive(receipt(item, status: .stored, hash: "wrong"), expected: item))
+        XCTAssertEqual(try queue.publications().count, 1)
+        try queue.receive(receipt(item, status: .pendingGap), expected: item)
+        XCTAssertEqual(try queue.publications().count, 1)
+        try queue.receive(receipt(item, status: .stored), expected: item)
+        queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try queue.enqueue(acceptedData: bytes, record: r)
+        XCTAssertTrue(try queue.publications().isEmpty)
+        XCTAssertEqual(try queue.awaitingSearchability(), [item])
+        try queue.receive(receipt(item, status: .searchable), expected: item)
+        try queue.receive(receipt(item, status: .stored), expected: item) // delayed reply cannot regress
+        XCTAssertTrue(try queue.awaitingSearchability().isEmpty)
+        queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try queue.enqueue(acceptedData: bytes, record: r)
+        XCTAssertTrue(try queue.publications().isEmpty)
+        let state = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+            queue.directory.appendingPathComponent("state.json"))) as? [String: Any])
+        let entries = try XCTUnwrap(state["entries"] as? [[String: Any]])
+        XCTAssertNil(entries.first?["payload"])
+    }
+
+    func testPublicationRevisionOrderingSelectionAndExactEnvelopeReceipt() throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let r = record(), first = try accepted(r), second = try accepted(r, summary: "Revised")
+        let queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try queue.enqueue(acceptedData: first, record: r)
+        try queue.enqueue(acceptedData: second, record: r, explicitlySelected: true)
+        try queue.enqueue(acceptedData: first, record: r) // old revision does not allocate a new ordinal
+        let items = try queue.publications()
+        XCTAssertEqual(items.map(\.publicationOrdinal), [1, 2])
+        XCTAssertEqual(items[1].previousRevision, items[0].outputRevision)
+        XCTAssertEqual(items[1].selectionBasis, .explicitHistory)
+        let changed = MeetingMinutesPublication(schemaVersion: 1, operation: .delete,
+            sourceUUID: items[1].sourceUUID, meetingID: r.id, outputRevision: items[1].outputRevision,
+            publicationOrdinal: 2, previousRevision: items[0].outputRevision,
+            selectionBasis: .explicitHistory, payloadSHA256: items[1].payloadSHA256, payloadBase64: items[1].payloadBase64)
+        XCTAssertThrowsError(try queue.receive(receipt(items[1], status: .stored), expected: changed))
+        try queue.receive(receipt(items[1], status: .stored), expected: items[1])
+        try queue.receive(receipt(items[0], status: .stored, current: false), expected: items[0])
+        XCTAssertEqual(try queue.awaitingSearchability(), [items[1]])
+        XCTAssertTrue(try queue.publications().isEmpty)
+    }
+
+    func testPublicationExplicitDeletionCannotBeResurrectedByOldAcceptedFile() throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let r = record(), bytes = try accepted(r)
+        var queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try queue.enqueue(acceptedData: bytes, record: r)
+        let upsert = try XCTUnwrap(queue.publications().first)
+        try queue.receive(receipt(upsert, status: .searchable), expected: upsert)
+        try queue.enqueueDeletion(meetingID: r.id, expectedRevision: upsert.outputRevision)
+        let deletion = try XCTUnwrap(queue.publications().first)
+        XCTAssertEqual(deletion.operation, .delete)
+        XCTAssertEqual(deletion.publicationOrdinal, 2)
+        XCTAssertEqual(deletion.payloadSHA256, MeetingMinutesPublication.digest(Data()))
+        XCTAssertEqual(deletion.payloadBase64, "")
+        XCTAssertThrowsError(try queue.receive(receipt(deletion, status: .stored), expected: deletion))
+        try queue.receive(receipt(deletion, status: .deleted), expected: deletion)
+        queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        XCTAssertThrowsError(try queue.enqueue(acceptedData: bytes, record: r))
+        try queue.enqueueDeletion(meetingID: r.id, expectedRevision: upsert.outputRevision)
+        XCTAssertTrue(try queue.publications().isEmpty)
+    }
+
 }

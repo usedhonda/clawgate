@@ -20,9 +20,11 @@ recovers a save-before-enqueue interruption from marked accepted files. Staging
 is not a consumer receipt, searchable knowledge or activation of an automatic
 delivery route. Consumer retention, transport and acknowledgement remain separate
 integration work; this foundation does not choose an OpenClaw storage backend.
-Staging reuses the existing synchronized, immutable metadata journal with an
-explicit caller-supplied positive byte limit and no production default. Capacity
-or stale-writer failure retains accepted documents and never evicts pending data.
+The ordered publication ledger reuses the existing bounded private fsynced file
+primitives with an explicit caller-supplied byte limit and no production default.
+Capacity or stale-writer failure retains accepted documents and never evicts pending
+records. This supersedes the inactive snapshot-only journal format: neither format
+has been activated by a production caller, and incompatible files fail closed.
 
 The Recall Hub-STT adapter consumes only the existing authenticated OpenClaw
 policy-filtered projection after explicit event/result selection. It preserves
@@ -704,3 +706,31 @@ job persistence, accepted minutes and cited knowledge snapshots. These fields
 are citation identity, not a stored permission grant. Regeneration still requires
 a fresh policy-filtered canonical read. The model prompt omits this machine-only
 lineage; source locators and speech offsets remain its grounding references.
+
+### Ordered minutes publication producer (v1, inactive transport)
+
+The logical slot is `(sourceUUID, meetingID)`. `outputRevision` remains the SHA256
+of the accepted-file bytes, not a clock, input fingerprint, or snapshot body hash.
+Publication fields are `schemaVersion: 1`, `operation: upsert|delete`, `sourceUUID`,
+`meetingID`, `outputRevision`, `publicationOrdinal`, `previousRevision` (absent/null
+for the first), `selectionBasis: future_accepted|explicit_history_selection`,
+`payloadSHA256` (64 lowercase hex) and `payloadBase64`. Upserts carry the exact
+sorted-key snapshot JSON bytes; snapshot Date fields use Foundation reference-date
+seconds, not ISO8601. The payload hash is over decoded exact bytes, never JSON
+re-serialization. Delete has empty payload and its SHA256, and requires an explicit
+source event with matching current revision; absence or read failure is not deletion.
+
+Ordinals are allocated durably per slot, starting at 1 with predecessor revision.
+Re-enqueue of an existing accepted revision does not allocate a new ordinal, even
+after receipt/restart. Explicit historical selection is recorded at enqueue and
+is not inferred from contextBasis. Tombstones reject re-enrollment of older upserts.
+
+Receipts echo schema/source/meeting/ordinal/revision/payload hash plus `status` and
+`isCurrent`. Only exact envelope-CAS-matched stored/searchable/deleted receipts can
+settle pending delivery; conflict/pending_gap/stale do not ACK. Stored is separate
+from search acceptance. Progress uses the same exact publication, not a new ordinal.
+Snapshot bytes are retained only as bounded pending progress until searchable,
+deleted or a non-current receipt, then removed; compact identity/hash/receipt remains
+to prevent duplicate enrollment. No historical payload archive is created. No
+registered RPC, source-credential binding, production quota, generation hook, consumer
+adapter deployment or live readback is implied by these producer types.

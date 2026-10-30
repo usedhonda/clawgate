@@ -210,14 +210,14 @@ final class AudioHubOutbox {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func ensureDirectory(_ directory: URL) throws {
+    static func ensureDirectory(_ directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
         guard attributes[.type] as? FileAttributeType == .typeDirectory else { throw Error.corruptState }
         guard chmod(directory.path, mode_t(0o700)) == 0 else { throw Error.ioFailure }
     }
 
-    private static func persist(_ state: State, to url: URL, maxBytes: Int) throws -> String {
+    static func persist<T: Encodable>(_ state: T, to url: URL, maxBytes: Int) throws -> String {
         let data: Data
         do { data = try JSONEncoder().encode(state) } catch { throw Error.ioFailure }
         guard data.count <= maxBytes else { throw Error.capacityExceeded }
@@ -242,7 +242,7 @@ final class AudioHubOutbox {
         } catch { try? FileManager.default.removeItem(at: temporary); throw Error.ioFailure }
     }
 
-    private static func readBounded(_ url: URL, maxBytes: Int) throws -> Data {
+    static func readBounded(_ url: URL, maxBytes: Int) throws -> Data {
         let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
         guard descriptor >= 0 else { throw Error.corruptState }
         defer { close(descriptor) }
