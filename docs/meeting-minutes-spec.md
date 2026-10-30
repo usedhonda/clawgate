@@ -24,6 +24,14 @@ Staging reuses the existing synchronized, immutable metadata journal with an
 explicit caller-supplied positive byte limit and no production default. Capacity
 or stale-writer failure retains accepted documents and never evicts pending data.
 
+The Recall Hub-STT adapter consumes only the existing authenticated OpenClaw
+policy-filtered projection after explicit event/result selection. It preserves
+Recall parent references, processing version, segment offsets and partial/unknown
+coverage; diarization labels are not promoted into named speakers. Suppressed,
+sensitive, non-Recall or mismatched results cannot become meeting speech. This
+adapter is not a new read permission, an activated reader or the complete Recall
+fallback: legacy transcript discovery, selection UI and transport remain separate.
+
 Normative contract for the meeting record, the minutes request envelope, and
 the reply the client will accept. Public-safe: this document must never contain
 real hostnames, IP addresses, network ids, personal names/accounts, or secrets.
