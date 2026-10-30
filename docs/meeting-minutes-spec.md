@@ -20,6 +20,9 @@ recovers a save-before-enqueue interruption from marked accepted files. Staging
 is not a consumer receipt, searchable knowledge or activation of an automatic
 delivery route. Consumer retention, transport and acknowledgement remain separate
 integration work; this foundation does not choose an OpenClaw storage backend.
+Staging reuses the existing synchronized, immutable metadata journal with an
+explicit caller-supplied positive byte limit and no production default. Capacity
+or stale-writer failure retains accepted documents and never evicts pending data.
 
 Normative contract for the meeting record, the minutes request envelope, and
 the reply the client will accept. Public-safe: this document must never contain

@@ -1,17 +1,16 @@
 import Foundation
-import CryptoKit
 
 /// Local producer staging only. Enqueuing is not consumer storage or indexing.
 /// The accepted document remains authoritative if staging fails or is interrupted.
 struct MeetingMinutesKnowledgeOutbox {
     let directory: URL
+    private let storage: AudioHubOutbox
 
-    init(store: MeetingStore) {
+    /// Reuse the existing bounded, synchronized metadata journal. There is no
+    /// implicit production quota or second implementation of its crash/CAS rules.
+    init(store: MeetingStore, maxMetadataBytes: Int) throws {
         directory = store.root.appendingPathComponent("knowledge-outbox", isDirectory: true)
-    }
-
-    enum QueueError: Error, Equatable {
-        case immutableConflict
+        storage = try AudioHubOutbox(directory: directory, maxMetadataBytes: maxMetadataBytes)
     }
 
     @discardableResult
@@ -22,31 +21,15 @@ struct MeetingMinutesKnowledgeOutbox {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let payload = try encoder.encode(snapshot)
-        let url = pendingURL(meetingID: snapshot.context.meetingID, outputRevision: snapshot.outputRevision)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                               attributes: [.posixPermissions: 0o700])
-        // link publishes a fully written, private payload without replacing a
-        // concurrent writer's binding for this meeting/revision.
-        let temporary = directory.appendingPathComponent(UUID().uuidString + ".pending")
-        try payload.write(to: temporary, options: [.atomic])
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
-        do {
-            try FileManager.default.linkItem(at: temporary, to: url)
-        } catch CocoaError.fileWriteFileExists {
-            guard try Data(contentsOf: url) == payload else { throw QueueError.immutableConflict }
-        }
+        try storage.enqueue(sourceRecordRef: "meeting-minutes:" + snapshot.context.meetingID,
+            revision: snapshot.outputRevision) { _, _ in payload }
         return snapshot
     }
 
     func pending() throws -> [MeetingMinutesKnowledgeSnapshot] {
-        let urls: [URL]
-        do {
-            urls = try FileManager.default.contentsOfDirectory(at: directory,
-                includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
-        } catch CocoaError.fileReadNoSuchFile { return [] }
-        return try urls.map { try JSONDecoder().decode(MeetingMinutesKnowledgeSnapshot.self,
-            from: Data(contentsOf: $0)) }.sorted {
+        return try storage.pending(limit: Int.max).map {
+            try JSONDecoder().decode(MeetingMinutesKnowledgeSnapshot.self, from: $0.envelope)
+        }.sorted {
                 if $0.generatedAt != $1.generatedAt { return $0.generatedAt < $1.generatedAt }
                 return $0.outputRevision < $1.outputRevision
             }
@@ -63,11 +46,5 @@ struct MeetingMinutesKnowledgeOutbox {
             do { try enqueue(acceptedData: data, record: record) }
             catch MeetingMinutesKnowledgeSnapshot.SnapshotError.historicalSelectionRequired { continue }
         }
-    }
-
-    private func pendingURL(meetingID: String, outputRevision: String) -> URL {
-        let binding = Data((meetingID + "\0" + outputRevision).utf8)
-        let key = SHA256.hash(data: binding).map { String(format: "%02x", $0) }.joined()
-        return directory.appendingPathComponent(key + ".json")
     }
 }

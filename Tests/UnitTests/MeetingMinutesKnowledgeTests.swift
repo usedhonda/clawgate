@@ -64,16 +64,40 @@ final class MeetingMinutesKnowledgeTests: XCTestCase {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try accepted(r, historical: legacy).write(to: directory.appendingPathComponent("minutes-accepted.json"))
         }
-        let queue = MeetingMinutesKnowledgeOutbox(store: store)
+        let queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
         try queue.reconcile(store: store, records: [new, old])
-        try MeetingMinutesKnowledgeOutbox(store: store).reconcile(store: store, records: [new, old])
+        try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+            .reconcile(store: store, records: [new, old])
         XCTAssertEqual(try queue.pending().map(\.context.meetingID), ["new"])
-        let item = try XCTUnwrap(FileManager.default.contentsOfDirectory(at: queue.directory,
-            includingPropertiesForKeys: nil).first { $0.pathExtension == "json" })
+        let item = queue.directory.appendingPathComponent("state.json")
         try Data("corrupted binding".utf8).write(to: item)
         let originalBytes = try Data(contentsOf: store.directory(for: new.id).appendingPathComponent("minutes-accepted.json"))
         XCTAssertThrowsError(try queue.enqueue(acceptedData: originalBytes, record: new)) {
-            XCTAssertEqual($0 as? MeetingMinutesKnowledgeOutbox.QueueError, .immutableConflict)
+            XCTAssertEqual($0 as? AudioHubOutbox.Error, .conflict)
         }
+    }
+
+    func testCapacityPreservesPendingAndAcceptedRevisionForLaterRecovery() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root), r = record()
+        let directory = store.directory(for: r.id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let source = directory.appendingPathComponent("minutes-accepted.json")
+        let first = try accepted(r)
+        try first.write(to: source, options: .atomic)
+        let small = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 4096)
+        let queued = try small.enqueue(acceptedData: first, record: r)
+        let revised = try accepted(r, summary: String(repeating: "Revised discussion ", count: 500))
+        try revised.write(to: source, options: .atomic)
+        XCTAssertThrowsError(try small.enqueue(acceptedData: revised, record: r)) {
+            XCTAssertEqual($0 as? AudioHubOutbox.Error, .capacityExceeded)
+        }
+        XCTAssertEqual(try Data(contentsOf: source), revised)
+        XCTAssertEqual(try small.pending().map(\.outputRevision), [queued.outputRevision])
+        let restored = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try restored.reconcile(store: store, records: [r])
+        XCTAssertEqual(try restored.pending().count, 2)
+        XCTAssertEqual(try Data(contentsOf: source), revised)
     }
 }
