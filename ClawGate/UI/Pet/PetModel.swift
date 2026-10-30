@@ -3197,12 +3197,14 @@ final class PetModel: NSObject, ObservableObject {
     }
 
     static func minutesEnvelope(for record: MeetingRecord, store: MeetingStore,
-                                local: [TranscriptSegment], material: MeetingGoogleMaterials.Snapshot?) -> MeetingMinutesEnvelope {
-        minutesEnvelope(for: record, store: store, local: local, material: material, checkingCancellation: {})
+                                local: [TranscriptSegment], material: MeetingGoogleMaterials.Snapshot?,
+                                recall: MeetingMinutesPreparation.RecallInput? = nil) -> MeetingMinutesEnvelope {
+        minutesEnvelope(for: record, store: store, local: local, material: material, recall: recall, checkingCancellation: {})
     }
 
     static func minutesEnvelope(for record: MeetingRecord, store: MeetingStore,
                                 local: [TranscriptSegment], material: MeetingGoogleMaterials.Snapshot?,
+                                recall: MeetingMinutesPreparation.RecallInput? = nil,
                                 checkingCancellation: () throws -> Void) rethrows -> MeetingMinutesEnvelope {
         let external = try (material?.segments ?? []).map {
             try checkingCancellation()
@@ -3210,7 +3212,7 @@ final class PetModel: NSObject, ObservableObject {
                 speaker: $0.speakerName, capturedAt: $0.capturedAt,
                 sourceURL: $0.sourceURL, sourceLocator: $0.locator)
         }
-        let fused = try MeetingTranscriptFusion.fuse(local: local, external: external, checkingCancellation: checkingCancellation)
+        let fused = try MeetingTranscriptFusion.fuse(local: local, external: external + (recall?.segments ?? []), checkingCancellation: checkingCancellation)
         try checkingCancellation()
         var envelope = MeetingMinutesEnvelope.build(record: record, sourceSegments: fused.segments)
         envelope.unresolvedNotes = fused.unresolvedNotes
@@ -3225,7 +3227,8 @@ final class PetModel: NSObject, ObservableObject {
             envelope = envelope.replacingSegments(envelope.segments + extra)
             if let error = review.error { envelope.unresolvedNotes = (envelope.unresolvedNotes ?? []) + [error] }
         }
-        envelope.coverageHints = material?.notes.map(\.text)
+        let coverage = (material?.notes.map(\.text) ?? []) + (recall?.coverageHints ?? [])
+        envelope.coverageHints = coverage.isEmpty ? nil : coverage
         let materials = Self.selectedSupplementalMaterials(store: store, id: record.id)
         envelope.supplementalMaterials = materials.isEmpty ? nil : materials
         return envelope
@@ -3518,14 +3521,16 @@ final class PetModel: NSObject, ObservableObject {
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
     /// a Log question the owner just asked matters more than a background write.
     func requestMinutes(for record: MeetingRecord, preservingMaterials: Bool = false,
-                        markUserRequested: Bool = true, refreshPreparedInput: Bool = false) {
+                        markUserRequested: Bool = true, refreshPreparedInput: Bool = false,
+                        recall: MeetingMinutesPreparation.RecallInput? = nil) {
         prepareMinutes(for: record, preservingMaterials: preservingMaterials,
-            markUserRequested: markUserRequested, refreshPreparedInput: refreshPreparedInput)
+            markUserRequested: markUserRequested, refreshPreparedInput: refreshPreparedInput, recall: recall)
     }
 
     private func prepareMinutes(for record: MeetingRecord, preservingMaterials: Bool = false,
                                 markUserRequested: Bool = true, refreshPreparedInput: Bool = false,
-                                regenerate: Bool = false, forceFull: Bool = false) {
+                                regenerate: Bool = false, forceFull: Bool = false,
+                                recall: MeetingMinutesPreparation.RecallInput? = nil) {
         guard !didCleanup, pendingMinutesMeetingID != record.id else { return }
         if let existing = minutesPreparationTickets[record.id] {
             guard markUserRequested, existing.requestedAt == nil else { return }
@@ -3544,7 +3549,7 @@ final class PetModel: NSObject, ObservableObject {
         let input = MeetingMinutesPreparation.Input(record: record, store: minutesStore(), sessionsRoot: sessionsRoot,
             material: record.materialCandidateID.flatMap { meetingMaterials[$0] }, transcript: meetingTranscriptProvider,
             preservingMaterials: preservingMaterials, refreshPreparedInput: refreshPreparedInput,
-            regenerate: regenerate, forceFull: forceFull)
+            regenerate: regenerate, forceFull: forceFull, recall: recall)
         #if DEBUG
         let didBuild = minutesPreparationDidBuildForTesting
         #else
@@ -3583,6 +3588,8 @@ final class PetModel: NSObject, ObservableObject {
                     self.minutesPreparationErrors[record.id] = "入力または実行状態が変わったため準備を取り消しました。もう一度生成できます。"
                 case .failure(MeetingMinutesPreparation.Failure.noTranscript):
                     self.finishMinutes(id: record.id, state: "failed", error: "この会議には文字起こしがありません")
+                case .failure(MeetingMinutesPreparation.Failure.recallReadRequired):
+                    self.minutesPreparationErrors[record.id] = "選択したRecallの発言を読み取る必要があります。旧議事録は保持しています。"
                 case .failure(MeetingMinutesPreparation.Failure.materialLimit):
                     self.finishMinutes(id: record.id, state: "failed", error: "選択資料が20万文字を超えています。使用する資料を絞ってください。旧議事録は保持しています。")
                 case .failure:
@@ -3985,13 +3992,14 @@ final class PetModel: NSObject, ObservableObject {
 
     /// Update from the selected sources. Unchanged validated input prefixes
     /// are reusable; new/changed material is generated before atomic acceptance.
-    func regenerateMinutes(for record: MeetingRecord, forceFull: Bool = false) {
+    func regenerateMinutes(for record: MeetingRecord, forceFull: Bool = false,
+                           recall: MeetingMinutesPreparation.RecallInput? = nil) {
         guard record.minutesState != "pending", pendingMinutesMeetingID != record.id,
               pendingSummaryPass?.id != record.id else { return }
         minutesAttempts[record.id] = 0
         minutesNotBefore[record.id] = nil
         summaryPassQueue.removeAll { $0 == record.id }
-        prepareMinutes(for: record, regenerate: true, forceFull: forceFull)
+        prepareMinutes(for: record, regenerate: true, forceFull: forceFull, recall: recall)
     }
 
     /// Sends the next queued overview rewrite. Returns whether one went out.

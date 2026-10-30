@@ -817,6 +817,14 @@ evergreen read permission; the chosen source must be read fresh for regeneration
 
 ### Recall selection references
 
+Fresh selected Recall speech enters the ordinary preparation/fusion/job path,
+with provider citation identity and coverage hints retained. A new preparation
+with nonempty saved selections must supply a fresh policy-filtered input bound
+to that exact selection fingerprint; it cannot silently use local/Meet speech
+alone when the selected read is unavailable. A selection changed during
+preparation invalidates the save. Resuming an already frozen pending job retains
+its established evidence rather than treating cached text as a new read grant.
+
 A meeting's private `recall-selection.json` may retain chosen source event UUIDs
 and an optional explicitly chosen derived result **event** UUID, not the distinct
 result artifact ID. It contains no text, audio, token or permission marker. Reopening

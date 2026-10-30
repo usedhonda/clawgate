@@ -30,6 +30,55 @@ final class MeetingMinutesPreparationTests: XCTestCase {
         return segment
     }
 
+    func testSelectedRecallRequiresFreshReadAndKeepsEvidenceInNormalJob() throws {
+        let selections = MeetingRecallSelectionStore(store: store)
+        let event = "00000000-0000-4000-8000-000000000001"
+        let selected = try selections.save(items: [.init(eventID: event, resultEventID: nil)],
+            record: record, expectedFingerprint: nil)
+        let fingerprint = try XCTUnwrap(selected.fingerprint)
+        let evidence = MeetingTranscriptSourceSegment(id: "recall-fixture", source: "recall",
+            text: "Selected statement", sourceLocator: "Hub event " + event)
+        let fresh = MeetingMinutesPreparation.RecallInput(selectionFingerprint: fingerprint,
+            segments: [evidence], coverageHints: ["Coverage is unconfirmed"])
+        func input(_ recall: MeetingMinutesPreparation.RecallInput?,
+                   transcript: ((MeetingRecord) -> [TranscriptSegment])? = nil) -> MeetingMinutesPreparation.Input {
+            .init(record: record, store: store, sessionsRoot: store.root.appendingPathComponent("sessions"),
+                material: nil, transcript: transcript, preservingMaterials: false,
+                refreshPreparedInput: false, regenerate: true, forceFull: false, recall: recall)
+        }
+        func run(_ input: MeetingMinutesPreparation.Input) throws {
+            _ = try MeetingMinutesPreparation.run(input, ticket: .init(requestedAt: Date()))
+        }
+        XCTAssertThrowsError(try run(input(nil, transcript: { [self] _ in [segment()] }))) {
+            guard case MeetingMinutesPreparation.Failure.recallReadRequired = $0 else {
+                return XCTFail("Selected evidence must not silently fall back to local speech")
+            }
+        }
+        XCTAssertNil(MeetingMinutesJob.load(store: store, id: record.id))
+        let stale = MeetingMinutesPreparation.RecallInput(selectionFingerprint: "sha256:stale",
+            segments: [evidence], coverageHints: [])
+        XCTAssertThrowsError(try run(input(stale)))
+        XCTAssertThrowsError(try run(input(fresh, transcript: { [self] _ in
+            _ = try? selections.save(items: [], record: record, expectedFingerprint: fingerprint)
+            return []
+        }))) {
+            guard case MeetingMinutesPreparation.Failure.changed = $0 else { return XCTFail("Changed selection accepted") }
+        }
+        XCTAssertNil(MeetingMinutesJob.load(store: store, id: record.id))
+        let empty = try selections.load(meetingID: record.id)
+        let restored = try selections.save(items: selected.items, record: record, expectedFingerprint: empty.fingerprint)
+        let current = MeetingMinutesPreparation.RecallInput(selectionFingerprint: try XCTUnwrap(restored.fingerprint),
+            segments: [evidence], coverageHints: fresh.coverageHints)
+        try run(input(current))
+        let job = try XCTUnwrap(MeetingMinutesJob.load(store: store, id: record.id))
+        let envelope = try XCTUnwrap(job.envelopes.first)
+        XCTAssertEqual(envelope.segments.map(\.id), [evidence.id])
+        XCTAssertEqual(envelope.segments.first?.source, "recall")
+        XCTAssertEqual(envelope.segments.first?.sourceLocator, evidence.sourceLocator)
+        XCTAssertNil(envelope.segments.first?.capturedAt)
+        XCTAssertEqual(envelope.coverageHints, fresh.coverageHints)
+    }
+
     func testRegenerationPreparesOffMainAndCoalescesRepeatedClicks() throws {
         let started = expectation(description: "worker started")
         let release = DispatchSemaphore(value: 0)

@@ -5,6 +5,7 @@ enum MeetingMinutesPreparation {
         case changed
         case cancelled
         case noTranscript
+        case recallReadRequired
         case materialLimit
     }
 
@@ -28,6 +29,14 @@ enum MeetingMinutesPreparation {
         }
     }
 
+    /// A fresh, policy-filtered read for this explicit selection. This is an
+    /// in-memory generation input, not a reusable permission or body cache.
+    struct RecallInput {
+        let selectionFingerprint: String
+        let segments: [MeetingTranscriptSourceSegment]
+        let coverageHints: [String]
+    }
+
     struct Input {
         let record: MeetingRecord
         let store: MeetingStore
@@ -38,6 +47,7 @@ enum MeetingMinutesPreparation {
         let refreshPreparedInput: Bool
         let regenerate: Bool
         let forceFull: Bool
+        var recall: RecallInput? = nil
     }
 
     struct Output {
@@ -92,6 +102,14 @@ enum MeetingMinutesPreparation {
             if let requestedAt = ticket.requestedAt { frozen.userRequestedAt = requestedAt }
             updated = frozen
         } else {
+            let selection = try MeetingRecallSelectionStore(store: store).load(meetingID: record.id)
+            if selection.items.isEmpty {
+                guard input.recall == nil else { throw Failure.changed }
+            } else {
+                guard let recall = input.recall else { throw Failure.recallReadRequired }
+                guard recall.selectionFingerprint == selection.fingerprint else { throw Failure.changed }
+                guard !recall.segments.isEmpty else { throw Failure.noTranscript }
+            }
             let boundary = AmbientController.trimmedEnd(of: record, against: store.all(), now: anchor)
             end = boundary
             sourceRevision = try MeetingMinutesSourceRevision.ambientRevision(record: record, files: files,
@@ -100,7 +118,7 @@ enum MeetingMinutesPreparation {
             let local = record.source == "calendar" ? (store.loadBackfill(id: record.id) ?? []) : (input.transcript?(record) ?? [])
             let material = input.material ?? record.materialCandidateID.flatMap { MeetingGoogleMaterials.load(candidateID: $0) }
             var envelope = try PetModel.minutesEnvelope(for: record, store: store, local: local,
-                material: material, checkingCancellation: { try ticket.check() })
+                material: material, recall: input.recall, checkingCancellation: { try ticket.check() })
             if !input.regenerate, record.minutesState == "pending" || input.preservingMaterials,
                let previous { envelope.supplementalMaterials = previous.allSupplementalMaterials }
             guard !envelope.segments.isEmpty else {
