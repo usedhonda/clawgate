@@ -55,6 +55,32 @@ final class MeetingFusionTests: XCTestCase {
         """
         XCTAssertThrowsError(try MeetingMinutesParser.parse(json, validSegmentIds: ["meet-known"]))
     }
+
+    func testExternalOffsetsSurviveAcceptanceWithoutInventingCaptureTime() throws {
+        let original = MeetingTranscriptSourceSegment(id: "recall-fixture-1", source: "recall",
+            text: "A grounded statement", sourceLocator: "segment:1",
+            startSeconds: 3.5, endSeconds: 9.5)
+        let fused = MeetingTranscriptFusion.fuse(local: [], external: [original])
+        let envelope = MeetingMinutesEnvelope.build(record: record, sourceSegments: fused.segments)
+        let chunks = MeetingMinutes.chunked(envelope, maxCharacters: 500)
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let minutes = MeetingMinutes(title: "Planning", summary: "A grounded statement", topics: [],
+            decisions: [], actionItems: [], openQuestions: [],
+            evidence: [MeetingEvidence(claim: "A grounded statement", segmentIds: [original.id])],
+            attendance: nil, language: "en")
+        let job = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope),
+            envelopes: chunks, completed: [minutes])
+        try job.save(store: store, id: record.id)
+        try store.saveValidatedMinutes(minutes, for: record, job: job)
+        let persisted = try XCTUnwrap(store.loadAcceptedMinutes(id: record.id)?.segments.first)
+        XCTAssertEqual(persisted.startSeconds, 3.5)
+        XCTAssertEqual(persisted.endSeconds, 9.5)
+        XCTAssertNil(persisted.capturedAt)
+        XCTAssertEqual(persisted.source, "recall")
+        XCTAssertEqual(persisted.sourceLocator, "segment:1")
+        XCTAssertEqual(MeetingMinutesJob.load(store: store, id: record.id)?.envelopes.first?.segments.first, persisted)
+    }
     func testDuplicateSpeechStillKeepsBothProviderCitationsAndReviewIsBounded() {
         let lines = [
             MeetingTranscriptSourceSegment(id: "seg-1", source: "local", text: "Agreed", capturedAt: 110),

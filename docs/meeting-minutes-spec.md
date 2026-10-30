@@ -11,6 +11,9 @@ context, unresolved notes and cited source locators, not raw speech or material
 bodies. A consumer must not recompute this revision from its JSON representation.
 Coverage hints are retained separately; acceptance establishes grounding in the
 selected inputs, never complete real-meeting coverage or measured capture bounds.
+External transcript providers may supply sample-relative `startSeconds` and
+`endSeconds`; fusion, durable jobs and accepted citations retain those offsets
+without deriving `capturedAt` from them or from a calendar/result/receipt clock.
 
 The local knowledge outbox stages immutable meeting/revision projections and
 recovers a save-before-enqueue interruption from marked accepted files. Staging

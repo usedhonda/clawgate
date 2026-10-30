@@ -25,12 +25,18 @@ struct MeetingTranscriptSourceSegment: Codable, Equatable {
     let capturedAt: Double?
     let sourceURL: String?
     let sourceLocator: String?
+    /// Sample-relative offsets supplied by a transcript provider. They do not
+    /// establish an absolute capture clock or a meeting-time association.
+    let startSeconds: Double?
+    let endSeconds: Double?
 
     init(id: String, source: String, text: String, speaker: String? = nil,
          capturedAt: Double? = nil, sourceURL: String? = nil,
-         sourceLocator: String? = nil) {
+         sourceLocator: String? = nil, startSeconds: Double? = nil,
+         endSeconds: Double? = nil) {
         self.id = id; self.source = source; self.text = text; self.speaker = speaker
         self.capturedAt = capturedAt; self.sourceURL = sourceURL; self.sourceLocator = sourceLocator
+        self.startSeconds = startSeconds; self.endSeconds = endSeconds
     }
 }
 
@@ -64,8 +70,8 @@ struct MeetingMinutesSegment: Codable, Equatable {
     init(sourceSegment: MeetingTranscriptSourceSegment) {
         self.id = sourceSegment.id
         self.capturedAt = sourceSegment.capturedAt
-        self.startSeconds = 0
-        self.endSeconds = 0
+        self.startSeconds = sourceSegment.startSeconds ?? 0
+        self.endSeconds = sourceSegment.endSeconds ?? self.startSeconds
         self.speaker = sourceSegment.speaker
         self.stream = nil
         self.speakerName = sourceSegment.speaker
