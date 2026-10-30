@@ -132,6 +132,10 @@ struct OpenClawDeviceIdentity {
 
     private static var cached: OpenClawDeviceIdentity?
 
+    /// Observation only: never load a key, show a Keychain prompt, or generate
+    /// an identity merely to prepare a publication registration candidate.
+    static var cachedPublicDeviceID: String? { cached?.deviceId }
+
     /// File path for dev identity storage (no Keychain dialog)
     private static var identityFilePath: String {
         NSString("~/.clawgate/device-identity.json").expandingTildeInPath

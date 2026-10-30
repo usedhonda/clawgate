@@ -23,8 +23,8 @@ integration work; this foundation does not choose an OpenClaw storage backend.
 The ordered publication ledger reuses the existing bounded private fsynced file
 primitives with an explicit caller-supplied byte limit and no production default.
 Capacity or stale-writer failure retains accepted documents and never evicts pending
-records. This supersedes the inactive snapshot-only journal format: neither format
-has been activated by a production caller, and incompatible files fail closed.
+records. This supersedes the inactive snapshot-only journal format: the snapshot-only format
+was never activated by a production caller, and incompatible files fail closed.
 
 The Recall Hub-STT adapter consumes only the existing authenticated OpenClaw
 policy-filtered projection after explicit event/result selection. It preserves
@@ -734,3 +734,20 @@ deleted or a non-current receipt, then removed; compact identity/hash/receipt re
 to prevent duplicate enrollment. No historical payload archive is created. No
 registered RPC, source-credential binding, production quota, generation hook, consumer
 adapter deployment or live readback is implied by these producer types.
+
+### Publisher registration candidate (not a grant)
+
+After the ordinary existing Gateway connection succeeds, the app may initialize
+its installation publication ledger with an explicit 16 MiB metadata quota and
+write an owner-only `source-binding-candidate.json` next to it. This contains only
+schema version, persisted sourceUUID, the already cached public deviceId and a
+fixed evidence label. It never loads an identity file, creates a key or enrolls
+past documents. File I/O runs off main, with at most one preparation in flight.
+The local operational quota is not a user token budget or an accepted-output cap.
+
+The candidate is an app observation, not server attestation. Only the consumer
+owner may bind that namespace after matching the existing authenticated paired
+device/current authority. The wire cannot register it. No credential, permission,
+recording state, consumer configuration or publication delivery is changed by this
+bootstrap. A missing cached identity produces no candidate; preparation failure
+is diagnosed without secret/body/identity values and does not block connection.

@@ -412,6 +412,7 @@ final class PetModel: NSObject, ObservableObject {
                     self.showWhisper("Connected")
                 }
                 self.hasEverConnected = true
+                if !wasConnected { self.prepareMinutesPublisherIdentity() }
                 // Pending minutes are durable meeting records, not a timer
                 // attempt. Reconnect is therefore a queue-drain trigger.
                 if !wasConnected { self.recoverMinutesAfterConnection(connectionRestored: true) }
@@ -2950,6 +2951,7 @@ final class PetModel: NSObject, ObservableObject {
     private var missingMinutesScanInFlight = false
     private var missingMinutesScanPending = false
     private let minutesPreparationQueue = DispatchQueue(label: "com.clawgate.minutes.preparation", qos: .userInitiated)
+    private var minutesPublisherIdentityInFlight = false
     private var minutesNetworkMonitor: NWPathMonitor?
     private var minutesNetworkAvailable = true
     private var minutesPreparationTickets: [String: MeetingMinutesPreparation.Ticket] = [:]
@@ -2960,6 +2962,27 @@ final class PetModel: NSObject, ObservableObject {
     @Published private(set) var minutesPreparationErrors: [String: String] = [:]
     private var meetingMaterials: [String: MeetingGoogleMaterials.Snapshot] = [:]
     @Published private var refreshingMaterialIDs: Set<String> = []
+
+    private func prepareMinutesPublisherIdentity() {
+        guard !minutesPublisherIdentityInFlight,
+              let deviceID = OpenClawDeviceIdentity.cachedPublicDeviceID else { return }
+        minutesPublisherIdentityInFlight = true
+        let store = minutesStore()
+        // Explicit installation assembly quota, not a token budget or a limit
+        // on accepted minutes. Capacity errors never discard authoritative data.
+        let metadataBytes = 16 * 1024 * 1024
+        missingMinutesQueue.async { [weak self] in
+            do {
+                _ = try MeetingMinutesPublisherIdentity.prepare(store: store,
+                    existingDeviceID: deviceID, maxMetadataBytes: metadataBytes)
+                NSLog("[MinutesPublication] private publisher candidate ready; registration unverified")
+            } catch {
+                // Fixed, body-free diagnostic. Never log identity or key material.
+                NSLog("[MinutesPublication] private publisher candidate unavailable")
+            }
+            DispatchQueue.main.async { self?.minutesPublisherIdentityInFlight = false }
+        }
+    }
 
     func startMeetingSources() {
         guard meetingSourcesTimer == nil else { return }
