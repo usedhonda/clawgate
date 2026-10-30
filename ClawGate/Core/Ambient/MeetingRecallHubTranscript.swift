@@ -4,14 +4,7 @@ import Foundation
 /// Hub event. The caller must obtain it through its authenticated reader after
 /// explicit selection; this type does not grant access or choose a recording.
 struct MeetingRecallHubTranscript {
-    struct Parent: Decodable, Equatable {
-        let source: String
-        let externalID: String
-        let eventID: String
-        private enum CodingKeys: String, CodingKey {
-            case source, externalID = "external_id", eventID = "event_id"
-        }
-    }
+    typealias Parent = MeetingRecallTranscriptLineage.Parent
 
     enum ImportError: Error, Equatable {
         case invalidProjection, selectionMismatch, bodyUnavailable, unverifiedParents, noSpeech
@@ -61,7 +54,10 @@ struct MeetingRecallHubTranscript {
             speech.append(MeetingTranscriptSourceSegment(
                 id: "recall-\(selectedEventID)-\(index)", source: "recall", text: segment.text,
                 sourceLocator: "Hub result \(selectedEventID), segment \(index)",
-                startSeconds: segment.start, endSeconds: segment.end))
+                startSeconds: segment.start, endSeconds: segment.end,
+                recallLineage: MeetingRecallTranscriptLineage(eventID: projection.ids.eventID,
+                    resultID: projection.ids.resultID, processingVersion: projection.processingVersion,
+                    parents: projection.ids.parents, segmentIndex: index)))
             // A local diarization label is not a named person's identity.
             labels.append(segment.speakerLabel)
         }

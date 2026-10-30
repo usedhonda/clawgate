@@ -57,9 +57,14 @@ final class MeetingFusionTests: XCTestCase {
     }
 
     func testExternalOffsetsSurviveAcceptanceWithoutInventingCaptureTime() throws {
+        let lineage = MeetingRecallTranscriptLineage(
+            eventID: "00000000-0000-0000-0000-000000000001",
+            resultID: "00000000-0000-0000-0000-000000000002", processingVersion: "local-stt-v1",
+            parents: [.init(source: "recall", externalID: "fixture-original",
+                            eventID: "00000000-0000-0000-0000-000000000003")], segmentIndex: 1)
         let original = MeetingTranscriptSourceSegment(id: "recall-fixture-1", source: "recall",
             text: "A grounded statement", sourceLocator: "segment:1",
-            startSeconds: 3.5, endSeconds: 9.5)
+            startSeconds: 3.5, endSeconds: 9.5, recallLineage: lineage)
         let fused = MeetingTranscriptFusion.fuse(local: [], external: [original])
         let envelope = MeetingMinutesEnvelope.build(record: record, sourceSegments: fused.segments)
         let chunks = MeetingMinutes.chunked(envelope, maxCharacters: 500)
@@ -79,6 +84,10 @@ final class MeetingFusionTests: XCTestCase {
         XCTAssertNil(persisted.capturedAt)
         XCTAssertEqual(persisted.source, "recall")
         XCTAssertEqual(persisted.sourceLocator, "segment:1")
+        XCTAssertEqual(persisted.recallLineage, lineage)
+        let snapshot = try MeetingMinutesKnowledgeSnapshot(
+            acceptedData: Data(contentsOf: store.directory(for: record.id).appendingPathComponent("minutes-accepted.json")), record: record)
+        XCTAssertEqual(snapshot.citations.first?.recallLineage, lineage)
         XCTAssertEqual(MeetingMinutesJob.load(store: store, id: record.id)?.envelopes.first?.segments.first, persisted)
     }
     func testDuplicateSpeechStillKeepsBothProviderCitationsAndReviewIsBounded() {

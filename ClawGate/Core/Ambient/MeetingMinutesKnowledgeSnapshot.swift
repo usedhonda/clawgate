@@ -25,6 +25,7 @@ struct MeetingMinutesKnowledgeSnapshot: Codable {
         let source: String
         let sourceURL: String?
         let sourceLocator: String?
+        let recallLineage: MeetingRecallTranscriptLineage?
     }
 
     enum SnapshotError: Error, Equatable {
@@ -69,11 +70,11 @@ struct MeetingMinutesKnowledgeSnapshot: Codable {
         let speechIDs = Set((minutes.evidence ?? []).flatMap(\.segmentIds))
         let materialIDs = Set((minutes.evidence ?? []).flatMap { $0.materialIds ?? [] })
         var refs = accepted.segments.filter { speechIDs.contains($0.id) }.map {
-            Citation(id: $0.id, source: $0.source, sourceURL: $0.sourceURL, sourceLocator: $0.sourceLocator)
+            Citation(id: $0.id, source: $0.source, sourceURL: $0.sourceURL, sourceLocator: $0.sourceLocator, recallLineage: $0.recallLineage)
         }
         for material in accepted.supplementalMaterials ?? [] {
             refs += material.sections.filter { materialIDs.contains($0.id) }.map {
-                Citation(id: $0.id, source: "supplemental", sourceURL: nil, sourceLocator: $0.locator)
+                Citation(id: $0.id, source: "supplemental", sourceURL: nil, sourceLocator: $0.locator, recallLineage: nil)
             }
         }
         citations = refs

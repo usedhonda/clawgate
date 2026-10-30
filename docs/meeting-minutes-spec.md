@@ -695,3 +695,12 @@ changes, and the existing periodic refresh update the cached document and its
 source row. Material refresh increments that revision on both start and finish.
 Unrelated chat token and pet state updates must not invalidate the document
 layout. This avoids redundant redraws; it is not a measured scroll-frame guarantee.
+
+### Selected Recall citation lineage
+
+Selected Hub-STT speech retains structured event/result IDs, processing version,
+original Recall parent references and the original segment index through fusion,
+job persistence, accepted minutes and cited knowledge snapshots. These fields
+are citation identity, not a stored permission grant. Regeneration still requires
+a fresh policy-filtered canonical read. The model prompt omits this machine-only
+lineage; source locators and speech offsets remain its grounding references.

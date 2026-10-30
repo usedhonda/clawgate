@@ -10,6 +10,24 @@ import Foundation
 
 // MARK: - Request
 
+/// Immutable citation identity, not a cached permission to read the body.
+/// Regeneration must revalidate access through the canonical reader.
+struct MeetingRecallTranscriptLineage: Codable, Equatable {
+    struct Parent: Codable, Equatable {
+        let source: String
+        let externalID: String
+        let eventID: String
+        private enum CodingKeys: String, CodingKey {
+            case source, externalID = "external_id", eventID = "event_id"
+        }
+    }
+    let eventID: String
+    let resultID: String
+    let processingVersion: String
+    let parents: [Parent]
+    let segmentIndex: Int
+}
+
 /// One transcript line as the model sees it. Unlike the Log envelope this
 /// carries `stream` and `speakerName`: during a call the stream says whether a
 /// line came from the microphone or system playback. Neither stream alone
@@ -25,6 +43,7 @@ struct MeetingTranscriptSourceSegment: Codable, Equatable {
     let capturedAt: Double?
     let sourceURL: String?
     let sourceLocator: String?
+    let recallLineage: MeetingRecallTranscriptLineage?
     /// Sample-relative offsets supplied by a transcript provider. They do not
     /// establish an absolute capture clock or a meeting-time association.
     let startSeconds: Double?
@@ -33,9 +52,10 @@ struct MeetingTranscriptSourceSegment: Codable, Equatable {
     init(id: String, source: String, text: String, speaker: String? = nil,
          capturedAt: Double? = nil, sourceURL: String? = nil,
          sourceLocator: String? = nil, startSeconds: Double? = nil,
-         endSeconds: Double? = nil) {
+         endSeconds: Double? = nil, recallLineage: MeetingRecallTranscriptLineage? = nil) {
         self.id = id; self.source = source; self.text = text; self.speaker = speaker
         self.capturedAt = capturedAt; self.sourceURL = sourceURL; self.sourceLocator = sourceLocator
+        self.recallLineage = recallLineage
         self.startSeconds = startSeconds; self.endSeconds = endSeconds
     }
 }
@@ -52,6 +72,7 @@ struct MeetingMinutesSegment: Codable, Equatable {
     let source: String
     let sourceURL: String?
     let sourceLocator: String?
+    let recallLineage: MeetingRecallTranscriptLineage?
 
     init(id: String, segment: TranscriptSegment) {
         self.id = id
@@ -65,6 +86,7 @@ struct MeetingMinutesSegment: Codable, Equatable {
         self.source = "local"
         self.sourceURL = nil
         self.sourceLocator = nil
+        self.recallLineage = nil
     }
 
     init(sourceSegment: MeetingTranscriptSourceSegment) {
@@ -79,9 +101,10 @@ struct MeetingMinutesSegment: Codable, Equatable {
         self.source = sourceSegment.source
         self.sourceURL = sourceSegment.sourceURL
         self.sourceLocator = sourceSegment.sourceLocator
+        self.recallLineage = sourceSegment.recallLineage
     }
 
-    private enum CodingKeys: String, CodingKey { case id, capturedAt, startSeconds, endSeconds, speaker, stream, speakerName, text, source, sourceURL, sourceLocator }
+    private enum CodingKeys: String, CodingKey { case id, capturedAt, startSeconds, endSeconds, speaker, stream, speakerName, text, source, sourceURL, sourceLocator, recallLineage }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(String.self, forKey: .id)
@@ -95,6 +118,7 @@ struct MeetingMinutesSegment: Codable, Equatable {
         source = try c.decodeIfPresent(String.self, forKey: .source) ?? "local"
         sourceURL = try c.decodeIfPresent(String.self, forKey: .sourceURL)
         sourceLocator = try c.decodeIfPresent(String.self, forKey: .sourceLocator)
+        recallLineage = try c.decodeIfPresent(MeetingRecallTranscriptLineage.self, forKey: .recallLineage)
     }
 }
 
