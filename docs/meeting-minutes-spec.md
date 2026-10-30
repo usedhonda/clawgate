@@ -1,5 +1,23 @@
 # Meeting Minutes — Contract Spec
 
+## Accepted-document knowledge handoff foundation
+
+Newly accepted generations pin `knowledgeContext` in the authoritative accepted
+file. Legacy accepted files remain readable, but require an explicit historical
+selection before knowledge staging; startup reconciliation must not enroll them.
+The output revision identifies exact accepted-file bytes, separately from the
+input fingerprint. The projection carries the generated document, frozen meeting
+context, unresolved notes and cited source locators, not raw speech or material
+bodies. A consumer must not recompute this revision from its JSON representation.
+Coverage hints are retained separately; acceptance establishes grounding in the
+selected inputs, never complete real-meeting coverage or measured capture bounds.
+
+The local knowledge outbox stages immutable meeting/revision projections and
+recovers a save-before-enqueue interruption from marked accepted files. Staging
+is not a consumer receipt, searchable knowledge or activation of an automatic
+delivery route. Consumer retention, transport and acknowledgement remain separate
+integration work; this foundation does not choose an OpenClaw storage backend.
+
 Normative contract for the meeting record, the minutes request envelope, and
 the reply the client will accept. Public-safe: this document must never contain
 real hostnames, IP addresses, network ids, personal names/accounts, or secrets.

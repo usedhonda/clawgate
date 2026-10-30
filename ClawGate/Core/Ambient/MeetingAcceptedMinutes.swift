@@ -10,6 +10,10 @@ struct MeetingAcceptedMinutes: Codable {
     let createdAt: Date
     var supplementalMaterials: [MeetingSupplementalMaterial]? = nil
     var supplementalInput: [MeetingSupplementalMaterial]? = nil
+    /// Present only on newly accepted generations. Legacy documents are not
+    /// implicitly enrolled for knowledge sharing during startup reconciliation.
+    var knowledgeContext: MeetingMinutesKnowledgeSnapshot.Context? = nil
+    var coverageHints: [String]? = nil
 }
 
 extension MeetingStore {
@@ -29,7 +33,9 @@ extension MeetingStore {
         let accepted = MeetingAcceptedMinutes(minutes: minutes, fingerprint: job.fingerprint,
             segments: Self.uniqueSegments(job.envelopes.flatMap(\.segments)),
             unresolvedNotes: job.envelopes.first?.unresolvedNotes ?? [], createdAt: Date(),
-            supplementalMaterials: job.materialCitationSnapshot, supplementalInput: job.allSupplementalMaterials)
+            supplementalMaterials: job.materialCitationSnapshot, supplementalInput: job.allSupplementalMaterials,
+            knowledgeContext: MeetingMinutesKnowledgeSnapshot.Context(record: record),
+            coverageHints: job.envelopes.first?.coverageHints)
         let dir = directory(for: record.id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         try JSONEncoder().encode(accepted).write(to: dir.appendingPathComponent("minutes-accepted.json"), options: .atomic)
