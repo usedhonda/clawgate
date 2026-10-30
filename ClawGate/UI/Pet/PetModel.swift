@@ -2976,6 +2976,10 @@ final class PetModel: NSObject, ObservableObject {
                 _ = try MeetingMinutesPublisherIdentity.prepare(store: store,
                     existingDeviceID: deviceID, maxMetadataBytes: metadataBytes)
                 NSLog("[MinutesPublication] private publisher candidate ready; registration unverified")
+                Task { [weak self] in
+                    guard let self else { return }
+                    await MeetingMinutesPublicationAdmission.runIfAvailable(store: store, client: self.wsClient)
+                }
             } catch {
                 // Fixed, body-free diagnostic. Never log identity or key material.
                 NSLog("[MinutesPublication] private publisher candidate unavailable")

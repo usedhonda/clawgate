@@ -751,3 +751,21 @@ device/current authority. The wire cannot register it. No credential, permission
 recording state, consumer configuration or publication delivery is changed by this
 bootstrap. A missing cached identity produces no candidate; preparation failure
 is diagnosed without secret/body/identity values and does not block connection.
+
+### Existing-socket publication admission and typed receipts
+
+`wiki.minutes.publish` uses only the existing ordinary signed Gateway socket,
+with current-generation authenticated method advertisement required. Its typed
+receipt is optional in generic payloads and must match the exact publication
+before settlement. An advertised method is not source ownership or delivery proof.
+
+After the consumer owner confirms the method and publisher binding are live,
+the reflected client may make one outer-envelope-valid, empty-document request.
+`MINUTES_DOCUMENT_INVALID` is the sole positive admission observation: it proves
+reaching document validation after current caller/source checks, before a consumer
+store write. It is not a completed minutes document or publication receipt.
+The producer persists a body-free attempted marker before this call. Any previous
+attempt (including uncertain outcome) prevents automatic retries on reconnect.
+Error bodies/credentials are never persisted or logged. No new debug endpoint,
+daemon, key, scope or unrelated send is used. Tombstones are terminal on both sides;
+new revisions also cannot automatically reactivate a deleted slot.

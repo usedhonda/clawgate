@@ -98,6 +98,9 @@ final class MeetingMinutesKnowledgeOutbox {
         lock.lock(); defer { lock.unlock() }
         try ensureCurrent()
         let entries = state.entries.filter { $0.meetingID == record.id }
+        // Consumer tombstones are terminal. Re-enabling this slot requires a
+        // separate explicit protocol, not a new automatically generated hash.
+        guard entries.last?.operation != .delete else { throw Failure.conflict }
         if let existing = entries.first(where: { $0.operation == .upsert && $0.outputRevision == snapshot.outputRevision }) {
             // Reconciliation may never resurrect a revision behind a tombstone.
             if let deletion = entries.last(where: { $0.operation == .delete }), deletion.ordinal > existing.ordinal {

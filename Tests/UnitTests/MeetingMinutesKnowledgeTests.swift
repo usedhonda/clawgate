@@ -181,6 +181,7 @@ final class MeetingMinutesKnowledgeTests: XCTestCase {
         try queue.receive(receipt(deletion, status: .deleted), expected: deletion)
         queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
         XCTAssertThrowsError(try queue.enqueue(acceptedData: bytes, record: r))
+        XCTAssertThrowsError(try queue.enqueue(acceptedData: accepted(r, summary: "New revision after deletion"), record: r))
         try queue.enqueueDeletion(meetingID: r.id, expectedRevision: upsert.outputRevision)
         XCTAssertTrue(try queue.publications().isEmpty)
     }

@@ -182,6 +182,41 @@ actor OpenClawWSClient {
         return methods.contains("chat.send") && methods.contains("chat.result.get")
     }
 
+    func supportsMinutesPublication() -> Bool {
+        isConnected && handshakeComplete &&
+            advertisedGatewayMethodsGeneration == connectionGeneration &&
+            advertisedGatewayMethods?.contains("wiki.minutes.publish") == true
+    }
+
+    /// Uses the already authenticated ordinary socket. A catalog entry is not
+    /// itself proof that this device owns the publication namespace.
+    func publishMinutes(_ publication: MeetingMinutesPublication) async throws -> MeetingMinutesPublicationReceipt {
+        guard supportsMinutesPublication() else { throw OpenClawError.connectionFailed("minutes publication method unavailable") }
+        let payload = try await request(method: "wiki.minutes.publish", params: publication)
+        guard let receipt = payload?.minutesPublicationReceipt, receipt.matches(publication) else {
+            throw OpenClawError.connectionFailed("minutes publication receipt unconfirmed")
+        }
+        return receipt
+    }
+
+    /// One document-invalid request: valid outer namespace/byte hash, no
+    /// document and no publication ledger entry. Expected rejection precedes
+    /// any consumer store mutation. The caller owns one-shot scheduling.
+    func checkMinutesPublicationAdmission(sourceUUID: String) async -> MeetingMinutesPublicationAdmission.Outcome {
+        guard supportsMinutesPublication() else { return .methodUnavailable }
+        let probe = MeetingMinutesPublication(schemaVersion: 1, operation: .upsert,
+            sourceUUID: sourceUUID, meetingID: "minutes-admission-check",
+            outputRevision: "sha256:" + String(repeating: "0", count: 64),
+            publicationOrdinal: 1, previousRevision: nil, selectionBasis: .futureAccepted,
+            payloadSHA256: MeetingMinutesPublication.digest(Data()), payloadBase64: "")
+        do {
+            _ = try await request(method: "wiki.minutes.publish", params: probe)
+            return .unexpectedAcceptance
+        } catch {
+            return MeetingMinutesPublicationAdmission.classify(error)
+        }
+    }
+
     /// Wait for the dedicated hello contract without issuing any RPC. The
     /// retained-minutes socket has no health/history/subscription traffic;
     /// readiness is established only by its authenticated hello advertisement.
