@@ -192,6 +192,7 @@ final class MeetingMinutesKnowledgeOutbox {
 
     func reconcile(store: MeetingStore, records: [MeetingRecord]) throws {
         for record in records {
+            if try isDeleted(meetingID: record.id) { continue }
             let url = store.directory(for: record.id).appendingPathComponent("minutes-accepted.json")
             let data: Data
             do { data = try Data(contentsOf: url) }
@@ -199,6 +200,11 @@ final class MeetingMinutesKnowledgeOutbox {
             do { try enqueue(acceptedData: data, record: record) }
             catch MeetingMinutesKnowledgeSnapshot.SnapshotError.historicalSelectionRequired { continue }
         }
+    }
+
+    private func isDeleted(meetingID: String) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }; try ensureCurrent()
+        return state.entries.last(where: { $0.meetingID == meetingID })?.operation == .delete
     }
 
     private func ensureCurrent() throws {

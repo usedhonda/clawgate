@@ -769,3 +769,22 @@ attempt (including uncertain outcome) prevents automatic retries on reconnect.
 Error bodies/credentials are never persisted or logged. No new debug endpoint,
 daemon, key, scope or unrelated send is used. Tombstones are terminal on both sides;
 new revisions also cannot automatically reactivate a deleted slot.
+
+### New accepted-generation publication hook
+
+After a production store commits an accepted file, it hands the exact accepted
+bytes to the single background installation publisher. Staging/delivery failure
+never rolls back the accepted output. Delivery uses the verified existing ordinary
+signed socket, and only after that source's positive admission observation. It
+opens the durable journal again after each network await so a simultaneous newly
+accepted revision cannot cause stale in-memory state to settle a different entry.
+Only exact immutable retries occur; errors/rejection retain pending. No timer,
+replay of source audio, new socket or notification is introduced.
+
+Reconnect reconciles marked new accepted files and drains pending/progress once
+per event. Legacy files are skipped without explicit selection; deleted slots are
+also skipped rather than preventing unrelated recovery. Settled revisions are not
+re-enqueued. A save-before-stage interruption recovers from the latest authoritative
+accepted file; it does not promise an archive of every unseen intermediate revision.
+Old version bodies are not retained as a second history store. Store roots explicitly
+provided by tests/tools do not auto-enroll into the production namespace.

@@ -23,16 +23,21 @@ struct MeetingMinutesPublicationAdmission: Codable {
         return .unknownFailure
     }
 
-    static func runIfAvailable(store: MeetingStore, client: OpenClawWSClient) async {
-        guard await client.supportsMinutesPublication() else { return }
+    static func runIfAvailable(store: MeetingStore, client: OpenClawWSClient) async -> Outcome? {
+        guard await client.supportsMinutesPublication() else { return nil }
         do {
             let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 16 * 1024 * 1024)
             let url = ledger.directory.appendingPathComponent("publication-admission.json")
+            if FileManager.default.fileExists(atPath: url.path) {
+                let previous = try JSONDecoder().decode(Self.self,
+                    from: AudioHubOutbox.readBounded(url, maxBytes: 4096))
+                return previous.sourceUUID == ledger.sourceUUID ? previous.outcome : nil
+            }
             // Any previous attempt, including uncertain outcome, suppresses an
             // automatic retry. Do not turn reconnect into a probe loop.
             let marker = open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK, 0o600)
             if marker < 0 {
-                if errno == EEXIST { return }
+                if errno == EEXIST { return nil }
                 throw AudioHubOutbox.Error.ioFailure
             }
             close(marker)
@@ -42,8 +47,10 @@ struct MeetingMinutesPublicationAdmission: Codable {
             _ = try AudioHubOutbox.persist(Self(schemaVersion: 1, sourceUUID: ledger.sourceUUID,
                 outcome: outcome), to: url, maxBytes: 4096)
             NSLog("[MinutesPublication] admission observation=%@; not a publication receipt", outcome.rawValue)
+            return outcome
         } catch {
             NSLog("[MinutesPublication] admission observation unavailable")
+            return nil
         }
     }
 }

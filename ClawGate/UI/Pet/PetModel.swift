@@ -600,6 +600,7 @@ final class PetModel: NSObject, ObservableObject {
 
             case .disconnected:
                 let wasConnected = (self.connectionState == .connected)
+                Task { await MeetingMinutesPublisher.shared.disconnect() }
                 self.connectionState = .disconnected
                 self.connectingSince = nil
                 self.stateMachine.handle(.disconnected)
@@ -2978,7 +2979,12 @@ final class PetModel: NSObject, ObservableObject {
                 NSLog("[MinutesPublication] private publisher candidate ready; registration unverified")
                 Task { [weak self] in
                     guard let self else { return }
-                    await MeetingMinutesPublicationAdmission.runIfAvailable(store: store, client: self.wsClient)
+                    let admission = await MeetingMinutesPublicationAdmission.runIfAvailable(store: store, client: self.wsClient)
+                    if admission == .confirmedDocumentRejection,
+                       await self.wsClient.supportsMinutesPublication() {
+                        let client = self.wsClient
+                        await MeetingMinutesPublisher.shared.connect { try await client.publishMinutes($0) }
+                    }
                 }
             } catch {
                 // Fixed, body-free diagnostic. Never log identity or key material.

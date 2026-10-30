@@ -186,4 +186,61 @@ final class MeetingMinutesKnowledgeTests: XCTestCase {
         XCTAssertTrue(try queue.publications().isEmpty)
     }
 
+    private actor PublicationSink {
+        var fail = true
+        var sent: [MeetingMinutesPublication] = []
+        func setReady() { fail = false }
+        func items() -> [MeetingMinutesPublication] { sent }
+        func send(_ item: MeetingMinutesPublication) throws -> MeetingMinutesPublicationReceipt {
+            sent.append(item)
+            if fail { throw OpenClawError.timeout }
+            return .init(schemaVersion: 1, sourceUUID: item.sourceUUID, meetingID: item.meetingID,
+                publicationOrdinal: item.publicationOrdinal, outputRevision: item.outputRevision,
+                payloadSHA256: item.payloadSHA256, status: item.operation == .delete ? .deleted : .searchable,
+                isCurrent: true)
+        }
+    }
+
+    func testPublisherOfflineReconnectExactRetryAndLegacyExclusion() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let r = record("mtg-new"), legacy = record("mtg-legacy")
+        let bytes = try accepted(r)
+        for (item, data) in [(r, bytes), (legacy, try accepted(legacy, historical: true))] {
+            store.save(item)
+            try data.write(to: store.directory(for: item.id).appendingPathComponent("minutes-accepted.json"))
+        }
+        let publisher = MeetingMinutesPublisher(store: store, maxMetadataBytes: 128 * 1024)
+        await publisher.accept(record: r, acceptedData: bytes)
+        XCTAssertEqual(try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024).pending().count, 1)
+        let sink = PublicationSink()
+        await publisher.connect { try await sink.send($0) }
+        XCTAssertEqual(try Data(contentsOf: store.directory(for: r.id).appendingPathComponent("minutes-accepted.json")), bytes)
+        XCTAssertEqual(try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024).publications().count, 1)
+        await sink.setReady()
+        await publisher.connect { try await sink.send($0) }
+        var sent = await sink.items()
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(sent[0], sent[1]) // uncertain outcome retried with exact immutable identity
+        XCTAssertEqual(sent[0].meetingID, r.id)
+        XCTAssertTrue(try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024).publications().isEmpty)
+        await publisher.connect { try await sink.send($0) }
+        sent = await sink.items()
+        XCTAssertEqual(sent.count, 2) // settled reconciliation neither resends nor enrolls legacy
+        let revised = try accepted(r, summary: "Revised accepted statement")
+        try revised.write(to: store.directory(for: r.id).appendingPathComponent("minutes-accepted.json"))
+        await publisher.accept(record: r, acceptedData: revised)
+        sent = await sink.items()
+        XCTAssertEqual(sent.count, 3)
+        XCTAssertEqual(sent[2].publicationOrdinal, 2)
+        XCTAssertEqual(sent[2].previousRevision, sent[0].outputRevision)
+        let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try ledger.enqueueDeletion(meetingID: r.id, expectedRevision: sent[2].outputRevision)
+        await publisher.connect { try await sink.send($0) }
+        await publisher.connect { try await sink.send($0) }
+        sent = await sink.items()
+        XCTAssertEqual(sent.count, 4)
+        XCTAssertEqual(sent[3].operation, .delete)
+    }
+
 }

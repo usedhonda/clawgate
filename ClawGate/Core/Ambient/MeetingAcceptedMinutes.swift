@@ -38,7 +38,9 @@ extension MeetingStore {
             coverageHints: job.envelopes.first?.coverageHints)
         let dir = directory(for: record.id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try JSONEncoder().encode(accepted).write(to: dir.appendingPathComponent("minutes-accepted.json"), options: .atomic)
+        let acceptedData = try JSONEncoder().encode(accepted)
+        try acceptedData.write(to: dir.appendingPathComponent("minutes-accepted.json"), options: .atomic)
+        MeetingMinutesPublisher.didAccept(store: self, record: record, acceptedData: acceptedData)
         // These are export copies. The accepted file above is the authority.
         saveMinutes(minutes, for: record)
     }
