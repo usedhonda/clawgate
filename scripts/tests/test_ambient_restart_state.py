@@ -1,7 +1,7 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import tempfile
 import urllib.error
 import json
@@ -32,6 +32,21 @@ class AmbientRestartStateTests(unittest.TestCase):
         with patch.object(subject, "request", side_effect=urllib.error.URLError("refused")):
             with self.assertRaises(urllib.error.URLError):
                 subject.snapshot()
+
+    def test_known_choice_waits_for_startup_readiness_without_post_or_unknown_success(self):
+        guard = Mock()
+        with patch.object(subject, "request", side_effect=[None, status()]) as request, patch.object(subject.time, "sleep"):
+            self.assertEqual(subject.restore({"capturing": True, "streaming": False}, guard=guard), "already_matching")
+        self.assertEqual([call.args for call in request.call_args_list], [("/status",), ("/status",)])
+        self.assertEqual(guard.call_count, 2)
+        with patch.object(subject, "request", return_value=None) as request:
+            with self.assertRaisesRegex(RuntimeError, "became unavailable"):
+                subject.restore({"capturing": True, "streaming": False}, timeout=0)
+        request.assert_called_once_with("/status")
+        with patch.object(subject, "request") as request:
+            with self.assertRaises(subject.UnverifiedAmbientState):
+                subject.restore(None)
+        request.assert_not_called()
 
     def test_incomplete_status_cannot_open_microphone(self):
         with patch.object(subject, "request", return_value={}) as request:

@@ -74,7 +74,13 @@ def restore(before, timeout=45, guard=lambda: None, before_post=lambda: None):
             guard()
         status = request("/status")
         if status is None:
-            raise RuntimeError("ambient became unavailable after restart")
+            # HTTP readiness can precede ambient endpoint availability. Keep
+            # the known pre-restart intent fence and wait within the existing
+            # deadline; unavailability is never evidence of an inactive mic.
+            if time.monotonic() >= deadline:
+                raise RuntimeError("ambient became unavailable after restart")
+            time.sleep(1)
+            continue
         current = choice(status)
         capturing = current["capturing"]
         streaming = current["streaming"]
