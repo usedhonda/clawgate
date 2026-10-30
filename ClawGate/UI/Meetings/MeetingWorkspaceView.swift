@@ -206,6 +206,8 @@ private struct MeetingWorkspaceDetail: View {
     @State private var editingNoteID: String?
     @State private var editingNote = ""
     @State private var confirmFullRegeneration = false
+    @State private var sharingKnowledge = false
+    @State private var knowledgeError: String?
 
     private var accepted: MeetingAcceptedMinutes? { document.snapshot?.accepted }
     private var job: MeetingMinutesJob? { document.snapshot?.job }
@@ -384,11 +386,50 @@ private struct MeetingWorkspaceDetail: View {
             if let accepted {
                 Text("表示中の議事録: \(accepted.createdAt.formatted(date: .abbreviated, time: .shortened)) に生成")
                     .font(.system(size: 11)).foregroundColor(WorkspaceTheme.muted)
+                knowledgeRow
             }
         }
         .padding(.horizontal, 28).padding(.vertical, 12)
         .background(WorkspaceTheme.header)
         .overlay(Divider(), alignment: .bottom)
+    }
+
+    private var knowledgeRow: some View {
+        let state = document.snapshot?.knowledgeStatus ?? .unavailable
+        let canRequest = state == .notStaged || state == .pending || state == .stored || state == .unavailable
+        let label: String = {
+            switch state {
+            case .notStaged: return accepted?.knowledgeContext == nil ? "この議事録はまだちーに保存していません" : "ちーへの自動保存を準備中"
+            case .pending: return "ちーへの保存待ち（受領を確認中）"
+            case .stored: return "ちーに保存済み・検索への反映待ち"
+            case .searchable: return "ちーの検索対象に保存済み"
+            case .superseded: return "旧版の記録です。現在の検索対象ではありません"
+            case .deletionPending: return "ちーからの削除を確認中"
+            case .deleted: return "ちーの検索対象から削除済み"
+            case .unavailable: return "ちーへの保存状態を確認できません"
+            }
+        }()
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label).font(.system(size: 11)).foregroundColor(WorkspaceTheme.secondary)
+                if canRequest, let revision = document.snapshot?.knowledgeRevision {
+                    Button(sharingKnowledge ? "保存を依頼中…" : "この議事録をちーに保存") {
+                        sharingKnowledge = true
+                        knowledgeError = nil
+                        model.shareMinutesKnowledge(for: meeting, expectedRevision: revision) { error in
+                            sharingKnowledge = false
+                            knowledgeError = error
+                            refreshDocument()
+                        }
+                    }
+                    .font(.system(size: 11)).disabled(sharingKnowledge)
+                    .help("表示中の完成議事録と出典参照を、ちーの検索用知識に保存します。録音や逐語原本は送信しません。")
+                }
+            }
+            if let knowledgeError {
+                Text(knowledgeError).font(.system(size: 11)).foregroundColor(WorkspaceTheme.warningText)
+            }
+        }
     }
 
     private func workflowStep(_ number: String, _ label: String, active: Bool, disabled: Bool = false,

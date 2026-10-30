@@ -5,6 +5,9 @@ import Foundation
 /// bounded, fsynced file primitives. Never activated by constructing a snapshot.
 final class MeetingMinutesKnowledgeOutbox {
     typealias Failure = AudioHubOutbox.Error
+    enum Status: Equatable {
+        case notStaged, pending, stored, searchable, superseded, deletionPending, deleted, unavailable
+    }
     private struct Entry: Codable {
         let operation: MeetingMinutesPublication.Operation
         let meetingID: String
@@ -161,6 +164,24 @@ final class MeetingMinutesKnowledgeOutbox {
         try publications().filter { $0.operation == .upsert }.map {
             guard let data = Data(base64Encoded: $0.payloadBase64) else { throw Failure.corruptState }
             return try JSONDecoder().decode(MeetingMinutesKnowledgeSnapshot.self, from: data)
+        }
+    }
+
+    func status(meetingID: String, outputRevision: String) throws -> Status {
+        lock.lock(); defer { lock.unlock() }; try ensureCurrent()
+        let entries = state.entries.filter { $0.meetingID == meetingID }
+        if let head = entries.last, head.operation == .delete {
+            return head.receipt?.status == .deleted ? .deleted : .deletionPending
+        }
+        guard let entry = entries.first(where: { $0.operation == .upsert && $0.outputRevision == outputRevision }) else {
+            return .notStaged
+        }
+        guard let receipt = entry.receipt else { return .pending }
+        guard receipt.isCurrent else { return .superseded }
+        switch receipt.status {
+        case .stored: return .stored
+        case .searchable: return .searchable
+        default: return .pending
         }
     }
 

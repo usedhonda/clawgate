@@ -44,6 +44,8 @@ struct MeetingWorkspaceSnapshot {
     var sourceRevision: SourceRevision?
     var held = false
     var progressUnavailable = false
+    var knowledgeRevision: String?
+    var knowledgeStatus: MeetingMinutesKnowledgeOutbox.Status = .unavailable
 
     mutating func updatePresentation(_ context: MeetingWorkspaceContext) {
         holdReason = held ? (context.pilotLabel ?? Self.heldMessage) : nil
@@ -150,7 +152,8 @@ actor MeetingWorkspaceLoader {
                 let signpost = OSSignpostID(log: log)
                 os_signpost(.begin, log: log, name: "PrepareDocument", signpostID: signpost)
                 defer { os_signpost(.end, log: log, name: "PrepareDocument", signpostID: signpost) }
-                let accepted = store.loadAcceptedMinutes(id: record.id)
+                let acceptedData = try? Data(contentsOf: directory.appendingPathComponent("minutes-accepted.json"))
+                let accepted = acceptedData.flatMap { try? JSONDecoder().decode(MeetingAcceptedMinutes.self, from: $0) }
                 try checkingCancellation()
                 let job = MeetingMinutesJob.load(store: store, id: record.id)
                 let minutes = accepted?.minutes ?? store.loadMinutes(id: record.id)
@@ -201,6 +204,7 @@ actor MeetingWorkspaceLoader {
                     transcriptRows: rows, citedText: rendered, questions: questions, supplemental: supplemental,
                     material: source, inputsChanged: inputsChanged, supplementalChanged: selected != previous,
                     capturedAt: Date())
+                snapshot.knowledgeRevision = acceptedData.map { "sha256:" + MeetingMinutesPublication.digest($0) }
             }
             try Task.checkCancellation()
             let progress = Result { try snapshot.job.flatMap { try MeetingMinutesExecutionProgress.load(store: store, id: record.id, job: $0) } }
@@ -209,6 +213,16 @@ actor MeetingWorkspaceLoader {
             else { snapshot.progressUnavailable = false }
             snapshot.held = Self.held(record: record, store: store, label: context.pilotLabel, files: before) != nil
             snapshot.updatePresentation(context)
+            // Knowledge custody is independently observed presentation state,
+            // not an input fence that discards a valid minutes load.
+            snapshot.knowledgeStatus = .notStaged
+            if let revision = snapshot.knowledgeRevision,
+               FileManager.default.fileExists(atPath: store.root.appendingPathComponent("knowledge-outbox/state.json").path) {
+                do {
+                    snapshot.knowledgeStatus = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 16 * 1024 * 1024)
+                        .status(meetingID: record.id, outputRevision: revision)
+                } catch { snapshot.knowledgeStatus = .unavailable }
+            }
             try Task.checkCancellation()
             let latestEnd = AmbientController.trimmedEnd(of: record, against: store.all(), now: cutoff)
             guard before == (try Self.files(in: directory)),

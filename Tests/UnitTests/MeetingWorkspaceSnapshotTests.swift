@@ -37,7 +37,19 @@ final class MeetingWorkspaceSnapshotTests: XCTestCase {
         XCTAssertEqual(first.questions, ["Who owns the rollout?"])
         XCTAssertEqual(first.transcriptRows.first?.time, "00:01")
         XCTAssertTrue(first.citedText.values.contains { $0.runs.contains { $0.link?.scheme == "clawgate-segment" } })
-        _ = try await loader.load(context(meeting, store: store))
+        XCTAssertEqual(first.knowledgeStatus, .notStaged)
+        let publication = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try publication.enqueue(acceptedData: Data(contentsOf: store.directory(for: meeting.id)
+            .appendingPathComponent("minutes-accepted.json")), record: meeting, explicitlySelected: true)
+        let pending = try await loader.load(context(meeting, store: store))
+        XCTAssertEqual(pending.knowledgeStatus, .pending)
+        XCTAssertEqual(pending.knowledgeRevision, first.knowledgeRevision)
+        let item = try XCTUnwrap(publication.publications().first)
+        try publication.receive(.init(schemaVersion: 1, sourceUUID: item.sourceUUID, meetingID: item.meetingID,
+            publicationOrdinal: item.publicationOrdinal, outputRevision: item.outputRevision,
+            payloadSHA256: item.payloadSHA256, status: .searchable, isCurrent: true), expected: item)
+        let published = try await loader.load(context(meeting, store: store))
+        XCTAssertEqual(published.knowledgeStatus, .searchable)
         meeting.minutesState = "failed"
         meeting.minutesError = "Processing failed"
         store.save(meeting)

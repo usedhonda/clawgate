@@ -788,3 +788,18 @@ re-enqueued. A save-before-stage interruption recovers from the latest authorita
 accepted file; it does not promise an archive of every unseen intermediate revision.
 Old version bodies are not retained as a second history store. Store roots explicitly
 provided by tests/tools do not auto-enroll into the production namespace.
+
+### Explicit historical knowledge selection and receipt display
+
+The displayed accepted version can be explicitly selected using the workspace's
+knowledge-save action. The source checks both the current meeting record and the
+exact accepted-file revision observed by that view before freezing bytes. If the
+file changed, do not silently publish the replacement; ask the owner to inspect
+the new version. Legacy selection is recorded only by this explicit action.
+
+Knowledge presentation distinguishes not-staged, pending, stored (index pending),
+currently searchable, superseded, deletion-pending and deleted. A pending local
+request is never labeled saved/searchable. Receipt presentation is loaded off-main
+independently of the document cache and does not become a global source fence.
+Isolated/test store roots cannot dispatch through the production namespace. No
+historical document is chosen or transmitted automatically by opening the view.

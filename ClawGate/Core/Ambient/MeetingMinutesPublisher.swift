@@ -22,7 +22,8 @@ actor MeetingMinutesPublisher {
         Task { await shared.accept(record: record, acceptedData: acceptedData) }
     }
 
-    func accept(record: MeetingRecord, acceptedData: Data, explicitlySelected: Bool = false) async {
+    @discardableResult
+    func accept(record: MeetingRecord, acceptedData: Data, explicitlySelected: Bool = false) async -> Bool {
         do {
             let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: metadataBytes)
             try ledger.enqueue(acceptedData: acceptedData, record: record, explicitlySelected: explicitlySelected)
@@ -30,9 +31,10 @@ actor MeetingMinutesPublisher {
             // Never roll back an accepted document because knowledge delivery
             // failed. Reconnect recovery can reconcile its authoritative file.
             NSLog("[MinutesPublication] staging unavailable; accepted document retained")
-            return
+            return false
         }
         await drain()
+        return true
     }
 
     func connect(send: @escaping Sender) async {

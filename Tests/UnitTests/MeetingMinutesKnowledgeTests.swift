@@ -243,4 +243,34 @@ final class MeetingMinutesKnowledgeTests: XCTestCase {
         XCTAssertEqual(sent[3].operation, .delete)
     }
 
+    func testExplicitSelectionRejectsChangedAcceptedVersionAndReceiptStatesStayDistinct() throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let r = record("mtg-selected")
+        store.save(r)
+        let bytes = try accepted(r, historical: true)
+        let url = store.directory(for: r.id).appendingPathComponent("minutes-accepted.json")
+        try bytes.write(to: url)
+        let revision = "sha256:" + MeetingMinutesPublication.digest(bytes)
+        let selection = try MeetingMinutesKnowledgeSelection(store: store, record: r, expectedRevision: revision)
+        XCTAssertTrue(selection.historical)
+        let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        XCTAssertEqual(try ledger.status(meetingID: r.id, outputRevision: revision), .notStaged)
+        try ledger.enqueue(acceptedData: selection.data, record: r, explicitlySelected: selection.historical)
+        let item = try XCTUnwrap(ledger.publications().first)
+        XCTAssertEqual(item.selectionBasis, .explicitHistory)
+        XCTAssertEqual(try ledger.status(meetingID: r.id, outputRevision: revision), .pending)
+        try ledger.receive(receipt(item, status: .stored), expected: item)
+        XCTAssertEqual(try ledger.status(meetingID: r.id, outputRevision: revision), .stored)
+        try ledger.receive(receipt(item, status: .searchable), expected: item)
+        XCTAssertEqual(try ledger.status(meetingID: r.id, outputRevision: revision), .searchable)
+        try accepted(r, summary: "Replacement not selected", historical: true).write(to: url)
+        XCTAssertThrowsError(try MeetingMinutesKnowledgeSelection(store: store, record: r, expectedRevision: revision))
+        try ledger.enqueueDeletion(meetingID: r.id, expectedRevision: revision)
+        XCTAssertEqual(try ledger.status(meetingID: r.id, outputRevision: revision), .deletionPending)
+        let deletion = try XCTUnwrap(ledger.publications().first)
+        try ledger.receive(receipt(deletion, status: .deleted), expected: deletion)
+        XCTAssertEqual(try ledger.status(meetingID: r.id, outputRevision: revision), .deleted)
+    }
+
 }

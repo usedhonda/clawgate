@@ -3099,6 +3099,34 @@ final class PetModel: NSObject, ObservableObject {
         regenerateMinutes(for: record)
     }
 
+    /// Explicit selected-version publication; never share a newer file that
+    /// replaced the accepted minutes while the owner was looking at this one.
+    func shareMinutesKnowledge(for record: MeetingRecord, expectedRevision: String,
+                               completion: @escaping (String?) -> Void) {
+        let store = minutesStore()
+        guard store.root.standardizedFileURL == MeetingStore().root.standardizedFileURL else {
+            completion("この保存先は共有対象の登録先ではありません。")
+            return
+        }
+        missingMinutesQueue.async {
+            do {
+                let selection = try MeetingMinutesKnowledgeSelection(store: store, record: record,
+                    expectedRevision: expectedRevision)
+                Task {
+                    let staged = await MeetingMinutesPublisher.shared.accept(record: record,
+                        acceptedData: selection.data, explicitlySelected: selection.historical)
+                    DispatchQueue.main.async {
+                        completion(staged ? nil : "保存待ちに登録できませんでした。元の議事録は保持しています。")
+                    }
+                }
+            } catch MeetingMinutesKnowledgeSelection.SelectionError.changed {
+                DispatchQueue.main.async { completion("議事録が更新されました。新しい版を確認してから選んでください。") }
+            } catch {
+                DispatchQueue.main.async { completion("議事録を読み取れませんでした。元の議事録は変更していません。") }
+            }
+        }
+    }
+
     func refreshMeetingSources(force: Bool = false) {
         guard !meetingSourcesBusy else { return }
         meetingSourcesBusy = true
