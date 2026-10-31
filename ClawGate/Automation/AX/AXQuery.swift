@@ -38,15 +38,17 @@ enum AXQuery {
     /// even if a different window is visually on top).
     static func topmostWindowBounds(pid: pid_t, minSize: CGSize = substantiveWindowMinimumSize) -> CGRect? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
-        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+        // Polled by pet tracking: read keys from the untouched list rather than
+        // bridging every window into Swift dictionaries first.
+        guard let list = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as NSArray? else {
             return nil
         }
-        for info in list {
-            guard let ownerPID = info[kCGWindowOwnerPID as String] as? pid_t, ownerPID == pid else { continue }
-            let layer = (info[kCGWindowLayer as String] as? Int) ?? -1
+        for case let info as NSDictionary in list {
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid else { continue }
+            let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue ?? -1
             if layer != 0 { continue }  // normal app windows only
-            guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
-                  let rect = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else {
+            guard let boundsDict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: boundsDict) else {
                 continue
             }
             if rect.width < minSize.width || rect.height < minSize.height { continue }

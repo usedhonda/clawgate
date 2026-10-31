@@ -346,7 +346,7 @@ final class PetWindowController {
         guard let windowInfo = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             kCGNullWindowID
-        ) as? [[String: Any]] else {
+        ) as? [NSDictionary] else {
             return
         }
 
@@ -376,7 +376,7 @@ final class PetWindowController {
         setMaximizedWindowSuppression(shouldSuppress)
     }
 
-    private func isPetCoveredAboveHost(windowInfo: [[String: Any]], globalTop: CGFloat) -> Bool {
+    private func isPetCoveredAboveHost(windowInfo: [NSDictionary], globalTop: CGFloat) -> Bool {
         guard let petFrame = window?.frame,
               let hostPID = model.lastTrackedApp?.processIdentifier,
               let hostFrame = model.lastTrackedWindowFrame else { return false }
