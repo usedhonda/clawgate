@@ -18,6 +18,7 @@ final class SystemAudioTap {
         case noChromeProcess
         case osStatus(String, OSStatus)
         case badFormat
+        case releaseFailed
 
         var description: String {
             switch self {
@@ -25,6 +26,7 @@ final class SystemAudioTap {
             case .noChromeProcess: return "no Chrome audio process"
             case .osStatus(let step, let status): return "\(step) failed (\(status))"
             case .badFormat: return "tap format unusable"
+            case .releaseFailed: return "could not release Core Audio objects"
             }
         }
     }
@@ -45,6 +47,7 @@ final class SystemAudioTap {
     private var drainBuffer: AVAudioPCMBuffer?
     private var drainFormat: AVAudioFormat?
     private var droppedBytesSeen = 0
+    private var writeFailing = false
 
     // HAL objects, touched only on controlQueue.
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -114,16 +117,22 @@ final class SystemAudioTap {
             if active {
                 if self.procID != nil { return }
                 do {
+                    guard self.teardown() else { throw TapError.releaseFailed }
                     try self.startTap()
                     self.setState(.running, error: nil)
                     self.log("ambient system tap started")
                 } catch {
-                    self.teardown()
+                    _ = self.teardown()
                     self.setState(.failed, error: "\(error)")
                     self.log("ambient system tap start failed: \(error)")
                 }
-            } else if self.procID != nil || self.tapID != kAudioObjectUnknown {
-                self.teardown()
+            } else if self.procID != nil || self.aggregateID != kAudioObjectUnknown || self.tapID != kAudioObjectUnknown {
+                guard self.teardown() else {
+                    // Held handles are retried by the next reconcile; this is not "stopped".
+                    self.setState(.failed, error: "\(TapError.releaseFailed)")
+                    self.log("ambient system tap release failed")
+                    return
+                }
                 self.setState(.idle, error: nil)
                 self.log("ambient system tap stopped")
             } else if self.state == .failed {
@@ -217,18 +226,20 @@ final class SystemAudioTap {
 
     /// Stop IO first, then destroy in reverse order of creation, then flush the
     /// open chunk so the tail of the call is not lost.
-    private func teardown() {
+    /// A handle is only forgotten once Core Audio accepted its release, and nothing
+    /// is destroyed underneath an object still using it. Returns false if any remain.
+    @discardableResult
+    private func teardown() -> Bool {
         if aggregateID != kAudioObjectUnknown, let proc = procID {
             AudioDeviceStop(aggregateID, proc)
-            AudioDeviceDestroyIOProcID(aggregateID, proc)
+            if AudioDeviceDestroyIOProcID(aggregateID, proc) == noErr { procID = nil }
         }
-        procID = nil
-        if aggregateID != kAudioObjectUnknown {
-            AudioHardwareDestroyAggregateDevice(aggregateID)
+        if procID == nil, aggregateID != kAudioObjectUnknown,
+           AudioHardwareDestroyAggregateDevice(aggregateID) == noErr {
             aggregateID = AudioObjectID(kAudioObjectUnknown)
         }
-        if tapID != kAudioObjectUnknown, #available(macOS 14.2, *) {
-            AudioHardwareDestroyProcessTap(tapID)
+        if aggregateID == kAudioObjectUnknown, tapID != kAudioObjectUnknown, #available(macOS 14.2, *),
+           AudioHardwareDestroyProcessTap(tapID) == noErr {
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
         tappedProcesses = []
@@ -237,6 +248,7 @@ final class SystemAudioTap {
             self.finalizeChunk()
             self.resetWriter()
         }
+        return procID == nil && aggregateID == kAudioObjectUnknown && tapID == kAudioObjectUnknown
     }
 
     // MARK: - Writer (writerQueue only)
@@ -338,6 +350,7 @@ final class SystemAudioTap {
             // file so its WAV header is complete before the chunk is handed on.
             guard file != nil else { return }
             try file?.write(from: buffer)
+            writeFailing = false
             let n = Int(buffer.frameLength)
             if firstLiveSampleAt == nil {
                 firstLiveSampleAt = arrivedAt.addingTimeInterval(-Double(n) / 16_000)
@@ -369,7 +382,9 @@ final class SystemAudioTap {
                 chunker.didStartChunk(primed: Int(primedFrames))
             }
         } catch {
-            log("ambient system tap write error: \(error)")
+            if !writeFailing { log("ambient system tap write error: \(error)") }
+            writeFailing = true
+            stateLock.withLock { _convertFailures += 1 }
         }
     }
 
