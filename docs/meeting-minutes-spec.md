@@ -888,6 +888,7 @@ add 0 to 3 images that make it easier to understand. A short or unsuitable docum
 - Images belong to one `outputRevision` and never change it. They live in
   `minutes-images/<revision hash>/` beside the meeting, and a replaced revision's images are
   not shown.
+- Images are 1024x768 (4:3) with text large enough to read on a phone.
 - Images are marked as AI generated, and the text of the minutes stays authoritative.
 - With `--upload` each image becomes a `clawgate.minutes-image.v1` event, closed by one
   `clawgate.minutes-image-set.v1` event, which also records a revision with no images.
