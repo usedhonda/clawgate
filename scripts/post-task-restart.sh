@@ -129,11 +129,14 @@ if communication_admission_requested; then
   fi
   if [[ -n "${CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST:-}" ]]; then
     communication_validate_candidate
-    export CLAWGATE_COMMUNICATION_CANDIDATE_FILES="$(communication_candidate_files_from)"
+    CLAWGATE_COMMUNICATION_CANDIDATE_FILES="$(communication_candidate_files_from)"
+    export CLAWGATE_COMMUNICATION_CANDIDATE_FILES
   fi
   export CLAWGATE_COMMUNICATION_PROJECT_PATH="$PROJECT_PATH"
-  export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY="$([[ "$PLUGIN_CLIENT_ONLY" == "true" ]] && echo 1 || echo 0)"
-  export CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC="$([[ "$SKIP_PLUGIN_SYNC" == "true" ]] && echo 1 || echo 0)"
+  CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY="$([[ "$PLUGIN_CLIENT_ONLY" == "true" ]] && echo 1 || echo 0)"
+  export CLAWGATE_COMMUNICATION_PLUGIN_CLIENT_ONLY
+  CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC="$([[ "$SKIP_PLUGIN_SYNC" == "true" ]] && echo 1 || echo 0)"
+  export CLAWGATE_COMMUNICATION_SKIP_PLUGIN_SYNC
   export CLAWGATE_COMMUNICATION_MAINTENANCE_HOOK="$PROJECT_PATH/scripts/communication-maintenance-apply.sh"
   export CLAWGATE_COMMUNICATION_ROLLBACK_HOOK="$PROJECT_PATH/scripts/communication-maintenance-rollback.sh"
   # Observe remote canonical admission before any local restart/build/deploy
@@ -270,9 +273,10 @@ if [[ "$SIGNED_BUNDLE" == "true" ]]; then
   echo "[local] Restart Host B ClawGate.app (signed-bundle path)"
   ./scripts/restart-local-clawgate.sh --skip-build --skip-sync --skip-plugin-sync --skip-sign
   if communication_admission_requested; then
-    export CLAWGATE_COMMUNICATION_SOURCE_STAGE="$(./scripts/stage-communication-candidate.sh \
+    CLAWGATE_COMMUNICATION_SOURCE_STAGE="$(./scripts/stage-communication-candidate.sh \
       --remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" \
       --manifest "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST")"
+    export CLAWGATE_COMMUNICATION_SOURCE_STAGE
     candidate_manifest_rel="$(python3 - "$PROJECT_PATH" "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST" <<'PY'
 import pathlib, sys
 print(pathlib.Path(sys.argv[2]).resolve().relative_to(pathlib.Path(sys.argv[1]).resolve()))
@@ -296,9 +300,10 @@ PY
   fi
 elif [[ "$SKIP_SYNC" != "true" ]]; then
   if communication_admission_requested; then
-    export CLAWGATE_COMMUNICATION_SOURCE_STAGE="$(./scripts/stage-communication-candidate.sh \
+    CLAWGATE_COMMUNICATION_SOURCE_STAGE="$(./scripts/stage-communication-candidate.sh \
       --remote-host "$REMOTE_HOST" --project-path "$PROJECT_PATH" \
       --manifest "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST")"
+    export CLAWGATE_COMMUNICATION_SOURCE_STAGE
     candidate_manifest_rel="$(python3 - "$PROJECT_PATH" "$CLAWGATE_COMMUNICATION_CANDIDATE_MANIFEST" <<'PY'
 import pathlib, sys
 print(pathlib.Path(sys.argv[2]).resolve().relative_to(pathlib.Path(sys.argv[1]).resolve()))

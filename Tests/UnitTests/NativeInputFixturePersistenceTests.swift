@@ -8,7 +8,7 @@ final class NativeInputFixturePersistenceTests: XCTestCase {
         let root = NSTemporaryDirectory() + "native-fixture-\(UUID().uuidString)"
         let isolation = PetLogTestIsolation.acquire(overriding: {
             original = PetLogStore.dir
-            PetLogStore.dir = root
+            PetLogStore.dir = root // petlog-test-dir-ok: temp root above
         }, restoring: {
             try? FileManager.default.removeItem(atPath: root)
             PetLogStore.dir = original
