@@ -74,6 +74,13 @@ final class MeetingMinutesHubPublisherTests: XCTestCase {
         XCTAssertThrowsError(try MeetingMinutesHubTransport.receipt(from: body(ordinal: 2), matching: publication))
     }
 
+    func testCurrentHubProfileWithMinutesDomainIsAccepted() throws {
+        let provision = try HubProducerProvision.parse(Data("""
+        {"schema_version":1,"source":"clawgate","base_url":"https://hub.example.invalid","bearer_token":"t","allowed_domains":["audio","minutes"]}
+        """.utf8), source: "clawgate")
+        XCTAssertEqual(provision.allowed_domains, ["audio", "minutes"])
+    }
+
     /// The Hub adding a domain for this source must not stop existing audio delivery.
     func testCapabilitiesAcceptGrantedSupersetAndRequireMinutesWhenAsked() throws {
         let provision = try HubProducerProvision.parse(Data("""

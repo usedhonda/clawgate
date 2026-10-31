@@ -46,7 +46,7 @@ final class AudioHubMetadataTransport {
     /// Sends one immutable metadata envelope. A successful return is only a
     /// validated storage acknowledgement; this method does not dequeue it.
     func send(_ record: AudioHubOutbox.PendingRecord) async throws -> HubAudioAdmission.Acknowledgement {
-        guard provision.source == "clawgate", provision.allowed_domains == ["audio"] else {
+        guard provision.source == "clawgate", provision.allowed_domains.contains("audio") else {
             throw Failure.invalidRecord
         }
         let envelope = try validate(record)

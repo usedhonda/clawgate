@@ -124,7 +124,7 @@ final class AudioHubOriginalTransport {
     }
 
     private func validate(_ record: AudioHubOutbox.PendingRecord) throws -> AudioHubOutbox.OriginalReference {
-        guard provision.source == "clawgate", provision.allowed_domains == ["audio"],
+        guard provision.source == "clawgate", provision.allowed_domains.contains("audio"),
               let original = record.original, original.byteLength > 0, original.byteLength <= Int64(Int.max),
               record.envelope.count <= 20 * 1024 * 1024,
               SHA256.hash(data: record.envelope).map({ String(format: "%02x", $0) }).joined() == record.bodySHA256,

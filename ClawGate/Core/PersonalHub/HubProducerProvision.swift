@@ -38,9 +38,10 @@ struct HubProducerProvision: Decodable {
 
     static func parse(_ data: Data, source: String) throws -> HubProducerProvision {
         let value = try JSONDecoder().decode(Self.self, from: data)
-        let expected = source == "line" ? ["line"] : source == "clawgate" ? ["audio"] : []
+        // The Hub's current clawgate profile lists minutes; older files list audio only.
+        let expected = source == "line" ? [["line"]] : source == "clawgate" ? [["audio"], ["audio", "minutes"]] : []
         guard !expected.isEmpty, value.schema_version == 1, value.source == source,
-              value.allowed_domains.sorted() == expected,
+              expected.contains(value.allowed_domains.sorted()),
               !value.bearer_token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !value.bearer_token.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
               let parts = URLComponents(string: value.base_url), parts.scheme == "https",
