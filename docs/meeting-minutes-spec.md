@@ -877,3 +877,17 @@ then leaves the ledger. Refused or unresolved entries stay pending and are
 retried every five minutes and after each acceptance. An export has no input
 fingerprint, citations or generation clock: those fields are empty, the meeting
 time stands in for the clock, and `contextBasis` marks it historical.
+
+## Explanatory images
+
+Once the Hub has stored a revision, `scripts/personal-hub-illustrate-clawgate-minutes.py` may
+add 0 to 3 images that make it easier to understand. A short or unsuitable document gets none.
+
+- Generation runs on the remote host with Codex image generation. The minutes text travels on
+  stdin and the working directory is removed afterwards. Evidence is not sent.
+- Images belong to one `outputRevision` and never change it. They live in
+  `minutes-images/<revision hash>/` beside the meeting, and a replaced revision's images are
+  not shown.
+- Images are marked as AI generated, and the text of the minutes stays authoritative.
+- With `--upload` each image becomes a `clawgate.minutes-image.v1` event, closed by one
+  `clawgate.minutes-image-set.v1` event, which also records a revision with no images.

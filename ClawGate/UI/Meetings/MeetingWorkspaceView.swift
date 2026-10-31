@@ -592,6 +592,8 @@ private struct MeetingWorkspaceDetail: View {
                             .font(.system(size: 15)).lineSpacing(5).textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    MeetingMinutesImagesCard(meetingDirectory: MeetingStore().directory(for: meeting.id),
+                                             revision: document.snapshot?.knowledgeRevision)
                     if !minutes.topics.isEmpty {
                         Text("議題ごとの詳細").font(.system(size: 13, weight: .bold)).foregroundColor(WorkspaceTheme.muted)
                         ForEach(Array(minutes.topics.enumerated()), id: \.offset) { _, topic in
@@ -1148,7 +1150,7 @@ struct MeetingWorkspaceStatus {
     var isProblem: Bool { meeting.minutesState == "failed" }
 }
 
-private struct WorkspaceCard<Content: View>: View {
+struct WorkspaceCard<Content: View>: View {
     let title: String?
     @ViewBuilder let content: Content
 
