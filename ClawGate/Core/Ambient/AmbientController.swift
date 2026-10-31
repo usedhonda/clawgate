@@ -369,25 +369,10 @@ final class AmbientController {
         }
     }
 
-    /// Stop transcribing/delivering. Capture may keep running.
+    /// Stopping recording releases the microphone and system tap, not just delivery.
     func stopStream() {
-        let revision = beginRestartIntent()
-        state.async {
-            defer { self.settleRestartIntent(revision) }
-            self.streaming = false
-            self.setWasStreaming(false)
-            // The microphone may stay open after the stream stops. While it does,
-            // the monitor stays up so a later input-device drift is still caught;
-            // it has nothing to do for a wedge (liveness is unknown when not
-            // streaming), so only pauseCapture stops it.
-            if self.capture.state != .capturing {
-                self.healthMonitor.stop()
-            }
-            self.reconcileSystemTapLocked()
-            self.transcriber.server?.stop()   // frees the resident model; relaunched on the next chunk
-            Task { await self.ingest.stop() }
-            self.log("ambient stream stopped (capture continues=\(self.capture.state == .capturing))")
-        }
+        pauseCapture()
+        log("ambient stream stopped; microphone and system tap released")
     }
 
     /// Hard-stop the microphone (privacy control).

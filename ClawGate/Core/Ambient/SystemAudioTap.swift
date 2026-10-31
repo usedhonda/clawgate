@@ -5,8 +5,9 @@ import Foundation
 /// Records outgoing Mac audio independently of the microphone, including calls
 /// outside Chrome, through a Core Audio tap. The two sources are never mixed.
 ///
-/// Threading: every writer field is confined to `ioQueue`, where the IOProc
-/// block runs. HAL calls (create/start/stop/destroy) run on `controlQueue` and
+/// Threading: the IOProc block runs on `ioQueue` inside the HAL's I/O cycle, so it
+/// only copies the samples. Conversion and disk writes run on `writerQueue`, which
+/// confines every writer field. HAL calls (create/start/stop/destroy) run on `controlQueue` and
 /// are never made while holding `stateLock` -- a HAL call made under a lock has
 /// hung indefinitely before (see the AVAudioEngine incident).
 final class SystemAudioTap {
@@ -34,7 +35,10 @@ final class SystemAudioTap {
     private let chunkFrames: AVAudioFrameCount
     private let overlapFrames: Int
     private let controlQueue = DispatchQueue(label: "ai.clawgate.ambient.systemtap.control")
-    private let ioQueue = DispatchQueue(label: "ai.clawgate.ambient.systemtap.io")
+    private let ioQueue = DispatchQueue(label: "ai.clawgate.ambient.systemtap.io", qos: .userInteractive)
+    private let writerQueue = DispatchQueue(label: "ai.clawgate.ambient.systemtap.writer", qos: .utility)
+    /// About 30 seconds of 10 ms cycles: a stalled disk loses audio, not the HAL cycle.
+    private static let maxPendingBuffers = 3000
 
     // HAL objects, touched only on controlQueue.
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -55,8 +59,10 @@ final class SystemAudioTap {
     private var _convertFailures = 0
     private var _tapFormat = ""
     private var _bufferCount = 0
+    private var _pendingBuffers = 0
+    private var _droppedBuffers = 0
 
-    // Writer state, confined to ioQueue.
+    // Writer state, confined to writerQueue.
     private let recordFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false
     )!
@@ -94,7 +100,7 @@ final class SystemAudioTap {
     var lastError: String? { stateLock.withLock { _lastError } }
     var diagnostics: String {
         stateLock.withLock {
-            "callbacks=\(_ioCallbacks) buffers=\(_bufferCount) framesIn=\(_framesIn) wrapFail=\(_wrapFailures) convertFail=\(_convertFailures) format=\(_tapFormat)"
+            "callbacks=\(_ioCallbacks) buffers=\(_bufferCount) framesIn=\(_framesIn) dropped=\(_droppedBuffers) wrapFail=\(_wrapFailures) convertFail=\(_convertFailures) format=\(_tapFormat)"
         }
     }
 
@@ -184,7 +190,7 @@ final class SystemAudioTap {
         guard status == noErr else { throw TapError.osStatus("create aggregate device", status) }
         aggregateID = device
 
-        ioQueue.sync { self.resetWriter() }
+        writerQueue.sync { self.resetWriter() }
         var proc: AudioDeviceIOProcID?
         status = AudioDeviceCreateIOProcIDWithBlock(&proc, device, ioQueue) { [weak self] _, input, _, _, _ in
             self?.handleInput(input, format: tapFormat)
@@ -213,13 +219,13 @@ final class SystemAudioTap {
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
         tappedProcesses = []
-        ioQueue.sync {
+        writerQueue.sync {
             self.finalizeChunk()
             self.resetWriter()
         }
     }
 
-    // MARK: - Writer (ioQueue only)
+    // MARK: - Writer (writerQueue only)
 
     private func resetWriter() {
         converter = nil
@@ -236,28 +242,38 @@ final class SystemAudioTap {
     }
 
     private func handleInput(_ input: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
-        stateLock.withLock { _ioCallbacks += 1 }
         // The aggregate carries the output device as its clock. When that device
         // has a microphone (AirPods, a headset), its input stream arrives in the
-        // same list ahead of the tap, and wrapping the whole list in the tap's
-        // format fails. The tap's stream is the last buffer with its channels.
+        // same list ahead of the tap. The tap's stream is the last buffer with its channels.
         let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-        stateLock.withLock { _bufferCount = list.count }
-        guard let tapBuffer = list.last(where: { $0.mNumberChannels == format.channelCount && $0.mDataByteSize > 0 }) else {
-            stateLock.withLock { _wrapFailures += 1 }
+        let tapBuffer = list.last(where: { $0.mNumberChannels == format.channelCount && $0.mDataByteSize > 0 })
+        let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
+        let frames = bytesPerFrame > 0 ? (tapBuffer?.mDataByteSize ?? 0) / bytesPerFrame : 0
+        let accepted: Bool = stateLock.withLock {
+            _ioCallbacks += 1
+            _bufferCount = list.count
+            guard frames > 0 else { _wrapFailures += 1; return false }
+            guard _pendingBuffers < Self.maxPendingBuffers else { _droppedBuffers += 1; return false }
+            _pendingBuffers += 1
+            _framesIn += Int(frames)
+            return true
+        }
+        guard accepted, let tapBuffer, let source = tapBuffer.mData,
+              let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
+              let target = copy.mutableAudioBufferList.pointee.mBuffers.mData else {
+            if accepted { stateLock.withLock { _pendingBuffers -= 1; _wrapFailures += 1 } }
             return
         }
-        // Kept alive for the whole callback: the PCM buffer references it.
-        let single = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-        single.pointee = AudioBufferList(mNumberBuffers: 1, mBuffers: tapBuffer)
-        defer { single.deallocate() }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: single, deallocator: nil),
-              buffer.frameLength > 0 else {
-            stateLock.withLock { _wrapFailures += 1 }
-            return
-        }
-        stateLock.withLock { _framesIn += Int(buffer.frameLength) }
+        memcpy(target, source, Int(frames * bytesPerFrame))
+        copy.frameLength = frames
         let arrivedAt = Date()
+        writerQueue.async { [self] in
+            convertAndWrite(copy, format: format, arrivedAt: arrivedAt)
+            stateLock.withLock { _pendingBuffers -= 1 }
+        }
+    }
+
+    private func convertAndWrite(_ buffer: AVAudioPCMBuffer, format: AVAudioFormat, arrivedAt: Date) {
         if converter == nil || converterInput != format {
             converter = AVAudioConverter(from: format, to: recordFormat)
             converterInput = format
