@@ -16,7 +16,7 @@ def options():
     parser.add_argument("--sessions-root", type=Path, default=Path.home() /
                         "Library/Application Support/ClawGate/ambient-context/sessions")
     parser.add_argument("--checkpoint", type=Path, default=Path.home() /
-                        ".local/share/personal-data-hub/clawgate-transcripts.json")
+                        "Library/Application Support/ClawGate/hub-sync/clawgate-transcripts.json")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--remote-host", required=True)
     parser.add_argument("--apply", action="store_true")

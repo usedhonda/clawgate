@@ -29,7 +29,7 @@ def arguments():
     parser.add_argument("--meetings-root", type=Path, default=Path.home() /
         "Library/Application Support/ClawGate/ambient-context/meetings")
     parser.add_argument("--checkpoint", type=Path, default=Path.home() /
-        ".local/share/personal-data-hub/clawgate-meetings.json")
+        "Library/Application Support/ClawGate/hub-sync/clawgate-meetings.json")
     parser.add_argument("--remote-host", required=True)
     parser.add_argument("--apply", action="store_true")
     return parser.parse_args()
@@ -48,6 +48,10 @@ def main():
     counts = {"selected_meetings": 0, "audio_chunks": 0, "missing_audio": 0,
               "transcripts": 0, "unchanged_meetings": 0}
     next_checkpoint = dict(checkpoint)
+    # Hub events are immutable per external_id, so a sent transcript revision is
+    # never resent even if its originals are later removed from the local store.
+    sent_revisions = dict(checkpoint.get("transcript_revisions", {}))
+    next_checkpoint["transcript_revisions"] = sent_revisions
     for directory in sorted(root.iterdir()):
         if not directory.is_dir() or directory.is_symlink():
             continue
@@ -106,9 +110,11 @@ def main():
                                  "ended_at": chunk.get("endedAt"), "selection": "explicit"},
                     "payload_base64": base64.b64encode(payload).decode("ascii")})
         if isinstance(transcript, list):
-            counts["transcripts"] += 1
-            if options.apply:
-                revision = digest(json.dumps(transcript, sort_keys=True, ensure_ascii=False).encode())
+            revision = digest(json.dumps(transcript, sort_keys=True, ensure_ascii=False).encode())
+            if sent_revisions.get(directory.name) != revision:
+                counts["transcripts"] += 1
+                sent_revisions[directory.name] = revision
+            if options.apply and checkpoint.get("transcript_revisions", {}).get(directory.name) != revision:
                 pending.append({"source": "clawgate", "domain": "audio", "kind": "selected-meeting-transcript",
                     "occurred_at": stamp(record["startedAt"]),
                     "external_id": "clawgate:meeting:" + directory.name + ":transcript:" + revision,
