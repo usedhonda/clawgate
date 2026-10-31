@@ -863,3 +863,17 @@ local/Meet speech opens that same picker. Saving choices precedes a separate fre
 read and the ordinary generation job. Unavailable reader methods produce an
 honest error, not an alternative identity/tool/raw read. No ASR, recording,
 notification, new grant or original archive is started by these controls.
+
+### Hub delivery of generated minutes
+
+The Hub receives the same minutes the app shows: the accepted document, or the
+`minutes.json` export for an older meeting without one. Merged fragments are
+excluded, as they are in the workspace. An installation with a Hub provision
+sends new and existing documents to `POST /v1/minutes/publications`; other hosts
+do nothing. Delivery uses its own `knowledge-outbox-hub` ledger under the same
+`sourceUUID`, so the Gateway route and its explicit-selection policy are
+unchanged. Only an exact `minutes_receipt` echo settles an entry, and the body
+then leaves the ledger. Refused or unresolved entries stay pending and are
+retried every five minutes and after each acceptance. An export has no input
+fingerprint, citations or generation clock: those fields are empty, the meeting
+time stands in for the clock, and `contextBasis` marks it historical.

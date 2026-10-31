@@ -48,6 +48,21 @@ struct MeetingMinutesKnowledgeSnapshot: Codable {
     let coverageBasis: String
     let contextBasis: String
 
+    /// An export has no accepted input or citations and no generation clock; the
+    /// meeting's own time stands in, and `contextBasis` says this is historical.
+    init(exportedData: Data, record: MeetingRecord) throws {
+        context = Context(record: record)
+        contextBasis = "historical_selection_current_metadata"
+        outputRevision = "sha256:" + SHA256.hash(data: exportedData).map { String(format: "%02x", $0) }.joined()
+        inputFingerprint = ""
+        generatedAt = Date(timeIntervalSince1970: record.endedAt ?? record.startedAt)
+        minutes = try JSONDecoder().decode(MeetingMinutes.self, from: exportedData)
+        citations = []
+        unresolvedNotes = []
+        coverageHints = []
+        coverageBasis = "selected_input_only"
+    }
+
     init(acceptedData: Data, record: MeetingRecord, explicitlySelected: Bool = false) throws {
         let accepted = try JSONDecoder().decode(MeetingAcceptedMinutes.self, from: acceptedData)
         if let frozen = accepted.knowledgeContext {

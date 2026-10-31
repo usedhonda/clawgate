@@ -22,7 +22,7 @@ final class AudioHubMetadataTransport {
         case invalidReceipt
     }
 
-    private final class RedirectRejectingDelegate: NSObject, URLSessionTaskDelegate {
+    final class RedirectRejectingDelegate: NSObject, URLSessionTaskDelegate {
         var rejected = false
 
         func urlSession(_ session: URLSession, task: URLSessionTask,

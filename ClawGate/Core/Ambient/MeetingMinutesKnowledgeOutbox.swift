@@ -41,16 +41,21 @@ final class MeetingMinutesKnowledgeOutbox {
     let directory: URL
     let sourceUUID: String
     private let maxMetadataBytes: Int
+    private let compactsWhenStored: Bool
     private var state: State
     private var durableDigest: String
     private var failed = false
     private let lock = NSLock()
     private var stateURL: URL { directory.appendingPathComponent("state.json") }
 
-    init(store: MeetingStore, maxMetadataBytes: Int) throws {
+    /// `compactsWhenStored` is for a destination whose stored receipt is final,
+    /// with no later searchability report to wait for.
+    init(store: MeetingStore, maxMetadataBytes: Int, directoryName: String = "knowledge-outbox",
+         sourceUUID inheritedSourceUUID: String? = nil, compactsWhenStored: Bool = false) throws {
         guard maxMetadataBytes > 0, maxMetadataBytes < Int.max else { throw Failure.invalidMaxMetadataBytes }
-        directory = store.root.appendingPathComponent("knowledge-outbox", isDirectory: true)
+        directory = store.root.appendingPathComponent(directoryName, isDirectory: true)
         self.maxMetadataBytes = maxMetadataBytes
+        self.compactsWhenStored = compactsWhenStored
         let url = directory.appendingPathComponent("state.json")
         let loaded: (State, String) = try Self.withFileLock(directory) {
             if FileManager.default.fileExists(atPath: url.path) {
@@ -85,7 +90,7 @@ final class MeetingMinutesKnowledgeOutbox {
                 }
                 return (value, MeetingMinutesPublication.digest(data))
             }
-            let value = State(format: "minutes-publication-v1", sourceUUID: UUID().uuidString.lowercased(), entries: [])
+            let value = State(format: "minutes-publication-v1", sourceUUID: inheritedSourceUUID ?? UUID().uuidString.lowercased(), entries: [])
             return (value, try AudioHubOutbox.persist(value, to: url, maxBytes: maxMetadataBytes))
         }
         state = loaded.0; sourceUUID = loaded.0.sourceUUID; durableDigest = loaded.1
@@ -96,11 +101,23 @@ final class MeetingMinutesKnowledgeOutbox {
                  explicitlySelected: Bool = false) throws -> MeetingMinutesKnowledgeSnapshot {
         let snapshot = try MeetingMinutesKnowledgeSnapshot(acceptedData: acceptedData,
             record: record, explicitlySelected: explicitlySelected)
+        try stage(snapshot, meetingID: record.id, selection: explicitlySelected ? .explicitHistory : .futureAccepted)
+        return snapshot
+    }
+
+    /// An older document that only exists as its `minutes.json` export.
+    func enqueue(exportedData: Data, record: MeetingRecord) throws {
+        let snapshot = try MeetingMinutesKnowledgeSnapshot(exportedData: exportedData, record: record)
+        try stage(snapshot, meetingID: record.id, selection: .explicitHistory)
+    }
+
+    private func stage(_ snapshot: MeetingMinutesKnowledgeSnapshot, meetingID: String,
+                       selection: MeetingMinutesPublication.SelectionBasis) throws {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let payload = try encoder.encode(snapshot)
         lock.lock(); defer { lock.unlock() }
         try ensureCurrent()
-        let entries = state.entries.filter { $0.meetingID == record.id }
+        let entries = state.entries.filter { $0.meetingID == meetingID }
         // Consumer tombstones are terminal. Re-enabling this slot requires a
         // separate explicit protocol, not a new automatically generated hash.
         guard entries.last?.operation != .delete else { throw Failure.conflict }
@@ -110,11 +127,10 @@ final class MeetingMinutesKnowledgeOutbox {
                 throw Failure.conflict
             }
             guard existing.payloadSHA256 == MeetingMinutesPublication.digest(payload) else { throw Failure.conflict }
-            return snapshot
+            return
         }
-        try append(operation: .upsert, meetingID: record.id, revision: snapshot.outputRevision,
-                   selection: explicitlySelected ? .explicitHistory : .futureAccepted, payload: payload)
-        return snapshot
+        try append(operation: .upsert, meetingID: meetingID, revision: snapshot.outputRevision,
+                   selection: selection, payload: payload)
     }
 
     /// Only a caller handling an explicit source deletion may invoke this.
@@ -205,7 +221,7 @@ final class MeetingMinutesKnowledgeOutbox {
            (old.status == .searchable || old.status == .deleted || !old.isCurrent),
            receipt.status == .stored && receipt.isCurrent { return }
         next.entries[index].receipt = receipt
-        if receipt.status == .searchable || receipt.status == .deleted || !receipt.isCurrent {
+        if receipt.status == .searchable || receipt.status == .deleted || !receipt.isCurrent || compactsWhenStored {
             next.entries[index].payload = nil
         }
         try persist(next)

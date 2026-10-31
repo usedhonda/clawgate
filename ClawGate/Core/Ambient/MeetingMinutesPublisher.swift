@@ -20,6 +20,7 @@ actor MeetingMinutesPublisher {
     nonisolated static func didAccept(store: MeetingStore, record: MeetingRecord, acceptedData: Data) {
         guard store.root.standardizedFileURL == MeetingStore().root.standardizedFileURL else { return }
         Task { await shared.accept(record: record, acceptedData: acceptedData) }
+        Task { await MeetingMinutesHubPublisher.shared.sync() }
     }
 
     @discardableResult

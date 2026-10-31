@@ -89,6 +89,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Task { await MeetingMinutesHubPublisher.shared.start() }
         let defaults = UserDefaults.standard
         let savedPosition = (defaults.object(forKey: MenuBarStatusItemPlacement.positionKey) as? NSNumber)
             ?? (defaults.object(forKey: MenuBarStatusItemPlacement.savedPositionKey) as? NSNumber)

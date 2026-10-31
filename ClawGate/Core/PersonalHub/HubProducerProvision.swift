@@ -55,7 +55,8 @@ struct HubProducerProvision: Decodable {
         URL(string: base_url)!.appendingPathComponent(path)
     }
 
-    func acceptsCapabilities(_ data: Data) -> Bool {
+    /// The Hub may grant this source more domains than this provision's own.
+    func acceptsCapabilities(_ data: Data, requiring extraDomain: String? = nil) -> Bool {
         struct Capability: Decodable {
             let version: Int
             let source: String
@@ -66,7 +67,7 @@ struct HubProducerProvision: Decodable {
             let finalize_replay_safe: Bool
         }
         guard data.count <= 65536, let value = try? JSONDecoder().decode(Capability.self, from: data) else { return false }
-        return value.version == 1 && value.source == source && value.domains.sorted() == allowed_domains.sorted()
+        return value.version == 1 && value.source == source && Set(value.domains).isSuperset(of: allowed_domains + (extraDomain.map { [$0] } ?? []))
             && value.storage_receipt_version == 1 && value.max_event_bytes == 20 * 1024 * 1024
             && value.max_chunk_bytes == 4 * 1024 * 1024 && value.finalize_replay_safe
     }
