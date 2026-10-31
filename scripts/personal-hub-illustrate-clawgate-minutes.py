@@ -94,7 +94,8 @@ def delivered_revisions(root):
     for entry in ledger["entries"]:
         heads[entry["meetingID"]] = entry
     found = []
-    for meeting_id, head in sorted(heads.items(), reverse=True):
+    # Newest first: readers look at recent meetings, and IDs do not sort by time.
+    for meeting_id, head in sorted(heads.items(), key=lambda item: started_at(root / item[0]), reverse=True):
         if head["operation"] != "upsert" or (head.get("receipt") or {}).get("status") != "stored":
             continue
         minutes = current_minutes(root / meeting_id, head["outputRevision"])
@@ -102,6 +103,13 @@ def delivered_revisions(root):
             found.append({"source_uuid": ledger["sourceUUID"], "meeting_id": meeting_id,
                           "revision": head["outputRevision"], "minutes": minutes})
     return found
+
+
+def started_at(directory):
+    try:
+        return json.loads((directory / "meeting.json").read_text())["startedAt"]
+    except (OSError, ValueError, KeyError):
+        return 0
 
 
 def current_minutes(directory, revision):
