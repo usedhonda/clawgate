@@ -124,6 +124,8 @@ final class AmbientCaptureManager {
     private let retentionSeconds: TimeInterval
 
     private var currentFile: AVAudioFile?
+    private var chunkOpenFailed = false
+    private var writeFailing = false
     private var currentChunkURL: URL?
     private var framesInCurrentChunk: AVAudioFrameCount = 0
     /// Sum of squared samples for the current chunk, accumulated as we write.
@@ -672,6 +674,7 @@ final class AmbientCaptureManager {
     // MARK: - Chunk files (lock held except onChunkReady dispatch)
 
     private func openNewChunkLocked() throws {
+        try AmbientStorage.ensureCaptureSpace()
         chunkSeq += 1
         let url = defaultChunkURLLocked()
         currentFile = try AVAudioFile(forWriting: url, settings: fileSettings)
@@ -777,6 +780,8 @@ final class AmbientCaptureManager {
         }
 
         lock.lock(); defer { lock.unlock() }
+        // A rollover that could not open its next chunk (full disk) resumes here.
+        if chunkOpenFailed, (try? openNewChunkLocked()) != nil { chunkOpenFailed = false }
         guard currentFile != nil else { return }
         writeBufferLocked(outBuf, firstLiveSampleDate: firstLiveSampleDate)
     }
@@ -791,6 +796,7 @@ final class AmbientCaptureManager {
             // Held here, the chunk shipped with a data size of 0 and the resident
             // whisper-server rejected it ("failed to read audio data").
             let writtenFrames = try writeAudioFile(currentFile!, buf)
+            writeFailing = false
             let normalizedWrittenFrames = min(writtenFrames, buf.frameLength)
             guard normalizedWrittenFrames > 0 else { return }
             framesInCurrentChunk += normalizedWrittenFrames
@@ -816,7 +822,9 @@ final class AmbientCaptureManager {
                 utteranceChunker?.didStartChunk(primed: Int(primedFrames))
             }
         } catch {
-            log("ambient capture write error: \(error)")
+            if !writeFailing { log("ambient capture write error: \(error)") }
+            writeFailing = true
+            chunkOpenFailed = currentFile == nil
         }
     }
 

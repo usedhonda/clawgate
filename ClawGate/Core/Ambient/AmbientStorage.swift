@@ -422,6 +422,17 @@ enum AmbientStorage {
     }
 
     /// Rolling directory for a given calendar day (UTC), e.g. rolling/2026-06-09/.
+    /// New chunks stop below this, so capture cannot be what fills the disk.
+    static let minimumCaptureFreeBytes: Int64 = 1024 * 1024 * 1024
+
+    static func ensureCaptureSpace() throws {
+        let values = try ambientRoot.deletingLastPathComponent()
+            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        if let free = values.volumeAvailableCapacityForImportantUsage, free < minimumCaptureFreeBytes {
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+    }
+
     static func rollingDir(for date: Date) -> URL {
         let fmt = DateFormatter()
         fmt.calendar = Calendar(identifier: .gregorian)

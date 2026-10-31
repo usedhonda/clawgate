@@ -507,3 +507,15 @@ This document does not implement:
 - UI changes
 - release or restart workflow
 - LINE adapter changes
+
+## Stopping and load
+
+`POST /v1/ambient/stream/stop` and the menu's Stop Recording release the microphone,
+the system tap and its aggregate device, as `capture/pause` does. Nothing keeps
+converting or writing audio while recording is off. A Core Audio object whose release
+fails is kept, reported as a failed tap state and retried by the next reconcile.
+
+The HAL calls the tap's IOProc block synchronously, so it only copies samples into a
+preallocated ring. A worker converts and writes them. A full ring drops audio, counts
+it in the tap diagnostics and ends the chunk, so no chunk spans the gap. Below 1 GiB
+free, no new chunk opens; capture resumes on its own when space returns.

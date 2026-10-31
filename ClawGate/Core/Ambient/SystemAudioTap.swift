@@ -389,6 +389,7 @@ final class SystemAudioTap {
     }
 
     private func openChunk() throws {
+        try AmbientStorage.ensureCaptureSpace()
         chunkSeq += 1
         let dir = AmbientStorage.rollingDir(for: Date())
         AmbientStorage.ensureDir(dir)
