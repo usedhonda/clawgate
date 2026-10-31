@@ -5,9 +5,9 @@ import Foundation
 /// Records outgoing Mac audio independently of the microphone, including calls
 /// outside Chrome, through a Core Audio tap. The two sources are never mixed.
 ///
-/// Threading: the IOProc block runs on `ioQueue` inside the HAL's I/O cycle, so it
-/// only copies the samples. Conversion and disk writes run on `writerQueue`, which
-/// confines every writer field. HAL calls (create/start/stop/destroy) run on `controlQueue` and
+/// Threading: the HAL calls the IOProc block synchronously inside its I/O cycle, so
+/// the block only copies samples into a preallocated ring. A timer on `writerQueue`
+/// drains it; that queue confines conversion, disk writes and writer fields. HAL calls (create/start/stop/destroy) run on `controlQueue` and
 /// are never made while holding `stateLock` -- a HAL call made under a lock has
 /// hung indefinitely before (see the AVAudioEngine incident).
 final class SystemAudioTap {
@@ -37,8 +37,14 @@ final class SystemAudioTap {
     private let controlQueue = DispatchQueue(label: "ai.clawgate.ambient.systemtap.control")
     private let ioQueue = DispatchQueue(label: "ai.clawgate.ambient.systemtap.io", qos: .userInteractive)
     private let writerQueue = DispatchQueue(label: "ai.clawgate.ambient.systemtap.writer", qos: .utility)
-    /// About 30 seconds of 10 ms cycles: a stalled disk loses audio, not the HAL cycle.
-    private static let maxPendingBuffers = 3000
+    /// A stalled disk loses audio past this point, not the HAL cycle.
+    private static let ringSeconds = 30
+    private static let drainMilliseconds = 100
+    private var ring: AudioFrameRing?
+    private var drainTimer: DispatchSourceTimer?
+    private var drainBuffer: AVAudioPCMBuffer?
+    private var drainFormat: AVAudioFormat?
+    private var droppedBytesSeen = 0
 
     // HAL objects, touched only on controlQueue.
     private var tapID = AudioObjectID(kAudioObjectUnknown)
@@ -53,14 +59,9 @@ final class SystemAudioTap {
     private var _lastChunkAt: Date?
     private var _lastError: String?
     // IO diagnostics: tells "IOProc never fires" from "fires but nothing converts".
-    private var _ioCallbacks = 0
-    private var _framesIn = 0
-    private var _wrapFailures = 0
     private var _convertFailures = 0
+    private var _ring: AudioFrameRing?
     private var _tapFormat = ""
-    private var _bufferCount = 0
-    private var _pendingBuffers = 0
-    private var _droppedBuffers = 0
 
     // Writer state, confined to writerQueue.
     private let recordFormat = AVAudioFormat(
@@ -100,7 +101,8 @@ final class SystemAudioTap {
     var lastError: String? { stateLock.withLock { _lastError } }
     var diagnostics: String {
         stateLock.withLock {
-            "callbacks=\(_ioCallbacks) buffers=\(_bufferCount) framesIn=\(_framesIn) dropped=\(_droppedBuffers) wrapFail=\(_wrapFailures) convertFail=\(_convertFailures) format=\(_tapFormat)"
+            let io = _ring?.snapshot ?? AudioFrameRing.Counters()
+            return "callbacks=\(io.callbacks) buffers=\(io.bufferCount) framesIn=\(io.framesIn) droppedBytes=\(io.droppedBytes) wrapFail=\(io.wrapFailures) convertFail=\(_convertFailures) format=\(_tapFormat)"
         }
     }
 
@@ -166,7 +168,7 @@ final class SystemAudioTap {
         let formatText = "\(Int(asbd.mSampleRate))Hz ch=\(asbd.mChannelsPerFrame) flags=\(asbd.mFormatFlags) bits=\(asbd.mBitsPerChannel)"
         stateLock.withLock {
             _tapFormat = formatText
-            _ioCallbacks = 0; _framesIn = 0; _wrapFailures = 0; _convertFailures = 0
+            _convertFailures = 0
         }
 
         let outputUID = Self.defaultOutputDeviceUID() ?? ""
@@ -190,10 +192,21 @@ final class SystemAudioTap {
         guard status == noErr else { throw TapError.osStatus("create aggregate device", status) }
         aggregateID = device
 
-        writerQueue.sync { self.resetWriter() }
+        let bytesPerFrame = Int(asbd.mBytesPerFrame)
+        guard bytesPerFrame > 0, asbd.mSampleRate > 0 else { throw TapError.badFormat }
+        let ring = AudioFrameRing(capacityBytes: Int(asbd.mSampleRate) * bytesPerFrame * Self.ringSeconds,
+                                  bytesPerFrame: bytesPerFrame)
+        let drainFrames = AVAudioFrameCount(asbd.mSampleRate) / 10
+        guard let drainBuffer = AVAudioPCMBuffer(pcmFormat: tapFormat, frameCapacity: drainFrames) else { throw TapError.badFormat }
+        stateLock.withLock { _ring = ring }
+        writerQueue.sync {
+            self.resetWriter()
+            self.startDrain(ring: ring, buffer: drainBuffer, format: tapFormat)
+        }
+        let channels = tapFormat.channelCount
         var proc: AudioDeviceIOProcID?
-        status = AudioDeviceCreateIOProcIDWithBlock(&proc, device, ioQueue) { [weak self] _, input, _, _, _ in
-            self?.handleInput(input, format: tapFormat)
+        status = AudioDeviceCreateIOProcIDWithBlock(&proc, device, ioQueue) { _, input, _, _, _ in
+            Self.copyInput(input, channels: channels, into: ring)
         }
         guard status == noErr, let proc else { throw TapError.osStatus("create IOProc", status) }
         procID = proc
@@ -220,6 +233,7 @@ final class SystemAudioTap {
         }
         tappedProcesses = []
         writerQueue.sync {
+            self.stopDrain()
             self.finalizeChunk()
             self.resetWriter()
         }
@@ -241,35 +255,55 @@ final class SystemAudioTap {
         chunker = UtteranceChunker(forcedOverlapSeconds: 1)
     }
 
-    private func handleInput(_ input: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
-        // The aggregate carries the output device as its clock. When that device
-        // has a microphone (AirPods, a headset), its input stream arrives in the
-        // same list ahead of the tap. The tap's stream is the last buffer with its channels.
+    /// The aggregate carries the output device as its clock. When that device
+    /// has a microphone (AirPods, a headset), its input stream arrives in the
+    /// same list ahead of the tap. The tap's stream is the last buffer with its channels.
+    private static func copyInput(_ input: UnsafePointer<AudioBufferList>, channels: AVAudioChannelCount,
+                                  into ring: AudioFrameRing) {
         let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input))
-        let tapBuffer = list.last(where: { $0.mNumberChannels == format.channelCount && $0.mDataByteSize > 0 })
-        let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
-        let frames = bytesPerFrame > 0 ? (tapBuffer?.mDataByteSize ?? 0) / bytesPerFrame : 0
-        let accepted: Bool = stateLock.withLock {
-            _ioCallbacks += 1
-            _bufferCount = list.count
-            guard frames > 0 else { _wrapFailures += 1; return false }
-            guard _pendingBuffers < Self.maxPendingBuffers else { _droppedBuffers += 1; return false }
-            _pendingBuffers += 1
-            _framesIn += Int(frames)
-            return true
+        let tapBuffer = list.last(where: { $0.mNumberChannels == channels && $0.mDataByteSize > 0 })
+        ring.write(tapBuffer?.mData, byteCount: Int(tapBuffer?.mDataByteSize ?? 0), bufferCount: list.count)
+    }
+
+    private func startDrain(ring: AudioFrameRing, buffer: AVAudioPCMBuffer, format: AVAudioFormat) {
+        self.ring = ring
+        drainBuffer = buffer
+        drainFormat = format
+        droppedBytesSeen = 0
+        let timer = DispatchSource.makeTimerSource(queue: writerQueue)
+        timer.schedule(deadline: .now() + .milliseconds(Self.drainMilliseconds),
+                       repeating: .milliseconds(Self.drainMilliseconds), leeway: .milliseconds(20))
+        timer.setEventHandler { [weak self] in self?.drain() }
+        timer.resume()
+        drainTimer = timer
+    }
+
+    private func stopDrain() {
+        drainTimer?.cancel()
+        drainTimer = nil
+        drain()
+        ring = nil
+        drainBuffer = nil
+        drainFormat = nil
+    }
+
+    private func drain() {
+        guard let ring, let buffer = drainBuffer, let format = drainFormat,
+              let target = buffer.mutableAudioBufferList.pointee.mBuffers.mData else { return }
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        let maxBytes = Int(buffer.frameCapacity) * bytesPerFrame
+        // Audio was lost here, so a chunk must not claim to span the gap.
+        let dropped = ring.snapshot.droppedBytes
+        if dropped != droppedBytesSeen {
+            droppedBytesSeen = dropped
+            finalizeChunk()
+            log("ambient system tap dropped audio; total bytes=\(dropped)")
         }
-        guard accepted, let tapBuffer, let source = tapBuffer.mData,
-              let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
-              let target = copy.mutableAudioBufferList.pointee.mBuffers.mData else {
-            if accepted { stateLock.withLock { _pendingBuffers -= 1; _wrapFailures += 1 } }
-            return
-        }
-        memcpy(target, source, Int(frames * bytesPerFrame))
-        copy.frameLength = frames
-        let arrivedAt = Date()
-        writerQueue.async { [self] in
-            convertAndWrite(copy, format: format, arrivedAt: arrivedAt)
-            stateLock.withLock { _pendingBuffers -= 1 }
+        while true {
+            let bytes = ring.read(into: target, maxBytes: maxBytes)
+            guard bytes > 0 else { return }
+            buffer.frameLength = AVAudioFrameCount(bytes / bytesPerFrame)
+            convertAndWrite(buffer, format: format, arrivedAt: Date())
         }
     }
 
