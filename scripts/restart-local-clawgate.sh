@@ -104,7 +104,7 @@ fi
 
 cd "$PROJECT_PATH"
 if [[ "${CLAWGATE_RESTART_LOCK:-}" != "$PROJECT_PATH" ]]; then
-  exec python3 "$SCRIPT_DIR/ambient-restart-state.py" run-locked "$PROJECT_PATH" "$SCRIPT_DIR/restart-local-clawgate.sh" "${ORIGINAL_ARGS[@]}"
+  exec python3 "$SCRIPT_DIR/ambient-restart-state.py" run-locked "$PROJECT_PATH" "$SCRIPT_DIR/restart-local-clawgate.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 fi
 
 APP_LAUNCH_ARGS=()
