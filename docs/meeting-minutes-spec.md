@@ -890,6 +890,10 @@ add 0 to 3 images that make it easier to understand. A short or unsuitable docum
   not shown.
 - Images are 1024x768 (4:3) with text large enough to read on a phone.
 - Images are marked as AI generated, and the text of the minutes stays authoritative.
+- The minutes tab shows diagrams above the summary. Multiple images use a visible
+  count and previous/next controls rather than pushing the text far down the page.
+- The image loader stays mounted before its first result, including when the
+  manifest arrives after the document. Image display is not its own load trigger.
 - The existing workspace refresh observes the current revision's image manifest
   even when the minutes document is cached. Images arriving later appear without
   reopening the meeting; unchanged manifests do not decode the PNGs again.

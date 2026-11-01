@@ -587,12 +587,12 @@ private struct MeetingWorkspaceDetail: View {
             // main one on a narrow window instead of crushing it.
             AdaptiveColumns(width: width, sideWidth: 300, minimumMainWidth: 460) {
                 LazyVStack(alignment: .leading, spacing: 18) {
+                    MeetingMinutesImagesCard(revision: document.snapshot?.imageRevision)
                     WorkspaceCard(title: shown.partial ? "概要（完成したパートの範囲）" : "概要") {
                         Text(renderedCitation(minutes.summary))
                             .font(.system(size: 15)).lineSpacing(5).textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    MeetingMinutesImagesCard(revision: document.snapshot?.imageRevision)
                     if !minutes.topics.isEmpty {
                         Text("議題ごとの詳細").font(.system(size: 13, weight: .bold)).foregroundColor(WorkspaceTheme.muted)
                         ForEach(Array(minutes.topics.enumerated()), id: \.offset) { _, topic in
