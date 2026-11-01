@@ -3,6 +3,40 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingWorkspaceSnapshotTests: XCTestCase {
+    func testLateImageManifestRefreshesCachedAcceptedAndLegacyMinutes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(root: root)
+        for legacy in [false, true] {
+            let meeting = record(legacy ? "legacy" : "accepted")
+            try seed(meeting, store: store)
+            if legacy {
+                let minutes = try XCTUnwrap(store.loadAcceptedMinutes(id: meeting.id)?.minutes)
+                store.saveMinutes(minutes, for: meeting)
+                try FileManager.default.removeItem(at: store.directory(for: meeting.id).appendingPathComponent("minutes-accepted.json"))
+            }
+            let loader = MeetingWorkspaceLoader()
+            let before = try await loader.load(context(meeting, store: store))
+            let missing = try XCTUnwrap(before.imageRevision)
+            XCTAssertNil(missing.manifestSHA256)
+            let folder = try XCTUnwrap(before.imageFolder)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let png = try XCTUnwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCfcAAAAASUVORK5CYII="))
+            try png.write(to: folder.appendingPathComponent("image-1.png"))
+            let manifest: [String: Any] = ["images": [["index": 1, "file": "image-1.png", "title": "Fixture", "alt": "Fixture"]]]
+            try JSONSerialization.data(withJSONObject: manifest).write(to: folder.appendingPathComponent("manifest.json"), options: .atomic)
+            let after = try await loader.load(context(meeting, store: store))
+            let present = try XCTUnwrap(after.imageRevision)
+            XCTAssertNotEqual(missing, present)
+            XCTAssertEqual(before.knowledgeRevision, after.knowledgeRevision)
+            let preparationCount = await loader.preparationCount
+            XCTAssertEqual(preparationCount, 1, "Late images must not rebuild the unchanged document")
+            XCTAssertEqual(MeetingMinutesImageStore.load(revision: present).count, 1)
+            XCTAssertTrue(MeetingMinutesImageStore.load(revision: missing).isEmpty)
+            let unchanged = try await loader.load(context(meeting, store: store))
+            XCTAssertEqual(unchanged.imageRevision, present)
+        }
+    }
     func testAcceptedRecallUsesFrozenEvidenceOnlyForDisplayComparison() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

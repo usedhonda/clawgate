@@ -14,6 +14,10 @@ struct MeetingMinutesImage: Decodable, Identifiable {
 
 enum MeetingMinutesImageStore {
     private struct Manifest: Decodable { let images: [MeetingMinutesImage] }
+    struct Revision: Hashable {
+        let folder: URL
+        let manifestSHA256: String?
+    }
 
     static func folder(meetingDirectory: URL) -> URL? {
         for name in ["minutes-accepted.json", "minutes.json"] {
@@ -24,24 +28,29 @@ enum MeetingMinutesImageStore {
         return nil
     }
 
-    static func load(meetingDirectory: URL) -> [(image: MeetingMinutesImage, picture: NSImage)] {
-        guard let folder = folder(meetingDirectory: meetingDirectory),
-              let data = try? Data(contentsOf: folder.appendingPathComponent("manifest.json")),
+    static func revision(folder: URL) -> Revision {
+        let data = try? Data(contentsOf: folder.appendingPathComponent("manifest.json"))
+        return Revision(folder: folder, manifestSHA256: data.map { MeetingMinutesPublication.digest($0) })
+    }
+
+    static func load(revision: Revision) -> [(image: MeetingMinutesImage, picture: NSImage)] {
+        guard let data = try? Data(contentsOf: revision.folder.appendingPathComponent("manifest.json")),
+              MeetingMinutesPublication.digest(data) == revision.manifestSHA256,
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else { return [] }
         return manifest.images.compactMap { image in
-            NSImage(contentsOf: folder.appendingPathComponent(image.file)).map { (image, $0) }
+            NSImage(contentsOf: revision.folder.appendingPathComponent(image.file)).map { (image, $0) }
         }
     }
 }
 
 struct MeetingMinutesImagesCard: View {
-    let meetingDirectory: URL
-    let revision: String?
+    let revision: MeetingMinutesImageStore.Revision?
     @State private var loaded: [(image: MeetingMinutesImage, picture: NSImage)] = []
+    @State private var loadedRevision: MeetingMinutesImageStore.Revision?
 
     var body: some View {
         Group {
-            if !loaded.isEmpty {
+            if loadedRevision == revision, !loaded.isEmpty {
                 WorkspaceCard(title: "図解（AI生成）") {
                     Text("内容の正確さは本文を基準にしてください。")
                         .font(.system(size: 12)).foregroundColor(WorkspaceTheme.muted)
@@ -56,11 +65,13 @@ struct MeetingMinutesImagesCard: View {
             }
         }
         .task(id: revision) {
-            let directory = meetingDirectory
+            guard let revision else { loaded = []; loadedRevision = nil; return }
             let images = await Task.detached(priority: .utility) {
-                MeetingMinutesImageStore.load(meetingDirectory: directory)
+                MeetingMinutesImageStore.load(revision: revision)
             }.value
+            guard !Task.isCancelled else { return }
             loaded = images
+            loadedRevision = revision
         }
     }
 }

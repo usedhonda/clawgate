@@ -45,6 +45,8 @@ struct MeetingWorkspaceSnapshot {
     var held = false
     var progressUnavailable = false
     var knowledgeRevision: String?
+    var imageFolder: URL?
+    var imageRevision: MeetingMinutesImageStore.Revision?
     var knowledgeStatus: MeetingMinutesKnowledgeOutbox.Status = .unavailable
 
     mutating func updatePresentation(_ context: MeetingWorkspaceContext) {
@@ -221,8 +223,13 @@ actor MeetingWorkspaceLoader {
                     material: source, inputsChanged: inputsChanged, supplementalChanged: selected != previous,
                     capturedAt: Date())
                 snapshot.knowledgeRevision = acceptedData.map { "sha256:" + MeetingMinutesPublication.digest($0) }
+                snapshot.imageFolder = MeetingMinutesImageStore.folder(meetingDirectory: directory)
             }
             try Task.checkCancellation()
+            // Images may arrive after the minutes were loaded. Observe their
+            // small manifest even on a document-cache hit, without rebuilding
+            // citations or decoding unchanged PNGs on every refresh.
+            snapshot.imageRevision = snapshot.imageFolder.map { MeetingMinutesImageStore.revision(folder: $0) }
             let progress = Result { try snapshot.job.flatMap { try MeetingMinutesExecutionProgress.load(store: store, id: record.id, job: $0) } }
             snapshot.indexedProgress = try? progress.get()
             if case .failure = progress { snapshot.progressUnavailable = true }

@@ -890,5 +890,8 @@ add 0 to 3 images that make it easier to understand. A short or unsuitable docum
   not shown.
 - Images are 1024x768 (4:3) with text large enough to read on a phone.
 - Images are marked as AI generated, and the text of the minutes stays authoritative.
+- The existing workspace refresh observes the current revision's image manifest
+  even when the minutes document is cached. Images arriving later appear without
+  reopening the meeting; unchanged manifests do not decode the PNGs again.
 - With `--upload` each image becomes a `clawgate.minutes-image.v1` event, closed by one
   `clawgate.minutes-image-set.v1` event, which also records a revision with no images.
