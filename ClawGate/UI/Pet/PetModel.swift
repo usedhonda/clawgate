@@ -3251,6 +3251,7 @@ final class PetModel: NSObject, ObservableObject {
                         let existing = MeetingWorkspace.associatedRecord(candidate: candidate, records: store.all())
                         let source = materials[candidate.id]
                         guard existing != nil || !(source?.notes.isEmpty ?? true) || !(source?.segments.isEmpty ?? true) else { continue }
+                        if existing == nil && MeetingWorkspace.holdsForReview(candidate: candidate) { continue }
                         let record = MeetingWorkspace.record(candidate: candidate, existing: existing)
                         store.save(record)
                         guard candidate.end < Date(), !self.supplementalMaterialsChanged(for: record), source?.status == .available,
