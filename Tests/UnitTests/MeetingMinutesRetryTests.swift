@@ -161,7 +161,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         // is not ours either.
         model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "run-mine", runId: "run-mine"), text: "{"))
         model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-other",
-                                                                       sessionKey: "agent:main:main"),
+                                                                       sessionKey: "agent:main:minutes"),
                                      reason: "fence"))
         drainMain()
         XCTAssertEqual(model.pendingMinutesMeetingIDForTesting, record.id)
@@ -174,7 +174,7 @@ final class MeetingMinutesRetryTests: XCTestCase {
         waitForMinutesPreparation(of: model)
         model.acknowledgeSharedSummonForTesting(runId: "run-mine")
         model.handleEvent(.runFailed(owner: OpenClawEventOwnerIdentity(messageId: "x", runId: "run-gateway",
-                                                                       sessionKey: "agent:main:main"),
+                                                                       sessionKey: "agent:main:minutes"),
                                      reason: "fence"))
         drainMain()
         XCTAssertNil(model.pendingMinutesMeetingIDForTesting)

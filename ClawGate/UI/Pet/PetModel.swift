@@ -420,6 +420,7 @@ final class PetModel: NSObject, ObservableObject {
                 Task { [weak self] in
                     guard let self, let key = self.sessionKey else { return }
                     try? await self.wsClient.subscribeToSession(sessionKey: key)
+                    try? await self.wsClient.subscribeToSession(sessionKey: Self.minutesSessionKey(for: key))
                     // Subscribe to proactive heartbeat for realtime notifications
                     try? await self.wsClient.subscribeToSession(sessionKey: "agent:main:proactive:heartbeat")
                 }
@@ -569,8 +570,9 @@ final class PetModel: NSObject, ObservableObject {
                 // ACK run id, so a failure on this session before our run has
                 // streamed anything is taken as ours. At worst a live run is
                 // asked again after the backoff.
-                let sameSession = eventOwner.sessionKey == nil || eventOwner.sessionKey == self.sessionKey
-                    || (self.sessionKey.map { eventOwner.sessionKey?.hasSuffix($0) == true } ?? false)
+                let minutesKey = self.sessionKey.map(Self.minutesSessionKey(for:))
+                let sameSession = eventOwner.sessionKey == nil || eventOwner.sessionKey == minutesKey
+                    || (minutesKey.map { eventOwner.sessionKey?.hasSuffix($0) == true } ?? false)
                 Self.petLogTelemetry.notice("minutesRunFailedEvent run=\(eventOwner.runId ?? "nil", privacy: .public) session=\(eventOwner.sessionKey ?? "nil", privacy: .public) mine=\(self.summonEventMatchesCurrentOwner(runId: eventOwner.runId), privacy: .public) streamed=\(self.minutesRunSawDelta, privacy: .public)")
                 guard self.summonEventMatchesCurrentOwner(runId: eventOwner.runId)
                         || (sameSession && !self.minutesRunSawDelta) else { break }
@@ -2455,7 +2457,7 @@ final class PetModel: NSObject, ObservableObject {
                 let runId: String
                 if source == Self.minutesSource || source == Self.minutesSummarySource {
                     runId = try await wsClient.sendMinutesAwaitingModelRunID(
-                        prompt, sessionKey: sessionKey, idempotencyKey: token.uuidString)
+                        prompt, sessionKey: Self.minutesSessionKey(for: sessionKey), idempotencyKey: token.uuidString)
                     Self.petLogTelemetry.info("minutesModelAck source=\(source, privacy: .public) owner=\(token.uuidString.prefix(8), privacy: .public) model=gpt-6.1-sol thinking=high")
                 } else {
                     runId = try await wsClient.sendMessageAwaitingRunId(prompt, sessionKey: sessionKey)
@@ -3350,6 +3352,12 @@ final class PetModel: NSObject, ObservableObject {
     static let minutesSource = "minutes"
     /// The one overview rewrite after a multi-part generation.
     static let minutesSummarySource = "minutes-summary"
+    /// Minutes requests and replies are long; they get their own conversation so
+    /// they neither appear in the chat nor collide with its turns.
+    static func minutesSessionKey(for chatSessionKey: String) -> String {
+        guard let colon = chatSessionKey.lastIndex(of: ":") else { return "agent:main:minutes" }
+        return chatSessionKey[..<colon] + ":minutes"
+    }
     static let minutesMaxAttempts = 3
     static let minutesRetrySeconds: TimeInterval = 120
     /// Backoff before re-sending a part that failed, by attempts already made.
@@ -3417,7 +3425,7 @@ final class PetModel: NSObject, ObservableObject {
     /// precedes explicit bounded-meeting activation; ordinary owners stay separate.
     private func startMinutesPilotIfNeeded() {
         guard minutesPilotTask == nil, !didCleanup,
-              connectionState == .connected, let key = sessionKey,
+              connectionState == .connected, let key = sessionKey.map(Self.minutesSessionKey(for:)),
               pendingMinutesMeetingID == nil, pendingSummaryPass == nil else { return }
         let store = minutesStore()
         guard let pilot = MeetingMinutesPilot.load(),
