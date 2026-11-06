@@ -107,6 +107,47 @@ final class MeetingMinutesExecutionStateTests: XCTestCase {
         XCTAssertThrowsError(try state.retry(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id))
     }
 
+    func testAnswerCorrectionRetainsRejectedOwnerAndReservesOnlyOnce() throws {
+        let (job, store, id) = try fixture(); defer { try? FileManager.default.removeItem(at: store.root) }
+        var state = try MeetingMinutesExecutionState(job: job)
+        let original = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "original", store: store, id: id)
+        let originalAck = try ack(original)
+        try state.acknowledge(original, ack: originalAck, store: store, id: id)
+        XCTAssertThrowsError(try state.reserveAnswerCorrection(original, message: "correction", store: store, id: id))
+        try state.failTerminal(original, runId: original.idempotencyKey, code: "invalid_answer", retryable: false, store: store, id: id)
+        let corrected = try state.reserveAnswerCorrection(original, message: "correction", store: store, id: id)
+        XCTAssertEqual(corrected.idempotencyKey, MeetingMinutesExecutionState.answerCorrectionKey(rejectedKey: original.idempotencyKey))
+        state = try XCTUnwrap(MeetingMinutesExecutionState.load(store: store, id: id, job: job))
+        XCTAssertEqual(state.parts[0].answerCorrection?.rejectedRequest, original.request)
+        XCTAssertEqual(state.parts[0].answerCorrection?.rejectedBinding, originalAck.binding)
+        XCTAssertEqual(state.parts[0].answerCorrection?.version, MeetingMinutesSummaryPass.correctionVersion)
+        XCTAssertEqual(state.parts[0].attempt, 2)
+        XCTAssertThrowsError(try state.reserveAnswerCorrection(original, message: "correction", store: store, id: id))
+        try state.acknowledge(corrected, ack: ack(corrected), store: store, id: id)
+        try state.failTerminal(corrected, runId: corrected.idempotencyKey, code: "invalid_answer", retryable: false, store: store, id: id)
+        XCTAssertThrowsError(try state.reserveAnswerCorrection(corrected, message: "third", store: store, id: id))
+        XCTAssertThrowsError(try state.retry(index: 0, sessionKey: corrected.sessionKey, message: corrected.request.message, store: store, id: id))
+    }
+
+    func testContradictoryCompletedOutcomeIsArchivedWithoutChangingIndependentPart() throws {
+        let (job, store, id) = try fixture(); defer { try? FileManager.default.removeItem(at: store.root) }
+        var state = try MeetingMinutesExecutionState(job: job)
+        let first = try state.reserve(index: 0, sessionKey: "agent:example:main", message: "fixture", store: store, id: id)
+        try state.acknowledge(first, ack: ack(first), store: store, id: id)
+        let conflict = MeetingMinutes(title: nil, summary: "Pending decision.", topics: [],
+            decisions: ["Pending decision."], actionItems: [], openQuestions: ["Pending decision."],
+            evidence: [], attendance: nil, language: nil)
+        try state.complete(first, runId: first.idempotencyKey, outcome: .answer(conflict), store: store, id: id)
+        let independent = state.parts[1]
+        try state.rejectContradictoryCompletedAnswer(index: 0, store: store, id: id)
+        let loaded = try XCTUnwrap(MeetingMinutesExecutionState.load(store: store, id: id, job: job))
+        XCTAssertEqual(loaded.parts[0].rejectedCompletedOutcome, .answer(conflict))
+        XCTAssertEqual(loaded.parts[0].status, .failed)
+        XCTAssertEqual(loaded.parts[0].request, first.request)
+        XCTAssertEqual(loaded.parts[1], independent)
+        XCTAssertThrowsError(try state.rejectContradictoryCompletedAnswer(index: 0, store: store, id: id))
+    }
+
     func testMalformedPrivateSidecarAndStaleWriterFailClosed() throws {
         let (job, store, id) = try fixture(); defer { try? FileManager.default.removeItem(at: store.root) }
         var state = try MeetingMinutesExecutionState(job: job)

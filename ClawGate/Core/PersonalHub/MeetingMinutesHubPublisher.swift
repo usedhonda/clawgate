@@ -46,6 +46,26 @@ actor MeetingMinutesHubPublisher {
         } while syncAgain
     }
 
+    func acceptSelectedSource(_ source: MeetingMinutesIntegrationSelection.Source) async throws {
+        let primary = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: Self.maxMetadataBytes)
+        let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: Self.maxMetadataBytes,
+            directoryName: "knowledge-outbox-hub", sourceUUID: primary.sourceUUID, compactsWhenStored: true)
+        try source.enqueue(in: ledger)
+        await sync()
+    }
+
+    /// Explicit migration only; does not infer a merge from enumeration. A
+    /// return confirms staging, while delivery is observed through this ledger.
+    func stageSupersession(snapshotData: Data, meetingID: String, expectedOrdinal: Int,
+                           target: MeetingMinutesPublication.SupersededBy?) async throws {
+        let primary = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: Self.maxMetadataBytes)
+        let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: Self.maxMetadataBytes,
+            directoryName: "knowledge-outbox-hub", sourceUUID: primary.sourceUUID, compactsWhenStored: true)
+        try ledger.enqueueSupersession(snapshotData: snapshotData, meetingID: meetingID,
+                                       expectedOrdinal: expectedOrdinal, target: target)
+        await sync()
+    }
+
     private func syncOnce() async {
         let ledger: MeetingMinutesKnowledgeOutbox
         do {

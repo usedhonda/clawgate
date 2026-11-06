@@ -28,6 +28,11 @@ actor MeetingMinutesPublisher {
         do {
             let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: metadataBytes)
             try ledger.enqueue(acceptedData: acceptedData, record: record, explicitlySelected: explicitlySelected)
+            // An earlier acceptance whose staging failed transiently is
+            // otherwise recovered only on reconnect. Each later acceptance
+            // re-stages from the authoritative accepted files (idempotent).
+            do { try ledger.reconcile(store: store, records: store.all()) }
+            catch { NSLog("[MinutesPublication] reconciliation incomplete; existing pending retained") }
         } catch {
             // Never roll back an accepted document because knowledge delivery
             // failed. Reconnect recovery can reconcile its authoritative file.
@@ -36,6 +41,23 @@ actor MeetingMinutesPublisher {
         }
         await drain()
         return true
+    }
+
+    /// Only sources pinned by the explicit local integration selection.
+    func acceptSelectedSource(_ source: MeetingMinutesIntegrationSelection.Source) async throws {
+        let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: metadataBytes)
+        try source.enqueue(in: ledger)
+        await drain()
+    }
+
+    /// Explicit migration only, after both consumers and target readbacks are
+    /// confirmed by the caller. Success means durable staging, not delivery.
+    func stageSupersession(snapshotData: Data, meetingID: String, expectedOrdinal: Int,
+                           target: MeetingMinutesPublication.SupersededBy?) async throws {
+        let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: metadataBytes)
+        try ledger.enqueueSupersession(snapshotData: snapshotData, meetingID: meetingID,
+                                       expectedOrdinal: expectedOrdinal, target: target)
+        await drain()
     }
 
     func connect(send: @escaping Sender) async {
@@ -76,7 +98,7 @@ actor MeetingMinutesPublisher {
                     // advance the journal while this request is in flight.
                     let current = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: metadataBytes)
                     try current.receive(receipt, expected: publication)
-                    guard receipt.status == .stored || receipt.status == .searchable || receipt.status == .deleted else {
+                    guard receipt.status == .stored || receipt.status == .searchable || receipt.status == .superseded || receipt.status == .deleted else {
                         NSLog("[MinutesPublication] receipt unresolved=%@; pending retained", receipt.status.rawValue)
                         return
                     }

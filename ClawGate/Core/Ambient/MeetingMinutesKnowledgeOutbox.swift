@@ -19,6 +19,7 @@ final class MeetingMinutesKnowledgeOutbox {
         let envelopeSHA256: String
         var payload: Data?
         var receipt: MeetingMinutesPublicationReceipt?
+        var supersededBy: MeetingMinutesPublication.SupersededBy? = nil
 
         func envelope(sourceUUID: String) -> MeetingMinutesPublication? {
             guard let payload else { return nil }
@@ -26,11 +27,11 @@ final class MeetingMinutesKnowledgeOutbox {
                 sourceUUID: sourceUUID, meetingID: meetingID, outputRevision: outputRevision,
                 publicationOrdinal: ordinal, previousRevision: previousRevision,
                 selectionBasis: selectionBasis, payloadSHA256: payloadSHA256,
-                payloadBase64: payload.base64EncodedString())
+                payloadBase64: payload.base64EncodedString(), supersededBy: supersededBy)
         }
         var settled: Bool {
             guard let status = receipt?.status else { return false }
-            return status == .stored || status == .searchable || status == .deleted
+            return status == .stored || status == .searchable || status == .superseded || status == .deleted
         }
     }
     private struct State: Codable {
@@ -130,7 +131,37 @@ final class MeetingMinutesKnowledgeOutbox {
             return
         }
         try append(operation: .upsert, meetingID: meetingID, revision: snapshot.outputRevision,
-                   selection: selection, payload: payload)
+                   selection: selection, payload: payload, supersededBy: entries.last?.supersededBy)
+    }
+
+    /// Explicit publication-state change, never called by periodic scanning.
+    /// The caller supplies the original exact snapshot bytes even after this
+    /// destination compacted its body. Both destination readbacks precede the
+    /// migration caller; this ledger additionally fences its own target head.
+    func enqueueSupersession(snapshotData: Data, meetingID: String, expectedOrdinal: Int,
+                             target: MeetingMinutesPublication.SupersededBy?) throws {
+        lock.lock(); defer { lock.unlock() }
+        try ensureCurrent()
+        guard expectedOrdinal > 0, expectedOrdinal < Int.max,
+              let head = state.entries.last(where: { $0.meetingID == meetingID }),
+              head.operation == .upsert,
+              head.payloadSHA256 == MeetingMinutesPublication.digest(snapshotData) else { throw Failure.conflict }
+        // An exact retry after staging/ACK must not allocate another ordinal.
+        if head.ordinal == expectedOrdinal + 1, head.supersededBy == target { return }
+        guard head.ordinal == expectedOrdinal else { throw Failure.conflict }
+        if head.supersededBy == target { return }
+        if let target {
+            guard target.sourceUUID == sourceUUID, target.meetingID != meetingID,
+                  let destination = state.entries.last(where: { $0.meetingID == target.meetingID }),
+                  destination.operation == .upsert, destination.supersededBy == nil,
+                  destination.outputRevision == target.outputRevision,
+                  destination.settled, destination.receipt?.isCurrent == true else { throw Failure.conflict }
+            var heads: [String: Entry] = [:]
+            for entry in state.entries { heads[entry.meetingID] = entry }
+            guard !heads.values.contains(where: { $0.supersededBy?.meetingID == meetingID }) else { throw Failure.conflict }
+        }
+        try append(operation: .upsert, meetingID: meetingID, revision: head.outputRevision,
+            selection: head.selectionBasis, payload: snapshotData, supersededBy: target)
     }
 
     /// Only a caller handling an explicit source deletion may invoke this.
@@ -146,18 +177,19 @@ final class MeetingMinutesKnowledgeOutbox {
     }
 
     private func append(operation: MeetingMinutesPublication.Operation, meetingID: String,
-                        revision: String, selection: MeetingMinutesPublication.SelectionBasis, payload: Data) throws {
+                        revision: String, selection: MeetingMinutesPublication.SelectionBasis, payload: Data,
+                        supersededBy: MeetingMinutesPublication.SupersededBy? = nil) throws {
         let head = state.entries.last { $0.meetingID == meetingID }
         guard (head?.ordinal ?? 0) < Int.max else { throw Failure.capacityExceeded }
         let envelope = MeetingMinutesPublication(schemaVersion: 1, operation: operation,
             sourceUUID: sourceUUID, meetingID: meetingID, outputRevision: revision,
             publicationOrdinal: (head?.ordinal ?? 0) + 1, previousRevision: head?.outputRevision,
             selectionBasis: selection, payloadSHA256: MeetingMinutesPublication.digest(payload),
-            payloadBase64: payload.base64EncodedString())
+            payloadBase64: payload.base64EncodedString(), supersededBy: supersededBy)
         let entry = Entry(operation: operation, meetingID: meetingID, outputRevision: revision,
             ordinal: envelope.publicationOrdinal, previousRevision: head?.outputRevision,
             selectionBasis: selection, payloadSHA256: envelope.payloadSHA256,
-            envelopeSHA256: MeetingMinutesPublication.digest(try envelope.encoded()), payload: payload)
+            envelopeSHA256: MeetingMinutesPublication.digest(try envelope.encoded()), payload: payload, supersededBy: supersededBy)
         var next = state; next.entries.append(entry)
         try persist(next)
     }
@@ -183,13 +215,32 @@ final class MeetingMinutesKnowledgeOutbox {
         }
     }
 
+    struct Head {
+        let operation: MeetingMinutesPublication.Operation
+        let outputRevision: String
+        let payloadSHA256: String
+        let ordinal: Int
+        let supersededBy: MeetingMinutesPublication.SupersededBy?
+        let receipt: MeetingMinutesPublicationReceipt?
+    }
+
+    /// Exact current head, unlike the revision-oriented UI status.
+    func head(meetingID: String) throws -> Head? {
+        lock.lock(); defer { lock.unlock() }; try ensureCurrent()
+        return state.entries.last(where: { $0.meetingID == meetingID }).map {
+            Head(operation: $0.operation, outputRevision: $0.outputRevision,
+                 payloadSHA256: $0.payloadSHA256, ordinal: $0.ordinal,
+                 supersededBy: $0.supersededBy, receipt: $0.receipt)
+        }
+    }
+
     func status(meetingID: String, outputRevision: String) throws -> Status {
         lock.lock(); defer { lock.unlock() }; try ensureCurrent()
         let entries = state.entries.filter { $0.meetingID == meetingID }
         if let head = entries.last, head.operation == .delete {
             return head.receipt?.status == .deleted ? .deleted : .deletionPending
         }
-        guard let entry = entries.first(where: { $0.operation == .upsert && $0.outputRevision == outputRevision }) else {
+        guard let entry = entries.last(where: { $0.operation == .upsert && $0.outputRevision == outputRevision }) else {
             return .notStaged
         }
         guard let receipt = entry.receipt else { return .pending }
@@ -197,6 +248,7 @@ final class MeetingMinutesKnowledgeOutbox {
         switch receipt.status {
         case .stored: return .stored
         case .searchable: return .searchable
+        case .superseded: return .superseded
         default: return .pending
         }
     }
@@ -208,20 +260,21 @@ final class MeetingMinutesKnowledgeOutbox {
         }), state.entries[index].envelopeSHA256 == MeetingMinutesPublication.digest(try expected.encoded()) else {
             throw Failure.payloadMismatch
         }
-        guard receipt.status == .stored || receipt.status == .searchable || receipt.status == .deleted else {
+        guard receipt.status == .stored || receipt.status == .searchable || receipt.status == .superseded || receipt.status == .deleted else {
             // Rejection/gap is not a delivery ACK and must not erase pending.
             return
         }
         guard (expected.operation == .delete) == (receipt.status == .deleted),
+              (expected.supersededBy != nil) == (receipt.status == .superseded),
               receipt.status != .searchable || receipt.isCurrent else { throw Failure.payloadMismatch }
         var next = state
         // A delayed stored receipt cannot regress a previous searchable/deleted
         // proof or re-expose a body already compacted from this ledger.
         if let old = next.entries[index].receipt,
-           (old.status == .searchable || old.status == .deleted || !old.isCurrent),
+           (old.status == .searchable || old.status == .superseded || old.status == .deleted || !old.isCurrent),
            receipt.status == .stored && receipt.isCurrent { return }
         next.entries[index].receipt = receipt
-        if receipt.status == .searchable || receipt.status == .deleted || !receipt.isCurrent || compactsWhenStored {
+        if receipt.status == .searchable || receipt.status == .superseded || receipt.status == .deleted || !receipt.isCurrent || compactsWhenStored {
             next.entries[index].payload = nil
         }
         try persist(next)

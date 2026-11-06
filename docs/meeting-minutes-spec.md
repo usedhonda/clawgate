@@ -392,7 +392,7 @@ Read back over HTTP with `GET /v1/ambient/meetings` (records, newest first) and
 
 ## Request envelope
 
-`policyVersion` = `meeting-minutes-v6`. The outbound message is the universal
+`policyVersion` = `meeting-minutes-v7`. The outbound message is the universal
 prefix, a blank line, then the envelope as JSON — never string-concatenated with
 a delimiter, so transcript text cannot break out of the data section.
 
@@ -460,7 +460,7 @@ evidence under the existing fail-closed validation.
     "attendance": {"present": ["…"], "absent": [], "calendarEventId": null},
     "language": "ja"
   },
-  "contextDecision": {"policyVersion": "meeting-minutes-v6"} }
+  "contextDecision": {"policyVersion": "meeting-minutes-v7"} }
 ```
 
 The parser is fail-closed. A reply is rejected — never shown as minutes — when:
@@ -899,3 +899,100 @@ add 0 to 3 images that make it easier to understand. A short or unsuitable docum
   reopening the meeting; unchanged manifests do not decode the PNGs again.
 - With `--upload` each image becomes a `clawgate.minutes-image.v1` event, closed by one
   `clawgate.minutes-image-set.v1` event, which also records a revision with no images.
+
+### Cross-provider clock alignment
+
+Transcript fusion may align comparison clocks when at least three unique shared
+utterances (at least 12 characters each) occur in the same strict order. All
+anchor offsets must lie within two seconds of the median offset. Whitespace and
+case normalize for comparison; punctuation, numbers and negation are retained.
+The reference is local capture when available, otherwise a deterministic source
+key. Recall result events and source document URLs have separate clock identities.
+Original timestamps, text and provider citation IDs remain unchanged. Missing,
+ambiguous or drifting anchors do not establish an offset, and untimed material
+never acquires an invented timestamp. This is alignment only, not a determination
+of which provider's claims are correct or proof of independent corroboration.
+
+### Existing-minutes evidence
+
+Associated Meet generated notes may supply information absent from the available
+audio transcript. Frozen inputs retain `source: existing-minutes`, the original
+URL, locator and exact UTF-8 body digest. Long notes are losslessly partitioned
+into at most 6,000 Swift Character slices with character ranges in their locators;
+they never acquire invented speech timestamps or Recall lineage.
+
+Every claim citing these notes, including mixed-source claims, must carry the
+visible original-audio-unverified label. This covers summary sentences, topics,
+decisions, action descriptions and unresolved questions. Part acceptance and
+accepted-file storage reject missing labels without replacing the old document.
+Overview rewrites retain the same label. Existing citation wire fields carry
+the distinction to consumers; no new strict-schema fields are emitted.
+
+### Equivalent speech prompt projection
+
+The v7 prompt groups exact normalized speech across timed provider streams, including up to three adjacent segments within two seconds of each other. The representative carries `equivalentSources` IDs and original timing/source metadata. All originals remain in the frozen envelope and accepted source revision; no publication snapshot schema changes. Numeric/negation differences, ambiguous repeated matches, untimed lines and existing-minutes documents are not collapsed. Paraphrases remain for grounded reconciliation. The model must cite all equivalent source IDs, not count them as independent corroboration.
+
+### Final publication boundary
+
+For multipart generation, completed parts are durable intermediate results, not accepted minutes. Both the indexed execution path and the ordinary queue preserve the prior accepted bundle until the final rewrite validates. Recovery reconstructs the pending rewrite from the completed job instead of publishing the concatenation. The final write is fenced against the exact current job revision; a late reply must neither publish nor mark a newer job failed. A rejected rewrite leaves the old document and completed parts intact.
+
+### Grounded whole-meeting reconciliation
+
+`meeting-minutes-reconciliation-v2` replaces the summary-only response. Its input contains all grounded part claims and their original segments. The answer contains complete minutes and a resolution mapping that covers every input claim exactly once and every output claim. Mapped output retains original speech/material citations. Corrections and retractions require exact original speech quotes and a visible cited history topic; later timestamps alone are not correction evidence. Unresolved conflicts remain in open questions. Existing-minutes labels and source boundaries remain mandatory. The response mapping validates structural coverage and quote identity, not semantic truth; natural acceptance must still inspect whether the actual correction is supported.
+
+The dedicated final pass uses a deterministic balanced reduction tree: each stage receives at most two preceding part/results and the unchanged original segments cited by those claims. An odd leaf is carried intact to the next level. Each validated stage result is persisted in the existing execution ledger; restart reconstructs the next input from those durable results, and a lost ACK is recovered through the original retained request, never redispatched. Only the last stage may replace accepted minutes. All claims/citations must pass the same coverage checks at every level; no body or citation is truncated to meet a size budget. The bound is on stage fan-in, not a claim that an arbitrarily large final result fits a fixed token limit. Original full transcripts remain in the frozen generation. Ordinary sequential part generation joins this same retained stage protocol for its final pass; the part dispatch protocol is unchanged.
+
+### Explicit publication supersession
+
+Both destination publishers expose an explicit `stageSupersession` operation. The migration caller must first verify both deployed consumers and exact target revision readbacks. The operation preserves exact snapshot bytes/output revision, advances only its own ledger ordinal, and uses that destination's normal drain; it does not start automatically from a merge flag or missing enumeration entry. A successful call confirms staging, not delivery or search acceptance. Each destination independently validates and retains its `superseded` receipt. Such a receipt is terminal for its entry and must not stop delivery of later entries. A normal accepted-file scan never clears a pointer; restoration requires an explicit newer ordinal.
+
+The exact-revision retained-execution pilot uses the Gateway hello's canonical main session key, not the ordinary `:minutes` chat suffix. The full isolation/nonprojection/retention tuple and authenticated admin/device/profile admission remain mandatory. This correction does not activate the pilot for new meetings, broaden authority, or reroute ordinary minutes chat. Stored requests are never re-keyed after dispatch; uncertain or expired executions remain read-only recovery states. Source compatibility and local compilation do not establish live admission.
+
+Ordinary multipart completion now queues a retained final pass rather than a new ordinary `chat.send` summary request. The existing dedicated connection must confirm the exact purpose, authenticated admin/profile and advertised result method before any stage is reserved. No authority is added and an unavailable connection keeps the prior accepted document and completed parts, with a visible waiting state and bounded recovery cadence. A new normal-socket failure cannot complete this retained owner. Disconnect cancels only the local polling task; the original durable request is reopened on reconnect/restart, without redispatching it or falling back to ordinary chat. The independent exact-revision pilot continues to govern part-generation rollout; this final-pass transition does not enable indexed part generation for all meetings.
+
+### Selected local minutes integration
+
+The top-level minutes workflow offers an explicit saved-meeting picker. Saving a selection pins the target and chosen local accepted files (or legacy exports) as exact bytes with source namespace, authority and SHA-256 in `minutes-integration.json`, inside the existing meeting directory. It starts no generation, publication, merge, deletion, or ASR. Unreadable accepted files are not silently replaced by legacy exports. Clearing the selection explicitly restores normal inputs without changing accepted minutes or source records.
+
+Regeneration uses the selected immutable revisions rather than silently substituting later source edits. Original segments keep text, timing, speaker, provider and Recall lineage, with collision-free IDs and a locator back to the source meeting/revision/segment. Generated document text is separately `existing-minutes` evidence and must retain the original-audio-unverified label; a legacy export never gains fabricated raw-speech authority. The stored bytes remain locally available, while the existing knowledge snapshot still exports only finished minutes/citations, not these full inputs.
+
+The selected bundle participates in the existing source-file fence. Its fingerprint survives chunking and crash recovery. Conflicting original text remains unresolved; importing a historical source does not authorize target-audio recognition, so no automatic recheck runs for this selected bundle. Integration selection does not hide old records or emit superseded publications: those steps wait for the exact integrated target's independent destination readbacks.
+
+The explicit finalize action requires a completed selected-input job matching the
+current accepted revision and exact current receipts for that target in both
+destination ledgers (Chi searchable, Hub stored/searchable). Only selected old
+sources are enrolled if not already published; legacy exports retain their
+historical authority. Each old slot is staged independently with its exact
+snapshot and next ordinal. Local records receive `mergedIntoMeetingID` only
+after both matching superseded receipts. A partial failure leaves source records
+visible and resumes the same publication identity. Source bytes, images and
+transcripts are never removed. Changed source revisions or a changed selection
+require a new explicit integration, not a guessed redirect. This application
+receipt gate does not replace the independent consumer body/search/get readbacks
+required by the integration acceptance contract.
+
+### Deterministic provenance labels
+
+After structural and citation validation, claims that cite existing-minutes receive the original-audio-unverified label from their actual cited source IDs when the model omitted it. Primary-only claims are unchanged; mixed-source claims remain labelled. This adds provenance display metadata only: it does not invent citations, alter source text, promote a document to speech, or waive grounding checks. Body/evidence claim text is updated together. Whole-meeting reconciliation validates its original exact claim mapping first, then carries the same label mapping into the returned resolutions. Accepted-file validation still rejects unlabelled secondary claims from any path that bypassed annotation.
+
+### Grounded unresolved placement and retained revalidation
+
+After all claim coverage and citation checks succeed, an explicit `unresolved` resolution whose output is missing from open questions contributes its exact mapped output strings to that section. Existing body fields, citations and resolution mappings remain unchanged; no uncertainty is inferred for other dispositions. Unknown references, missing coverage and unsupported correction/retraction quotes still fail.
+
+A retained overview rejected locally as `invalid_answer` may be read and revalidated on resumption, without another send. Recovery requires the same persisted request, attempt, execution binding and exact frozen stage message. Only a newly validated answer can replace that failed outcome; provider failures, expired results and changed bindings cannot use this transition. Previously completed stages and the old accepted output remain untouched until the whole tree completes.
+
+### One explicit original-evidence correction
+
+If same-answer revalidation still rejects a correction/retraction quote, explicit final-pass resume may request one corrective generation for that failed stage only. The original frozen input is byte-exact; a fixed `primary-correction-evidence-v1` instruction reiterates that derived minutes cannot establish an original-speech correction, and unsupported conflicts must remain unresolved. No validator condition is waived. Other failure categories do not enter this repair.
+
+The stage atomically reserves a deterministic key derived from its rejected key and correction version, retaining the rejected request, authenticated binding and attempt as provenance. A reservation is recovered by reads, never another send; another click or restart cannot reserve a second correction. A second invalid answer remains failed. Completed stages and old accepted minutes remain unchanged. This provenance stays in the frozen-job execution ledger; no new publication snapshot field or consumer authority is introduced.
+
+### Reviewed uncertainty and checkpoint recovery
+
+An explicitly unresolved mapped claim cannot remain in decisions or actionItems; that answer is rejected rather than made acceptable by copying text. Neutral grounded descriptions may also appear in questions, covering every unresolved mapped output.
+
+Explicit resume archives a contradictory completed intermediate outcome before withdrawing its acceptance. It refuses if a completed descendant depends on that outcome. Independent completed branches remain reusable; inputs still select their exact dependency outcomes. The original request/binding and old accepted document remain intact. Reviewed one-time correction instructions explicitly cover history citations and removal of unresolved claims from definite fields. A persisted prompt-variant marker preserves exact recovery of older correction requests without changing their version or key.
+
+### Shared bounded output repair
+
+Explicit one-time repair applies to a terminal answer rejected by evidence validation, not to transport or storage errors. A corrected result must pass the same unchanged strict validator. No citations are automatically added and no second correction is reserved. Future unsent stages receive grounding/history/uncertainty guidance upfront; existing stored requests retain their exact messages, fingerprints, keys and prompt variants. Both recognized original and guided messages must still match the exact reconstructed frozen input.

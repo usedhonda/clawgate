@@ -292,7 +292,7 @@ final class MenuBarAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc private func meetingEnd() { runtime.ambient()?.endManualMeeting() }
 
-    @objc private func meetingOpenMinutes() {
+    @objc func meetingOpenMinutes() {
         if meetingWindow == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1180, height: 780),

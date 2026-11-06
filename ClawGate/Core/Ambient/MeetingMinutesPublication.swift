@@ -16,6 +16,12 @@ struct MeetingMinutesPublication: Codable, Equatable {
     let selectionBasis: SelectionBasis
     let payloadSHA256: String
     let payloadBase64: String
+    struct SupersededBy: Codable, Equatable {
+        let sourceUUID: String
+        let meetingID: String
+        let outputRevision: String
+    }
+    var supersededBy: SupersededBy? = nil
 
     static func digest(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -28,7 +34,7 @@ struct MeetingMinutesPublication: Codable, Equatable {
 }
 
 struct MeetingMinutesPublicationReceipt: Codable, Equatable {
-    enum Status: String, Codable { case stored, searchable, deleted, conflict, pendingGap = "pending_gap", stale }
+    enum Status: String, Codable { case stored, searchable, superseded, deleted, conflict, pendingGap = "pending_gap", stale }
     let schemaVersion: Int
     let sourceUUID: String
     let meetingID: String

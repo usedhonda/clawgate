@@ -154,7 +154,8 @@ struct MeetingWorkspaceView: View {
         let context = model.minutesWorkspaceSidebarContext()
         indexTask = Task { @MainActor in
             let worker = Task.detached(priority: .userInitiated) {
-                try await MeetingWorkspaceLoader.shared.sidebar(store: context.store, labels: context.labels)
+                try await MeetingWorkspaceLoader.shared.sidebar(store: context.store, labels: context.labels,
+                                                                activeOverviewIDs: context.activeOverviewIDs)
             }
             let result = await withTaskCancellationHandler(operation: { await worker.result }, onCancel: { worker.cancel() })
             guard !Task.isCancelled else { return }
@@ -206,6 +207,7 @@ private struct MeetingWorkspaceDetail: View {
     @State private var editingNoteID: String?
     @State private var editingNote = ""
     @State private var confirmFullRegeneration = false
+    @State private var showIntegrationPicker = false
     @State private var sharingKnowledge = false
     @State private var knowledgeError: String?
 
@@ -289,6 +291,9 @@ private struct MeetingWorkspaceDetail: View {
             set: { if !$0 { model.minutesRecallPickerRecord = nil } })) {
             MeetingRecallPicker(model: model, record: meeting)
         }
+        .sheet(isPresented: $showIntegrationPicker) {
+            MeetingIntegrationPicker(record: meeting) { model.minutesIntegrationSelectionDidChange() }
+        }
         .onChange(of: meeting) { _ in refreshDocument() }
         .onReceive(model.$meetingsRevision.dropFirst()) { _ in refreshDocument() }
         .onReceive(Timer.publish(every: 15, on: .main, in: .common).autoconnect()) { _ in refreshDocument() }
@@ -329,7 +334,6 @@ private struct MeetingWorkspaceDetail: View {
             || activity != nil
         let checkpoint = meeting.minutesState == "failed"
             && (job?.completed.count ?? 0) > 0
-            && (job?.completed.count ?? 0) < (job?.envelopes.count ?? 0)
         return VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
                 workflowStep("1", "資料をそろえる", active: tab == .materials) {
@@ -349,6 +353,8 @@ private struct MeetingWorkspaceDetail: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(disabled)
+                    Button("保存した会議と統合…") { showIntegrationPicker = true }
+                        .disabled(disabled || accepted == nil && shown == nil)
                     Button("Recallの発言を選ぶ…") { model.minutesRecallPickerRecord = meeting }
                         .disabled(disabled)
                     if checkpoint {
@@ -904,17 +910,22 @@ private struct MeetingSourcesRow: View {
         let sources = accepted?.segments.map(\.source)
         let local = sources?.filter { $0 == "local" }.count ?? transcriptCount
         let recheck = sources?.filter { $0 == "audio-recheck" }.count ?? 0
-        let external = sources?.filter { $0 != "local" && $0 != "audio-recheck" }.count ?? 0
+        let external = sources?.filter { $0 != "local" && $0 != "audio-recheck" && $0 != MeetingMinutesSecondaryEvidence.source }.count ?? 0
+        let secondary = sources?.filter { $0 == MeetingMinutesSecondaryEvidence.source }.count ?? 0
         let notes = material?.notes.count ?? 0
         let unresolved = accepted?.unresolvedNotes.count ?? 0
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 14) {
                 Text("情報源").font(.system(size: 12, weight: .bold)).foregroundColor(WorkspaceTheme.muted)
                 item("ClawGate 文字起こし", "\(local) 発言", ok: local > 0)
-                item("Meet 文字起こし", external > 0 ? "\(external) 発言" : meetStatus(material), ok: external > 0)
+                item("Meet・Recall 文字起こし", external > 0 ? "\(external) 発言" : meetStatus(material), ok: external > 0)
                 item("聞き直し", "\(recheck) 件", ok: true)
                 item("要確認", "\(unresolved) 件", ok: unresolved == 0)
-                if notes > 0 { item("Meet メモ", "\(notes) 件（参考のみ）", ok: true) }
+                if secondary > 0 {
+                    item("既存議事録", "\(secondary) 区間（原音未確認）", ok: true)
+                } else if notes > 0 {
+                    item("Meet メモ", "\(notes) 件（再生成で採用）", ok: true)
+                }
                 Spacer()
                 Button(explain ? "閉じる" : "どう使っているか") { explain.toggle() }
                     .buttonStyle(.link).font(.system(size: 12))
@@ -923,7 +934,7 @@ private struct MeetingSourcesRow: View {
                 Text("""
                 ClawGate の文字起こしと Meet の文字起こしは、時刻順に並べてどちらも残します。同じ発言は重複としてまとめ、どちらを根拠にしても辿れます。
                 似た発言なのに数字や否定（〜しない）が食い違う箇所は「要確認」にし、その区間の録音を最大3回・各30秒まで聞き直して別の根拠として添えます。元の文字起こしは書き換えません。
-                Meet の自動メモは取りこぼしの確認にだけ使い、議事録の発言の根拠にはしません。
+                既存議事録にしかない情報も、出典を付けて採用します。その情報を使った主張には「既存議事録・原音未確認」を表示し、直接録音された発言とは区別します。資料が追加されても、再生成するまでは完成済み議事録を変更しません。
                 """)
                 .font(.system(size: 12)).lineSpacing(3)
                 .foregroundColor(WorkspaceTheme.secondary)
@@ -1034,7 +1045,7 @@ private struct MeetingStatusBanner: View {
         case "failed":
             return total > 1 && done > 0 ? "途中で止まりました（\(total) パート中 \(done) パート完成）" : "議事録を作れませんでした"
         case "ready":
-            return activity == nil ? nil : "議事録の概要を仕上げています"
+            return activity == nil ? nil : "議事録全体を統合しています"
         default:
             return !hasTranscript ? nil : "議事録はまだありません"
         }

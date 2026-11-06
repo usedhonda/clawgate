@@ -2,6 +2,40 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingMinutesPromptPayloadTests: XCTestCase {
+    func testPromptGroupsSplitSpeechWithoutDiscardingOriginalsOrConflicts() throws {
+        let record = MeetingRecord(id: "meeting-grouping", source: "meet", startedAt: 100,
+            endedAt: 200, timeZone: "UTC", title: "Grouping", conferenceCode: nil,
+            participants: [], minutesState: "none", minutesError: nil)
+        let sources: [MeetingTranscriptSourceSegment] = [
+            .init(id: "whole", source: "local", text: "Budget is 23 million", capturedAt: 110),
+            .init(id: "part-a", source: "meet", text: "Budget is", capturedAt: 110),
+            .init(id: "part-b", source: "meet", text: "23 million", capturedAt: 111),
+            .init(id: "conflict", source: "recall", text: "Budget is not 23 million", capturedAt: 110),
+            .init(id: "untimed", source: "other", text: "Budget is 23 million"),
+            .init(id: "secondary", source: "existing-minutes", text: "Budget is 23 million", capturedAt: 110)
+        ]
+        let envelope = MeetingMinutesEnvelope.build(record: record, sourceSegments: sources)
+        let original = try JSONEncoder().encode(envelope)
+        let message = try MeetingMinutesPrompt.buildMessage(envelope: envelope)
+        let json = try XCTUnwrap(message.components(separatedBy: "\n\n").last)
+        let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let lines = try XCTUnwrap(payload["segments"] as? [[String: Any]])
+        XCTAssertEqual(lines.count, 4)
+        let whole = try XCTUnwrap(lines.first { $0["id"] as? String == "whole" })
+        let aliases = try XCTUnwrap(whole["equivalentSources"] as? [[String: Any]])
+        XCTAssertEqual(aliases.compactMap { $0["id"] as? String }, ["part-a", "part-b"])
+        XCTAssertEqual(aliases.compactMap { $0["capturedAt"] as? Double }, [110, 111])
+        XCTAssertTrue(aliases.allSatisfy { $0["text"] == nil })
+        XCTAssertEqual(Set(lines.compactMap { $0["id"] as? String }), ["whole", "conflict", "untimed", "secondary"])
+        let restored = try JSONDecoder().decode(MeetingMinutesEnvelope.self, from: original)
+        XCTAssertEqual(restored, envelope)
+        XCTAssertEqual(restored.segments.map(\.text), sources.map(\.text))
+        // Repeated same-time lines are ambiguous, not extra corroboration.
+        let ambiguous = [sources[0], sources[1], sources[2],
+            MeetingTranscriptSourceSegment(id: "repeat", source: "meet", text: sources[0].text, capturedAt: 111)]
+        XCTAssertEqual(MeetingTranscriptFusion.equivalentGroups(ambiguous).count, 4)
+    }
+
     func testPromptProjectionDropsRepeatedMetadataWithoutDroppingEvidenceOrTiming() throws {
         let record = MeetingRecord(id: "meeting-payload", source: "meet", startedAt: 1_700_000_000,
                                    endedAt: 1_700_000_600, timeZone: "UTC", title: "Payload",

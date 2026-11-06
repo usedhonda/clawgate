@@ -118,9 +118,11 @@ actor MeetingMinutesExecutor {
                             let envelope = job.envelopes[d.index]
                             let outcome: MeetingMinutesExecutionState.Outcome
                             do {
-                                let minutes = try MeetingMinutesParser.parse(text,
+                                let parsed = try MeetingMinutesParser.parse(text,
                                     validSegmentIds: Set(envelope.segments.map(\.id)),
                                     validMaterialIds: Set((envelope.supplementalMaterials ?? []).flatMap(\.sections).map(\.id)))
+                                let minutes = parsed.map { MeetingMinutesSecondaryEvidence.annotate($0, segments: envelope.segments).minutes }
+                                if let minutes { try MeetingMinutesSecondaryEvidence.validate(minutes, segments: envelope.segments) }
                                 outcome = minutes.map(MeetingMinutesExecutionState.Outcome.answer) ?? .insufficientEvidence
                             } catch {
                                 try ledger.failTerminal(d, runId: d.idempotencyKey, code: "invalid_answer", retryable: false, store: store, id: id)

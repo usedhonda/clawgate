@@ -136,14 +136,22 @@ final class MeetingWorkspaceSnapshotTests: XCTestCase {
     func testIndexedStatusChangesDoNotPrepareDocumentAgain() async throws {
         let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         defer { try? FileManager.default.removeItem(at: store.root) }
-        var meeting = record()
+        var meeting = record("mtg-overview-status")
         meeting.minutesState = "pending"
         try seed(meeting, store: store)
         let loader = MeetingWorkspaceLoader()
         _ = try await loader.load(context(meeting, store: store))
         try Data("{}".utf8).write(to: store.directory(for: meeting.id).appendingPathComponent("minutes-execution-test.json"))
-        let changed = try await loader.load(context(meeting, store: store))
+        var changed = try await loader.load(context(meeting, store: store))
         XCTAssertNotNil(changed.holdReason)
+        var active = context(meeting, store: store)
+        active.overviewActive = true
+        changed.updatePresentation(active)
+        XCTAssertNil(changed.holdReason, "An active retained overview is not parked")
+        changed.updatePresentation(context(meeting, store: store))
+        XCTAssertNotNil(changed.holdReason, "Owner loss restores the existing hold")
+        let sidebar = try await loader.sidebar(store: store, labels: [:], activeOverviewIDs: [meeting.id])
+        XCTAssertFalse(try XCTUnwrap(sidebar.statuses[meeting.id]).held)
         let count = await loader.preparationCount
         XCTAssertEqual(count, 1)
     }

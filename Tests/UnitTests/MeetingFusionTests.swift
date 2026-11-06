@@ -2,6 +2,36 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingFusionTests: XCTestCase {
+    func testConsistentClockShiftRetainsOriginalEvidenceAndDetectsConflict() {
+        let anchors = ["The first shared sentence", "The second shared sentence", "The third shared sentence"]
+        let local = anchors.enumerated().map {
+            MeetingTranscriptSourceSegment(id: "l\($0.offset)", source: "local", text: $0.element, capturedAt: Double($0.offset * 10 + 100))
+        } + [.init(id: "budget-local", source: "local", text: "Budget is 23 million", capturedAt: 140)]
+        let remote = anchors.enumerated().map {
+            MeetingTranscriptSourceSegment(id: "r\($0.offset)", source: "meet", text: $0.element, capturedAt: Double($0.offset * 10 + 160))
+        } + [.init(id: "budget-remote", source: "meet", text: "Budget is 2 million", capturedAt: 200)]
+        let fused = MeetingTranscriptFusion.fuse(sourceSegments: local + remote)
+        XCTAssertEqual(fused.clockOffsetsBySource["meet:"], -60)
+        XCTAssertEqual(fused.segments.count, 8)
+        XCTAssertEqual(fused.segments.first { $0.id == "budget-remote" }?.capturedAt, 200)
+        XCTAssertEqual(fused.unresolvedNotes.count, 1)
+        XCTAssertEqual(fused.provenanceBySegmentID["l0"], ["l0", "r0"])
+    }
+
+    func testClockShiftRequiresUniqueOrderedConsistentAnchors() {
+        let text = ["A long shared first utterance", "A long shared second utterance", "A long shared third utterance"]
+        let local = text.enumerated().map {
+            MeetingTranscriptSourceSegment(id: "l\($0.offset)", source: "local", text: $0.element, capturedAt: Double($0.offset * 10))
+        }
+        let drift = text.enumerated().map {
+            MeetingTranscriptSourceSegment(id: "r\($0.offset)", source: "meet", text: $0.element, capturedAt: Double($0.offset * 20 + 60))
+        }
+        XCTAssertTrue(MeetingTranscriptFusion.fuse(sourceSegments: local + drift).clockOffsetsBySource.isEmpty)
+        XCTAssertTrue(MeetingTranscriptFusion.fuse(sourceSegments: Array(local.prefix(2)) + Array(drift.prefix(2))).clockOffsetsBySource.isEmpty)
+        let untimed = MeetingTranscriptSourceSegment(id: "untimed", source: "recall", text: text[0])
+        XCTAssertNil(MeetingTranscriptFusion.fuse(sourceSegments: local + [untimed]).segments.last?.capturedAt)
+    }
+
     private var record: MeetingRecord {
         MeetingRecord(id: "mtg-fixture", source: "meet", startedAt: 100, endedAt: 200,
             timeZone: "UTC", title: "Planning", conferenceCode: nil, participants: [],
@@ -19,6 +49,26 @@ final class MeetingFusionTests: XCTestCase {
         XCTAssertEqual(Set(result.segments.map(\.id)), ["seg-1", "meet-a", "meet-b"])
         XCTAssertEqual(result.segments.first { $0.id == "seg-1" }?.speaker, "Speaker A")
         XCTAssertEqual(result.unresolvedNotes.count, 1)
+    }
+
+    func testSelectedIntegrationUsesWiderChunksAndStillRequiresWholeMeetingReconciliation() {
+        let input = (0..<4).map {
+            MeetingTranscriptSourceSegment(id: "source-\($0)", source: "meet",
+                text: String(repeating: "evidence ", count: 750), capturedAt: Double(100 + $0))
+        }
+        let ordinary = MeetingMinutesEnvelope.build(record: record, sourceSegments: input)
+        var selected = ordinary
+        selected.integrationSelectionFingerprint = "selected-fixture"
+        let selectedChunks = MeetingMinutes.chunked(selected)
+        XCTAssertEqual(selectedChunks.count, 1)
+        XCTAssertEqual(MeetingMinutes.chunked(ordinary).count, 2)
+        XCTAssertEqual(MeetingMinutes.chunked(selected, maxCharacters: 16_000).count, 2)
+        XCTAssertEqual(selectedChunks.flatMap(\.segments).map(\.id), ordinary.segments.map(\.id))
+        XCTAssertEqual(selectedChunks.flatMap(\.segments).map(\.text), ordinary.segments.map(\.text))
+        let selectedJob = MeetingMinutesJob(fingerprint: "selected", envelopes: selectedChunks, completed: [])
+        let ordinaryJob = MeetingMinutesJob(fingerprint: "ordinary", envelopes: [ordinary], completed: [])
+        XCTAssertTrue(MeetingMinutesSummaryPass.needed(for: selectedJob))
+        XCTAssertFalse(MeetingMinutesSummaryPass.needed(for: ordinaryJob))
     }
 
     func testChunkJobsPreserveAllEvidenceAndResumeAfterCheckpoint() throws {
@@ -107,8 +157,37 @@ final class MeetingFusionTests: XCTestCase {
         store.save(record)
         let model = PetModel()
         model.setMeetingStoreForTesting(store)
-        model.setSessionKeyForTesting("test-session")
+        model.setSessionKeyForTesting("agent:main:main")
         model.setConnectionStateForTesting(.connected)
+        let finalDispatched = expectation(description: "retained final request reserved")
+        let finalCompleted = expectation(description: "retained final result published")
+        var requestSent: MinutesExecutionSendParams?
+        model.minutesFinalDidFinishForTesting = { finalCompleted.fulfill() }
+        model.minutesFinalTransportForTesting = (
+            send: { request in
+                XCTAssertNil(requestSent, "lost ACK must not cause another send")
+                XCTAssertEqual(request.sessionKey, "agent:main:main")
+                requestSent = request
+                finalDispatched.fulfill()
+                throw URLError(.networkConnectionLost)
+            },
+            read: { request in
+                XCTAssertEqual(requestSent, request)
+                let body = """
+                {"policyVersion":"\(MeetingMinutesSummaryPass.policyVersion)",
+                 "minutes":{"summary":"Discussion","topics":[],"decisions":[],"actionItems":[],"openQuestions":[],"evidence":[{"claim":"Discussion","segmentIds":["seg-3"]}]},
+                 "resolutions":[{"sourceClaimIds":["part-0-summary-0"],"disposition":"retained","outputClaims":["Discussion"],"quotes":[]}]}
+                """
+                let binding: [String: Any] = ["version": 1, "requestFingerprintScheme": MinutesRequestFingerprint.scheme,
+                    "requestFingerprint": try request.requestFingerprint(), "resolvedModel": MinutesExecutionSendParams.model,
+                    "resolvedThinking": "high", "degraded": false, "fallbackReason": NSNull(),
+                    "isolationApplied": true, "nonprojectionApplied": true, "retentionApplied": true]
+                let object: [String: Any] = ["status": "terminal", "sessionKey": request.sessionKey,
+                    "runId": request.idempotencyKey, "executionBinding": binding,
+                    "terminal": ["kind": "answer", "answer": body], "resultRetentionExpiresAt": 1_800_000_000_000]
+                return try MinutesExecutionRead.validate(JSONDecoder().decode(IncomingPayload.self,
+                    from: JSONSerialization.data(withJSONObject: object)), expected: request)
+            })
         model.suppressLogSendForTesting = true
         let originalGap = PetModel.minutesPartGapSeconds
         PetModel.minutesPartGapSeconds = 0
@@ -128,8 +207,27 @@ final class MeetingFusionTests: XCTestCase {
         }
         model.releaseCurrentSharedSummonForTesting()
         model.completeMinutesReplyForTesting("{\"outcome\":\"answer\",\"minutes\":{\"summary\":\"Discussion\",\"topics\":[],\"decisions\":[],\"actionItems\":[],\"openQuestions\":[],\"evidence\":[{\"claim\":\"Discussion\",\"segmentIds\":[\"seg-3\"]}]},\"contextDecision\":{\"policyVersion\":\"\(MeetingMinutesPrompt.policyVersion)\"}}")
+        XCTAssertEqual(store.load(id: record.id)?.minutesState, "pending")
+        XCTAssertNil(store.loadAcceptedMinutes(id: record.id))
+        waitForMinutesPreparation(of: model)
+        wait(for: [finalDispatched], timeout: 2)
+        XCTAssertFalse(model.isSummonBusy, "final pass does not own ordinary chat")
+        XCTAssertNil(store.loadAcceptedMinutes(id: record.id))
+        wait(for: [finalCompleted], timeout: 8)
         XCTAssertEqual(store.load(id: record.id)?.minutesState, "ready")
         XCTAssertEqual(store.loadAcceptedMinutes(id: record.id)?.segments.count, 3)
+
+        let savedJob = try Data(contentsOf: store.directory(for: record.id).appendingPathComponent("minutes-job.json"))
+        var failedFinal = try XCTUnwrap(store.load(id: record.id))
+        failedFinal.minutesState = "failed"
+        store.save(failedFinal)
+        let resumedFinal = expectation(description: "completed-part final pass resumes without regeneration")
+        model.minutesFinalDidFinishForTesting = { resumedFinal.fulfill() }
+        model.meetingTranscriptProvider = { _ in XCTFail("resume must use frozen parts"); return [] }
+        model.resumeMinutes(for: failedFinal)
+        wait(for: [resumedFinal], timeout: 3)
+        XCTAssertEqual(store.load(id: record.id)?.minutesState, "ready")
+        XCTAssertEqual(try Data(contentsOf: store.directory(for: record.id).appendingPathComponent("minutes-job.json")), savedJob)
     }
 
 }

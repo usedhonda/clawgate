@@ -31,6 +31,7 @@ extension MeetingStore {
                               job: MeetingMinutesJob) throws {
         guard !job.envelopes.isEmpty, job.completed.count == job.envelopes.count,
               job.completed.contains(where: { $0 != nil }) else { throw MeetingMinutesError.encodingFailed }
+        try MeetingMinutesSecondaryEvidence.validate(minutes, segments: job.envelopes.flatMap(\.segments))
         let accepted = MeetingAcceptedMinutes(minutes: minutes, fingerprint: job.fingerprint,
             segments: Self.uniqueSegments(job.envelopes.flatMap(\.segments)),
             unresolvedNotes: job.envelopes.first?.unresolvedNotes ?? [], createdAt: Date(),

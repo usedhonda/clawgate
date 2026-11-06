@@ -146,7 +146,7 @@ struct MeetingMinutesJob: Codable {
         }
     }
 
-    private static func withRevisionLock<T>(store: MeetingStore, id: String, body: () throws -> T) throws -> T {
+    static func withRevisionLock<T>(store: MeetingStore, id: String, body: () throws -> T) throws -> T {
         let dir = store.directory(for: id)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var info = stat()

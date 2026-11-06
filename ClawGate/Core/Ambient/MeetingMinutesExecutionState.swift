@@ -31,6 +31,13 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
             }
         }
     }
+    struct AnswerCorrection: Codable, Equatable {
+        let version: String
+        let rejectedRequest: MinutesExecutionSendParams
+        let rejectedBinding: MinutesExecutionBinding
+        let rejectedAttempt: Int
+        var reviewedPrompt: Bool? = nil
+    }
     struct Part: Codable, Equatable {
         let index: Int
         let envelopeHash: String
@@ -45,6 +52,8 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         var reason: String?
         var retryable: Bool
         var outcome: Outcome?
+        var answerCorrection: AnswerCorrection? = nil
+        var rejectedCompletedOutcome: Outcome? = nil
     }
     struct Dispatch: Equatable {
         let index: Int; let attempt: Int; let idempotencyKey: String
@@ -205,7 +214,8 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         guard parts.indices.contains(index), Self.validSession(sessionKey) else { throw LedgerError.invalidTransition }
         guard parts.filter({ $0.status == .submitting || $0.status == .running }).count < 2 else { throw LedgerError.tooManyLiveParts }
         let old = parts[index]
-        guard retry ? (old.status == .failed && old.retryable) : old.status == .pending,
+        guard old.answerCorrection == nil,
+              retry ? (old.status == .failed && old.retryable) : old.status == .pending,
               old.attempt < Int.max else { throw LedgerError.invalidTransition }
         if retry {
             guard let original = old.request, original.sessionKey == sessionKey,
@@ -257,6 +267,84 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         try transitionTerminal(dispatch, runId: runId, status: .completed, outcome: outcome, reason: nil, retryable: false, store: store, id: id)
     }
 
+    static func answerCorrectionKey(rejectedKey: String) -> String {
+        var bytes = Array(SHA256.hash(data: Data((MeetingMinutesSummaryPass.correctionVersion + "\0" + rejectedKey).utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15])).uuidString
+    }
+
+    /// A single explicitly requested correction of a known rejected answer.
+    /// Reserve before dispatch; crash recovery only reads the deterministic key.
+    mutating func reserveAnswerCorrection(_ rejected: Dispatch, message: String, reviewedPrompt: Bool = false,
+                                          store: MeetingStore, id: String) throws -> Dispatch {
+        guard parts.indices.contains(rejected.index), !hasLiveParts else { throw LedgerError.invalidTransition }
+        let old = parts[rejected.index]
+        try owner(old, index: rejected.index, attempt: rejected.attempt,
+                  key: rejected.idempotencyKey, sessionKey: rejected.sessionKey)
+        guard old.status == .failed, old.reason == "invalid_answer", !old.retryable,
+              old.attempt == 1, old.answerCorrection == nil, old.request == rejected.request,
+              let binding = old.executionBinding, binding.matches(rejected.request),
+              message != rejected.request.message else { throw LedgerError.notRetryable }
+        let key = Self.answerCorrectionKey(rejectedKey: rejected.idempotencyKey)
+        let request = MinutesExecutionSendParams(sessionKey: rejected.sessionKey, message: message, idempotencyKey: key)
+        var candidate = self
+        candidate.parts[rejected.index].answerCorrection = .init(version: MeetingMinutesSummaryPass.correctionVersion,
+            rejectedRequest: rejected.request, rejectedBinding: binding, rejectedAttempt: old.attempt,
+            reviewedPrompt: reviewedPrompt ? true : nil)
+        candidate.parts[rejected.index].request = request
+        candidate.parts[rejected.index].requestFingerprint = try request.requestFingerprint()
+        candidate.parts[rejected.index].executionBinding = nil
+        candidate.parts[rejected.index].idempotencyKey = key
+        candidate.parts[rejected.index].runId = nil
+        candidate.parts[rejected.index].attempt = 2
+        candidate.parts[rejected.index].status = .submitting
+        candidate.parts[rejected.index].reason = nil
+        try commit(candidate, store: store, id: id)
+        return Dispatch(index: rejected.index, attempt: 2, idempotencyKey: key,
+                        sessionKey: rejected.sessionKey, request: request)
+    }
+
+    /// Keep the prior validated artifact for audit while withdrawing a result
+    /// whose unresolved text also appears in a definite field. The overview
+    /// caller must first ensure no completed descendant depends on this node.
+    mutating func rejectContradictoryCompletedAnswer(index: Int, store: MeetingStore, id: String) throws {
+        guard parts.indices.contains(index), !hasLiveParts else { throw LedgerError.invalidTransition }
+        let old = parts[index]
+        guard old.status == .completed, old.attempt > 0,
+              old.rejectedCompletedOutcome == nil, case .answer(let minutes) = old.outcome,
+              !Set(minutes.openQuestions).isDisjoint(with: Set(minutes.decisions + minutes.actionItems.map(\.what)))
+        else { throw LedgerError.invalidTransition }
+        var candidate = self
+        candidate.parts[index].rejectedCompletedOutcome = old.outcome
+        candidate.parts[index].outcome = nil
+        candidate.parts[index].status = .failed
+        candidate.parts[index].reason = "invalid_answer"
+        candidate.parts[index].retryable = false
+        try commit(candidate, store: store, id: id)
+    }
+
+    /// Revalidation consumes the same retained answer after a local validator
+    /// correction. It cannot retry a provider failure or change request identity.
+    mutating func completeRevalidatedAnswer(_ dispatch: Dispatch, binding: MinutesExecutionBinding,
+                                            minutes: MeetingMinutes, store: MeetingStore, id: String) throws {
+        guard parts.indices.contains(dispatch.index) else { throw LedgerError.staleOwner }
+        let old = parts[dispatch.index]
+        try owner(old, index: dispatch.index, attempt: dispatch.attempt,
+                  key: dispatch.idempotencyKey, sessionKey: dispatch.sessionKey)
+        guard old.status == .failed, old.reason == "invalid_answer", !old.retryable,
+              old.runId == dispatch.idempotencyKey, old.request == dispatch.request,
+              old.executionBinding == binding, binding.matches(dispatch.request) else {
+            throw LedgerError.invalidTransition
+        }
+        var candidate = self
+        candidate.parts[dispatch.index].status = .completed
+        candidate.parts[dispatch.index].outcome = .answer(minutes)
+        candidate.parts[dispatch.index].reason = nil
+        try commit(candidate, store: store, id: id)
+    }
+
     mutating func failTerminal(_ dispatch: Dispatch, runId: String, code: String, retryable: Bool, store: MeetingStore, id: String) throws {
         guard Self.validCode(code) else { throw LedgerError.invalidTransition }
         try transitionTerminal(dispatch, runId: runId, status: .failed, outcome: nil, reason: code, retryable: retryable, store: store, id: id)
@@ -301,11 +389,29 @@ struct MeetingMinutesExecutionState: Codable, Equatable {
         }
     }
 
+    var rejectedAnswerDispatches: [Dispatch] {
+        parts.compactMap { p in
+            guard p.status == .failed, p.reason == "invalid_answer", !p.retryable,
+                  let request = p.request, let key = p.idempotencyKey,
+                  let session = p.sessionKey else { return nil }
+            return Dispatch(index: p.index, attempt: p.attempt, idempotencyKey: key,
+                            sessionKey: session, request: request)
+        }
+    }
+
     private var validInvariants: Bool {
         guard parts.map(\.index) == Array(parts.indices), parts.filter({ $0.status == .submitting || $0.status == .running }).count <= 2 else { return false }
         let keys = parts.compactMap(\.idempotencyKey)
         guard Set(keys).count == keys.count else { return false }
         return parts.allSatisfy { p in
+            if let correction = p.answerCorrection {
+                guard correction.version == MeetingMinutesSummaryPass.correctionVersion,
+                      correction.rejectedAttempt == 1, p.attempt == 2,
+                      correction.rejectedBinding.matches(correction.rejectedRequest),
+                      correction.rejectedRequest.sessionKey == p.sessionKey,
+                      p.idempotencyKey == Self.answerCorrectionKey(rejectedKey: correction.rejectedRequest.idempotencyKey)
+                else { return false }
+            }
             guard p.attempt >= 0, p.envelopeHash.count == 64, p.envelopeHash.allSatisfy(\.isHexDigit) else { return false }
             let ownerValid = p.attempt > 0 && p.idempotencyKey.flatMap(UUID.init(uuidString:)) != nil &&
                 p.sessionKey.map(Self.validSession) == true

@@ -2,6 +2,145 @@ import XCTest
 @testable import ClawGate
 
 final class MeetingMinutesKnowledgeTests: XCTestCase {
+    func testSupersessionKeepsExactBodyAndIndependentReceiptsUntilExplicitRestore() throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let old = record("old"), target = record("target")
+        let oldBytes = try accepted(old), targetBytes = try accepted(target)
+        var queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        let other = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024,
+            directoryName: "knowledge-outbox-hub", sourceUUID: queue.sourceUUID, compactsWhenStored: true)
+        for q in [queue, other] {
+            try q.enqueue(acceptedData: oldBytes, record: old)
+            try q.enqueue(acceptedData: targetBytes, record: target)
+        }
+        let originals = try queue.publications()
+        let source = try XCTUnwrap(originals.first { $0.meetingID == old.id })
+        let destination = try XCTUnwrap(originals.first { $0.meetingID == target.id })
+        let data = try XCTUnwrap(Data(base64Encoded: source.payloadBase64))
+        let pointer = MeetingMinutesPublication.SupersededBy(sourceUUID: queue.sourceUUID,
+            meetingID: target.id, outputRevision: destination.outputRevision)
+        XCTAssertThrowsError(try queue.enqueueSupersession(snapshotData: data, meetingID: old.id, expectedOrdinal: 1, target: pointer))
+        for item in originals { try queue.receive(receipt(item, status: .searchable), expected: item) }
+        try queue.enqueueSupersession(snapshotData: data, meetingID: old.id, expectedOrdinal: 1, target: pointer)
+        let publication = try XCTUnwrap(queue.publications().first)
+        XCTAssertEqual(publication.publicationOrdinal, 2)
+        XCTAssertEqual(publication.payloadBase64, source.payloadBase64)
+        XCTAssertEqual(publication.payloadSHA256, source.payloadSHA256)
+        XCTAssertEqual(publication.outputRevision, source.outputRevision)
+        XCTAssertEqual(publication.supersededBy, pointer)
+        XCTAssertThrowsError(try queue.receive(receipt(publication, status: .stored), expected: publication))
+        try queue.receive(receipt(publication, status: .superseded), expected: publication)
+        XCTAssertEqual(try other.publications().count, 2, "one destination ACK cannot settle another")
+        queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try queue.enqueueSupersession(snapshotData: data, meetingID: old.id, expectedOrdinal: 1, target: pointer)
+        try queue.enqueue(acceptedData: oldBytes, record: old)
+        XCTAssertTrue(try queue.publications().isEmpty, "ordinary scanning must not restore the slot")
+        XCTAssertEqual(try queue.status(meetingID: old.id, outputRevision: source.outputRevision), .superseded)
+        try queue.enqueueSupersession(snapshotData: data, meetingID: old.id, expectedOrdinal: 2, target: nil)
+        let restored = try XCTUnwrap(queue.publications().first)
+        XCTAssertEqual(restored.publicationOrdinal, 3)
+        XCTAssertNil(restored.supersededBy)
+        try queue.receive(receipt(restored, status: .searchable), expected: restored)
+        XCTAssertThrowsError(try queue.enqueueSupersession(snapshotData: data, meetingID: old.id, expectedOrdinal: 1, target: pointer))
+        XCTAssertEqual(try queue.status(meetingID: old.id, outputRevision: source.outputRevision), .searchable)
+    }
+
+    func testSupersededReceiptDoesNotStarveLaterPublication() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let old = record("old"), target = record("target"), later = record("later")
+        let queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        try queue.enqueue(acceptedData: accepted(old), record: old)
+        try queue.enqueue(acceptedData: accepted(target), record: target)
+        let originals = try queue.publications()
+        let source = try XCTUnwrap(originals.first { $0.meetingID == old.id })
+        let destination = try XCTUnwrap(originals.first { $0.meetingID == target.id })
+        for item in originals { try queue.receive(receipt(item, status: .searchable), expected: item) }
+        let publisher = MeetingMinutesPublisher(store: store, maxMetadataBytes: 128 * 1024)
+        try await publisher.stageSupersession(snapshotData: XCTUnwrap(Data(base64Encoded: source.payloadBase64)),
+            meetingID: old.id, expectedOrdinal: 1,
+            target: .init(sourceUUID: queue.sourceUUID, meetingID: target.id, outputRevision: destination.outputRevision))
+        _ = await publisher.accept(record: later, acceptedData: try accepted(later))
+        actor Received {
+            var ids: [String] = []
+            func add(_ id: String) { ids.append(id) }
+            func all() -> [String] { ids }
+        }
+        let received = Received()
+        await publisher.connect { publication in
+            await received.add(publication.meetingID)
+            return self.receipt(publication, status: publication.supersededBy == nil ? .searchable : .superseded)
+        }
+        let ids = await received.all()
+        XCTAssertEqual(ids, [old.id, later.id], "a settled redirect must not halt the destination drain")
+        let reloaded = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 128 * 1024)
+        XCTAssertTrue(try reloaded.publications().isEmpty)
+        XCTAssertEqual(try reloaded.status(meetingID: old.id, outputRevision: source.outputRevision), .superseded)
+    }
+
+    func testIntegrationFinalizationWaitsForBothDestinationsAndResumesWithoutDeletingSources() async throws {
+        let store = MeetingStore(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        defer { try? FileManager.default.removeItem(at: store.root) }
+        let old = record("mtg-old"), target = record("mtg-target")
+        let original = try accepted(old)
+        for record in [old, target] {
+            store.save(record)
+            let bytes = record.id == old.id ? original : try accepted(record)
+            try bytes.write(to: store.directory(for: record.id).appendingPathComponent("minutes-accepted.json"))
+        }
+        let queue = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 16 * 1024 * 1024)
+        try MeetingMinutesIntegrationSelection.select(targetID: target.id, otherIDs: [old.id],
+            sourceUUID: queue.sourceUUID, store: store)
+        XCTAssertThrowsError(try MeetingMinutesIntegrationFinalization.prepare(targetID: target.id, store: store))
+        let envelope = try PetModel.minutesEnvelope(for: target, store: store, local: [], material: nil, checkingCancellation: {})
+        let speech = try XCTUnwrap(envelope.segments.first { $0.source != "existing-minutes" })
+        let minutes = MeetingMinutes(title: "Integrated", summary: "Grounded integration", topics: [], decisions: [],
+            actionItems: [], openQuestions: [], evidence: [.init(claim: "Grounded integration", segmentIds: [speech.id])],
+            attendance: nil, language: "en")
+        let job = MeetingMinutesJob(fingerprint: MeetingMinutesJob.fingerprint(envelope), envelopes: [envelope], completed: [minutes])
+        try job.save(store: store, id: target.id)
+        try store.saveValidatedMinutes(minutes, for: target, job: job)
+        let plan = try MeetingMinutesIntegrationFinalization.prepare(targetID: target.id, store: store)
+        XCTAssertThrowsError(try MeetingMinutesIntegrationFinalization.requireTargetReceipts(plan, store: store))
+        let primary = MeetingMinutesPublisher(store: store, maxMetadataBytes: 16 * 1024 * 1024)
+        await primary.connect { item in self.receipt(item, status: item.supersededBy == nil ? .searchable : .superseded) }
+        actor Gate {
+            var refuse = true
+            func allow() { refuse = false }
+            func check(_ item: MeetingMinutesPublication) throws {
+                if refuse && item.supersededBy != nil { throw MeetingMinutesHubTransport.Failure.unavailable }
+            }
+        }
+        let gate = Gate()
+        let hub = MeetingMinutesHubPublisher(store: store, sender: { item in
+            try await gate.check(item)
+            return self.receipt(item, status: item.supersededBy == nil ? .stored : .superseded)
+        })
+        await hub.sync()
+        do {
+            try await MeetingMinutesIntegrationFinalization.finish(targetID: target.id, store: store, primary: primary, hub: hub)
+            XCTFail("one destination must not hide the local source")
+        } catch {}
+        XCTAssertNil(store.load(id: old.id)?.mergedIntoMeetingID)
+        XCTAssertEqual(try Data(contentsOf: store.directory(for: old.id).appendingPathComponent("minutes-accepted.json")), original)
+        await gate.allow()
+        try await MeetingMinutesIntegrationFinalization.finish(targetID: target.id, store: store, primary: primary, hub: hub)
+        try await MeetingMinutesIntegrationFinalization.finish(targetID: target.id, store: store, primary: primary, hub: hub)
+        XCTAssertEqual(store.load(id: old.id)?.mergedIntoMeetingID, target.id)
+        for directory in ["knowledge-outbox", "knowledge-outbox-hub"] {
+            let ledger = try MeetingMinutesKnowledgeOutbox(store: store, maxMetadataBytes: 16 * 1024 * 1024,
+                directoryName: directory, sourceUUID: queue.sourceUUID, compactsWhenStored: directory.hasSuffix("-hub"))
+            let head = try XCTUnwrap(ledger.head(meetingID: old.id))
+            XCTAssertEqual(head.ordinal, 2, "resume must reuse the immutable state change")
+            XCTAssertEqual(head.receipt?.status, .superseded)
+            XCTAssertEqual(head.supersededBy, plan.target)
+        }
+        XCTAssertEqual(try Data(contentsOf: store.directory(for: old.id).appendingPathComponent("minutes-accepted.json")), original)
+        try Data("changed".utf8).write(to: store.directory(for: old.id).appendingPathComponent("minutes-accepted.json"))
+        XCTAssertThrowsError(try MeetingMinutesIntegrationFinalization.prepare(targetID: target.id, store: store))
+    }
+
     private func record(_ id: String = "meeting") -> MeetingRecord {
         MeetingRecord(id: id, source: "calendar", startedAt: 100, endedAt: 200,
             timeZone: "UTC", title: "Meeting", conferenceCode: nil, participants: [],

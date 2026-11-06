@@ -10,6 +10,7 @@ struct MeetingWorkspaceContext {
     let connected: Bool
     let activity: (label: String, elapsedSeconds: Int?)?
     let sourceRevision: Int
+    var overviewActive = false
 
     func hasSameDocumentInputs(as other: Self) -> Bool {
         record == other.record && store.root == other.store.root && material == other.material
@@ -50,7 +51,7 @@ struct MeetingWorkspaceSnapshot {
     var knowledgeStatus: MeetingMinutesKnowledgeOutbox.Status = .unavailable
 
     mutating func updatePresentation(_ context: MeetingWorkspaceContext) {
-        holdReason = held ? (context.pilotLabel ?? Self.heldMessage) : nil
+        holdReason = held && !context.overviewActive ? (context.pilotLabel ?? Self.heldMessage) : nil
         activity = context.activity
         if record.minutesState == "pending", job?.waitingForConnectivity == true {
             activity = ("接続の回復待ち（完成済みパートは保持しています）", nil)
@@ -262,14 +263,14 @@ actor MeetingWorkspaceLoader {
         throw MeetingWorkspaceLoadError.changedDuringRead
     }
 
-    func sidebar(store: MeetingStore, labels: [String: String]) throws -> (meetings: [MeetingRecord], statuses: [String: MeetingWorkspaceStatus], labels: [String: String]) {
+    func sidebar(store: MeetingStore, labels: [String: String], activeOverviewIDs: Set<String> = []) throws -> (meetings: [MeetingRecord], statuses: [String: MeetingWorkspaceStatus], labels: [String: String]) {
         precondition(!Thread.isMainThread)
         let meetings = store.all().filter { $0.mergedIntoMeetingID == nil }
         var statuses: [String: MeetingWorkspaceStatus] = [:], result: [String: String] = [:]
         for record in meetings {
             try Task.checkCancellation()
             let stamp = try Self.files(in: store.directory(for: record.id))
-            let held = Self.held(record: record, store: store, label: labels[record.id], files: stamp) != nil
+            let held = !activeOverviewIDs.contains(record.id) && Self.held(record: record, store: store, label: labels[record.id], files: stamp) != nil
             let status = MeetingWorkspaceStatus(meeting: record, held: held)
             statuses[record.id] = status
             if let cached = sidebarLabels[record.id], cached.stamp == stamp, cached.record == record, cached.held == held {

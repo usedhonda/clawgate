@@ -578,7 +578,7 @@ final class PetModel: NSObject, ObservableObject {
                         || (sameSession && !self.minutesRunSawDelta) else { break }
                 if owner.source == Self.minutesSummarySource {
                     self.releaseSharedSummon(owner)
-                    self.handleSummaryPassReply("")
+                    // Retained final passes never consume ordinary run events.
                     break
                 }
                 NSLog("[Pet] minutes run failed: %@", reason)
@@ -624,8 +624,9 @@ final class PetModel: NSObject, ObservableObject {
                 self.streamingRunId = nil
                 self.streamingText = ""
                 if let summary = self.pendingSummaryPass {
-                    // Retried after reconnect; a lost rewrite must not hold
-                    // the queue closed.
+                    // Reopen the durable final-pass owner on reconnect; never
+                    // redispatch an uncertain request under a fresh key.
+                    self.minutesFinalTask?.cancel()
                     self.pendingSummaryPass = nil
                     self.summaryPassQueue.insert(summary.id, at: 0)
                 }
@@ -1518,6 +1519,9 @@ final class PetModel: NSObject, ObservableObject {
         preparingMinutesIDs.removeAll()
         minutesPilotTask?.cancel()
         minutesPilotTask = nil
+        minutesFinalTask?.cancel()
+        minutesFinalTask = nil
+        minutesFinalOwner = nil
         teardownMinutesConnection()
         meetingSourcesTimer?.invalidate()
         meetingSourcesTimer = nil
@@ -3172,6 +3176,10 @@ final class PetModel: NSObject, ObservableObject {
             .filter { $0.included && $0.status != .failed && !$0.sections.isEmpty }
     }
 
+    /// File-revision fences protect generation; this also refreshes list/detail
+    /// input indicators and invalidates work prepared before the selection save.
+    func minutesIntegrationSelectionDidChange() { meetingsRevision += 1 }
+
     func regenerateMinutesWithSupplementalMaterials(for record: MeetingRecord) {
         guard record.minutesState != "pending", pendingSummaryPass?.id != record.id else { return }
         regenerateMinutes(for: record)
@@ -3278,20 +3286,43 @@ final class PetModel: NSObject, ObservableObject {
     static func minutesEnvelope(for record: MeetingRecord, store: MeetingStore,
                                 local: [TranscriptSegment], material: MeetingGoogleMaterials.Snapshot?,
                                 recall: MeetingMinutesPreparation.RecallInput? = nil) -> MeetingMinutesEnvelope {
-        minutesEnvelope(for: record, store: store, local: local, material: material, recall: recall, checkingCancellation: {})
+        do { return try minutesEnvelope(for: record, store: store, local: local, material: material, recall: recall, checkingCancellation: {}) }
+        catch {
+            var envelope = MeetingMinutesEnvelope.build(record: record, sourceSegments: [])
+            envelope.unresolvedNotes = ["統合資料を確認できません。現在の議事録は保持しています"]
+            return envelope
+        }
     }
 
     static func minutesEnvelope(for record: MeetingRecord, store: MeetingStore,
                                 local: [TranscriptSegment], material: MeetingGoogleMaterials.Snapshot?,
                                 recall: MeetingMinutesPreparation.RecallInput? = nil,
-                                checkingCancellation: () throws -> Void) rethrows -> MeetingMinutesEnvelope {
+                                checkingCancellation: () throws -> Void) throws -> MeetingMinutesEnvelope {
+        if let selection = try MeetingMinutesIntegrationSelection.load(targetID: record.id, store: store) {
+            try checkingCancellation()
+            let imported = try selection.segments()
+            let fused = try MeetingTranscriptFusion.fuse(sourceSegments: imported + (recall?.segments ?? []),
+                checkingCancellation: checkingCancellation)
+            var envelope = MeetingMinutesEnvelope.build(record: record, sourceSegments: fused.segments)
+            envelope.unresolvedNotes = fused.unresolvedNotes
+            envelope.coverageHints = ["選択した会議の保存版を統合。元音声の追加認識は行っていません"] + (recall?.coverageHints ?? [])
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            envelope.integrationSelectionFingerprint = MeetingMinutesPublication.digest(try encoder.encode(selection))
+            envelope.recallSelectionFingerprint = recall?.selectionFingerprint
+            let materials = Self.selectedSupplementalMaterials(store: store, id: record.id)
+            envelope.supplementalMaterials = materials.isEmpty ? nil : materials
+            return envelope
+        }
         let external = try (material?.segments ?? []).map {
             try checkingCancellation()
             return MeetingTranscriptSourceSegment(id: "meet-" + $0.id, source: "meet", text: $0.text,
                 speaker: $0.speakerName, capturedAt: $0.capturedAt,
                 sourceURL: $0.sourceURL, sourceLocator: $0.locator)
         }
-        let fused = try MeetingTranscriptFusion.fuse(local: local, external: external + (recall?.segments ?? []), checkingCancellation: checkingCancellation)
+        let secondary = MeetingMinutesSecondaryEvidence.segments(material?.notes ?? [])
+        let fused = try MeetingTranscriptFusion.fuse(local: local,
+            external: external + (recall?.segments ?? []) + secondary,
+            checkingCancellation: checkingCancellation)
         try checkingCancellation()
         var envelope = MeetingMinutesEnvelope.build(record: record, sourceSegments: fused.segments)
         envelope.unresolvedNotes = fused.unresolvedNotes
@@ -3306,7 +3337,7 @@ final class PetModel: NSObject, ObservableObject {
             envelope = envelope.replacingSegments(envelope.segments + extra)
             if let error = review.error { envelope.unresolvedNotes = (envelope.unresolvedNotes ?? []) + [error] }
         }
-        let coverage = (material?.notes.map(\.text) ?? []) + (recall?.coverageHints ?? [])
+        let coverage = recall?.coverageHints ?? []
         envelope.coverageHints = coverage.isEmpty ? nil : coverage
         envelope.recallSelectionFingerprint = recall?.selectionFingerprint
         let materials = Self.selectedSupplementalMaterials(store: store, id: record.id)
@@ -3334,10 +3365,11 @@ final class PetModel: NSObject, ObservableObject {
     private var minutesNotBefore: [String: Date] = [:]
     /// Opens the minutes window (set by the menu bar app).
     var onOpenMinutesWindow: (() -> Void)?
-    /// Meetings whose joined multi-part minutes still await the overview
-    /// rewrite, and the one in flight. In memory only: after a restart the
-    /// joined minutes simply stay as they are.
+    /// Pending completed-part jobs awaiting their final rewrite. This queue is
+    /// reconstructed from durable pending jobs after restart; accepted minutes
+    /// remain unchanged until the final response passes validation.
     private var summaryPassQueue: [String] = []
+    private var summaryPassCorrectionRequests: Set<String> = []
     /// Whether the in-flight minutes run has streamed anything yet. A Gateway
     /// run failure is attributed to it only while it has not.
     private var minutesRunSawDelta = false
@@ -3345,8 +3377,12 @@ final class PetModel: NSObject, ObservableObject {
     /// after a reply applies to the shared main session, not per meeting
     /// (2026-09-29: another meeting's part went out 5s after a reply).
     private var minutesSessionNotBefore = Date.distantPast
-    private var pendingSummaryPass: (id: String, input: MeetingMinutesSummaryPass.Input)?
+    private var pendingSummaryPass: (id: String, job: MeetingMinutesJob)?
+    private var minutesFinalTask: Task<Void, Never>?
+    private var minutesFinalOwner: UUID?
 #if DEBUG
+    var minutesFinalTransportForTesting: (send: MeetingMinutesOverviewExecutor.Send, read: MeetingMinutesOverviewExecutor.Read)?
+    var minutesFinalDidFinishForTesting: (() -> Void)?
     private var meetingStoreOverrideForTesting: MeetingStore?
 #endif
 
@@ -3409,6 +3445,7 @@ final class PetModel: NSObject, ObservableObject {
     /// Every automatic entry already skips such a meeting; this makes the hold
     /// visible instead of looking like a stalled "作成中".
     func minutesHoldReason(for record: MeetingRecord) -> String? {
+        guard !activeMinutesOverviewIDs.contains(record.id) else { return nil }
         guard record.minutesState == "pending" || record.minutesState == "failed" else { return nil }
         guard hasIndexedMinutesOwner(id: record.id) || isMinutesPilotTarget(id: record.id) else { return nil }
         return minutesPilotLabels[record.id]
@@ -3424,9 +3461,12 @@ final class PetModel: NSObject, ObservableObject {
 
     /// The private rollout selects one exact revision. Single-part admission
     /// precedes explicit bounded-meeting activation; ordinary owners stay separate.
+    /// Retained execution uses the Gateway-advertised canonical main key and
+    /// nonprojection, not the ordinary minutes chat suffix. Existing reservations
+    /// retain their exact stored session/key for read-only recovery.
     private func startMinutesPilotIfNeeded() {
-        guard minutesPilotTask == nil, !didCleanup,
-              connectionState == .connected, let key = sessionKey.map(Self.minutesSessionKey(for:)),
+        guard minutesPilotTask == nil, minutesFinalTask == nil, !didCleanup,
+              connectionState == .connected, let key = sessionKey,
               pendingMinutesMeetingID == nil, pendingSummaryPass == nil else { return }
         let store = minutesStore()
         guard let pilot = MeetingMinutesPilot.load(),
@@ -3488,7 +3528,7 @@ final class PetModel: NSObject, ObservableObject {
                     }
                     if pilot.mode == .boundedMeeting && progress.completed == progress.total {
                         let prepared = try await executor.completedResult(record: record)
-                        if !MeetingMinutesSummaryPass.needed(partCount: prepared.completedJob.envelopes.count) {
+                        if !MeetingMinutesSummaryPass.needed(for: prepared.completedJob) {
                             _ = try await executor.finalize(record: record)
                             self.finishMinutes(id: record.id, state: "ready", error: nil)
                             return
@@ -3498,24 +3538,23 @@ final class PetModel: NSObject, ObservableObject {
                             id: record.id, sessionKey: key,
                             send: { try await client.sendMinutesExecution($0) },
                             read: { try await client.minutesExecutionResult($0) })
-                        if !(await overview.hasCompletedOutcome()) { _ = try await executor.finalize(record: record) }
                         while !Task.isCancelled {
                             guard self.connectionState == .connected,
                                   await client.supportsDedicatedMinutesExecution() else { return }
-                            self.minutesPilotLabels[record.id] = "会議全体の概要を専用経路で統合中"
+                            self.minutesPilotLabels[record.id] = "会議全体の論点・決定・担当を専用経路で統合中"
                             self.meetingsRevision += 1
                             switch try await overview.step() {
                             case .completed:
                                 self.finishMinutes(id: record.id, state: "ready", error: nil)
                                 return
                             case .failed:
-                                self.finishMinutes(id: record.id, state: "ready", error: "概要の統合を採用できませんでした。各パートの議事録は保存されています")
+                                self.finishMinutes(id: record.id, state: "failed", error: "全体の統合を採用できませんでした。旧議事録と完成済みパートは保持しています")
                                 return
                             case .unavailable:
-                                self.minutesPilotLabels[record.id] = "概要の保存済み実行を復旧待ち（再送しません）"
+                                self.minutesPilotLabels[record.id] = "全体統合の保存済み実行を復旧待ち（再送しません）"
                                 return
                             case .recovering:
-                                self.minutesPilotLabels[record.id] = "概要の受付・復旧確認待ち（再送しません）"
+                                self.minutesPilotLabels[record.id] = "全体統合の受付・復旧確認待ち（再送しません）"
                             case .pending: break
                             }
                             try await Task.sleep(nanoseconds: 5_000_000_000)
@@ -3569,7 +3608,7 @@ final class PetModel: NSObject, ObservableObject {
             let elapsed = startedAt.map {
                 max(0, Int(now.timeIntervalSince($0)))
             }
-            return (awaitingRunId ? "概要の生成依頼を送信中" : "会議全体の概要を統合中", elapsed)
+            return (awaitingRunId ? "全体統合の生成依頼を送信中" : "会議全体を段階統合中", elapsed)
         }
         guard record.minutesState == "pending" else { return nil }
         if pendingMinutesMeetingID == record.id {
@@ -3597,11 +3636,17 @@ final class PetModel: NSObject, ObservableObject {
         MeetingWorkspaceContext(record: record, store: minutesStore(),
             material: record.materialCandidateID.flatMap { meetingMaterials[$0] },
             pilotLabel: minutesPilotLabels[record.id], connected: connectionState == .connected,
-            activity: minutesLiveActivity(for: record, now: Date()), sourceRevision: meetingsRevision)
+            activity: minutesLiveActivity(for: record, now: Date()), sourceRevision: meetingsRevision,
+            overviewActive: activeMinutesOverviewIDs.contains(record.id))
     }
 
-    func minutesWorkspaceSidebarContext() -> (store: MeetingStore, labels: [String: String]) {
-        (minutesStore(), minutesPilotLabels)
+    private var activeMinutesOverviewIDs: Set<String> {
+        guard minutesFinalTask != nil, let id = pendingSummaryPass?.id else { return [] }
+        return [id]
+    }
+
+    func minutesWorkspaceSidebarContext() -> (store: MeetingStore, labels: [String: String], activeOverviewIDs: Set<String>) {
+        (minutesStore(), minutesPilotLabels, activeMinutesOverviewIDs)
     }
 
     /// Ask for minutes of one meeting. Waits its turn rather than preempting:
@@ -3782,7 +3827,7 @@ final class PetModel: NSObject, ObservableObject {
         // An explicit owner request is allowed ahead of a background overview
         // rewrite. This only chooses the next idle slot; active RPCs remain
         // untouched. Automatic/legacy parts keep summary priority.
-        let queuedIsExplicit = snapshot?.job.userRequestedAt != nil
+        let queuedIsExplicit = snapshot?.job.userRequestedAt != nil && snapshot?.job.next != nil
         if !queuedIsExplicit,
            sendNextSummaryPass() { return }
         guard let snapshot else { return }
@@ -3822,11 +3867,12 @@ final class PetModel: NSObject, ObservableObject {
         if !finished.envelopes.isEmpty, finished.next == nil {
             do {
                 if let combined = snapshot.combined {
-                    try minutesStore().saveValidatedMinutes(combined.boundToCalendarEvent(record.calendarEventID), for: record, job: finished)
-                    finishMinutes(id: record.id, state: "ready", error: nil)
-                    if MeetingMinutesSummaryPass.needed(partCount: finished.envelopes.count),
-                       !summaryPassQueue.contains(record.id) {
-                        summaryPassQueue.append(record.id)
+                    if MeetingMinutesSummaryPass.needed(for: finished) {
+                        if !summaryPassQueue.contains(record.id) { summaryPassQueue.append(record.id) }
+                        markMinutes(id: record.id, state: "pending", error: nil)
+                    } else {
+                        try minutesStore().saveValidatedMinutes(combined.boundToCalendarEvent(record.calendarEventID), for: record, job: finished)
+                        finishMinutes(id: record.id, state: "ready", error: nil)
                     }
                 } else {
                     finishMinutes(id: record.id, state: "failed", error: "根拠となる発言が足りませんでした")
@@ -4036,6 +4082,21 @@ final class PetModel: NSObject, ObservableObject {
     /// thrown away.
     func resumeMinutes(for record: MeetingRecord) {
         let store = minutesStore()
+        // A failed whole-meeting pass owns the exact completed-part snapshot.
+        // Do not refresh source/calendar metadata or regenerate ordinary parts.
+        if record.minutesState == "failed", store.load(id: record.id) == record,
+           let job = MeetingMinutesJob.load(store: store, id: record.id),
+           !job.envelopes.isEmpty, job.next == nil,
+           MeetingMinutesSummaryPass.needed(for: job),
+           MeetingMinutes.combining(job.completed.compactMap { $0 }) != nil {
+            guard pendingSummaryPass?.id != record.id else { return }
+            minutesNotBefore[record.id] = nil
+            summaryPassCorrectionRequests.insert(record.id)
+            if !summaryPassQueue.contains(record.id) { summaryPassQueue.append(record.id) }
+            markMinutes(id: record.id, state: "pending", error: nil)
+            drainPendingMinutes()
+            return
+        }
         if let pilot = MeetingMinutesPilot.load(), pilot.mode == .boundedMeeting,
            let job = MeetingMinutesJob.load(store: store, id: record.id),
            pilot.matches(store: store, id: record.id, job: job),
@@ -4093,51 +4154,98 @@ final class PetModel: NSObject, ObservableObject {
         prepareMinutes(for: record, regenerate: true, forceFull: forceFull, recall: recall)
     }
 
-    /// Sends the next queued overview rewrite. Returns whether one went out.
+    /// Ordinary part generation joins the same retained final-pass protocol.
+    /// Connection admission is checked before reserving any model execution.
     private func sendNextSummaryPass() -> Bool {
+        guard !summaryPassQueue.isEmpty else { return false }
+        guard minutesFinalTask == nil, minutesPilotTask == nil else { return true }
         while let id = summaryPassQueue.first {
             summaryPassQueue.removeFirst()
             let store = minutesStore()
-            guard let record = store.load(id: id), record.minutesState == "ready",
-                  let accepted = store.loadAcceptedMinutes(id: id),
-                  let job = MeetingMinutesJob.load(store: store, id: id) else { continue }
-            let parts = job.completed.compactMap { $0 }
-            let input = MeetingMinutesSummaryPass.input(for: accepted.minutes, parts: parts, record: record)
-            guard let message = try? MeetingMinutesSummaryPass.buildMessage(input: input) else { continue }
-            pendingSummaryPass = (id, input)
-            minutesRunSawDelta = false
+            guard let record = store.load(id: id), record.minutesState == "pending",
+                  (minutesNotBefore[id] ?? .distantPast) <= Date(),
+                  let job = MeetingMinutesJob.load(store: store, id: id), job.next == nil,
+                  MeetingMinutes.combining(job.completed.compactMap { $0 }) != nil,
+                  let key = sessionKey else { continue }
+            let owner = UUID()
+            minutesFinalOwner = owner
+            pendingSummaryPass = (id, job)
             minutesActivityStartedAt = Date()
-            minutesGenerationStartedAt = nil
-            sendSummon(message, source: Self.minutesSummarySource)
-            if sharedSummonOwner?.source != Self.minutesSummarySource {
-                // Not admitted; try again on the next drain.
-                pendingSummaryPass = nil
-                summaryPassQueue.insert(id, at: 0)
-                return false
+            minutesPilotLabels[id] = "全体統合の専用接続を確認中"
+            let client = minutesWSClient
+            minutesFinalTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    if self.minutesFinalOwner == owner {
+                        self.minutesFinalOwner = nil
+                        self.minutesFinalTask = nil
+                        if self.pendingSummaryPass?.id == id { self.pendingSummaryPass = nil }
+                        self.meetingsRevision += 1
+                        #if DEBUG
+                        self.minutesFinalDidFinishForTesting?()
+                        #endif
+                        self.drainPendingMinutes()
+                    }
+                }
+                func park(_ label: String) {
+                    self.minutesPilotLabels[id] = label
+                    self.minutesNotBefore[id] = Date().addingTimeInterval(Self.minutesServiceRecoverySeconds)
+                }
+                let send: MeetingMinutesOverviewExecutor.Send
+                let read: MeetingMinutesOverviewExecutor.Read
+                #if DEBUG
+                if let transport = self.minutesFinalTransportForTesting {
+                    send = transport.send; read = transport.read
+                } else {
+                    do { try await self.connectMinutesIfNeeded() }
+                    catch { park("全体統合の接続確認待ち（未送信・旧版保持）"); return }
+                    send = { try await client.sendMinutesExecution($0) }
+                    read = { try await client.minutesExecutionResult($0) }
+                }
+                #else
+                do { try await self.connectMinutesIfNeeded() }
+                catch { park("全体統合の接続確認待ち（未送信・旧版保持）"); return }
+                send = { try await client.sendMinutesExecution($0) }
+                read = { try await client.minutesExecutionResult($0) }
+                #endif
+                do {
+                    let executor = try MeetingMinutesOverviewExecutor(frozenJob: job, completedJob: job,
+                        record: record, store: store, id: id, sessionKey: key, send: send, read: read,
+                        correctionRequested: self.summaryPassCorrectionRequests.remove(id) != nil)
+                    while !Task.isCancelled, self.minutesFinalOwner == owner,
+                          self.connectionState == .connected, !self.didCleanup {
+                        // A changed job cannot acquire a new stage from an old task.
+                        try MeetingMinutesJob.withCurrentRevisionLock(store: store, id: id, expected: job) { }
+                        self.minutesPilotLabels[id] = "会議全体の論点・決定・担当を段階統合中"
+                        self.meetingsRevision += 1
+                        switch try await executor.step() {
+                        case .completed(let minutes):
+                            self.minutesPilotLabels[id] = nil
+                            self.finishMinutes(id: id, state: "ready", error: nil)
+                            self.addNotificationEntry(text: "議事録ができました: \(minutes?.title ?? record.title ?? "会議")", source: Self.minutesSource)
+                            return
+                        case .failed:
+                            self.minutesPilotLabels[id] = nil
+                            self.finishMinutes(id: id, state: "failed", error: "全体統合を採用できませんでした。旧版と完成済みパートは保持しています")
+                            return
+                        case .unavailable:
+                            park("全体統合の保存済み結果を確認できません（再送なし・旧版保持）")
+                            return
+                        case .recovering:
+                            self.minutesPilotLabels[id] = "全体統合の保存済み要求を確認中（再送しません）"
+                        case .pending: break
+                        }
+                        try await Task.sleep(nanoseconds: 5_000_000_000)
+                    }
+                } catch is CancellationError {
+                    // Reconnect/restart reloads the durable request, never re-keys it.
+                } catch {
+                    park("全体統合の実行記録を確認できません（旧版保持）")
+                }
             }
             return true
         }
         return false
-    }
-
-    /// A rejected or failed rewrite leaves the joined minutes as they are.
-    private func handleSummaryPassReply(_ text: String) {
-        guard let pending = pendingSummaryPass else { return }
-        minutesSessionNotBefore = Date().addingTimeInterval(Self.minutesPartGapSeconds)
-        pendingSummaryPass = nil
-        defer { drainPendingMinutes() }
-        let store = minutesStore()
-        guard let record = store.load(id: pending.id),
-              let accepted = store.loadAcceptedMinutes(id: pending.id),
-              let job = MeetingMinutesJob.load(store: store, id: pending.id) else { return }
-        do {
-            let reply = try MeetingMinutesSummaryPass.parse(text, input: pending.input)
-            let rewritten = MeetingMinutesSummaryPass.apply(reply, to: accepted.minutes, parts: job.completed.compactMap { $0 })
-            try store.saveValidatedMinutes(rewritten, for: record, job: job)
-            meetingsRevision += 1
-        } catch {
-            NSLog("[Pet] minutes overview rewrite kept the joined overview: %@", "\(error)")
-        }
     }
 
     private func handleMinutesReply(_ text: String) {
@@ -4151,10 +4259,12 @@ final class PetModel: NSObject, ObservableObject {
         do {
             let materialIDs = Set((MeetingMinutesJob.load(store: minutesStore(), id: id)?.next?.supplementalMaterials ?? [])
                 .flatMap(\.sections).map(\.id))
-            let minutes = try MeetingMinutesParser.parse(text, validSegmentIds: validSegmentIDs, validMaterialIds: materialIDs)
+            let parsed = try MeetingMinutesParser.parse(text, validSegmentIds: validSegmentIDs, validMaterialIds: materialIDs)
             guard var job = MeetingMinutesJob.load(store: minutesStore(), id: id), job.next != nil else {
                 throw MeetingMinutesError.encodingFailed
             }
+            let minutes = parsed.map { MeetingMinutesSecondaryEvidence.annotate($0, segments: job.next?.segments ?? []).minutes }
+            if let minutes { try MeetingMinutesSecondaryEvidence.validate(minutes, segments: job.next?.segments ?? []) }
             // A silent/irrelevant part is a completed part, not a failed meeting.
             job.completed.append(minutes)
             job.connectivityRetryAfter = nil
@@ -4172,12 +4282,14 @@ final class PetModel: NSObject, ObservableObject {
                 finishMinutes(id: id, state: "failed", error: "根拠となる発言が足りませんでした。旧議事録は保持しています。")
                 return
             }
-            try minutesStore().saveValidatedMinutes(accepted.boundToCalendarEvent(record.calendarEventID), for: record, job: job)
-            finishMinutes(id: id, state: "ready", error: nil)
-            addNotificationEntry(text: "議事録ができました: \(accepted.title ?? record.title ?? "会議")",
-                                 source: Self.minutesSource)
-            if MeetingMinutesSummaryPass.needed(partCount: job.envelopes.count), !summaryPassQueue.contains(id) {
-                summaryPassQueue.append(id)
+            if MeetingMinutesSummaryPass.needed(for: job) {
+                if !summaryPassQueue.contains(id) { summaryPassQueue.append(id) }
+                markMinutes(id: id, state: "pending", error: nil)
+            } else {
+                try minutesStore().saveValidatedMinutes(accepted.boundToCalendarEvent(record.calendarEventID), for: record, job: job)
+                finishMinutes(id: id, state: "ready", error: nil)
+                addNotificationEntry(text: "議事録ができました: \(accepted.title ?? record.title ?? "会議")",
+                                     source: Self.minutesSource)
             }
         } catch {
             // Keep the head of what came back: without it "notJSON" says
@@ -4212,7 +4324,7 @@ final class PetModel: NSObject, ObservableObject {
             return
         }
         if source == Self.minutesSummarySource {
-            handleSummaryPassReply(text)
+            // Old ordinary final-pass events cannot complete a retained owner.
             return
         }
         if source == "log_scene_naming" {

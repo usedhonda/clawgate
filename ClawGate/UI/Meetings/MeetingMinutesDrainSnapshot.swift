@@ -57,7 +57,7 @@ struct MeetingMinutesDrainSnapshot {
         let conflicts = MeetingTranscriptFusion.fuse(sourceSegments: raw)
         let windows = MeetingConflictReview.windows(times: conflicts.conflictTimes, record: record)
         let reviewKey = MeetingConflictReview.fingerprint(record: record, windows: windows)
-        let needsReview = job.completed.isEmpty && !windows.isEmpty
+        let needsReview = job.completed.isEmpty && envelope.integrationSelectionFingerprint == nil && !windows.isEmpty
             && MeetingConflictReview.load(record: record, fingerprint: reviewKey, store: store) == nil
         let message = job.next.flatMap { try? MeetingMinutesPrompt.buildMessage(envelope: $0) }
         let combined = !job.envelopes.isEmpty && job.next == nil
