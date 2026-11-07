@@ -65,8 +65,9 @@
   // contains it, so the minutes can find the right entry without guessing from
   // the clock.
   function meetingCode() {
-    const path = window.location.pathname.replace(/^\//, '');
-    return /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/.test(path) ? path : null;
+    // Meet serves calls at both /<code> and /meet/<code>.
+    const match = /^\/(?:meet\/)?([a-z]{3}-[a-z]{4}-[a-z]{3})\/?$/.exec(window.location.pathname);
+    return match ? match[1] : null;
   }
 
   function scanTiles() {
