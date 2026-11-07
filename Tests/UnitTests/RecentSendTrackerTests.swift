@@ -3,21 +3,21 @@ import XCTest
 
 final class RecentSendTrackerTests: XCTestCase {
 
-    func testIsLikelyEchoAfterSend() {
-        let tracker = RecentSendTracker()
-        tracker.recordSend(conversation: "TestUser", text: "Hello")
-        XCTAssertTrue(tracker.isLikelyEcho())
+    func testRecordedSendIsAvailableForEchoDetection() {
+        let cases = [
+            (RecentSendTracker(), "TestUser", "Hello"),
+            (RecentSendTracker(windowSeconds: 60), "Alice Smith", "[clawgate.cc]\nHello from Claude Code"),
+        ]
+        for (tracker, conversation, text) in cases {
+            tracker.recordSend(conversation: conversation, text: text)
+            XCTAssertTrue(tracker.isLikelyEcho())
+            XCTAssertEqual(tracker.recentSentText(), text)
+        }
     }
 
     func testIsLikelyEchoWhenEmpty() {
         let tracker = RecentSendTracker()
         XCTAssertFalse(tracker.isLikelyEcho())
-    }
-
-    func testRecentSentTextReturnsLatest() {
-        let tracker = RecentSendTracker()
-        tracker.recordSend(conversation: "TestUser", text: "Hello")
-        XCTAssertEqual(tracker.recentSentText(), "Hello")
     }
 
     func testRecentSentTextNilWhenEmpty() {
@@ -26,11 +26,19 @@ final class RecentSendTrackerTests: XCTestCase {
     }
 
     func testRecentSentTextReturnsNewest() {
-        let tracker = RecentSendTracker()
-        tracker.recordSend(conversation: "User1", text: "First")
-        tracker.recordSend(conversation: "User2", text: "Second")
-        tracker.recordSend(conversation: "User3", text: "Third")
-        XCTAssertEqual(tracker.recentSentText(), "Third")
+        // Keep both the two-conversation and three-send sequences in one
+        // newest-entry contract; this does not test LINE's navigation cache.
+        let sequences = [
+            [("User1", "First"), ("User2", "Second"), ("User3", "Third")],
+            [("Alice Smith", "Test"), ("Work Group", "Test 2")],
+        ]
+        for sequence in sequences {
+            let tracker = RecentSendTracker()
+            for (conversation, text) in sequence {
+                tracker.recordSend(conversation: conversation, text: text)
+                XCTAssertEqual(tracker.recentSentText(), text)
+            }
+        }
     }
 
     func testLastSendAtTracksLatestRecordedSend() {

@@ -46,7 +46,10 @@ final class RuntimeRoleTests: XCTestCase {
 
     // MARK: - Empty / whitespace resolve to .server (fail-closed)
 
-    func testEmptyHostResolvesToServer() {
+    func testDefaultAndEmptyHostResolveToServer() {
+        // An unconfigured host must keep ambient capture off (fail-closed).
+        XCTAssertEqual(AppConfig.default.runtimeRole, .server)
+        XCTAssertFalse(AppConfig.default.isClientRole)
         XCTAssertEqual(role(forHost: ""), .server)
         XCTAssertFalse(isClient(forHost: ""))
     }
@@ -61,7 +64,7 @@ final class RuntimeRoleTests: XCTestCase {
     func testRemoteHostsResolveToClient() {
         // Documentation-only addresses (RFC 5737 TEST-NET, RFC 3849 IPv6 doc,
         // example.com) — never real infra.
-        for host in ["example-host.example.com", "192.0.2.1", "203.0.113.5", "2001:db8::1"] {
+        for host in ["example-host.example.com", "gateway-host.example-tailnet.ts.net", "192.0.2.1", "203.0.113.5", "2001:db8::1"] {
             XCTAssertEqual(role(forHost: host), .client, "host=\(host)")
             XCTAssertTrue(isClient(forHost: host), "host=\(host)")
         }

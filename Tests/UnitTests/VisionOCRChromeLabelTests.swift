@@ -14,6 +14,7 @@ final class VisionOCRChromeLabelTests: XCTestCase {
 
     func testTimestampBesideBubbleIsChrome() {
         XCTAssertTrue(VisionOCR.isChromeLabel("午前 10:12"))
+        XCTAssertTrue(VisionOCR.isChromeLabel("午前 10:05"))
         XCTAssertTrue(VisionOCR.isChromeLabel("午後12:17"))
         XCTAssertTrue(VisionOCR.isChromeLabel("10:05"))
     }
@@ -47,6 +48,7 @@ final class VisionOCRChromeLabelTests: XCTestCase {
     func testTimeInsideASentenceIsAMessage() {
         XCTAssertFalse(VisionOCR.isChromeLabel("10:30に行くね"))
         XCTAssertFalse(VisionOCR.isChromeLabel("18:00から打ち合わせが入っています"))
+        XCTAssertFalse(VisionOCR.isChromeLabel("今日は18:00から予定が入ってるよ"))
     }
 
     /// Short replies carry fewer letters than the chrome threshold and must
@@ -112,8 +114,4 @@ final class VisionOCRChromeLabelTests: XCTestCase {
         )
     }
 
-    func testPositionedChromeFilterKeepsMessageSemantics() {
-        XCTAssertFalse(VisionOCR.isChromeLabel("今日は18:00から予定が入ってるよ"))
-        XCTAssertTrue(VisionOCR.isChromeLabel("午前 10:05"))
-    }
 }
