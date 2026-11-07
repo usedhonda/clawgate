@@ -12,7 +12,7 @@ let package = Package(
         .executable(name: "ClawGate", targets: ["ClawGate"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.67.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.3"),
     ],
     targets: [
         .executableTarget(
@@ -32,7 +32,10 @@ let package = Package(
         ),
         .testTarget(
             name: "UnitTests",
-            dependencies: ["ClawGate"],
+            dependencies: [
+                "ClawGate",
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ],
             path: "Tests/UnitTests"
         ),
     ]
