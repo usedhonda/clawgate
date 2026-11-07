@@ -10,7 +10,8 @@
 # sends many such chunks, so the reply falls back to "unknown" instead.
 set -euo pipefail
 
-TAG="${WHISPER_CPP_TAG:-v1.9.4}"
+# v1.9.5 includes the model/VAD tensor-type bounds fix (CVE-2026-110810).
+TAG="${WHISPER_CPP_TAG:-v1.9.5}"
 DEST="$HOME/Library/Application Support/ClawGate/whisper/server"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
