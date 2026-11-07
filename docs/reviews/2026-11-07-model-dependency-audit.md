@@ -136,8 +136,12 @@ The provisioning default is advanced one patch release, with the existing
 and compared: their contents are identical, including the three
 `whisper_lang_str_full(` call sites patched by this script. Therefore the
 existing null-language compatibility patch remains applicable at the source
-level. The rest of the upstream release still needs the build/runtime validation
-listed below.
+level. A dedicated macOS CI job now runs this canonical provisioning script, building
+v1.9.5 with Metal, applying the local source patch, copying the server and dylibs
+to their real installation layout, and executing the installed binary's
+`--help` path. This verifies the native build and dynamic-library loading
+without downloading models, starting a listener, or using audio. Inference and
+no-speech/VAD behavior still require the runtime validation listed below.
 
 This change affects future server provisioning. It does not modify an already
 installed server or the separately installed `whisper-cli` fallback. The latter's
@@ -154,10 +158,14 @@ installation inventory before any upgrade claim.
   could be applied locally. No shell syntax check, ShellCheck, or
   `git diff --check` result is claimed for this change. GitHub content entries
   were prepared from the immutable baseline instead.
-- **Pending — CI:** the new pull request's checks must be evaluated separately.
-  Results from the earlier maintenance PR do not validate this version bump.
-- **Not run — runtime:** macOS/Metal build of v1.9.5, the patched no-speech/VAD
-  response, server startup, local-model inference, Apple asset availability,
+- **CI coverage:** the existing app build/tests, ShellCheck, JavaScript tests,
+  and leak guard run for this PR. The new path-filtered
+  `.github/workflows/whisper-provision.yml` additionally builds the native
+  server on macOS and checks the installed binary's dynamic-library loading.
+  The current commit's results are recorded in [PR #12](https://github.com/usedhonda/clawgate/pull/12);
+  earlier PR results are not treated as validation of this version bump.
+- **Not run — inference/runtime:** the patched no-speech/VAD response, server
+  startup with models, local-model inference, Apple asset availability,
   FluidAudio re-enrollment compatibility, VOICEVOX synthesis, and live host or
   provider access were not exercised.
 - **Tests added / removed / consolidated:** 0 / 0 / 0 in this focused change.
@@ -165,8 +173,9 @@ installation inventory before any upgrade claim.
   native fix. Existing app tests are unchanged; independent suite rationalization
   is handled in the other RepoFix review stream.
 
-Before using the rebuilt server in an installed app, build on macOS and verify
-the retained null-language/no-speech behavior using nonpersonal fixtures.
+Before using the rebuilt server in an installed app, require the macOS provision
+check to pass and verify the retained null-language/no-speech behavior using
+nonpersonal fixtures.
 Keep the reviewed model and VAD assets, isolate the server's dylibs as before,
 and inventory the separate CLI installation. An intentional rollback can change
 the provisioning tag, but v1.9.4 would restore the known bounds-check gap.

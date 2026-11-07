@@ -1,0 +1,41 @@
+name: Whisper provisioning
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - scripts/provision-whisper-server.sh
+      - .github/workflows/whisper-provision.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/provision-whisper-server.sh
+      - .github/workflows/whisper-provision.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: whisper-provision-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provision-whisper:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26.3
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Build and install the patched resident server
+        run: |
+          bash -n scripts/provision-whisper-server.sh
+          bash scripts/provision-whisper-server.sh
+
+      - name: Verify installed binary and dynamic libraries
+        # --help exits before model loading or listener startup.
+        run: '"$HOME/Library/Application Support/ClawGate/whisper/server/bin/whisper-server" --help'
