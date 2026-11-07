@@ -102,9 +102,15 @@ actor OpenClawWSClient {
     /// connection is dropped. nil is the ordinary connection, unchanged.
     let executionPurpose: String?
 
-    init(role: String = "unknown", executionPurpose: String? = nil) {
+    /// Injectable readiness boundary; production uses the bounded HTTP probe.
+    /// Tests can hold this suspension point without contacting a Gateway.
+    private let readinessProbe: (@Sendable (URL) async throws -> Void)?
+
+    init(role: String = "unknown", executionPurpose: String? = nil,
+         readinessProbe: (@Sendable (URL) async throws -> Void)? = nil) {
         self.role = role
         self.executionPurpose = executionPurpose
+        self.readinessProbe = readinessProbe
     }
 
     /// Whether a hello-ok may be accepted on this connection. An ordinary
@@ -131,6 +137,9 @@ actor OpenClawWSClient {
     private var session: URLSession?
     private var continuation: AsyncStream<OpenClawEvent>.Continuation?
     private var isConnected = false
+    /// Reserve ownership before /ready suspends. Actor isolation alone does not
+    /// prevent a second connect or disconnect from running during that await.
+    private var connectingGeneration: UInt64?
     /// Bumped on every connect()/teardown(). In-flight closures captured with a
     /// stale generation early-return instead of acting on a superseded connection.
     /// Mirrors VibeTerm OpenClawWebSocketClient.swift (untouchable-map U4).
@@ -299,8 +308,8 @@ actor OpenClawWSClient {
     /// connect before the handshake, so it counts attempts and failures
     /// together and matches nothing the Gateway logs.
     ///
-    /// `connectAttempts` counts every call that got as far as opening a
-    /// session.
+    /// `connectAttempts` counts every admitted connection attempt, including
+    /// attempts that fail the HTTP readiness probe before opening a socket.
     ///
     /// `closeFramesSent` counts teardowns where a task reference was still
     /// held — so it is the number of times this client ATTEMPTED to send a
@@ -331,35 +340,48 @@ actor OpenClawWSClient {
 
     /// Connect to local OpenClaw Gateway
     func connect(url: URL, token: String) async throws -> AsyncStream<OpenClawEvent> {
-        guard !isConnected else {
-            throw OpenClawError.connectionFailed("Already connected")
+        try Task.checkCancellation()
+        guard !isConnected, connectingGeneration == nil else {
+            throw OpenClawError.connectionFailed("Already connected or connecting")
         }
 
         connectionGeneration &+= 1
         connectAttempts += 1
         let gen = connectionGeneration
+        connectingGeneration = gen
+        defer {
+            // An older attempt must not release a replacement's reservation.
+            if connectingGeneration == gen { connectingGeneration = nil }
+        }
         advertisedGatewayMethods = nil
         advertisedGatewayMethodsGeneration = nil
-
-        authToken = token
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = Self.webSocketInactivityTimeout
-        config.timeoutIntervalForResource = Self.webSocketLifetimeCap
-        session = URLSession(configuration: config)
 
         // Wait for Gateway to be ready. Gateway init (bonjour/telegram/model-pricing)
         // can take ~30s after a restart — longer than the 10s handshake timeout below.
         // Without this poll we would tear down the WS before Gateway sends connect.challenge,
         // then reconnect into the same trap (logged 5+ times over 2026-04-22/23).
-        try await waitForGatewayReady(url: url)
+        if let readinessProbe {
+            try await readinessProbe(url)
+        } else {
+            try await waitForGatewayReady(url: url, generation: gen)
+        }
+        try Task.checkCancellation()
+        guard connectionGeneration == gen, connectingGeneration == gen else {
+            throw CancellationError()
+        }
+
+        // Allocate transport state only for the attempt that still owns the
+        // connection after readiness. Failed probes leave no session or token.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = Self.webSocketInactivityTimeout
+        config.timeoutIntervalForResource = Self.webSocketLifetimeCap
+        let session = URLSession(configuration: config)
+        self.session = session
+        authToken = token
 
         var request = URLRequest(url: url)
         request.setValue("clawgate-macos/1.0", forHTTPHeaderField: "User-Agent")
         request.setValue(UUID().uuidString, forHTTPHeaderField: "X-Connection-Nonce")
-
-        guard let session else {
-            throw OpenClawError.connectionFailed("Failed to create session")
-        }
 
         webSocketTask = session.webSocketTask(with: request)
 
@@ -405,7 +427,7 @@ actor OpenClawWSClient {
 
     /// Poll Gateway's HTTP /ready endpoint with exponential backoff until 200 OK or total ~60s elapsed.
     /// Derives the HTTP base URL from the ws URL (ws→http, wss→https).
-    private func waitForGatewayReady(url wsURL: URL) async throws {
+    private func waitForGatewayReady(url wsURL: URL, generation gen: UInt64) async throws {
         guard var comps = URLComponents(url: wsURL, resolvingAgainstBaseURL: false) else {
             throw OpenClawError.connectionFailed("Invalid WS URL for /ready probe")
         }
@@ -430,6 +452,7 @@ actor OpenClawWSClient {
 
         while Date().timeIntervalSince(started) < maxElapsed {
             try Task.checkCancellation()
+            guard connectionGeneration == gen else { throw CancellationError() }
             var req = URLRequest(url: readyURL)
             req.timeoutInterval = 5
             if let (_, resp) = try? await client.data(for: req),
@@ -454,6 +477,7 @@ actor OpenClawWSClient {
         let openedAt = connectedAt
         let closingGeneration = connectionGeneration
         connectionGeneration &+= 1
+        connectingGeneration = nil
         isConnected = false
         handshakeComplete = false
         advertisedGatewayMethods = nil
