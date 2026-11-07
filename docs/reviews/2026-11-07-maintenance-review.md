@@ -143,7 +143,8 @@ all historical commits or external release artifacts.
 
 Support diagnostics now use a unique owner-only directory and file, collect
 process IDs/executable names without command arguments, use literal trace
-matching, and impose network deadlines. Diagnostic files can still contain
+matching, impose network deadlines, and work without developer utilities such
+as ripgrep. Diagnostic files can still contain
 sensitive operational information and should be reviewed before sharing.
 
 README and setup instructions now reflect the built-in tmux poller, retired
@@ -163,6 +164,12 @@ CI now checks every JavaScript file individually (the old multi-file
 `node --check` invocation checked only one), runs Chrome and telemetry
 regressions in addition to the main plugin tests, pins its Node test version,
 and gives the workflow read-only repository permissions.
+
+The full macOS suite exposed a timing race in an existing pre-acknowledgement
+event test: a 50 ms sleep competed with a test-only 100 ms reply watchdog.
+That event-correlation case now uses the production deadline and waits for
+main-queue event processing before asserting, keeping every original assertion.
+The dedicated short-watchdog test and production timeout behavior are unchanged.
 
 ## Verification and runtime boundary
 

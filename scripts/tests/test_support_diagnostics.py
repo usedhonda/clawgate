@@ -18,6 +18,11 @@ class SupportDiagnosticsTests(unittest.TestCase):
             shutil.copyfile(source, script)
             fakebin = root / "bin"
             fakebin.mkdir()
+            # A support bundle must work with standard OS tools, without rg or
+            # other developer utilities inherited from the caller's PATH.
+            for name in ("dirname", "date", "mktemp", "ls", "head", "tail", "grep"):
+                (fakebin / name).symlink_to(shutil.which(name))
+            bash = shutil.which("bash")
             commands = {
                 "curl": '#!/bin/sh\ncase "$*" in *"--connect-timeout 2 --max-time 10"*) echo health-ok;; *) exit 71;; esac\n',
                 "ps": '#!/bin/sh\n[ "$*" = "-axo pid=,ppid=,comm=" ] || { echo unexpected-argv-collection; exit 72; }\necho "123 1 /Applications/ClawGate.app/Contents/MacOS/ClawGate"\n',
@@ -26,8 +31,8 @@ class SupportDiagnosticsTests(unittest.TestCase):
                 executable = fakebin / name
                 executable.write_text(content)
                 executable.chmod(0o755)
-            env = dict(os.environ, PATH=str(fakebin) + os.pathsep + os.environ["PATH"], TMPDIR=str(root))
-            result = subprocess.run(["bash", str(script)], env=env, text=True, capture_output=True, timeout=10, check=True)
+            env = dict(os.environ, PATH=str(fakebin), TMPDIR=str(root))
+            result = subprocess.run([bash, str(script)], env=env, text=True, capture_output=True, timeout=10, check=True)
             output = Path(result.stdout.strip())
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(output.parent.stat().st_mode), 0o700)
@@ -36,7 +41,7 @@ class SupportDiagnosticsTests(unittest.TestCase):
             self.assertEqual(body.count("health-ok"), 3)
             self.assertNotIn("unexpected-argv-collection", body)
             self.assertNotIn("curl_failed", body)
-            second = subprocess.run(["bash", str(script)], env=env, text=True, capture_output=True, timeout=10, check=True)
+            second = subprocess.run([bash, str(script)], env=env, text=True, capture_output=True, timeout=10, check=True)
             self.assertNotEqual(second.stdout.strip(), str(output))
 
 

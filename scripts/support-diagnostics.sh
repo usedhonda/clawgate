@@ -54,7 +54,7 @@ if [[ -n "$OPS_LOG" && -f "$OPS_LOG" ]]; then
 
   if [[ -n "$TRACE_ID" ]]; then
     append "### Trace filter (${TRACE_ID})"
-    rg -n -F -- "$TRACE_ID" "$PROJECT_DIR/docs/log/ops" >> "$OUT_FILE" || append "trace_not_found"
+    grep -r -n -F -- "$TRACE_ID" "$PROJECT_DIR/docs/log/ops" >> "$OUT_FILE" || append "trace_not_found"
     append ""
   fi
 fi
@@ -62,7 +62,7 @@ fi
 append "## Process"
 # Command arguments can contain credentials or message text. Collect only the
 # executable names and process IDs, never the full argv or environment.
-ps -axo pid=,ppid=,comm= | rg 'ClawGate|openclaw|gateway' >> "$OUT_FILE" || append "no_matching_process"
+ps -axo pid=,ppid=,comm= | grep -E 'ClawGate|openclaw|gateway' >> "$OUT_FILE" || append "no_matching_process"
 append ""
 
 echo "$OUT_FILE"

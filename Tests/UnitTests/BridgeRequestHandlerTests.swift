@@ -109,7 +109,7 @@ final class BridgeRequestHandlerTests: XCTestCase {
         }
         let config = ConfigStore(defaults: defaults)
         let core = BridgeCore(eventBus: EventBus(), registry: AdapterRegistry(adapters: []), logger: AppLogger(configStore: config), opsLogStore: OpsLogStore(logDirectory: directory.appendingPathComponent("logs")), configStore: config, statsCollector: StatsCollector(filePath: directory.appendingPathComponent("stats.json").path))
-        return try EmbeddedChannel(handler: BridgeRequestHandler(core: core), loop: loop)
+        return EmbeddedChannel(handler: BridgeRequestHandler(core: core), loop: loop)
     }
 
     private func readResponse(_ channel: EmbeddedChannel) throws -> (head: HTTPResponseHead, error: ErrorPayload?) {
