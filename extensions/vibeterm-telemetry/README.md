@@ -10,9 +10,10 @@ daily diary files for AI location awareness.
 | File | Role |
 |------|------|
 | `index.js` | Plugin entry — registers HTTP route |
-| `src/handler.js` | Request handler — auth, parse, dedup, diary write |
-| `src/store.js` | In-memory store — UUID dedup (1h TTL), circular history (100 entries) |
-| `src/auth.js` | Bearer token validation against gateway token |
+| `src/handler.js` | Request handler — validation, dedup, serialized diary write |
+| `src/request-body.js` | Bounded body read — byte limit, deadline and abort cleanup |
+| `src/validation.js` | Location and health input validation before diary rendering |
+| `src/store.js` | In-memory store — UUID dedup (1h TTL, max 10,000), history (100 entries) |
 | `openclaw.plugin.json` | Plugin manifest (required by OpenClaw) |
 
 ## Diary Writing
@@ -20,11 +21,40 @@ daily diary files for AI location awareness.
 Location samples are written to `~/.openclaw/workspace/memory/YYYY-MM-DD.md`.
 
 - **Format:** `📍 HH:MM - lat, lon (accuracy Xm)`
-- **Timezone:** JST (Asia/Tokyo)
+- **Timezone:** UTC, with an explicit `Z` suffix
 - **Throttle:** 200m+ movement or 30min+ elapsed (~5-20 entries/day)
 - **Errors:** Logged but never affect the API response
+- **New files:** owner-only permissions (`0600`, new memory directories `0700`)
 
 The AI reads these diary files at session start to understand the user's location context.
+
+## Authentication and limits
+
+The exact `/api/telemetry` route declares `auth: "gateway"`. OpenClaw performs
+authentication before invoking the handler, using its resolved auth policy;
+the plugin does not cache or compare a plaintext token from `api.config`.
+This preserves environment-provided credentials, SecretRefs, password mode,
+and credential rotation. Deploy it with authenticated Gateway access. An
+explicit `gateway.auth.mode: "none"` is an operator opt-out and also leaves
+Gateway-auth routes unauthenticated.
+
+OpenClaw `v2026.11.1` requires an explicit route auth field; the prior registration
+without one is rejected by that host. See the tagged
+[route registrar](https://github.com/openclaw/openclaw/blob/v2026.11.1/src/plugins/registry-registrars-network.ts)
+and [HTTP route contract](https://docs.openclaw.ai/plugins/architecture-internals/gateway-routes).
+
+Each body is limited to 1 MiB, 10 seconds, and 1,000 samples. At most eight
+requests are admitted concurrently; excess requests receive `503` with
+`Retry-After: 1`. `413` means the sender must split the batch; `408` means the
+upload did not complete in time. Invalid location samples are skipped; invalid
+health summaries receive `400` before any samples from that body are stored.
+Raw invalid samples are never logged. Health numbers must be finite numbers,
+timestamps must parse, and workout names cannot contain line breaks.
+
+Diary processing is serialized so simultaneous batches respect the existing
+200 m / 30-minute throttle. The dedup cache expires on access without a
+background timer and evicts its oldest ID if it reaches 10,000 entries. Normal
+one-hour retry deduplication is preserved below that capacity.
 
 ## Setup
 
@@ -69,23 +99,20 @@ cp -R extensions/vibeterm-telemetry/ ~/.openclaw/extensions/vibeterm-telemetry/
 openclaw gateway stop && openclaw gateway start
 ```
 
-Note: Symlinks are not supported by OpenClaw discovery — use `cp -R`.
-
 ## Test
 
+Deterministic regressions (no live Gateway, location transmission, or real diary):
+
 ```bash
-# Get gateway auth token
-TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/.openclaw/openclaw.json'))['gateway']['auth']['token'])")
-
-# Send a test sample
-curl -s -X POST http://localhost:18789/api/telemetry \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"samples":[{"id":"test-001","lat":35.6762,"lon":139.6503,"accuracy":10,"timestamp":"2026-01-01T00:00:00Z"}]}'
-
-# Expected: {"received":1,"nextMinIntervalSec":60}
-
-# Verify diary was written
-cat ~/.openclaw/workspace/memory/2026-01-01.md
-# Expected: 📍 09:00 - 35.6762, 139.6503 (accuracy 10m)
+node --test extensions/vibeterm-telemetry/src/__tests__/*.test.js
 ```
+
+For live acceptance, use an isolated development Gateway and synthetic samples
+with a current timestamp. First confirm that invalid credentials are rejected by
+the Gateway, then verify one accepted batch and a duplicate batch using that
+Gateway's configured authentication method. Check only the isolated development
+diary. Do not replay historical location records into a production diary.
+
+The unit suite verifies the route registration contract and handler behavior;
+it does not substitute for Gateway authentication and plugin lifecycle testing
+on the exact host release being deployed.

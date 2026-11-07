@@ -114,69 +114,64 @@ enum TmuxShell {
             }
     }
 
-    /// Walk the process tree starting at `rootPID` and return all descendant
-    /// process argument lines. Uses a single `ps` invocation and filters in
-    /// Swift to avoid multiple exec calls.
-    static func descendantProcessArgs(rootPID: Int32, maxDepth: Int = 3) -> [String] {
-        guard rootPID > 0 else { return [] }
-        // Single ps snapshot: pid, ppid, args
-        guard let raw = try? run(arguments: [], launchPath: "/bin/ps", psArgs: ["-A", "-o", "pid=,ppid=,command="]) else {
-            return []
-        }
-        struct ProcRow {
+    /// One process-table snapshot, indexed once and reused across all unresolved
+    /// panes in a poll. Never cache this across polls: exited/reused PIDs must not
+    /// keep a stale session classification alive.
+    struct ProcessSnapshot {
+        private struct Row {
             let pid: Int32
-            let ppid: Int32
             let command: String
         }
-        var rows: [ProcRow] = []
-        for line in raw.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else { continue }
-            // Parse: "<pid> <ppid> <command...>"
-            let scanner = Scanner(string: trimmed)
-            scanner.charactersToBeSkipped = .whitespaces
-            var pidVal: Int64 = 0
-            var ppidVal: Int64 = 0
-            guard scanner.scanInt64(&pidVal), scanner.scanInt64(&ppidVal) else { continue }
-            let cmd = String(trimmed[trimmed.index(trimmed.startIndex, offsetBy: scanner.currentIndex.utf16Offset(in: trimmed))...])
-                .trimmingCharacters(in: .whitespaces)
-            rows.append(ProcRow(pid: Int32(pidVal), ppid: Int32(ppidVal), command: cmd))
+        private var children: [Int32: [Row]] = [:]
+
+        init(output: String) {
+            for line in output.split(separator: "\n") {
+                let text = line.trimmingCharacters(in: .whitespaces)
+                let scanner = Scanner(string: text)
+                scanner.charactersToBeSkipped = .whitespaces
+                var pidValue: Int64 = 0
+                var parentValue: Int64 = 0
+                guard scanner.scanInt64(&pidValue), scanner.scanInt64(&parentValue),
+                      let pid = Int32(exactly: pidValue), pid > 0,
+                      let parent = Int32(exactly: parentValue), parent >= 0 else { continue }
+                let command = String(text[scanner.currentIndex...])
+                    .trimmingCharacters(in: .whitespaces)
+                children[parent, default: []].append(Row(pid: pid, command: command))
+            }
         }
-        // BFS from rootPID
-        var result: [String] = []
-        var queue: [(pid: Int32, depth: Int)] = [(rootPID, 0)]
-        var visited = Set<Int32>([rootPID])
-        while let (pid, depth) = queue.first {
-            queue.removeFirst()
-            if depth > 0 {  // skip root itself
-                if let row = rows.first(where: { $0.pid == pid }) {
-                    result.append(row.command)
+
+        func descendantArgs(rootPID: Int32, maxDepth: Int = 3) -> [String] {
+            guard rootPID > 0, maxDepth > 0 else { return [] }
+            var result: [String] = []
+            var queue: [(pid: Int32, depth: Int)] = [(rootPID, 0)]
+            var visited = Set<Int32>([rootPID])
+            var cursor = 0
+            while cursor < queue.count {
+                let (pid, depth) = queue[cursor]
+                cursor += 1
+                guard depth < maxDepth else { continue }
+                for child in children[pid] ?? [] where visited.insert(child.pid).inserted {
+                    result.append(child.command)
+                    queue.append((child.pid, depth + 1))
                 }
             }
-            if depth >= maxDepth { continue }
-            for child in rows where child.ppid == pid && !visited.contains(child.pid) {
-                visited.insert(child.pid)
-                queue.append((child.pid, depth + 1))
-            }
+            return result
         }
-        return result
     }
 
-    /// Overload that allows running an arbitrary executable (used for /bin/ps above).
-    /// IMPORTANT: drain the pipe BEFORE waiting for exit. Otherwise large outputs
-    /// (e.g. `ps -A`) can fill the pipe buffer (~64KB) and deadlock both sides.
-    private static func run(arguments: [String], launchPath: String, psArgs: [String]) throws -> String {
+    static func processSnapshot() -> ProcessSnapshot {
         let process = Process()
-        process.launchPath = launchPath
-        process.arguments = psArgs
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try process.run()
-        // Drain stdout first — readDataToEndOfFile blocks until EOF (process exit)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()  // cleanup after drain
-        return String(data: data, encoding: .utf8) ?? ""
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-A", "-o", "pid=,ppid=,command="]
+        guard let output = try? captureOutput(of: process), output.status == 0 else {
+            return ProcessSnapshot(output: "")
+        }
+        return ProcessSnapshot(output: output.stdout)
+    }
+
+    static func descendantProcessArgs(rootPID: Int32, maxDepth: Int = 3) -> [String] {
+        guard rootPID > 0, maxDepth > 0 else { return [] }
+        return processSnapshot().descendantArgs(rootPID: rootPID, maxDepth: maxDepth)
     }
 
     /// Keys that must NEVER be sent — they exit Claude Code to raw shell.
@@ -242,29 +237,60 @@ enum TmuxShell {
         process.arguments = arguments
         process.environment = processEnvironment()
 
+        let output = try captureOutput(of: process)
+        guard output.status == 0 else {
+            throw BridgeRuntimeError(
+                code: "tmux_command_failed",
+                message: "tmux \(arguments.first ?? "") failed (exit \(output.status))",
+                retriable: true,
+                failedStep: "tmux_shell",
+                details: output.stderr.isEmpty ? output.stdout : output.stderr
+            )
+        }
+
+        return output.stdout
+    }
+
+    struct CommandOutput {
+        let status: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    private final class CapturedData: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func store(_ value: Data) { lock.lock(); data = value; lock.unlock() }
+        func load() -> Data { lock.lock(); defer { lock.unlock() }; return data }
+    }
+
+    /// Drain BOTH streams while the child runs. Waiting for exit first, or
+    /// draining only stdout, deadlocks when either pipe fills (wide tmux panes
+    /// and large process tables can exceed the pipe's capacity).
+    static func captureOutput(of process: Process) throws -> CommandOutput {
         let stdout = Pipe()
         let stderr = Pipe()
         process.standardOutput = stdout
         process.standardError = stderr
-
-        try process.run()
-        process.waitUntilExit()
-
-        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-        let outStr = String(data: outData, encoding: .utf8) ?? ""
-        let errStr = String(data: errData, encoding: .utf8) ?? ""
-
-        guard process.terminationStatus == 0 else {
-            throw BridgeRuntimeError(
-                code: "tmux_command_failed",
-                message: "tmux \(arguments.first ?? "") failed (exit \(process.terminationStatus))",
-                retriable: true,
-                failedStep: "tmux_shell",
-                details: errStr.isEmpty ? outStr : errStr
-            )
+        defer {
+            try? stdout.fileHandleForReading.close()
+            try? stderr.fileHandleForReading.close()
         }
-
-        return outStr
+        try process.run()
+        let errors = CapturedData()
+        let readers = DispatchGroup()
+        readers.enter()
+        DispatchQueue.global(qos: .utility).async {
+            errors.store(stderr.fileHandleForReading.readDataToEndOfFile())
+            readers.leave()
+        }
+        let output = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        readers.wait()
+        return CommandOutput(
+            status: process.terminationStatus,
+            stdout: String(data: output, encoding: .utf8) ?? "",
+            stderr: String(data: errors.load(), encoding: .utf8) ?? ""
+        )
     }
 }

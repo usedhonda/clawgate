@@ -5,7 +5,7 @@ Connects OpenClaw to a local ClawGate app so AI agents can review tmux/Codex ses
 ## What this plugin adds
 
 - Registers the `clawgate` channel in OpenClaw
-- Reads channel config from ClawGate via `/v1/openclaw-info`
+- Reads account settings from OpenClaw and runtime preferences from ClawGate via `/v1/config`
 - Sends outbound messages through ClawGate (`/v1/send`)
 - Translates OpenClaw review output (`<cc_task>`, `<cc_answer>`) into tmux / messenger actions
 
@@ -29,9 +29,9 @@ The following features require OpenClaw plus this plugin:
 
 ## Requirements
 
-- Node.js 18 or newer
+- Node.js in the OpenClaw v2026.11.1 engine range: `>=24.16.0 <25 || >=26.1.0`
 - A running ClawGate instance reachable from OpenClaw (default: `http://127.0.0.1:8765`)
-- OpenClaw installed and configured
+- OpenClaw installed and configured. The source-reviewed baseline is **v2026.11.1**; see [compatibility and upgrade limits](../../docs/openclaw-compatibility.md) before changing the host version. Some optional workflows require a separately maintained host extension.
 
 ## Install
 
@@ -57,11 +57,21 @@ ln -s "$(pwd)/extensions/openclaw-plugin" ~/.openclaw/extensions/clawgate
         "enabled": true
       }
     }
+  },
+  "channels": {
+    "clawgate": {
+      "default": {
+        "apiUrl": "http://127.0.0.1:8765",
+        "defaultConversation": "Your conversation"
+      }
+    }
   }
 }
 ```
 
 ### 3. Restart OpenClaw gateway
+
+Use the restart procedure for your installation. Repository-managed deployments must follow [AGENTS.md](../../AGENTS.md) and the project restart scripts. For a standalone OpenClaw service:
 
 ```bash
 openclaw gateway stop
@@ -70,21 +80,21 @@ openclaw gateway start
 
 ## Configuration
 
-The plugin reads its runtime account config from ClawGate. The most important fields are:
+Account configuration belongs under `channels.clawgate.<accountId>` in OpenClaw. ClawGate Settings provides additional runtime preferences through `/v1/config`. The main account fields are:
 
 | Field | Example | Meaning |
 |------|---------|---------|
 | `apiUrl` | `http://127.0.0.1:8765` | ClawGate base URL |
-| `token` | `...` | Bearer token for remote ClawGate instances |
+| `token` | `...` | Optional Authorization header for an authenticated proxy or custom bridge |
 | `defaultConversation` | `Your Name` | Default LINE conversation hint |
 | `prompts.localOverlayPath` | `src/prompts-local.js` | Repo-local prompt overlay (optional) |
 | `prompts.privateOverlayPath` | `~/.clawgate/prompts-private.js` | Machine-local private overlay (recommended) |
 
 Notes:
 
-- Local ClawGate usually does not require a token.
-- Remote ClawGate requires `Authorization: Bearer <token>`.
-- The gateway token comes from your OpenClaw configuration (`~/.openclaw/openclaw.json`).
+- The native ClawGate bridge listens on all interfaces and applies source-address and browser-origin checks. The account `token` does **not** authenticate requests to that native bridge. Configure host firewall and tailnet access controls as described in the [main README](../../README.md).
+- Set `token` only if an explicitly configured proxy or custom bridge verifies that header. Do not expose the native bridge directly to an untrusted network.
+- The OpenClaw Gateway credential is a separate credential for ClawGate’s native WebSocket client. Do not copy it into this account field merely to configure a remote bridge.
 
 ## Prompt customization
 

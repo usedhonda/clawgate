@@ -4,7 +4,7 @@
  * Expected config shape in ~/.openclaw/openclaw.json:
  *   channels.clawgate.<accountId> = {
  *     apiUrl: "http://127.0.0.1:8765"      // required
- *     token: "optional-bearer-token"        // optional (remote mode)
+ *     token: "optional-proxy-token"         // optional authenticated proxy/custom bridge
  *     prompts: {                             // optional prompt profile controls
  *       enableValidation: true,
  *       enableRepoLocalOverlay: true,
@@ -16,7 +16,8 @@
  *     // defaultConversation: "..."
  *   }
  *
- * No token needed — ClawGate binds to 127.0.0.1 only (no auth required).
+ * Native ClawGate applies source-address/browser-origin policy, not this token.
+ * See the main README for the bridge network boundary and remote setup requirements.
  */
 
 import { readFileSync } from "node:fs";
@@ -35,8 +36,9 @@ const DEFAULTS = {
  */
 export function listAccountIds(cfg) {
   const section = cfg?.channels?.clawgate;
-  if (!section || typeof section !== "object") return [];
-  return Object.keys(section).filter((k) => typeof section[k] === "object");
+  if (!section || typeof section !== "object" || Array.isArray(section)) return [];
+  return Object.keys(section).filter((k) => section[k] !== null
+    && typeof section[k] === "object" && !Array.isArray(section[k]));
 }
 
 /**
@@ -61,7 +63,7 @@ export function resolveAccount(cfg, accountId) {
   }
 
   return {
-    accountId,
+    accountId: effectiveId,
     enabled: section.enabled !== false,
     apiUrl: section.apiUrl || DEFAULTS.apiUrl,
     pollIntervalMs: section.pollIntervalMs || DEFAULTS.pollIntervalMs,

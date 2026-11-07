@@ -2838,7 +2838,7 @@ function execFilePromise(cmd, args, opts = {}) {
   });
 }
 
-export function buildMsgContext(event, accountId, defaultConversation) {
+export function buildMsgContext(event, accountId, defaultConversation, sessionAgentId = resolveSessionAgentId()) {
   const payload = event.payload ?? {};
   // LINE Qt window title is always "LINE", so use defaultConversation from config
   const rawConv = payload.conversation || "LINE";
@@ -2861,7 +2861,7 @@ export function buildMsgContext(event, accountId, defaultConversation) {
     // case-preserving-peer registry (session-key-utils.ts), so the store folds the whole
     // key to lowercase on write; fold it here too so the value we emit is already in its
     // own canonical/normalized form.
-    SessionKey: `agent:${resolveSessionAgentId()}:clawgate:${accountId}:${conversation}`.toLowerCase(),
+    SessionKey: `agent:${sessionAgentId}:clawgate:${accountId}:${conversation}`.toLowerCase(),
     AccountId: accountId,
     ChatType: "direct",
     Provider: "clawgate",
@@ -2911,7 +2911,8 @@ export async function handleInboundMessage({ event, originalEvents = [], account
   const traceId = makeTraceId("line", event);
   if (!event.payload) event.payload = {};
   event.payload.trace_id = traceId;
-  const ctx = buildMsgContext(event, accountId, defaultConversation);
+  const sessionAgentId = resolveSessionAgentId().toLowerCase();
+  const ctx = buildMsgContext(event, accountId, defaultConversation, sessionAgentId);
   const conversation = ctx.ConversationLabel;
   if (!`${ctx.Body || ""}`.trim()) {
     traceLog(log, "info", {
@@ -2983,8 +2984,16 @@ export async function handleInboundMessage({ event, originalEvents = [], account
 
   // Record session
   try {
-    const storePath = runtime.config?.storePath ?? "";
-    if (storePath && runtime.channel?.session?.recordInboundSession) {
+    if (runtime.channel?.session?.recordInboundSession) {
+      // config.current() is the public config snapshot; runtime.config has no
+      // storePath. Let the host resolve its storage layout for this session's
+      // owner instead of guessing a file path or writing the store ourselves.
+      const resolveStorePath = runtime.agent?.session?.resolveStorePath
+        ?? runtime.channel.session.resolveStorePath;
+      if (typeof resolveStorePath !== "function") {
+        throw new Error("OpenClaw session path resolver is unavailable");
+      }
+      const storePath = resolveStorePath(cfg?.session?.store, { agentId: sessionAgentId });
       await runtime.channel.session.recordInboundSession({
         storePath,
         sessionKey: ctx.SessionKey,

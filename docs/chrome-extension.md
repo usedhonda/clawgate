@@ -1,6 +1,6 @@
 # ClawGate Chrome extension
 
-Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.12.3`.
+Source: `extensions/clawgate-chrome/`. Manifest V3, currently `0.12.11`.
 
 The extension is the browser half of ClawGate. It sends pages you choose to Chi,
 records where you have been, and — on Messenger only — reads the conversation on
@@ -96,6 +96,12 @@ this repository.
 
 The toolbar badge shows `!` while the extension is unconfigured.
 
+Bootstrap, bridge polling, popup connection checks, and legacy capture uploads
+have ten-second request deadlines. JSON bootstrap/poll reads retain that deadline
+through the response body, and redirects are rejected. A stalled response cannot
+leave the polling lock set indefinitely; cleanup schedules the next attempt.
+Responses that arrive after bootstrap has timed out do not update credentials.
+
 The popup also carries the passive-tracking toggle and a link to the options
 page, which manages the domain exclusion list. Excluded domains, `localhost`,
 `127.0.0.1` and the gateway's own host are never captured
@@ -110,6 +116,9 @@ to Chi. Text is extracted from the main content region, capped at 5000
 characters. One image may be OCR'd in a sandboxed frame (`sandbox/ocr.html`),
 capped at 800 characters.
 
+The bundled OCRAD.js component retains its upstream license; see
+[its pinned source and license](../extensions/clawgate-chrome/vendor/README.md).
+
 Extracted text passes through `stripInjectionPatterns()`, which replaces prompt
 injection markers with `[FILTERED]`, and `detectInjectionAttempt()` flags a page
 whose content tries to address the model. Page content is untrusted input.
@@ -120,6 +129,13 @@ While passive tracking is on, a visit is recorded after the tab has been active
 for 8 seconds. Entries are queued (max 50) and flushed on a 1.5-minute alarm to
 `/api/web-history`. The same URL is not re-sent within 30 minutes. The last 200
 sends are kept in `chrome.storage.local` under `passiveSendLog` for debugging.
+
+Only one legacy passive-queue flush runs at a time. Concurrent alarm and capture
+triggers share that work, so the same queued observation is not submitted twice
+by overlapping flushes. Observations added during delivery remain queued and may
+receive one immediate follow-up batch. Failed or uncertain entries are not
+retried within that flush; they remain for the existing later retry triggers.
+The independently durable Hub outbox keeps its own receipt and retry policy.
 
 ### Messenger conversations
 

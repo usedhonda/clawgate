@@ -52,31 +52,50 @@ final class BridgeCore {
         self.jsonEncoder.outputFormatting = [.withoutEscapingSlashes]
     }
 
-    // MARK: - CSRF protection
+    // MARK: - HTTP admission
 
-    /// Reject POST requests that carry an Origin header (browser-initiated).
-    /// Chrome extensions are explicitly allowed since they use a chrome-extension:// origin
-    /// and are additionally protected by the pairing token check.
+    /// Apply browser protection to reads as well as writes: bootstrap and read
+    /// endpoints expose credentials and private messages.
     func checkOrigin(method: HTTPMethod, headers: HTTPHeaders) -> HTTPResult? {
-        guard method == .POST else { return nil }
-        guard let origin = headers.first(name: "Origin"), !origin.isEmpty else { return nil }
-        if origin.hasPrefix("chrome-extension://") { return nil }
-        let payload = ErrorPayload(
-            code: "browser_origin_rejected",
-            message: "Requests from browsers are rejected",
-            retriable: false,
-            failedStep: "origin_check",
-            details: "Origin header detected: \(origin)"
-        )
-        return jsonResponse(
-            status: .forbidden,
-            body: encode(APIResponse<String>(ok: false, result: nil, error: payload))
-        )
+        guard !BridgeRequestSecurity.allowsBrowserHeaders(headers) else { return nil }
+        return admissionFailure(code: "browser_origin_rejected", message: "Requests from web pages are rejected", step: "origin_check")
     }
 
-    /// Source-IP filter for ClawGate API. Allows loopback and Tailscale CGNAT
-    /// (100.64.0.0/10) only. Everything else gets 403. No tokens, no whitelists.
-    /// The trust boundary is "your local machine + your Tailscale tailnet".
+    /// Run before accumulating any body bytes. Health remains exempt from the
+    /// source-IP filter, but never from browser and DNS-rebinding protection.
+    func checkRequestHead(_ head: HTTPRequestHead, remoteAddress: String?) -> HTTPResult? {
+        if let rejected = checkBrowserRequestHead(head) { return rejected }
+        let path = URLComponents(string: "http://localhost\(head.uri)")?.path ?? head.uri
+        if head.method == .GET && path == "/v1/health" { return nil }
+        return checkAuthorization(remoteAddress: remoteAddress)
+    }
+
+    /// Configured bearer federation retains its existing remote-network support.
+    /// Tokenless federation uses the ordinary source-network boundary.
+    func checkFederationRequestHead(_ head: HTTPRequestHead, remoteAddress: String?, expectedToken: String) -> HTTPResult? {
+        if let rejected = checkBrowserRequestHead(head) { return rejected }
+        if expectedToken.isEmpty { return checkAuthorization(remoteAddress: remoteAddress) }
+        guard head.headers["Authorization"] == ["Bearer \(expectedToken)"] else {
+            return admissionFailure(code: "unauthorized", message: "Federation token required", step: "federation_auth")
+        }
+        return nil
+    }
+
+    private func checkBrowserRequestHead(_ head: HTTPRequestHead) -> HTTPResult? {
+        if let rejected = checkOrigin(method: head.method, headers: head.headers) { return rejected }
+        guard BridgeRequestSecurity.allowsHost(head.headers, localHostnames: BridgeRequestSecurity.localHostnames()) else {
+            return admissionFailure(code: "invalid_host", message: "Host must identify this bridge", step: "host_check")
+        }
+        return nil
+    }
+
+    private func admissionFailure(code: String, message: String, step: String) -> HTTPResult {
+        let payload = ErrorPayload(code: code, message: message, retriable: false, failedStep: step, details: nil)
+        return jsonResponse(status: .forbidden, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
+    }
+
+    /// Source-IP filter only; this checks a network range, not a Tailscale
+    /// identity. Accepted clients can invoke privileged bridge operations.
     func checkAuthorization(remoteAddress: String?) -> HTTPResult? {
         guard let raw = remoteAddress, !raw.isEmpty else {
             return forbidden(reason: "source address unavailable")
@@ -182,7 +201,7 @@ final class BridgeCore {
         // If the caller is the Chrome extension, record the bootstrap so the
         // Settings panel can auto-detect that the extension is installed.
         if let origin = headers?.first(name: "Origin"),
-           origin.hasPrefix("chrome-extension://") {
+           BridgeRequestSecurity.isChromeExtensionOrigin(origin) {
             DispatchQueue.main.async {
                 UserDefaults.standard.set(true, forKey: "chromeExtensionProvisioned")
             }
@@ -233,7 +252,10 @@ final class BridgeCore {
             )
             return jsonResponse(status: .internalServerError, body: encode(APIResponse<String>(ok: false, result: nil, error: payload)))
         }
-        return jsonResponse(status: .ok, body: body)
+        let response = jsonResponse(status: .ok, body: body)
+        var responseHeaders = response.headers
+        responseHeaders.add(name: "Cache-Control", value: "no-store")
+        return HTTPResult(status: response.status, headers: responseHeaders, body: response.body)
     }
 
     func config() -> HTTPResult {
@@ -1236,7 +1258,9 @@ final class BridgeCore {
         }
     }
 
-    func messages(adapter adapterName: String, limit: Int, conversation: String? = nil, pathAndQuery: String = "/v1/messages", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+    func messages(adapter adapterName: String, limit requestedLimit: Int, conversation: String? = nil, pathAndQuery: String = "/v1/messages", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+        // Keep native/federation callers within the same bounds as HTTP query parsing.
+        let limit = min(max(requestedLimit, 0), 200)
         if let denied = rejectLineOnClient(adapterName: adapterName, method: .GET, pathAndQuery: pathAndQuery, body: nil, headers: headers, traceID: nil) {
             return denied
         }
@@ -1282,7 +1306,9 @@ final class BridgeCore {
         }
     }
 
-    func conversations(adapter adapterName: String, limit: Int, pathAndQuery: String = "/v1/conversations", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+    func conversations(adapter adapterName: String, limit requestedLimit: Int, pathAndQuery: String = "/v1/conversations", headers: HTTPHeaders = HTTPHeaders()) -> HTTPResult {
+        // Keep native/federation callers within the same bounds as HTTP query parsing.
+        let limit = min(max(requestedLimit, 0), 200)
         if let denied = rejectLineOnClient(adapterName: adapterName, method: .GET, pathAndQuery: pathAndQuery, body: nil, headers: headers, traceID: nil) {
             return denied
         }
@@ -1654,11 +1680,11 @@ final class BridgeCore {
             result = context(adapter: adapter)
         case (.GET, "/v1/messages"):
             let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-            let limit = min(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 50, 200)
+            let limit = min(max(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 50, 0), 200)
             result = messages(adapter: adapter, limit: limit)
         case (.GET, "/v1/conversations"):
             let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
-            let limit = min(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 50, 200)
+            let limit = min(max(components?.queryItems?.first(where: { $0.name == "limit" })?.value.flatMap(Int.init) ?? 50, 0), 200)
             result = conversations(adapter: adapter, limit: limit)
         case (.GET, "/v1/axdump"):
             let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"

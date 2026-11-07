@@ -79,14 +79,14 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         RouteKey(.GET, "/v1/messages"): { core, components, head, _ in
             let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
             let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
-            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+            let limit = min(max(limitStr.flatMap(Int.init) ?? 50, 0), 200)
             let conversation = components?.queryItems?.first(where: { $0.name == "conversation" })?.value
             return core.messages(adapter: adapter, limit: limit, conversation: conversation, pathAndQuery: head.uri, headers: head.headers)
         },
         RouteKey(.GET, "/v1/conversations"): { core, components, head, _ in
             let adapter = components?.queryItems?.first(where: { $0.name == "adapter" })?.value ?? "line"
             let limitStr = components?.queryItems?.first(where: { $0.name == "limit" })?.value
-            let limit = min(limitStr.flatMap(Int.init) ?? 50, 200)
+            let limit = min(max(limitStr.flatMap(Int.init) ?? 50, 0), 200)
             return core.conversations(adapter: adapter, limit: limit, pathAndQuery: head.uri, headers: head.headers)
         },
         RouteKey(.GET, "/v1/axdump"): { core, components, head, _ in
@@ -150,37 +150,89 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
             + blockingRoutes.keys.map { ($0.method, $0.path) }
     }()
 
+    /// Bridge requests contain JSON/text, never raw media uploads.
+    static let maximumRequestBodyBytes = 1_048_576
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer = ByteBuffer()
-
+    private var bodyDeadline: Scheduled<Void>?
+    private var closing = false
     private var sseSubscriberID: UUID?
-
     private let core: BridgeCore
+    private let requestTimeout: TimeAmount
 
-    init(core: BridgeCore) {
+    init(core: BridgeCore, requestTimeout: TimeAmount = .seconds(15)) {
         self.core = core
+        self.requestTimeout = requestTimeout
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !closing else { return }
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
+            if let rejected = core.checkRequestHead(head, remoteAddress: context.channel.remoteAddress?.ipAddress) {
+                reject(context: context, result: rejected)
+                return
+            }
+            if let length = head.headers.first(name: "Content-Length") {
+                guard let count = UInt64(length), count <= UInt64(Self.maximumRequestBodyBytes) else {
+                    rejectBody(context: context, status: HTTPResponseStatus(statusCode: 413), code: "request_body_too_large", message: "Request body exceeds 1 MiB")
+                    return
+                }
+            }
             requestHead = head
-            bodyBuffer.clear()
+            bodyBuffer = ByteBuffer()
+            bodyDeadline?.cancel()
+            bodyDeadline = context.eventLoop.scheduleTask(in: requestTimeout) { [self] in
+                guard requestHead != nil, !closing else { return }
+                rejectBody(context: context, status: .requestTimeout, code: "request_timeout", message: "Request body was not received in time")
+            }
         case .body(var chunk):
+            guard requestHead != nil else { return }
+            // Check before appending, including chunked requests without a
+            // Content-Length. Subtraction avoids integer-overflow bypasses.
+            guard chunk.readableBytes <= Self.maximumRequestBodyBytes - bodyBuffer.readableBytes else {
+                rejectBody(context: context, status: HTTPResponseStatus(statusCode: 413), code: "request_body_too_large", message: "Request body exceeds 1 MiB")
+                return
+            }
             bodyBuffer.writeBuffer(&chunk)
         case .end:
             guard let head = requestHead else { return }
-            handleRequest(context: context, head: head, body: bodyBuffer)
+            bodyDeadline?.cancel()
+            bodyDeadline = nil
+            let body = bodyBuffer
             requestHead = nil
+            bodyBuffer = ByteBuffer()
+            handleRequest(context: context, head: head, body: body)
         }
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        bodyDeadline?.cancel()
+        bodyDeadline = nil
+        requestHead = nil
+        bodyBuffer = ByteBuffer()
         if let id = sseSubscriberID {
             core.eventBus.unsubscribe(id)
             sseSubscriberID = nil
         }
+        context.fireChannelInactive()
+    }
+
+    private func rejectBody(context: ChannelHandlerContext, status: HTTPResponseStatus, code: String, message: String) {
+        let payload = ErrorPayload(code: code, message: message, retriable: false, failedStep: "request_body", details: nil)
+        let body = (try? JSONEncoder().encode(APIResponse<String>(ok: false, result: nil, error: payload))) ?? Data()
+        let headers = HTTPHeaders([("Content-Type", "application/json"), ("Content-Length", String(body.count))])
+        reject(context: context, result: HTTPResult(status: status, headers: headers, body: body))
+    }
+
+    private func reject(context: ChannelHandlerContext, result: HTTPResult) {
+        closing = true
+        bodyDeadline?.cancel()
+        bodyDeadline = nil
+        requestHead = nil
+        bodyBuffer = ByteBuffer()
+        writeResponse(context: context, result: result, closeAfterResponse: true)
     }
 
     private func handleRequest(context: ChannelHandlerContext, head: HTTPRequestHead, body: ByteBuffer) {
@@ -194,12 +246,6 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
             return
         }
 
-        // CSRF protection: reject POST requests with Origin header
-        if let csrfResult = core.checkOrigin(method: head.method, headers: head.headers) {
-            writeResponse(context: context, result: csrfResult)
-            return
-        }
-
         // Track meaningful API requests (exclude high-frequency polling/monitoring)
         let noTrack = ["/v1/poll", "/v1/health", "/v1/events", "/v1/stats", "/v1/ops/logs", "/v1/autonomous/status", "/v1/debug/line-dedup", "/v1/debug/line-health", "/v1/debug/tmux-direct"]
         if !noTrack.contains(path) {
@@ -209,13 +255,6 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         // Non-blocking: health check responds immediately on event loop
         if head.method == .GET && path == "/v1/health" {
             writeResponse(context: context, result: core.health())
-            return
-        }
-
-        // Source-IP filter: loopback + Tailscale CGNAT only
-        let remoteIP = context.channel.remoteAddress?.ipAddress
-        if let authResult = core.checkAuthorization(remoteAddress: remoteIP) {
-            writeResponse(context: context, result: authResult)
             return
         }
 
@@ -240,7 +279,7 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
         // Stats: lightweight in-memory read, respond on event loop
         if head.method == .GET && path == "/v1/stats" {
             let daysStr = components?.queryItems?.first(where: { $0.name == "days" })?.value
-            let days = min(daysStr.flatMap(Int.init) ?? 7, 90)
+            let days = min(max(daysStr.flatMap(Int.init) ?? 7, 0), 90)
             writeResponse(context: context, result: core.stats(days: days))
             return
         }
@@ -355,14 +394,22 @@ final class BridgeRequestHandler: ChannelInboundHandler, RemovableChannelHandler
 
     // MARK: - Response writing
 
-    private func writeResponse(context: ChannelHandlerContext, result: HTTPResult) {
-        let responseHead = HTTPResponseHead(version: .http1_1, status: result.status, headers: result.headers)
+    private func writeResponse(context: ChannelHandlerContext, result: HTTPResult, closeAfterResponse: Bool = false) {
+        var headers = result.headers
+        if closeAfterResponse { headers.replaceOrAdd(name: "Connection", value: "close") }
+        let responseHead = HTTPResponseHead(version: .http1_1, status: result.status, headers: headers)
         context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
 
         var buffer = context.channel.allocator.buffer(capacity: result.body.count)
         buffer.writeBytes(result.body)
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        if closeAfterResponse {
+            let flushed = context.eventLoop.makePromise(of: Void.self)
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: flushed)
+            flushed.futureResult.whenComplete { _ in context.close(promise: nil) }
+        } else {
+            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+        }
     }
 }
 

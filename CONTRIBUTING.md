@@ -5,8 +5,8 @@ Thanks for contributing. This project combines a macOS Swift app, shell tooling,
 ## Development requirements
 
 - macOS 12 or newer
-- Xcode / Swift toolchain capable of building Swift 5.9 packages
-- Node.js 18 or newer (for plugin tests)
+- Xcode 26.3 or newer (the Speech framework source requires its SDK; CI uses 26.3)
+- Node.js 24.22.1 (the version used by CI for plugin and extension tests)
 - Accessibility permission for local AX-dependent testing
 - Screen Recording permission if you test OCR-based LINE flows
 
@@ -35,6 +35,17 @@ Run plugin tests:
 ```bash
 node --experimental-test-module-mocks --test extensions/openclaw-plugin/src/__tests__/*.test.js
 ```
+
+Run Chrome extension tests:
+
+```bash
+node --test extensions/clawgate-chrome/*.test.js extensions/clawgate-chrome/tests/*.test.js
+```
+
+For OpenClaw host compatibility and the distinction between upstream and custom
+Gateway capabilities, see [OpenClaw compatibility](docs/openclaw-compatibility.md).
+The installed host and the declared plugin compatibility range must be validated
+together before deploying a host upgrade.
 
 Optional checks:
 

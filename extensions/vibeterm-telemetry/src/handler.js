@@ -32,10 +32,13 @@
 import { promises as fs } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { verifyAuth } from "./auth.js";
-import { storeSample, isDuplicate } from "./store.js";
+import { storeSample } from "./store.js";
+import { readBody, RequestBodyError } from "./request-body.js";
+import { validHealth, validSample } from "./validation.js";
 
 const NEXT_MIN_INTERVAL_SEC = 60;
+const MAX_SAMPLES = 1000;
+const MAX_IN_FLIGHT = 8;
 
 // Location diary throttle state
 let lastDiaryWrite = { lat: 0, lon: 0, time: 0 };
@@ -89,8 +92,8 @@ async function maybeWriteDiary(sample, log) {
   const diaryPath = join(memoryDir, `${dateStr}.md`);
 
   try {
-    await fs.mkdir(memoryDir, { recursive: true });
-    await fs.appendFile(diaryPath, line, "utf-8");
+    await fs.mkdir(memoryDir, { recursive: true, mode: 0o700 });
+    await fs.appendFile(diaryPath, line, { encoding: "utf-8", mode: 0o600 });
     lastDiaryWrite = { lat: sample.lat, lon: sample.lon, time: now };
     log?.debug?.(`vibeterm-telemetry: diary entry written to ${dateStr}.md`);
   } catch (err) {
@@ -179,27 +182,13 @@ async function maybeWriteHealthDiary(health, log) {
   const diaryPath = join(memoryDir, `${dateStr}.md`);
 
   try {
-    await fs.mkdir(memoryDir, { recursive: true });
-    await fs.appendFile(diaryPath, line, "utf-8");
+    await fs.mkdir(memoryDir, { recursive: true, mode: 0o700 });
+    await fs.appendFile(diaryPath, line, { encoding: "utf-8", mode: 0o600 });
     lastHealthWrite = { periodEndMs };
     log?.info?.(`vibeterm-telemetry: health diary written to ${dateStr}.md`);
   } catch (err) {
     log?.warn?.(`vibeterm-telemetry: failed to write health diary: ${err.message}`);
   }
-}
-
-/**
- * Read the full request body as a string.
- * @param {import("http").IncomingMessage} req
- * @returns {Promise<string>}
- */
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
-    req.on("error", reject);
-  });
 }
 
 /**
@@ -230,73 +219,79 @@ function sendJson(res, data) {
  * @returns {(req: import("http").IncomingMessage, res: import("http").ServerResponse) => Promise<void>}
  */
 export function createTelemetryHandler(api) {
-  const gatewayToken = api.config?.gateway?.auth?.token;
   const log = api.logger;
-
-  if (!gatewayToken) {
-    log?.warn?.("vibeterm-telemetry: no gateway auth token found in config");
-  }
+  let inFlight = 0;
+  let processing = Promise.resolve();
 
   return async (req, res) => {
+    // Authentication belongs to the auth:"gateway" route registration, so
+    // environment credentials, SecretRefs and rotation use the host's policy.
     // Method check
     if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
       sendError(res, 405, "METHOD_NOT_ALLOWED", "Only POST is accepted");
-      return;
+      return true;
     }
 
-    // Auth check
-    if (gatewayToken) {
-      const auth = verifyAuth(req, gatewayToken);
-      if (!auth.valid) {
-        log?.debug?.(`vibeterm-telemetry: auth failed: ${auth.error}`);
-        sendError(res, 401, "UNAUTHORIZED", auth.error);
-        return;
-      }
+    if (inFlight >= MAX_IN_FLIGHT) {
+      res.setHeader("Retry-After", "1");
+      res.setHeader("Connection", "close");
+      sendError(res, 503, "BUSY", "Telemetry is busy; retry later");
+      return true;
     }
-
-    // Parse body
-    let body;
+    inFlight++;
     try {
-      const raw = await readBody(req);
-      body = JSON.parse(raw);
-    } catch (err) {
-      sendError(res, 400, "BAD_REQUEST", "Invalid JSON body");
-      return;
-    }
-
-    // Validate samples array
-    const samples = body.samples;
-    if (!Array.isArray(samples)) {
-      sendError(res, 400, "BAD_REQUEST", "\"samples\" must be an array");
-      return;
-    }
-
-    // Process samples with dedup
-    let received = 0;
-    for (const sample of samples) {
-      if (!sample.id || typeof sample.lat !== "number" || typeof sample.lon !== "number") {
-        log?.debug?.(`vibeterm-telemetry: skipping invalid sample: ${JSON.stringify(sample).slice(0, 100)}`);
-        continue;
+      // Parse before enqueueing work. A slow upload cannot hold the diary queue.
+      let body;
+      try {
+        const raw = await readBody(req);
+        body = JSON.parse(raw);
+      } catch (err) {
+        if (err instanceof RequestBodyError) {
+          res.setHeader("Connection", "close");
+          sendError(res, err.status, err.code, err.message);
+        } else {
+          sendError(res, 400, "BAD_REQUEST", "Invalid JSON body");
+        }
+        return true;
       }
-      if (storeSample(sample)) {
-        received++;
-        maybeWriteDiary(sample, log).catch(() => {}); // fire-and-forget
+
+      // Validate samples array
+      const samples = body?.samples;
+      if (!Array.isArray(samples) || samples.length > MAX_SAMPLES) {
+        sendError(res, 400, "BAD_REQUEST", "\"samples\" must be an array of at most 1000 entries");
+        return true;
       }
+      if (!validHealth(body.health)) {
+        sendError(res, 400, "BAD_REQUEST", "Invalid health summary");
+        return true;
+      }
+
+      // Batch members and simultaneous uploads share the throttle state. Await
+      // each write before checking the next sample; fire-and-forget lets every
+      // member observe the old timestamp and defeats the diary's movement limit.
+      const work = processing.then(async () => {
+        let received = 0;
+        for (const sample of samples) {
+          if (!validSample(sample)) continue;
+          if (storeSample(sample)) {
+            received++;
+            await maybeWriteDiary(sample, log);
+          }
+        }
+        const health = body.health;
+        if (health) {
+          await maybeWriteHealthDiary(health, log);
+        }
+        log?.info?.(`vibeterm-telemetry: processed ${samples.length} samples, ${received} new, health=${Boolean(health)}`);
+        return received;
+      });
+      processing = work.catch(() => undefined);
+      const received = await work;
+      sendJson(res, { received, nextMinIntervalSec: NEXT_MIN_INTERVAL_SEC });
+      return true;
+    } finally {
+      inFlight--;
     }
-
-    // Process health data
-    const health = body.health;
-    let healthReceived = false;
-    if (health && typeof health === "object") {
-      healthReceived = true;
-      await maybeWriteHealthDiary(health, log);
-    }
-
-    log?.info?.(`vibeterm-telemetry: processed ${samples.length} samples, ${received} new, health=${healthReceived}`);
-
-    sendJson(res, {
-      received,
-      nextMinIntervalSec: NEXT_MIN_INTERVAL_SEC,
-    });
   };
 }

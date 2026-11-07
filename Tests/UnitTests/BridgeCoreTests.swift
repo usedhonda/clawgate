@@ -29,8 +29,8 @@ private final class FakeAdapter: AdapterProtocol {
             messages: [
                 VisibleMessage(text: "Hello", sender: "other", yOrder: 0),
                 VisibleMessage(text: "Hi there", sender: "self", yOrder: 1),
-            ],
-            messageCount: 2,
+            ].suffix(limit).map { $0 },
+            messageCount: min(limit, 2),
             timestamp: "2026-02-06T00:00:00Z"
         )
     }
@@ -41,8 +41,8 @@ private final class FakeAdapter: AdapterProtocol {
             conversations: [
                 ConversationEntry(name: "TestUser", yOrder: 0, hasUnread: false),
                 ConversationEntry(name: "WorkGroup", yOrder: 1, hasUnread: true),
-            ],
-            count: 2,
+            ].prefix(limit).map { $0 },
+            count: min(limit, 2),
             timestamp: "2026-02-06T00:00:00Z"
         )
     }
@@ -166,6 +166,31 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertEqual(parsed.result?.conversations.last?.hasUnread, true)
     }
 
+    func testFederationAdmissionPreservesAuthenticatedLANAndGuardsTokenlessPeers() {
+        let core = makeCore()
+        var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "/federation", headers: HTTPHeaders([("Host", "192.0.2.10:8765"), ("Authorization", "Bearer test-federation-token")]))
+        XCTAssertNil(core.checkFederationRequestHead(head, remoteAddress: "192.168.1.2", expectedToken: "test-federation-token"))
+        XCTAssertNotNil(core.checkFederationRequestHead(head, remoteAddress: "192.168.1.2", expectedToken: "different-test-token"))
+        XCTAssertNotNil(core.checkFederationRequestHead(head, remoteAddress: "192.168.1.2", expectedToken: ""))
+        XCTAssertNil(core.checkFederationRequestHead(head, remoteAddress: "100.64.0.10", expectedToken: ""))
+        head.headers.add(name: "Origin", value: "https://attacker.example")
+        XCTAssertNotNil(core.checkFederationRequestHead(head, remoteAddress: "192.168.1.2", expectedToken: "test-federation-token"))
+    }
+
+    func testReadLimitsCannotCrashAdapterCollectionSlices() throws {
+        let core = makeCore()
+        for (limit, expectedCount) in [(Int.min, 0), (-1, 0), (0, 0), (1, 1), (200, 2), (Int.max, 2)] {
+            let messages = core.messages(adapter: "line", limit: limit)
+            XCTAssertEqual(messages.status, .ok)
+            let messageResult = try JSONDecoder().decode(APIResponse<MessageList>.self, from: messages.body)
+            XCTAssertEqual(messageResult.result?.messages.count, expectedCount)
+            let conversations = core.conversations(adapter: "line", limit: limit)
+            XCTAssertEqual(conversations.status, .ok)
+            let conversationResult = try JSONDecoder().decode(APIResponse<ConversationList>.self, from: conversations.body)
+            XCTAssertEqual(conversationResult.result?.conversations.count, expectedCount)
+        }
+    }
+
     func testContextUnsupportedAdapterReturnsError() {
         let core = makeCore()
         let response = core.context(adapter: "slack")
@@ -196,12 +221,20 @@ final class BridgeCoreTests: XCTestCase {
         XCTAssertNil(result)
     }
 
-    func testOriginCheckAllowsGetWithOrigin() {
+    func testOriginCheckRejectsReadAndPutWithWebOrigin() {
         let core = makeCore()
-        var headers = HTTPHeaders()
-        headers.add(name: "Origin", value: "http://evil.com")
-        let result = core.checkOrigin(method: .GET, headers: headers)
-        XCTAssertNil(result)
+        let headers = HTTPHeaders([("Origin", "https://attacker.example")])
+        for method in [HTTPMethod.GET, .PUT, .DELETE, .OPTIONS] {
+            XCTAssertEqual(core.checkOrigin(method: method, headers: headers)?.status, .forbidden)
+        }
+    }
+
+    func testOriginCheckAllowsUnpackedExtension() {
+        let core = makeCore()
+        let headers = HTTPHeaders([("Origin", "chrome-extension://abcdefghijklmnopabcdefghijklmnop")])
+        for method in [HTTPMethod.GET, .POST, .PUT] {
+            XCTAssertNil(core.checkOrigin(method: method, headers: headers))
+        }
     }
 
     func testLineHealthDebugReturnsSnapshotEnvelope() throws {
@@ -388,19 +421,26 @@ final class BridgeCoreTests: XCTestCase {
     // MARK: - Helpers
 
     private func makeCore() -> BridgeCore {
-        let defaults = UserDefaults(suiteName: "clawgate.tests.core")!
-        defaults.removePersistentDomain(forName: "clawgate.tests.core")
+        let suite = "clawgate.tests.core.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.removePersistentDomain(forName: suite)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("clawgate-core-tests-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: directory)
+        }
         let cfg = ConfigStore(defaults: defaults)
         var appCfg = cfg.load()
         appCfg.lineEnabled = true
         cfg.save(appCfg)
 
-        let statsFile = NSTemporaryDirectory() + "clawgate-stats-test-\(UUID().uuidString).json"
+        let statsFile = directory.appendingPathComponent("stats.json").path
         return BridgeCore(
             eventBus: EventBus(),
             registry: AdapterRegistry(adapters: [FakeAdapter()]),
             logger: AppLogger(configStore: cfg),
-            opsLogStore: OpsLogStore(),
+            opsLogStore: OpsLogStore(logDirectory: directory.appendingPathComponent("logs")),
             configStore: cfg,
             statsCollector: StatsCollector(filePath: statsFile)
         )

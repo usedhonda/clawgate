@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -19,6 +22,9 @@ jobs:
 
       - name: Leak guard
         run: bash scripts/security-leak-check.sh --all
+
+      - name: Leak guard regressions
+        run: bash scripts/security-leak-check.sh --self-test
 
   swift-test:
     runs-on: macos-15
@@ -42,55 +48,24 @@ jobs:
       - name: Test
         run: swift test
 
+  # Keep the existing check name while using the complete suites as its evidence.
   line-smoke:
-    runs-on: macos-15
-    timeout-minutes: 10
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.changed_files_url, 'LINE') ||
-      true
+    needs: [swift-test, lint]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Check LINE-related changes
-        id: line-check
+      - name: Require full Swift and plugin validation
+        env:
+          SWIFT_RESULT: ${{ needs.swift-test.result }}
+          PLUGIN_RESULT: ${{ needs.lint.result }}
         run: |
-          LINE_PATTERNS="ClawGate/Adapters/LINE/ ClawGate/Automation/AX/ extensions/openclaw-plugin/src/outbound.js extensions/openclaw-plugin/src/gateway.js extensions/openclaw-plugin/src/client.js extensions/openclaw-plugin/src/channel.js"
-          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
-          HAS_LINE=false
-          for pattern in $LINE_PATTERNS; do
-            if echo "$CHANGED" | grep -q "$pattern"; then
-              HAS_LINE=true
-              break
-            fi
-          done
-          echo "has_line_changes=$HAS_LINE" >> "$GITHUB_OUTPUT"
-
-      - name: Select Xcode 26.3
-        if: steps.line-check.outputs.has_line_changes == 'true'
-        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
-
-      - name: Cache SPM
-        if: steps.line-check.outputs.has_line_changes == 'true'
-        uses: actions/cache@v4
-        with:
-          path: .build
-          key: spm-${{ runner.os }}-xcode-26.3-${{ hashFiles('Package.resolved') }}
-          restore-keys: spm-${{ runner.os }}-xcode-26.3-
-
-      - name: Run LINE-specific Swift tests
-        if: steps.line-check.outputs.has_line_changes == 'true'
-        run: swift test --filter "LINE|LINEAdapter|LineSidebar|LineTextSanitizer"
-
-      - name: Run outbound.js mapping tests
-        if: steps.line-check.outputs.has_line_changes == 'true'
-        run: node --experimental-test-module-mocks --test extensions/openclaw-plugin/src/__tests__/outbound.test.js
-
-      - name: Skip (no LINE changes)
-        if: steps.line-check.outputs.has_line_changes != 'true'
-        run: echo "No LINE-related files changed — skipping smoke test"
+          if [[ "$SWIFT_RESULT" == "success" && "$PLUGIN_RESULT" == "success" ]]; then
+            echo "LINE Swift and outbound coverage passed in the complete suites."
+          else
+            echo "Required suites did not succeed: Swift=$SWIFT_RESULT plugin=$PLUGIN_RESULT" >&2
+            exit 1
+          fi
 
   lint:
     runs-on: ubuntu-latest
@@ -98,11 +73,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+
       - name: ShellCheck
         run: shellcheck -S warning scripts/*.sh
 
       - name: JS syntax check
-        run: find extensions -name '*.js' -not -path '*__tests__*' -exec node --check {} +
+        run: find extensions -name '*.js' -print0 | xargs -0 -n 1 node --check
 
       - name: Run plugin tests
         run: node --experimental-test-module-mocks --test extensions/openclaw-plugin/src/__tests__/*.test.js
+
+      - name: Run Chrome extension tests
+        run: node --test extensions/clawgate-chrome/*.test.js extensions/clawgate-chrome/tests/*.test.js
+
+      - name: Run telemetry plugin tests
+        run: node --test extensions/vibeterm-telemetry/src/__tests__/*.test.js
+
+      - name: Support diagnostics privacy regression
+        run: python3 -m unittest discover -s scripts/tests -p 'test_support_diagnostics.py'
