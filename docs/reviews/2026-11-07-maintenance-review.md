@@ -196,3 +196,32 @@ On a fresh installation, hostname discovery may still be warming when the first
 MagicDNS request arrives. Use an IP literal or retry after discovery; do not
 weaken Host admission to accept an arbitrary DNS alias. Tmux subprocesses now
 drain pipes safely but do not yet have a general process-execution deadline.
+
+## RepoFix follow-up: reuse and CI consolidation
+
+The explicitly requested follow-up reuses this PR's verified code review and CI
+instead of recreating the same patch. Independent dependency, lifecycle, and
+test-reduction findings are published in focused RepoFix PRs.
+
+The previous `line-smoke` job repeated a subset of the full `swift-test` suite
+and the already executed `outbound.test.js` cases. Those Node tests mock the
+transports and have no macOS-only operation. Its second macOS checkout/build
+does not add a distinct runtime or oracle. Keep the check name as a small Ubuntu
+gate that requires successful full Swift and JavaScript jobs, including rejecting
+failed, skipped, or cancelled prerequisites. This removes one duplicate Swift
+subset run and one duplicate outbound run on LINE-related changes. Mac test
+jobs for that path decrease from two to one; no claim is made about a measured
+wall-clock or billing reduction.
+
+For this PR relative to main: Swift cases 1,207 to 1,225 (19 added, one permissive
+GET-origin case replaced); plugin 190 to 193; Chrome 47 to 53; telemetry 0 to 10;
+diagnostic Python regression 0 to 1. Existing security and behavior cases are
+retained. The separate test-consolidation PR records its own reductions and
+preserved input vectors.
+
+The model audit also distinguishes a stock-compatible CLI handshake from the
+custom per-request `chat.send` fields used by Pet Log and minutes. This is
+documented in the compatibility matrix without weakening request isolation or
+model acknowledgements. The follow-up environment became unavailable mid-task;
+GitHub's immutable source reads and exact-commit CI provide the publication and
+validation path for these remaining edits.

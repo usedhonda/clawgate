@@ -45,6 +45,15 @@ alone does not enable them:
   does not include `interactive`, and its closed connect schema does not include
   `executionPurpose`. The dedicated connection requires the corresponding host
   extension; the ordinary `cli` connection has a different compatibility status.
+- **Per-request Pet Log and minutes model routing.** The stock v2026.11.1
+  closed `chat.send` schema accepts `thinking` but does not declare `model`,
+  `requestLocalContext`, `nonprojection`, or `retainTerminalResult`.
+  `PetLogChatSendParams` and `MinutesModelSendParams` therefore require the
+  matching host extension even over an ordinary CLI connection. A compatible
+  handshake does not establish support for these requests. Preserve model and
+  fallback acknowledgements and isolation checks; do not strip these fields or
+  change a shared session's model as a silent fallback. Source:
+  [tagged chat.send schema](https://github.com/openclaw/openclaw/blob/v2026.11.1/packages/gateway-protocol/src/schema/logs-chat.ts).
 - **Protected bridge admission.** The plugin's signed ingress path expects
   `runtime.channel.inbound.bridgeAdmission` helpers from its host integration.
   These are not present in the reviewed official plugin runtime. Preserve the
