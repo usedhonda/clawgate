@@ -190,29 +190,42 @@ final class PetModelDisconnectRoutingTests: XCTestCase {
         XCTAssertFalse(model.isSummonBusy, "dispatch failure must clear summon slot immediately")
     }
 
-    func testPreAckLogEventsAreRejectedUntilGatewayRunIdArrives() async throws {
-        let model = PetModel()
-        model.connectionState = .connected
-        model.setSessionKeyForTesting("test-session")
-        model.suppressLogSendForTesting = true
-        XCTAssertTrue(model.sendLogInstruction(envelope: logEnvelope(instruction: "pre-ack test")))
+    func testPreAckLogEventsAreRejectedUntilGatewayRunIdArrives() async {
+        // This case verifies event correlation. Keep the production deadline so
+        // the suite's 100ms watchdog cannot expire while CI schedules the events.
+        PetModel.logAwaitingReplyTimeoutSeconds = originalLogAwaitingReplyTimeoutSeconds
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async {
+                let model = PetModel()
+                model.connectionState = .connected
+                model.setSessionKeyForTesting("test-session")
+                model.suppressLogSendForTesting = true
+                XCTAssertTrue(model.sendLogInstruction(envelope: self.logEnvelope(instruction: "pre-ack test")))
 
-        let initialLogCount = model.logReplies.count
-        let initialMessageCount = model.messages.count
-        model.handleEvent(.message(OpenClawChatMessage(id: "m1", role: .assistant, text: "stale final")))
-        model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "m1"), text: "stale delta"))
-        model.handleEvent(.messageComplete(messageId: OpenClawEventOwnerIdentity(messageId: "m1")))
-        try await Task.sleep(nanoseconds: 50_000_000)
+                let initialLogCount = model.logReplies.count
+                let initialMessageCount = model.messages.count
+                model.handleEvent(.message(OpenClawChatMessage(id: "m1", role: .assistant, text: "stale final")))
+                model.handleEvent(.delta(messageId: OpenClawEventOwnerIdentity(messageId: "m1"), text: "stale delta"))
+                model.handleEvent(.messageComplete(messageId: OpenClawEventOwnerIdentity(messageId: "m1")))
 
-        XCTAssertEqual(model.pendingSummonSource, "log")
-        XCTAssertNil(model.pendingSummonRunId)
-        XCTAssertTrue(model.logAwaitingReply)
-        XCTAssertFalse(model.isStreaming)
-        XCTAssertTrue(model.streamingText.isEmpty)
-        XCTAssertEqual(model.logReplies.count, initialLogCount)
-        XCTAssertEqual(model.messages.count, initialMessageCount)
-        XCTAssertTrue(model.summonResults.isEmpty)
-        model.cleanup()
+                // handleEvent enqueues on the main queue. Observe on that same
+                // queue after all three events, without a sleep or off-main reads.
+                DispatchQueue.main.async {
+                    defer {
+                        model.cleanup()
+                        continuation.resume()
+                    }
+                    XCTAssertEqual(model.pendingSummonSource, "log")
+                    XCTAssertNil(model.pendingSummonRunId)
+                    XCTAssertTrue(model.logAwaitingReply)
+                    XCTAssertFalse(model.isStreaming)
+                    XCTAssertTrue(model.streamingText.isEmpty)
+                    XCTAssertEqual(model.logReplies.count, initialLogCount)
+                    XCTAssertEqual(model.messages.count, initialMessageCount)
+                    XCTAssertTrue(model.summonResults.isEmpty)
+                }
+            }
+        }
     }
 
     /// A late event from a DIFFERENT run must be dropped without touching any
