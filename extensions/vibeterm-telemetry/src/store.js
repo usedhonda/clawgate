@@ -8,8 +8,8 @@
  */
 
 const DEDUP_TTL_MS = 60 * 60 * 1000; // 1 hour
+const DEDUP_MAX = 10_000;
 const HISTORY_MAX = 100;
-const CLEANUP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 
 /** @type {Map<string, number>} uuid -> timestamp */
 const seenIds = new Map();
@@ -20,13 +20,15 @@ const history = [];
 /** @type {object | null} */
 let latestLocation = null;
 
-// Periodic cleanup of expired dedup entries
-setInterval(() => {
-  const cutoff = Date.now() - DEDUP_TTL_MS;
+// Entries are insertion ordered. Expire them on access instead of creating an
+// import-time timer that survives plugin reload and keeps Gateway shutdown alive.
+function pruneExpired(now = Date.now()) {
+  const cutoff = now - DEDUP_TTL_MS;
   for (const [id, ts] of seenIds) {
-    if (ts < cutoff) seenIds.delete(id);
+    if (ts > cutoff) break;
+    seenIds.delete(id);
   }
-}, CLEANUP_INTERVAL_MS);
+}
 
 /**
  * Check if a sample ID has already been seen.
@@ -35,6 +37,7 @@ setInterval(() => {
  */
 export function isDuplicate(id) {
   if (!id) return false;
+  pruneExpired();
   return seenIds.has(id);
 }
 
@@ -44,10 +47,15 @@ export function isDuplicate(id) {
  * @returns {boolean} true if stored, false if duplicate
  */
 export function storeSample(sample) {
-  if (!sample.id) return false;
+  if (!sample || typeof sample.id !== "string" || !sample.id) return false;
+  const now = Date.now();
+  pruneExpired(now);
   if (seenIds.has(sample.id)) return false;
 
-  seenIds.set(sample.id, Date.now());
+  while (seenIds.size >= DEDUP_MAX) {
+    seenIds.delete(seenIds.keys().next().value);
+  }
+  seenIds.set(sample.id, now);
 
   const entry = {
     ...sample,
@@ -86,6 +94,7 @@ export function getHistory(limit = 10) {
  * @returns {{ dedupSize: number, historySize: number, hasLatest: boolean }}
  */
 export function getStats() {
+  pruneExpired();
   return {
     dedupSize: seenIds.size,
     historySize: history.length,

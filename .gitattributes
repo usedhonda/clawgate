@@ -1,0 +1,2 @@
+# Preserve the vendored upstream license byte for byte, including its whitespace.
+extensions/clawgate-chrome/vendor/OCRAD-LICENSE.txt -whitespace

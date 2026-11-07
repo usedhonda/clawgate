@@ -32,7 +32,10 @@ let package = Package(
         ),
         .testTarget(
             name: "UnitTests",
-            dependencies: ["ClawGate"],
+            dependencies: [
+                "ClawGate",
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ],
             path: "Tests/UnitTests"
         ),
     ]

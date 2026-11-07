@@ -1,93 +1,82 @@
-# Direct Gateway Setup (No Federation)
+# Direct Gateway Setup
 
-Connect OpenClaw Gateway directly to a remote ClawGate instance, without Federation.
+Connect an OpenClaw Gateway to a ClawGate bridge on a trusted network without
+requiring federation. First check the [host compatibility notes](../openclaw-compatibility.md):
+custom minutes, ambient, and messaging contracts are not automatically available
+in an upstream OpenClaw installation.
 
-## Prerequisites
+## The two connections
 
-- ClawGate running on a host with tmux sessions (Host B)
-- OpenClaw Gateway running on another host (Host A)
-- Network connectivity between hosts (Tailscale recommended)
+| Connection | Destination | Configuration |
+| --- | --- | --- |
+| Native pet → Gateway WebSocket | Gateway host, normally port 18789 | ClawGate Settings: OpenClaw host and port; local Gateway credential |
+| Gateway plugin → ClawGate HTTP API | Bridge host, port 8765 | OpenClaw `channels.clawgate.<accountId>.apiUrl` |
 
-## Setup
+Do not use a bridge URL as the pet's Gateway URL.
 
-### 1. ClawGate (Host B) — Enable Remote Access
+## Network access
 
-In ClawGate settings (Gateway section):
+The current app listens on `0.0.0.0:8765`. The HTTP API accepts loopback and
+source addresses in the CGNAT range used by Tailscale. It does not authenticate
+those addresses as individual Tailscale users or devices, and it does not check
+a bridge bearer token. `/v1/health` is public liveness only.
 
-- Enable **"Allow Gateway to connect"**
-- Set a **token** (shared secret)
+Use a host firewall and tailnet ACLs to restrict port 8765 to trusted peers.
+Do not publish it through a public reverse proxy or an untrusted local proxy:
+a proxy can make every caller appear to be the same trusted source. The API can
+send adapter actions and expose the Gateway credential through its bootstrap
+endpoint, so access grants substantial authority.
 
-Or via API:
+`remoteAccessEnabled` and `remoteAccessToken` are retired settings. The old
+`PUT /v1/config` examples do not apply; the app has no such update route.
 
-```bash
-# On Host B
-curl -s -X PUT http://127.0.0.1:8765/v1/config \
-  -H "Content-Type: application/json" \
-  -d '{"remoteAccessEnabled": true, "remoteAccessToken": "your-secret-token"}'
-```
+## Configure the Gateway plugin
 
-ClawGate will bind to `0.0.0.0:8765` when remote access is enabled.
-
-### 2. OpenClaw Gateway (Host A) — Point to Remote ClawGate
-
-In `~/.openclaw/openclaw.json`, set the ClawGate channel config:
+Install the plugin following its [README](../../extensions/openclaw-plugin/README.md)
+and the compatibility notes. Set the account's `apiUrl` in the OpenClaw config:
 
 ```json
 {
   "channels": {
     "clawgate": {
       "default": {
-        "apiUrl": "http://host-b-address:8765",
-        "token": "your-secret-token"
+        "apiUrl": "http://bridge.example-tailnet.ts.net:8765"
       }
     }
   }
 }
 ```
 
-Or using the CLI:
+The hostname is a placeholder; use the address of your trusted bridge host.
+The plugin still supports a `token` option for explicitly configured authenticated
+frontends, but that token is not the native bridge's access control.
+
+Configure the app's Gateway host and port in Settings, using the Gateway's
+address rather than the bridge address. Keep the Gateway's own authentication
+enabled. Do not copy credentials into the repository or public diagnostics.
+
+Use the canonical restart flow for the actual deployment. A source or unit-test
+pass does not establish that the running Gateway loaded the edited plugin.
+
+## Verify
+
+From a trusted Gateway host:
 
 ```bash
-openclaw config set channels.clawgate.default.apiUrl "http://host-b:8765"
-openclaw config set channels.clawgate.default.token "your-secret-token"
+curl --fail --max-time 10 http://bridge.example-tailnet.ts.net:8765/v1/health
+curl --fail --max-time 10 http://bridge.example-tailnet.ts.net:8765/v1/doctor
 ```
 
-Restart OpenClaw Gateway after config changes.
-
-### 3. Verify
-
-```bash
-# From Host A, test ClawGate reachability
-curl -s -H "Authorization: Bearer your-secret-token" \
-  http://host-b-address:8765/v1/health
-
-# Check doctor
-curl -s -H "Authorization: Bearer your-secret-token" \
-  http://host-b-address:8765/v1/doctor
-```
-
-## Security
-
-- **Tailscale recommended**: Use Tailscale addresses (`100.x.x.x` or `hostname.tailnet`) instead of public IPs
-- **Token required**: All requests must include `Authorization: Bearer <token>`
-- **CSRF protection**: POST requests with `Origin` header are rejected (browser protection)
-- Do not expose port 8765 to the public internet without additional access controls
-
-## Migrating from Federation
-
-If you previously used Federation (server/client mode):
-
-1. On Host B: Enable remote access in ClawGate settings
-2. On Host A: Change `apiUrl` in `openclaw.json` from `http://127.0.0.1:8765` to `http://host-b:8765`
-3. Add `token` to `openclaw.json` matching Host B's remote access token
-4. Federation can be left enabled during transition — it won't conflict with direct access
-5. Once verified, Federation is no longer needed (but code remains until Phase D cleanup)
+Check plugin startup and one fresh event in the running environment. Do not
+replay historical messages or treat a health response as end-to-end delivery.
+`/v1/openclaw-info` returns a credential; do not paste its response into an issue.
 
 ## Troubleshooting
 
 | Symptom | Check |
-|---------|-------|
-| Gateway can't reach ClawGate | `remoteAccessEnabled` is true? Firewall allows 8765? |
-| 401 Unauthorized | Token matches between ClawGate and `openclaw.json`? |
-| Events not arriving | Gateway polling the right `apiUrl`? Check Gateway logs |
-| `/v1/send` rejected | Token correct? Check CSRF (no Origin header in server-to-server calls) |
+| --- | --- |
+| Health works but other routes return 403 | Source-network policy and browser-origin checks; health is not an authorization test |
+| Gateway cannot reach the bridge | Correct host and port, host firewall, tailnet ACLs, bridge process |
+| Pet connects to the wrong Gateway | ClawGate Settings host/port take precedence for the connection destination |
+| Events arrive but specialized features fail | Required custom Gateway capabilities, plugin SDK compatibility, and feature-specific admission |
+| Changed plugin behaves like the old version | Canonical restart and actual loaded plugin path/version |

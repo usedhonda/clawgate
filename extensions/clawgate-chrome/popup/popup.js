@@ -1,3 +1,5 @@
+import { fetchWithDeadline } from '../request.js';
+
 const DEFAULT_SETTINGS = {
   bridgePort: 8765,
   gatewayURL: '',
@@ -63,12 +65,10 @@ async function connectToClawGate() {
   setStatus(false, 'Connecting...');
 
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/v1/openclaw-info`);
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const data = await response.json();
+    const data = await fetchWithDeadline(`http://127.0.0.1:${port}/v1/openclaw-info`, {}, async (response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    });
     const host = typeof data.gateway_host === 'string' && data.gateway_host
       ? data.gateway_host
       : (typeof data.host === 'string' ? data.host : '');
@@ -104,7 +104,7 @@ async function testConnection() {
   }
 
   try {
-    const response = await fetch(new URL('/health', gatewayURL).toString(), {
+    const response = await fetchWithDeadline(new URL('/health', gatewayURL).toString(), {
       headers: {
         Authorization: `Bearer ${gatewayToken}`,
       },

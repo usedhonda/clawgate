@@ -3,27 +3,23 @@
 [![CI](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml/badge.svg)](https://github.com/usedhonda/clawgate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A macOS menu bar app that lets an AI agent (OpenClaw) monitor, review, and interact with your Claude Code / Codex sessions in real time.
+A macOS menu bar companion for OpenClaw: monitor Claude Code / Codex tmux sessions, chat with a desktop pet, capture optional ambient context, and bridge selected browser and messaging workflows.
 
 ## How It Works
 
-```
-Claude Code (tmux) <--WS--> cc-status-bar <--WS--> ClawGate <--HTTP--> OpenClaw Gateway <--> AI
-                                                       |                                     |
-                                                   EventBus                         User (Messenger app)
-                                                   HTTP API
-```
+1. **ClawGate's built-in tmux poller** discovers sessions and observes their state. A separate cc-status-bar process is not required.
+2. **ClawGate's HTTP bridge** exposes buffered events through `/v1/poll` and `/v1/events`, and handles approved adapter operations.
+3. **The ClawGate OpenClaw plugin** consumes those events and routes reviews and notifications through the Gateway.
+4. **The native pet client** connects directly to the Gateway over WebSocket for chat. Ambient ingest and retained-meeting execution use separate connections and capability checks.
 
-1. **cc-status-bar** connects to Claude Code / Codex tmux sessions and streams state changes over WebSocket
-2. **ClawGate** receives those events, buffers them in an EventBus (ring buffer, 1000 events), and exposes them via HTTP API (`/v1/poll`, `/v1/events` SSE)
-3. **OpenClaw plugin** polls ClawGate for events, sends task completions and questions to an AI for review
-4. The AI responds with `<cc_task>` tags that ClawGate sends back to Claude Code / Codex via tmux
+This repository also contains a Chrome extension and an optional VibeTerm telemetry plugin. Some integrations use custom Gateway contracts, so a successful connection to upstream OpenClaw does not establish support for every feature. Read [OpenClaw compatibility](docs/openclaw-compatibility.md) before upgrading the host.
 
 ## Ambient Context (optional)
 
-Beyond session monitoring, ClawGate can give the agent a sense of what is happening *around* the machine. Start **Recording** from the menu bar and ClawGate captures nearby speech, transcribes it on-device with whisper.cpp, and sends periodic text summaries to OpenClaw so the agent has ambient context — it is a context stream, not a recording archive, and audio never leaves the machine.
+Beyond session monitoring, ClawGate can give the agent a sense of what is happening *around* the machine. Start **Recording** from the menu bar and ClawGate captures nearby speech, transcribes it on-device with whisper.cpp, and sends periodic text summaries to OpenClaw so the agent has ambient context — the default Gateway context stream carries text. Meeting recordings and the optional Personal Data Hub route have separate storage and transfer rules.
 
-- **On-device only**: capture and transcription run locally; only text summaries are delivered.
+- **Default context stream**: capture and transcription run locally; text summaries/deltas are delivered to the configured Gateway.
+- **Optional Hub transfer**: a separately provisioned private runtime manifest can authorize selected meeting originals and transcripts to be sent to Personal Data Hub. This is not enabled by credentials alone; see [audio Hub admission and retention](docs/audio-hub-producer.md).
 - **Speaker labeling (optional)**: on Apple Silicon / macOS 14+, an optional helper can label each utterance as *self* vs *other* by matching against a locally enrolled voiceprint. On Intel / older macOS the app runs normally with labeling off.
 - **Log tab**: the pet chat panel shows the running, time-stamped transcript grouped by speaker.
 
@@ -85,10 +81,7 @@ Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/claw
 1. Open `ClawGate.dmg` and drag **ClawGate** to **Applications**
 2. Launch ClawGate from Applications (it runs as a menu bar app)
 3. Grant **Accessibility** permission: System Settings > Privacy & Security > Accessibility > enable ClawGate (required for window tracking — Chi follows your focused window)
-4. Install [cc-status-bar](https://github.com/nicobailon/cc-status-bar) and start it:
-   ```bash
-   cc-status-bar
-   ```
+4. Install `tmux` and run the Claude Code / Codex sessions you want to monitor inside it. ClawGate discovers them directly; cc-status-bar is not required.
 5. Install the ClawGate plugin on your OpenClaw Gateway machine (see [Plugin Setup](#plugin-setup) below)
 6. Verify ClawGate is running:
    ```bash
@@ -99,9 +92,9 @@ Download the latest DMG from [GitHub Releases](https://github.com/usedhonda/claw
 
 ### Requirements
 
-- macOS 13+ (Ventura or later)
-- [cc-status-bar](https://github.com/nicobailon/cc-status-bar) (provides Claude Code / Codex session state via WebSocket)
-- [OpenClaw Gateway](https://github.com/usedhonda/openclaw_general) (required for pet chat and summon features)
+- macOS 12+ for the app; optional capture and speaker features require newer macOS versions and compatible hardware
+- `tmux` for Claude Code / Codex session monitoring
+- [OpenClaw Gateway](https://github.com/openclaw/openclaw) for pet chat and summon features; see the [compatibility matrix](docs/openclaw-compatibility.md) for custom capabilities
 
 ## Pet Character (Chi)
 
@@ -140,7 +133,7 @@ Each tmux project can be assigned one of four session modes. Set them in the men
 
 ## OpenClaw Integration
 
-ClawGate includes an [OpenClaw](https://github.com/usedhonda/openclaw_general) channel plugin that connects the event stream to an AI reviewer.
+ClawGate includes an [OpenClaw](https://github.com/openclaw/openclaw) channel plugin that connects the event stream to an AI reviewer.
 
 ### Plugin Setup
 
@@ -173,7 +166,7 @@ The plugin reads ClawGate's config via `/v1/openclaw-info`. Key settings in the 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `apiUrl` | `http://127.0.0.1:8765` | ClawGate HTTP API base URL |
-| `pollIntervalMs` | `3000` | Event polling interval in milliseconds |
+| `pollIntervalMs` | `1500` | Event polling interval in milliseconds |
 
 Optional (`projectView`) for Observe/Autonomous doc grounding via read-only bridge:
 
@@ -256,8 +249,9 @@ reviewer, authorized via ClawGate session mode settings. For backward compatibil
 | POST | `/v1/send` | Send a message/task via adapter |
 
 All endpoints return JSON (`{"ok": true, "result": {...}}` or `{"ok": false, "error": {...}}`).
-Local mode requires no authentication. Remote mode requires `Authorization: Bearer <token>`.
-POST requests with an `Origin` header are rejected (CSRF protection).
+The current native bridge listens on `0.0.0.0:8765`. Its access policy is based on the connection's source address: loopback and the CGNAT address range used by Tailscale are accepted; other sources are rejected. `/v1/health` is a public liveness endpoint. There is no separate bridge bearer-token check. A CGNAT address alone is not proof of a Tailscale identity, so host firewall and tailnet ACLs must restrict which peers can reach this port. Do not expose it through a public or untrusted proxy.
+
+Browser-origin checks also apply. `/v1/openclaw-info` is a sensitive bootstrap endpoint that returns the configured Gateway credential to trusted native/extension callers. Treat API access as privileged, not as read-only monitoring. See [Security](SECURITY.md).
 
 For `adapter=line`, `GET /v1/conversations` uses AX text first and falls back to OCR on visible sidebar rows when the current LINE AX tree exposes textless `AXRow`s only.
 
@@ -314,8 +308,9 @@ swift build
 ### Requirements
 
 - macOS 12+ (Monterey or later)
-- Swift 5.9+ (swift-nio 2.67+)
-- Xcode or Command Line Tools
+- Xcode 26.3 or newer (required for the Speech framework SDK used by current source)
+- Swift Package Manager (swift-nio 2.67+); the deployment target remains macOS 12
+- Node.js 24.22.1 for plugin and extension tests
 
 See [scripts/README.md](scripts/README.md) for a full list of available scripts and their intended audience (user vs. maintainer).
 
@@ -345,103 +340,36 @@ The built-in messenger adapter currently targets LINE Desktop via the macOS Acce
 
 ### Remote Access (Direct Gateway Connection)
 
-If OpenClaw Gateway runs on a different machine, enable remote access so Gateway can poll ClawGate directly:
+When the Gateway runs on another machine, configure its ClawGate channel account to use the bridge host's address on a trusted network. The current app already listens on port 8765; the former `remoteAccessEnabled` and `remoteAccessToken` settings are retired. They do not enable or secure this API.
 
-1. In ClawGate settings (Gateway section): enable "Allow Gateway to connect" and set a token
-2. ClawGate binds to `0.0.0.0:8765` instead of `127.0.0.1`
-3. All requests require `Authorization: Bearer <token>`
-4. In Gateway's `openclaw.json`: set `apiUrl` to `http://clawgate-host:8765` and `token`
+Set the app's **OpenClaw host/port** in Settings to the Gateway used for pet chat. Separately, set the plugin's `apiUrl` to the ClawGate bridge it should poll. These addresses serve opposite directions and use different ports (Gateway default 18789, bridge default 8765).
 
-See [Direct Gateway Setup](docs/runbooks/direct-gateway-setup.md) for full instructions.
+See [Direct Gateway Setup](docs/runbooks/direct-gateway-setup.md) for configuration and verification.
 
 ### Messenger Recovery (LINE Adapter)
 
-```bash
-# Re-sign + restart on macmini (when TCC permission is lost or app is unsigned).
-# Run on the macmini local desktop session (NOT via SSH):
-KEYCHAIN_PASSWORD='your-password' ./scripts/macmini-local-sign-and-restart.sh
-```
+Use the canonical [restart and signing scripts](scripts/README.md) on the Mac with LINE installed. Signing credentials belong in the local, ignored release environment; do not put passwords in commands, public issues, or diagnostic bundles.
 
-## Advanced: Federation (2-Host Setup)
+## Advanced: Federation (Compatibility Path)
 
-Federation connects two ClawGate instances over WebSocket, enabling a workstation (Host B) to relay events through a server (Host A) that has a messenger adapter (LINE) and OpenClaw Gateway.
-
-```
-Host A (macmini)                 Host B (workstation)
-+-----------------------+        +-----------------------+
-| ClawGate (server)     |<--WS-->| ClawGate (client)     |
-| - Messenger adapter   | /federation | - tmux adapter    |
-|   (LINE)              |             | - Federation client |
-| - Federation server   |             |                     |
-| - OpenClaw Gateway    |        | - CC / Codex sessions |
-+-----------------------+        +-----------------------+
-```
-
-### Configuration
-
-**Host A** (server):
-| Key | Value |
-|-----|-------|
-| `nodeRole` | `server` |
-| `remoteAccessEnabled` | `true` |
-| `remoteAccessToken` | `<token>` |
-
-**Host B** (client):
-| Key | Value |
-|-----|-------|
-| `nodeRole` | `client` |
-| `federationEnabled` | `true` |
-| `federationURL` | `ws://macmini:8765/federation` |
-| `federationToken` | `<token>` |
-
-### Mode Resolution
-
-When a federation event arrives at Host A, the mode is resolved as:
-
-1. **Server's local config** for that project (if set) -- highest priority
-2. **Event's mode field** sent by the client -- used if server has no config
-3. **`ignore`** -- fallback default
+The repository retains optional Host A / Host B federation code and migration settings. The normal session source is the built-in tmux poller, and the direct Gateway setup above does not require federation. Existing deployments can retain their explicitly configured federation connection; do not infer that these older fields configure the pet's Gateway endpoint.
 
 ## Configuration Reference
 
-ClawGate stores all configuration in UserDefaults, readable via `GET /v1/config`.
+Settings are backed by UserDefaults. `GET /v1/config` returns a diagnostic projection, not the complete settings store, and there is no general `PUT /v1/config` route. Use Settings for app configuration and the dedicated session-mode endpoint for automation modes.
 
-### General
+| App setting | Default | Purpose |
+| --- | --- | --- |
+| `nodeRole` | `client` | `client` or `server`; controls local capture/host responsibilities |
+| `openclawHost` | `127.0.0.1` | Gateway destination used by the native client and extension bootstrap |
+| `openclawPort` | `18789` | Gateway port, distinct from the bridge's 8765 |
+| `debugLogging` | `false` | Additional local diagnostics |
+| `lineEnabled` | `true` | Register the local LINE adapter |
+| `linePollIntervalSeconds` | `1` | LINE observation interval |
+| `tmuxSessionModes` | `{}` | `cc:<project>` / `codex:<project>` mode overrides; absent means `ignore` |
+| `jevEnabled` | `true` | Jev tagging is inert until its separate API key is configured |
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `nodeRole` | String | `"standalone"` | `standalone`, `server`, or `client` |
-| `debugLogging` | Bool | `false` | Verbose logging |
-| `clawgate.jevEnabled` | Bool | `true` | Enable Jev (TypeSafe) shadow-tagging; inert until an API key is saved (see [Jev Integration](#jev-typesafe-integration-optional)) |
-| `includeMessageBodyInLogs` | Bool | `false` | Include message text in logs |
-| `remoteAccessEnabled` | Bool | `false` | Bind to `0.0.0.0` instead of `127.0.0.1` |
-| `remoteAccessToken` | String | `""` | Bearer token for remote access |
-
-### Tmux
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `tmux.enabled` | Bool | `false` | Enable tmux adapter |
-| `tmux.statusBarUrl` | String | `ws://localhost:8080/ws/sessions` | cc-status-bar WebSocket URL |
-| `tmux.sessionModes` | Dict | `{}` | Per-project mode map (e.g., `{"cc:myproject": "autonomous"}`) |
-
-### Messenger Adapter (LINE)
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `line.default_conversation` | String | `""` | Default chat name for LINE adapter |
-| `line.poll_interval_seconds` | Int | `2` | Polling interval (seconds) |
-| `line.detection_mode` | String | `"hybrid"` | `"legacy"` or `"hybrid"` |
-| `line.fusion_threshold` | Int | `60` | Detection score threshold (1-100) |
-
-### Federation
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `federationEnabled` | Bool | `false` | Enable federation client |
-| `federationURL` | String | `""` | Server WebSocket URL |
-| `federationToken` | String | `""` | Bearer auth token |
-| `federationReconnectMaxSeconds` | Int | `120` | Max reconnect backoff (seconds) |
+The app currently reads its Gateway token from `gateway.auth.token` in `~/.openclaw/openclaw.json`. The supported configuration forms and limitations are listed in [OpenClaw compatibility](docs/openclaw-compatibility.md). Jev and provisioned Hub secrets have separate private stores and are not returned by `/v1/config`.
 
 ## Project Structure
 
@@ -458,7 +386,8 @@ ClawGate/
     Tmux/
       TmuxAdapter.swift                   # Claude Code/Codex task dispatch
       TmuxInboundWatcher.swift            # State transition detection
-      CCStatusBarClient.swift             # WebSocket client for cc-status-bar
+      TmuxDirectPoller.swift              # Built-in session discovery and polling
+      CCStatusBarClient.swift             # Retained compatibility implementation
       TmuxShell.swift                     # tmux CLI wrapper
   Automation/
     AX/                                   # AXUIElement query, actions, dump
@@ -468,7 +397,7 @@ ClawGate/
     BridgeServer/                         # SwiftNIO HTTP server + routing
     Config/                               # UserDefaults-backed ConfigStore
     EventBus/                             # Ring buffer + SSE + polling
-    Federation/                           # WebSocket federation (server + client)
+    Federation/                           # Optional compatibility transport
     Logging/                              # AppLogger
   UI/                                     # MenuBarApp, SettingsView
 Tests/

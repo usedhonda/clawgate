@@ -149,8 +149,10 @@ final class TmuxDirectPoller: TmuxSessionSource {
         // Build snapshots per pane, then select representative per logicalKey
         var perPane: [SessionSnapshot] = []
         var rejectedPaneSamples: [DiagnosticsSnapshot.RejectedPaneSample] = []
-        for pane in descriptors {
-            if let session = buildSession(from: pane) {
+        let sessionTypes = Self.sessionTypes(for: descriptors)
+        for (pane, sessionType) in zip(descriptors, sessionTypes) {
+            if let sessionType {
+                let session = buildSession(from: pane, sessionType: sessionType)
                 perPane.append(session)
             } else if rejectedPaneSamples.count < 5 {
                 rejectedPaneSamples.append(makeRejectedPaneSample(from: pane))
@@ -201,15 +203,14 @@ final class TmuxDirectPoller: TmuxSessionSource {
         }
     }
 
-    private func buildSession(from pane: TmuxShell.PaneDescriptor) -> SessionSnapshot? {
-        guard let sessionType = inferSessionType(from: pane) else { return nil }
+    private func buildSession(from pane: TmuxShell.PaneDescriptor, sessionType: String) -> SessionSnapshot {
         let capture = (try? TmuxShell.capturePane(target: pane.target, lines: 120))?.trimmingCharacters(in: .newlines)
         let project = inferProject(from: pane)
         let promptClassification = classifyPromptState(capture: capture ?? "")
         let promptState = promptClassification.state
         logger.log(
             .debug,
-            "TmuxDirectPoller: classify target=\(pane.target) project=\(project) classified=\(promptState.rawValue) lastPromptLine=\(promptClassification.lastPromptLine ?? "nil")"
+            "TmuxDirectPoller: classify target=\(pane.target) project=\(project) classified=\(promptState.rawValue) hasPrompt=\(promptClassification.lastPromptLine != nil)"
         )
         let rootHint = inferRootHint(from: pane)
 
@@ -286,7 +287,26 @@ final class TmuxDirectPoller: TmuxSessionSource {
         return basename.lowercased()
     }
 
-    private func inferSessionType(from pane: TmuxShell.PaneDescriptor) -> String? {
+    /// Load at most one process table per poll, and only if a pane could not be
+    /// classified from its metadata. A failed snapshot is reused for this poll
+    /// too; the next poll always gets a fresh opportunity to discover processes.
+    static func sessionTypes(
+        for panes: [TmuxShell.PaneDescriptor],
+        loadProcessSnapshot: () -> TmuxShell.ProcessSnapshot = TmuxShell.processSnapshot
+    ) -> [String?] {
+        var snapshot: TmuxShell.ProcessSnapshot?
+        return panes.map { pane in
+            inferSessionType(from: pane) {
+                if snapshot == nil { snapshot = loadProcessSnapshot() }
+                return snapshot?.descendantArgs(rootPID: pane.panePID, maxDepth: 3) ?? []
+            }
+        }
+    }
+
+    private static func inferSessionType(
+        from pane: TmuxShell.PaneDescriptor,
+        descendantArgs: () -> [String]
+    ) -> String? {
         let title = pane.title.lowercased()
         let cmd = pane.currentCommand.lowercased()
 
@@ -315,7 +335,7 @@ final class TmuxDirectPoller: TmuxSessionSource {
         //    This catches cases where Claude Code runs as "2.1.97" (version
         //    number as process name) or Codex runs as "node" (wrapper script).
         if pane.panePID > 0 {
-            let args = TmuxShell.descendantProcessArgs(rootPID: pane.panePID, maxDepth: 3)
+            let args = descendantArgs()
             for line in args {
                 let lower = line.lowercased()
                 // Check for explicit binary references

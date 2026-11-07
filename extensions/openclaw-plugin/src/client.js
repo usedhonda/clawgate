@@ -1,13 +1,13 @@
 /**
  * ClawGate HTTP client — thin wrapper around the localhost API.
- * Uses Node.js 22+ built-in fetch (no dependencies).
+ * Uses the supported OpenClaw host's built-in fetch (no dependencies).
  *
- * Local mode: no authentication required (127.0.0.1 bind).
- * Remote mode: optional Bearer token via setClawgateAuthToken().
- * CSRF protection via Origin header check (server-side).
+ * Native bridge access is enforced by source-address and browser-origin policy.
+ * The optional Bearer header is for an explicitly authenticated proxy/custom bridge;
+ * it does not add authentication to the native ClawGate bridge. See the README.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const SEND_TIMEOUT_MS = 30_000;
@@ -257,8 +257,9 @@ export async function telegramSend(botToken, chatId, text, opts = {}) {
 
 export function resolveTmuxWorkingDir(tmuxTarget) {
   try {
-    return execSync(
-      `tmux display-message -p -t "${tmuxTarget}" '#{pane_current_path}'`,
+    return execFileSync(
+      "tmux",
+      ["display-message", "-p", "-t", tmuxTarget, "#{pane_current_path}"],
       { encoding: "utf-8", timeout: 3000, stdio: ["pipe", "pipe", "pipe"] }
     ).trim() || null;
   } catch {

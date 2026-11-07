@@ -59,16 +59,14 @@ final class BridgeServer {
 
         let upgrader = NIOWebSocketServerUpgrader(
             shouldUpgrade: { channel, head in
-                // Only upgrade /federation paths
-                guard head.uri.hasPrefix("/federation") else {
+                // Upgrade only the exact federation endpoint and apply the
+                // browser/Host bounds without narrowing token-authenticated peers.
+                let path = URLComponents(string: "http://localhost\(head.uri)")?.path ?? head.uri
+                guard head.method == .GET && path == "/federation" else {
                     return channel.eventLoop.makeFailedFuture(WebSocketUpgradeError.unsupportedPath)
                 }
-                // Check bearer token if configured
-                if !expectedToken.isEmpty {
-                    let auth = head.headers.first(name: "Authorization") ?? ""
-                    guard auth == "Bearer \(expectedToken)" else {
-                        return channel.eventLoop.makeFailedFuture(WebSocketUpgradeError.unauthorized)
-                    }
+                guard core.checkFederationRequestHead(head, remoteAddress: channel.remoteAddress?.ipAddress, expectedToken: expectedToken) == nil else {
+                    return channel.eventLoop.makeFailedFuture(WebSocketUpgradeError.unauthorized)
                 }
                 return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
             },

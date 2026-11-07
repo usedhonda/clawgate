@@ -1,5 +1,6 @@
 import { enqueueHubEntry, enqueueHubThreadList, flushHubOutbox } from './hub-outbox.js';
 import { isNewerVersion } from './self-update.js';
+import { fetchWithDeadline } from './request.js';
 
 const DEFAULT_SETTINGS = {
   bridgePort: 8765,
@@ -38,6 +39,7 @@ let pollInFlight = false;
 
 let passiveVisit = null;
 const passiveQueue = [];
+let passiveFlushFlight = null;
 const passiveSentAtByURL = new Map();
 // The sidebar observed during the most recent capture. Sent alongside the
 // entries it was observed with, never folded into one.
@@ -383,11 +385,10 @@ async function ensureGatewayConfigured() {
   }
   lastGatewayRefreshAt = Date.now();
   try {
-    const response = await fetch(`http://127.0.0.1:${bridgePort}/v1/openclaw-info`);
-    if (!response.ok) {
-      return;
-    }
-    const data = await response.json();
+    const data = await fetchWithDeadline(`http://127.0.0.1:${bridgePort}/v1/openclaw-info`, {}, async (response) => {
+      if (!response.ok) throw new Error(`bootstrap_${response.status}`);
+      return response.json();
+    });
     const host = typeof data.gateway_host === 'string' && data.gateway_host
       ? data.gateway_host
       : (typeof data.host === 'string' ? data.host : '');
@@ -431,6 +432,7 @@ async function startPolling() {
     return;
   }
   pollInFlight = true;
+  let nextDelay = POLL_INTERVAL_MS;
   try {
     await ensureGatewayConfigured();
     const { bridgePort } = await getSettings();
@@ -439,14 +441,10 @@ async function startPolling() {
       url.searchParams.set('since', cursor);
     }
 
-    const response = await fetch(url.toString(), { method: 'GET' });
-    if (!response.ok) {
-      await notifySettingsUpdated({ bridgeConnected: false, reason: `poll_${response.status}` });
-      scheduleNextPoll(POLL_ERROR_BACKOFF_MS);
-      return;
-    }
-
-    const data = await response.json();
+    const data = await fetchWithDeadline(url.toString(), { method: 'GET' }, async (response) => {
+      if (!response.ok) throw new Error(`poll_${response.status}`);
+      return response.json();
+    });
     if (data?.next_cursor != null) {
       await saveCursor(String(data.next_cursor));
     }
@@ -462,13 +460,12 @@ async function startPolling() {
         await captureAndSend(tab);
       }
     }
-
-    scheduleNextPoll(POLL_INTERVAL_MS);
   } catch (error) {
+    nextDelay = POLL_ERROR_BACKOFF_MS;
     await notifySettingsUpdated({ bridgeConnected: false, reason: error?.message || 'poll_error' });
-    scheduleNextPoll(POLL_ERROR_BACKOFF_MS);
   } finally {
     pollInFlight = false;
+    scheduleNextPoll(nextDelay);
   }
 }
 
@@ -801,20 +798,30 @@ function enqueuePassiveEntry(entry) {
   }
 }
 
-async function flushPassiveQueue() {
-  if (!passiveQueue.length) {
-    return;
-  }
+function flushPassiveQueue() {
+  if (passiveFlushFlight) return passiveFlushFlight;
+  passiveFlushFlight = flushPassiveBatches().finally(() => { passiveFlushFlight = null; });
+  return passiveFlushFlight;
+}
 
-  const settings = await getSettings();
-  if (!settings.passiveTracking || !settings.gatewayURL || !settings.gatewayToken) {
-    return;
+async function flushPassiveBatches() {
+  const attempted = new Set();
+  // Give captures queued during delivery one immediate follow-up batch. Bound
+  // the work even on a continuously changing page; remaining entries ride the
+  // existing alarm. A failed/uncertain entry is never retried within this flight.
+  for (let batch = 0; batch < 2; batch += 1) {
+    const settings = await getSettings();
+    if (!settings.passiveTracking || !settings.gatewayURL || !settings.gatewayToken) return;
+    const entries = passiveQueue.filter((entry) => !attempted.has(entry));
+    if (!entries.length) return;
+    for (const entry of entries) attempted.add(entry);
+    await flushPassiveBatch(entries, settings);
   }
+}
 
+async function flushPassiveBatch(entries, settings) {
   // Entries leave the queue only once the gateway has accepted them; a failed
   // send keeps them for the next flush (the queue limit still bounds it).
-  const entries = passiveQueue.slice();
-
   const messengerEntries = entries.filter((entry) => entry.platform === 'messenger');
   const webEntries = entries.filter((entry) => entry.platform !== 'messenger');
 
@@ -875,7 +882,7 @@ async function appendPassiveSendLog(records) {
 
 async function postWebHistoryEntries(entries, settings) {
   const endpoint = new URL('/api/web-history', settings.gatewayURL).toString();
-  const response = await fetch(endpoint, {
+  const response = await fetchWithDeadline(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -892,19 +899,20 @@ async function postWebHistoryEntries(entries, settings) {
 
 async function postMessengerEntries(entries, settings) {
   const endpoint = new URL(MESSENGER_CAPTURE_ENDPOINT, settings.gatewayURL).toString();
-  const response = await fetch(endpoint, {
+  const threadList = latestThreadList;
+  const response = await fetchWithDeadline(endpoint, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${settings.gatewayToken}`,
     },
-    body: JSON.stringify(latestThreadList ? { entries, threadList: latestThreadList } : { entries }),
+    body: JSON.stringify(threadList ? { entries, threadList } : { entries }),
   });
 
   if (!response.ok) {
     throw new Error(`Gateway rejected messenger capture (${response.status})`);
   }
-  latestThreadList = null;
+  if (latestThreadList === threadList) latestThreadList = null;
   return response;
 }
 

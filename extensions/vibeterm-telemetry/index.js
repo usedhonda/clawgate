@@ -22,6 +22,8 @@ const plugin = {
     const handler = createTelemetryHandler(api);
     api.registerHttpRoute({
       path: "/api/telemetry",
+      auth: "gateway",
+      match: "exact",
       handler,
     });
     api.logger?.info?.("vibeterm-telemetry: registered POST /api/telemetry");

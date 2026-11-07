@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -19,6 +22,9 @@ jobs:
 
       - name: Leak guard
         run: bash scripts/security-leak-check.sh --all
+
+      - name: Leak guard regressions
+        run: bash scripts/security-leak-check.sh --self-test
 
   swift-test:
     runs-on: macos-15
@@ -45,14 +51,14 @@ jobs:
   line-smoke:
     runs-on: macos-15
     timeout-minutes: 10
-    if: >-
-      github.event_name == 'push' ||
-      contains(github.event.pull_request.changed_files_url, 'LINE') ||
-      true
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
 
       - name: Check LINE-related changes
         id: line-check
@@ -98,11 +104,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+
       - name: ShellCheck
         run: shellcheck -S warning scripts/*.sh
 
       - name: JS syntax check
-        run: find extensions -name '*.js' -not -path '*__tests__*' -exec node --check {} +
+        run: find extensions -name '*.js' -print0 | xargs -0 -n 1 node --check
 
       - name: Run plugin tests
         run: node --experimental-test-module-mocks --test extensions/openclaw-plugin/src/__tests__/*.test.js
+
+      - name: Run Chrome extension tests
+        run: node --test extensions/clawgate-chrome/*.test.js extensions/clawgate-chrome/tests/*.test.js
+
+      - name: Run telemetry plugin tests
+        run: node --test extensions/vibeterm-telemetry/src/__tests__/*.test.js
+
+      - name: Support diagnostics privacy regression
+        run: python3 -m unittest discover -s scripts/tests -p 'test_support_diagnostics.py'
