@@ -2,32 +2,22 @@ import XCTest
 @testable import ClawGate
 
 final class MenuBarRevealTests: XCTestCase {
-    func testVisibleFrontmostPanelCloses() {
-        XCTAssertTrue(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
-            isVisible: true,
-            isKeyWindow: true
-        ))
-        XCTAssertTrue(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
-            isVisible: true,
-            isKeyWindow: true
-        ))
-    }
-
-    func testVisiblePanelBehindAnotherAppIsRevealed() {
-        XCTAssertFalse(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
-            isVisible: true,
-            isKeyWindow: false
-        ))
-        XCTAssertFalse(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
-            isVisible: false,
-            isKeyWindow: true
-        ))
-    }
-
-    func testActivationTransitionDoesNotCloseNonKeyPanel() {
-        XCTAssertFalse(MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
-            isVisible: true,
-            isKeyWindow: false
-        ))
+    func testOnlyVisibleKeyPanelCloses() {
+        let cases: [(visible: Bool, key: Bool, closes: Bool)] = [
+            (true, true, true),
+            (true, false, false),
+            (false, true, false),
+            (false, false, false),
+        ]
+        for row in cases {
+            XCTAssertEqual(
+                MenuBarPanelRevealPolicy.shouldCloseVisiblePanel(
+                    isVisible: row.visible,
+                    isKeyWindow: row.key
+                ),
+                row.closes,
+                "visible=\(row.visible), key=\(row.key)"
+            )
+        }
     }
 }

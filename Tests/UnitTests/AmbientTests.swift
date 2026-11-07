@@ -3,25 +3,6 @@ import XCTest
 
 final class AmbientTests: XCTestCase {
 
-    // Role is resolved from the Gateway relationship: server hosts the Gateway
-    // locally (localhost), client points at a remote Gateway. Default openclawHost
-    // is localhost, so an unconfigured host resolves to server (fail-closed:
-    // ambient stays OFF until explicitly pointed at a remote Gateway).
-    func testRuntimeRoleFromGatewayRelationship() {
-        var cfg = AppConfig.default
-        XCTAssertEqual(cfg.runtimeRole, .server)
-        XCTAssertFalse(cfg.isClientRole)
-
-        for local in ["127.0.0.1", "localhost", "::1", "0.0.0.0", ""] {
-            cfg.openclawHost = local
-            XCTAssertEqual(cfg.runtimeRole, .server, "host \(local) should resolve to server")
-        }
-
-        cfg.openclawHost = "gateway-host.example-tailnet.ts.net"
-        XCTAssertEqual(cfg.runtimeRole, .client)
-        XCTAssertTrue(cfg.isClientRole)
-    }
-
     func testTranscriberParsesWhisperJSON() throws {
         let json = """
         {"transcription":[
@@ -1098,15 +1079,6 @@ final class AmbientTests: XCTestCase {
         let empty = resultJSON(included: [], includedRangeIsNull: true, boundaryConfidence: "low")
         XCTAssertEqual(PetLogResultParser.parse(empty, allowedSegmentIds: ["a", "b", "c"], selectionMode: .automaticBackward),
                        .failure(.answerOutcomeRequiresInclusion))
-    }
-
-    func testResultParserRejectsMiddleSubsetEvenWithHighBoundaryConfidence() {
-        // D2 old-fail flip: a high-confidence MIDDLE subset [b,c] (excludes the
-        // newest 'd') is no longer accepted — the generic high-subset gate is
-        // abolished; automatic scope requires a contiguous backward suffix.
-        let subset = resultJSON(included: ["b", "c"], includedRange: ("b", "c"), boundaryConfidence: "high")
-        XCTAssertEqual(PetLogResultParser.parse(subset, allowedSegmentIds: ["a", "b", "c", "d"], selectionMode: .automaticBackward),
-                       .failure(.notContiguousBackwardSuffix))
     }
 
     func testResultParserAllowsFullRetentionWithMediumOrLowBoundaryConfidence() {

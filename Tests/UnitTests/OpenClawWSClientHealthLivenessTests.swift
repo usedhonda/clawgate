@@ -112,7 +112,104 @@ final class OpenClawWSClientHealthLivenessTests: XCTestCase {
         XCTAssertEqual(consecutive, 0, "a successful health round-trip must reset the consecutive-timeout counter")
     }
 
+
+    func testReadinessRejectsConcurrentConnectAndReleasesFailedAttempt() async {
+        let entered = expectation(description: "first readiness probe suspended")
+        let probe = ControlledReadinessProbe(suspendedAttempts: 1) { _ in entered.fulfill() }
+        let client = OpenClawWSClient(readinessProbe: { _ in try await probe.wait() })
+        let first = Task { await self.connectionError(client) }
+        await fulfillment(of: [entered], timeout: 5)
+
+        let overlappingError = await connectionError(client)
+        XCTAssertTrue(isConnectionRejection(overlappingError),
+                      "a second connect must be rejected before another readiness probe")
+        let probeCount = await probe.attemptCount
+        XCTAssertEqual(probeCount, 1)
+
+        await probe.resolve(1, with: .failure(ReadinessFailure.notReady))
+        let firstError = await first.value
+        XCTAssertEqual(firstError as? ReadinessFailure, .notReady)
+
+        // A failed attempt releases its reservation. The retry reaches the
+        // synthetic probe and fails there without opening a WebSocket.
+        let retryError = await connectionError(client)
+        XCTAssertEqual(retryError as? ReadinessFailure, .unexpectedProbe)
+        let state = await client.snapshot()
+        XCTAssertEqual(state.connectAttempts, 2)
+        XCTAssertFalse(state.connected)
+        XCTAssertNil(state.connectedAt)
+        await client.disconnect()
+    }
+
+    func testCancelledReadinessCannotOpenSocketWhenProbeCompletesLate() async {
+        let entered = expectation(description: "readiness probe suspended")
+        let probe = ControlledReadinessProbe(suspendedAttempts: 1) { _ in entered.fulfill() }
+        let client = OpenClawWSClient(readinessProbe: { _ in try await probe.wait() })
+        let attempt = Task { await self.connectionError(client) }
+        await fulfillment(of: [entered], timeout: 5)
+
+        attempt.cancel()
+        // Deliberately ignore cancellation inside the controlled probe, like a
+        // readiness response already queued when cancellation arrives.
+        await probe.resolve(1, with: .success(()))
+        let error = await attempt.value
+        XCTAssertTrue(error is CancellationError)
+        let state = await client.snapshot()
+        XCTAssertFalse(state.connected)
+        XCTAssertNil(state.connectedAt)
+        XCTAssertEqual(state.closeFramesSent, 0)
+        await client.disconnect()
+    }
+
+    func testDisconnectedReadinessCannotConsumeOrReleaseReplacementAttempt() async {
+        let oldEntered = expectation(description: "old readiness probe suspended")
+        let newEntered = expectation(description: "replacement readiness probe suspended")
+        let probe = ControlledReadinessProbe(suspendedAttempts: 2) { attempt in
+            if attempt == 1 { oldEntered.fulfill() } else { newEntered.fulfill() }
+        }
+        let client = OpenClawWSClient(readinessProbe: { _ in try await probe.wait() })
+        let old = Task { await self.connectionError(client) }
+        await fulfillment(of: [oldEntered], timeout: 5)
+        await client.disconnect()
+        let replacement = Task { await self.connectionError(client) }
+        await fulfillment(of: [newEntered], timeout: 5)
+        let currentGeneration = await client.connectionGeneration
+
+        await probe.resolve(1, with: .success(()))
+        let oldError = await old.value
+        XCTAssertTrue(oldError is CancellationError)
+        let state = await client.snapshot()
+        XCTAssertEqual(state.generation, currentGeneration)
+        XCTAssertFalse(state.connected)
+        XCTAssertNil(state.connectedAt)
+
+        let overlappingError = await connectionError(client)
+        XCTAssertTrue(isConnectionRejection(overlappingError),
+                      "a stale completion must not release the replacement reservation")
+        let probeCount = await probe.attemptCount
+        XCTAssertEqual(probeCount, 2)
+        await probe.resolve(2, with: .failure(ReadinessFailure.notReady))
+        let replacementError = await replacement.value
+        XCTAssertEqual(replacementError as? ReadinessFailure, .notReady)
+        await client.disconnect()
+    }
+
     // MARK: - Helpers
+
+    private func connectionError(_ client: OpenClawWSClient) async -> Error? {
+        do {
+            _ = try await client.connect(url: URL(string: "ws://127.0.0.1:1/")!, token: "test-token")
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    private func isConnectionRejection(_ error: Error?) -> Bool {
+        guard let error = error as? OpenClawError else { return false }
+        if case .connectionFailed = error { return true }
+        return false
+    }
 
     private func withHealthAckContinuation(
         client: OpenClawWSClient, requestId: String, _ body: @escaping (String) async -> Void
@@ -131,6 +228,38 @@ final class OpenClawWSClientHealthLivenessTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .path
+    }
+}
+
+
+private enum ReadinessFailure: Error, Equatable { case notReady, unexpectedProbe }
+
+/// Controls readiness completions instead of sleeping or using a live server.
+/// Unexpected extra probes fail immediately rather than wait on an unowned
+/// continuation.
+private actor ControlledReadinessProbe {
+    private let suspendedAttempts: Int
+    private let onEntered: @Sendable (Int) -> Void
+    private var pending: [Int: CheckedContinuation<Void, Error>] = [:]
+    private(set) var attemptCount = 0
+
+    init(suspendedAttempts: Int, onEntered: @escaping @Sendable (Int) -> Void) {
+        self.suspendedAttempts = suspendedAttempts
+        self.onEntered = onEntered
+    }
+
+    func wait() async throws {
+        attemptCount += 1
+        let attempt = attemptCount
+        guard attempt <= suspendedAttempts else { throw ReadinessFailure.unexpectedProbe }
+        try await withCheckedThrowingContinuation { continuation in
+            pending[attempt] = continuation
+            onEntered(attempt)
+        }
+    }
+
+    func resolve(_ attempt: Int, with result: Result<Void, Error>) {
+        pending.removeValue(forKey: attempt)?.resume(with: result)
     }
 }
 
