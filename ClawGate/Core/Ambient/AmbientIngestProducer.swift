@@ -87,6 +87,10 @@ actor AmbientIngestProducer {
 
     private let log: (String) -> Void
     private let onUpdate: (Update) -> Void
+    /// A controlled sender lets queue ownership be tested across the real
+    /// suspension point without contacting a Gateway.
+    private let windowSender: ((AmbientIngestParams) async throws -> IncomingPayload?)?
+    private let successfulWindowObserver: (([Line], [String], [String]) -> Void)?
 
     private var client: OpenClawWSClient?
     private var drainTask: Task<Void, Never>?
@@ -107,6 +111,9 @@ actor AmbientIngestProducer {
     }
 
     private struct WindowSegment {
+        /// Local queue identity, distinct from the stable transcript/Jev ID.
+        /// Repeated identical content added later is a different pending item.
+        let pendingID = UUID()
         let line: Line
         let addedAt: Date
         /// Stable id for this exact segment (`PetLogSegmentID.make(for:)`),
@@ -126,9 +133,13 @@ actor AmbientIngestProducer {
     private static let windowCap = 120                            // bound retry backlog
 
     init(log: @escaping (String) -> Void = { _ in },
-         onUpdate: @escaping (Update) -> Void = { _ in }) {
+         onUpdate: @escaping (Update) -> Void = { _ in },
+         windowSender: ((AmbientIngestParams) async throws -> IncomingPayload?)? = nil,
+         successfulWindowObserver: (([Line], [String], [String]) -> Void)? = nil) {
         self.log = log
         self.onUpdate = onUpdate
+        self.windowSender = windowSender
+        self.successfulWindowObserver = successfulWindowObserver
     }
 
     // MARK: - Lifecycle
@@ -199,7 +210,8 @@ actor AmbientIngestProducer {
 
     // MARK: - Flush
 
-    private func flush() async {
+    /// Send one snapshot; later arrivals remain pending for the next window.
+    func flush() async {
         guard running, !window.isEmpty else { return }  // no new speech → no send
         let segments = window
         let lines = segments.map { $0.line }
@@ -241,13 +253,22 @@ actor AmbientIngestProducer {
             events: events.isEmpty ? nil : events
         )
         do {
-            try await ensureConnected()
-            guard let c = client else { throw OpenClawError.connectionFailed("no client") }
-            let payload = try await c.request(method: "ambient.ingest", params: params)
+            let payload: IncomingPayload?
+            if let windowSender {
+                payload = try await windowSender(params)
+            } else {
+                try await ensureConnected()
+                guard let c = client else { throw OpenClawError.connectionFailed("no client") }
+                payload = try await c.request(method: "ambient.ingest", params: params)
+            }
             let accepted = payload?.stateAccepted ?? false
             sentTotal += 1
             lastError = nil
-            window.removeAll()
+            // add(_:) may run while connection/RPC I/O suspends this actor.
+            // The cap may also evict older entries during that await, so a
+            // prefix count or stable content ID cannot identify what to retire.
+            let sentIDs = Set(segments.map(\.pendingID))
+            window.removeAll { sentIDs.contains($0.pendingID) }
             // Everything sent successfully is locally suppressed (layer 1) —
             // strictly stronger than suppressing only dedup:"duplicate"
             // receipts. Receipts are still surfaced for observability.
@@ -262,8 +283,13 @@ actor AmbientIngestProducer {
             // never reaches here, so a retried window is simply asked once
             // when it finally succeeds (windowKey dedupes on content, not on
             // send attempt).
-            scheduleJevTag(lines: lines, segmentIds: segments.map { $0.segmentId },
-                           ruleEventTypes: drafts.map { $0.eventType })
+            let segmentIds = segments.map { $0.segmentId }
+            let ruleEventTypes = drafts.map { $0.eventType }
+            if let successfulWindowObserver {
+                successfulWindowObserver(lines, segmentIds, ruleEventTypes)
+            } else {
+                scheduleJevTag(lines: lines, segmentIds: segmentIds, ruleEventTypes: ruleEventTypes)
+            }
         } catch {
             // Keep the window; the next 60s tick retries once. No hammering.
             lastError = "\(error)"
