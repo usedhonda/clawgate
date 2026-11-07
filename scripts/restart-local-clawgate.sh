@@ -308,6 +308,12 @@ fi
 echo "[5/5] Restart app + local gateway"
 
 STARTUP_LOG="$PROJECT_PATH/.local/logs/clawgate-startup.log"
+# launchd cannot open --stdout/--stderr files on an external volume: `open`
+# then fails with -10810 ("Launchd job spawn failed: Operation not permitted")
+# and the app never starts. Keep the log on the internal disk in that case.
+if [[ "$(cd "$PROJECT_PATH" && pwd -P)" == /Volumes/* ]]; then
+  STARTUP_LOG="$HOME/Library/Logs/ClawGate/clawgate-startup.log"
+fi
 mkdir -p "$(dirname "$STARTUP_LOG")"
 if [[ -L "$STARTUP_LOG" || -L "$STARTUP_LOG.previous" ]]; then
   echo "Refusing symlinked startup log." >&2
