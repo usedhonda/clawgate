@@ -653,7 +653,17 @@ final class AmbientController {
         let wasStreaming = UserDefaults.standard.bool(forKey: Self.wasStreamingKey)
         let blocked = autoResumeBlockedReason
         guard Self.shouldAutoResume(wasStreaming: wasStreaming, blockedReason: blocked) else {
-            if wasStreaming, let blocked { log("ambient auto-resume inhibited: \(blocked)") }
+            if wasStreaming, let blocked {
+                log("ambient auto-resume inhibited: \(blocked)")
+                // The inhibit is silent by design, which once left recording
+                // off for three days unnoticed. Tell the person once per launch;
+                // the pet subscribes after startup, so post after a delay.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                    NotificationCenter.default.post(name: .petBubbleNotify, object: nil, userInfo: [
+                        "text": "録音が止まったままです（前回の起動に失敗したため自動では再開していません）。メニューから録音を開始してください。",
+                        "source": "ambient"])
+                }
+            }
             return
         }
         log("ambient auto-resume: stream was on before launch, restarting")
