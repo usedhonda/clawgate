@@ -80,4 +80,19 @@ final class AudioHubControlStoreTests: XCTestCase {
         XCTAssertEqual(try outbox.pending(limit: 10).count, 1)
         XCTAssertEqual(try reopened.checkpoints().count, 1)
     }
+
+    /// Lines behind a session's cursor are dropped; the cursor line, later
+    /// lines, other sessions and non-transcript records stay.
+    func testCompactionDropsOnlyLinesBehindTheCursor() {
+        func cp(_ ref: String) -> AudioHubControlStore.Checkpoint {
+            .init(sourceRecordRef: ref, revisionRef: "sha256:" + String(repeating: "0", count: 64),
+                  disposition: "enqueued", externalID: nil, reason: nil, coverage: nil)
+        }
+        let all = [cp("clawgate:session:ctx-a:raw:1"), cp("clawgate:session:ctx-a:raw:5"),
+                   cp("clawgate:session:ctx-a:raw:6"), cp("clawgate:session:ctx-b:raw:1"),
+                   cp("clawgate:meeting:m1:chunk:1")]
+        let kept = AudioHubControlStore.compactedCheckpoints(all, cursors: ["ctx-a": 5])
+        XCTAssertEqual(kept.map(\.sourceRecordRef), ["clawgate:session:ctx-a:raw:5", "clawgate:session:ctx-a:raw:6",
+                                                     "clawgate:session:ctx-b:raw:1", "clawgate:meeting:m1:chunk:1"])
+    }
 }

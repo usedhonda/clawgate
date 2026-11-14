@@ -102,6 +102,9 @@ final class AudioHubControlStore {
                   loaded.sourceUUID == sourceUUID, Self.valid(loaded) else { throw Failure.invalidState }
             state = loaded
             persistedHash = Self.hash(data)
+            // Journals written before compaction existed can sit at the cap.
+            let compacted = Self.compacted(loaded)
+            if compacted.checkpoints.count != loaded.checkpoints.count { try replace(compacted) }
         } else {
             guard errno == ENOENT else { throw Failure.invalidState }
             try persist(try encode(state))
@@ -265,7 +268,32 @@ final class AudioHubControlStore {
                             snapshot: expectedLine.snapshot, previousLineSHA256: Self.hash(expectedLine.rawLine))
         scan.staged = nil
         var candidate = state; candidate.scans?[sessionID] = scan
-        try replace(candidate)
+        try replace(Self.compacted(candidate))
+    }
+
+    /// A transcript line's checkpoint is needed only until its session cursor
+    /// has moved past it: replay starts at the cursor, and the scanner's proof
+    /// reads the line at the cursor itself. Older lines are already queued or
+    /// excluded, and the Hub deduplicates by external ID, so keeping them only
+    /// grows the journal until it reaches its byte cap and blocks all new audio.
+    static func compactedCheckpoints(_ checkpoints: [Checkpoint],
+                                     cursors: [String: UInt64]) -> [Checkpoint] {
+        checkpoints.filter { checkpoint in
+            let ref = checkpoint.sourceRecordRef
+            guard ref.hasPrefix("clawgate:session:"),
+                  let rawRange = ref.range(of: ":raw:", options: .backwards),
+                  let line = UInt64(ref[rawRange.upperBound...]) else { return true }
+            let sessionID = String(ref[ref.index(ref.startIndex, offsetBy: 17)..<rawRange.lowerBound])
+            guard let cursor = cursors[sessionID] else { return true }
+            return line >= cursor
+        }
+    }
+
+    private static func compacted(_ value: State) -> State {
+        var result = value
+        let cursors = (value.scans ?? [:]).mapValues { $0.cursor.physicalLine }
+        result.checkpoints = compactedCheckpoints(value.checkpoints, cursors: cursors)
+        return result
     }
 
     private func replace(_ candidate: State) throws {
