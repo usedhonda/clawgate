@@ -2,6 +2,7 @@
 """Mirror ClawGate's transcript-enabled sessions, never rolling raw audio."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -79,8 +80,14 @@ def main():
             try:
                 if marker_path.is_symlink():
                     raise ValueError("invalid marker path")
-                pending.append(gap_event_for(directory.name, json.loads(marker_path.read_text())))
-                counts["gap_markers"] += 1
+                marker_text = marker_path.read_text()
+                marker_key = "gap:" + directory.name
+                marker_hash = hashlib.sha256(marker_text.encode()).hexdigest()
+                # A marker is immutable once written; send it once, not every run.
+                if checkpoint.get(marker_key) != marker_hash:
+                    pending.append(gap_event_for(directory.name, json.loads(marker_text)))
+                    counts["gap_markers"] += 1
+                    next_checkpoint[marker_key] = marker_hash
                 has_gap = True
             except (OSError, ValueError):
                 counts["invalid_gap_markers"] += 1
